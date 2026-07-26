@@ -29,10 +29,17 @@ Dockerfile             Rust + Android NDK/SDK + Node
 dev.sh                 runs a command in that container
 ```
 
-`funkot-core` is a **path dependency** on a sibling `funkot-autodj` checkout.
-The repos are separate to keep the sources from mixing, not to make this one
-build standalone; `dev.sh` mounts the sibling read-only at the matching path.
-Set `FUNKOT_CORE_REPO` if yours lives elsewhere.
+`funkot-core` is a **path dependency** on a sibling checkout of
+[funkot-autodj](https://github.com/yasuyuki/funkot-autodj), expected at
+`../funkot-autodj-for-ui`. The repos are separate to keep the sources from
+mixing, not to make this one build standalone; `dev.sh` mounts the sibling
+read-only at the matching path. Set `FUNKOT_CORE_REPO` if yours lives elsewhere.
+
+The checkout is deliberately a *second* one, not the working checkout used for
+engine development: a path dependency builds whatever happens to be checked out,
+so a branch switch on the engine side would silently change this build. Anything
+`funkot-player` needs from `funkot-core` — a branch, a fix, a pull — is done in
+`funkot-autodj-for-ui`; the engine's own checkout is left alone.
 
 ## Build
 

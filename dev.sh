@@ -1,9 +1,13 @@
 #!/bin/sh
 # Run a command inside the build container.
 #
-# This repo is mounted at /work/funkot-player and the sibling funkot-autodj
-# checkout read-only at /work/funkot-autodj, which is what the `funkot-core`
-# path dependency in src-tauri/Cargo.toml resolves to.
+# This repo is mounted at /work/funkot-player and the sibling
+# funkot-autodj-for-ui checkout read-only at /work/funkot-autodj-for-ui, which
+# is what the `funkot-core` path dependency in src-tauri/Cargo.toml resolves to.
+#
+# funkot-autodj-for-ui is a second checkout of the funkot-autodj repo, kept for
+# this player so that engine work in the original checkout cannot change this
+# build by switching branches. Point FUNKOT_CORE_REPO elsewhere to override.
 #
 # Usage:
 #   ./dev.sh npx tauri android build --debug --target aarch64
@@ -20,11 +24,11 @@ set -eu
 cd "$(dirname "$0")"
 
 IMAGE=funkot-player-dev
-CORE_DIR=${FUNKOT_CORE_REPO:-"$PWD/../funkot-autodj"}
+CORE_DIR=${FUNKOT_CORE_REPO:-"$PWD/../funkot-autodj-for-ui"}
 
 if [ ! -d "$CORE_DIR/funkot-core" ]; then
-    echo "cannot find funkot-autodj at $CORE_DIR" >&2
-    echo "clone it next to this repo, or set FUNKOT_CORE_REPO" >&2
+    echo "cannot find funkot-autodj-for-ui at $CORE_DIR" >&2
+    echo "clone funkot-autodj there next to this repo, or set FUNKOT_CORE_REPO" >&2
     exit 1
 fi
 
@@ -41,7 +45,7 @@ CHOWN="chown -R \"\$HOST_UID:\$HOST_GID\" /work/funkot-player 2>/dev/null || tru
 # shellcheck disable=SC2086
 exec docker run --rm -i $NET \
     -v "$PWD":/work/funkot-player \
-    -v "$(cd "$CORE_DIR" && pwd)":/work/funkot-autodj:ro \
+    -v "$(cd "$CORE_DIR" && pwd)":/work/funkot-autodj-for-ui:ro \
     -v funkot-player-cargo-registry:/usr/local/cargo/registry \
     -v funkot-player-gradle:/root/.gradle \
     -v funkot-player-android-home:/root/.android \

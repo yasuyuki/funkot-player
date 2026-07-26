@@ -1225,7 +1225,6 @@ dependencies = [
  "hound",
  "log",
  "rubato",
- "rustfft",
  "serde",
  "serde_json",
  "sha2",

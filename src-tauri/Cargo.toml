@@ -23,7 +23,13 @@ log = "0.4"
 # mixing, not to make this one build in isolation. ./dev.sh mounts the sibling
 # checkout at the matching location. Switch to a git dependency pinned to a tag
 # once funkot-autodj publishes the release carrying `Engine::new_with_source`.
-funkot-core = { path = "../../funkot-autodj/funkot-core" }
+#
+# The sibling is `funkot-autodj-for-ui`, a second checkout of the funkot-autodj
+# repo reserved for this player: a path dependency builds whatever is checked
+# out, so sharing one checkout with engine work meant an unrelated branch switch
+# changed this build. Engine work stays in `funkot-autodj`; this one only moves
+# when the player needs it.
+funkot-core = { path = "../../funkot-autodj-for-ui/funkot-core" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
