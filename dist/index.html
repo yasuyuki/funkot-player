@@ -9,12 +9,18 @@
          background: #111; color: #eee; }
   button { font-size: 1.2rem; padding: .8rem 1.6rem; width: 100%;
            background: #2b6; color: #000; border: 0; border-radius: .4rem; }
+  .row { display: flex; gap: .6rem; margin-top: .6rem; }
+  .row button { background: #369; color: #fff; }
   pre { white-space: pre-wrap; word-break: break-all; font-size: .8rem;
         background: #000; padding: .6rem; border-radius: .3rem; margin-top: 1rem; }
   .err { color: #f66; }
 </style>
 
 <button id="go">▶ start</button>
+<div class="row">
+  <button id="toggle">⏸ pause / play</button>
+  <button id="next">⏭ next</button>
+</div>
 <pre id="log">idle</pre>
 
 <script>
@@ -44,6 +50,22 @@
         const lines = await invoke("poll_log");
         log.textContent = `${found}\n` + lines.join("\n");
       }, 500);
+    } catch (e) {
+      log.innerHTML = `<span class="err">${e}</span>`;
+    }
+  };
+
+  document.getElementById("toggle").onclick = async () => {
+    try {
+      await invoke("toggle_pause");
+    } catch (e) {
+      log.innerHTML = `<span class="err">${e}</span>`;
+    }
+  };
+
+  document.getElementById("next").onclick = async () => {
+    try {
+      await invoke("skip_next");
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
     }

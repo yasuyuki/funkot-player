@@ -11,13 +11,13 @@ not actively supported but is not deliberately broken either.
 
 ## Status
 
-Early, but it plays. On Android, drop tracks into the app's Music folder over
-MTP, press start, and it mixes the whole folder on a loop with DJ transitions.
-Verified on a Pixel 10 Pro (Android 17).
+Usable as a folder player. On Android, drop tracks into the app's Music folder
+over MTP, press start, and it mixes the whole folder on a loop with DJ
+transitions — including with the screen off, with transport controls in the
+notification shade and on the lock screen. Verified on a Pixel 10 Pro
+(Android 17).
 
-Not yet built: library scanning, the queue, intro/outro bar editing, and
-**background playback** — the system mutes the stream the moment the app leaves
-the screen, so today it only plays while you are looking at it.
+Not yet built: library scanning, the queue, and intro/outro bar editing.
 
 ## Layout
 
@@ -84,10 +84,17 @@ place it matters, but they are easy to undo by accident:
   list it. `getExternalFilesDir` creates it with the right ownership, which is
   why `app_dirs` goes through JNI instead of formatting a string. Copying files
   *into* an app-created directory from a PC is fine.
-- **Background playback needs a foreground service**, which does not exist yet.
-  Right now the stream stays alive when backgrounded but the system mutes it
-  (`mutedState:opControlAudio`), so audio only comes out while the app is on
-  screen.
+- **`PlaybackService` is what keeps the sound on.** Without a
+  `mediaPlayback`-typed foreground service the stream stays alive when
+  backgrounded but the system mutes it, which `dumpsys audio` reports as
+  `mutedState:opControlAudio` while still saying `state:started`. The service
+  plays nothing itself; it exists to make the process foreground-privileged.
+- **The MediaSession is not decoration either.** A plain ongoing notification,
+  even with actions, lands in the silent section of the shade and gets collapsed
+  into the icon strip at the bottom, where nobody will find it — the controls
+  looked simply absent. Backing the notification with a `MediaSession` and
+  `Notification.MediaStyle` is what moves it to the media area and the lock
+  screen. Both use framework APIs, so neither costs a dependency.
 - The Tauri CLI must be a **project-local** npm install. A global one makes the
   generated Gradle task run `node tauri` and fail to resolve it.
 

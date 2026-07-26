@@ -3,12 +3,25 @@
 //! Still minimal: no library UI, no queue, no persistence.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use funkot_core::engine::Engine;
+use funkot_core::engine::{Engine, NavAction};
 use funkot_core::EngineOptions;
+
+/// Global handle to the running engine's playback controls.
+///
+/// Notification-button JNI callbacks (`onNativeControl`) do not go through
+/// Tauri, so they cannot reach a `tauri::State`; this is set once, from the
+/// audio thread, before the `Engine` moves into the cpal callback closure.
+struct Playback {
+    paused: Arc<AtomicBool>,
+    nav_tx: SyncSender<NavAction>,
+}
+
+static PLAYBACK: OnceLock<Playback> = OnceLock::new();
 
 /// Where the app keeps music and the analysis cache, as absolute paths.
 ///
@@ -207,10 +220,23 @@ fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>) {
     engine.set_realtime(true);
     say!("engine created");
 
+    // Grab the nav sender before `engine` moves into the cpal closure below,
+    // and publish both it and a fresh `paused` flag for Tauri commands and the
+    // notification's JNI callback to reach.
+    let paused = Arc::new(AtomicBool::new(false));
+    let _ = PLAYBACK.set(Playback {
+        paused: Arc::clone(&paused),
+        nav_tx: engine.nav_sender(),
+    });
+
     let err_log = log.clone();
     let stream = device.build_output_stream(
         supported.config(),
         move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            if paused.load(Ordering::Relaxed) {
+                out.fill(0.0);
+                return;
+            }
             let frames = engine.render(out);
             let written = frames * 2;
             if written < out.len() {
@@ -280,6 +306,8 @@ fn start(music_dir: String, cache_dir: String, state: tauri::State<AppState>) ->
         .spawn(move || audio_thread(paths, cache, tx))
         .map_err(|e| format!("spawn audio thread: {e}"))?;
 
+    service_set_running(true);
+
     *started = true;
     Ok(found)
 }
@@ -294,6 +322,34 @@ fn poll_log(state: tauri::State<AppState>) -> Vec<String> {
         }
     }
     lines.clone()
+}
+
+/// Flip the paused flag. Returns the new state.
+#[tauri::command]
+fn toggle_pause() -> Result<bool, String> {
+    let playback = PLAYBACK.get().ok_or("not playing")?;
+    // fetch_xor(true) returns the *previous* value; the new state is its negation.
+    let now_paused = !playback.paused.fetch_xor(true, Ordering::Relaxed);
+    service_sync_state();
+    Ok(now_paused)
+}
+
+/// Ask the engine to transition to the next track.
+#[tauri::command]
+fn skip_next() -> Result<(), String> {
+    let playback = PLAYBACK.get().ok_or("not playing")?;
+    // A full channel (capacity 8) just means a nav is already queued; that is
+    // normal under repeated taps and not an error worth surfacing.
+    let _ = playback.nav_tx.try_send(NavAction::TransitionToNext);
+    Ok(())
+}
+
+#[tauri::command]
+fn is_paused() -> bool {
+    PLAYBACK
+        .get()
+        .map(|p| p.paused.load(Ordering::Relaxed))
+        .unwrap_or(false)
 }
 
 /// Publish the Android `Context` to `ndk-context`.
@@ -339,6 +395,86 @@ pub extern "C" fn JNI_OnLoad(
     jni::sys::JNI_VERSION_1_6
 }
 
+/// Start or stop the `PlaybackService` foreground service.
+///
+/// The service plays no audio itself — the cpal stream on the audio thread
+/// already does that — its only job is keeping the process foreground-
+/// privileged (so the system stops muting it once backgrounded) and showing a
+/// notification. Failure here must not be fatal: playback continues either
+/// way, just without a notification.
+#[cfg(target_os = "android")]
+fn service_call(method: &str) {
+    use jni::objects::JObject;
+    use jni::strings::JNIString;
+    use jni::{errors::Result as JResult, Env, JavaVM};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    let raw_context = ctx.context() as jni::sys::jobject;
+
+    let result: JResult<()> = vm.attach_current_thread(|env: &mut Env<'_>| {
+        let context = unsafe { JObject::from_raw(env, raw_context) };
+        let class = env.find_class(jni::jni_str!(
+            "jp/hatsuboshi/funkotplayer/PlaybackService"
+        ))?;
+        env.call_static_method(
+            &class,
+            JNIString::new(method),
+            jni::jni_sig!("(Landroid/content/Context;)V"),
+            &[(&context).into()],
+        )?;
+        Ok(())
+    });
+    if let Err(e) = result {
+        log::error!("PlaybackService.{method}: {e}");
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn service_call(_method: &str) {}
+
+fn service_set_running(running: bool) {
+    service_call(if running { "startFrom" } else { "stopFrom" });
+}
+
+/// Nudge the service to re-read the paused flag.
+///
+/// The notification and the in-app buttons are two views of one flag; without
+/// this, pausing from the app leaves the notification showing the old label
+/// until something else touches it.
+fn service_sync_state() {
+    service_call("syncFrom");
+}
+
+/// Called from `PlaybackService`'s notification actions. `action` is
+/// 0 = toggle play/pause, 1 = skip to next track.
+#[cfg(target_os = "android")]
+#[no_mangle]
+/// Returns whether playback is paused *after* the action, so the Kotlin side
+/// can keep the MediaSession state and the notification in step without holding
+/// its own copy of the flag.
+pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeControl(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    action: i32,
+) -> jni::sys::jboolean {
+    // jni-sys 0.4 defines jboolean as a real `bool`, not the u8 it used to be.
+    let Some(playback) = PLAYBACK.get() else {
+        return false;
+    };
+    match action {
+        0 => {
+            playback.paused.fetch_xor(true, Ordering::Relaxed);
+        }
+        1 => {
+            let _ = playback.nav_tx.try_send(NavAction::TransitionToNext);
+        }
+        // 2 = query only, used when the app's own buttons changed the flag.
+        _ => {}
+    }
+    playback.paused.load(Ordering::Relaxed)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "android")]
@@ -352,7 +488,14 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![app_dirs, start, poll_log])
+        .invoke_handler(tauri::generate_handler![
+            app_dirs,
+            start,
+            poll_log,
+            toggle_pause,
+            skip_next,
+            is_paused
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
