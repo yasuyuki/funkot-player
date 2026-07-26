@@ -11,13 +11,13 @@ not actively supported but is not deliberately broken either.
 
 ## Status
 
-Early. This is the verified Android spike promoted to a repo: the toolchain, the
-audio path and the platform workarounds are proven on a real device (Pixel 10
-Pro / Android 17), but the UI is still a single "start" button that plays every
-file in one hard-coded directory.
+Early, but it plays. On Android, drop tracks into the app's Music folder over
+MTP, press start, and it mixes the whole folder on a loop with DJ transitions.
+Verified on a Pixel 10 Pro (Android 17).
 
 Not yet built: library scanning, the queue, intro/outro bar editing, and
-background playback. See the plan for what those are.
+**background playback** — the system mutes the stream the moment the app leaves
+the screen, so today it only plays while you are looking at it.
 
 ## Layout
 
@@ -78,6 +78,12 @@ place it matters, but they are easy to undo by accident:
 - **The UI must respect safe-area insets.** Tauri draws edge-to-edge; a control
   at the top of the page ends up under the status bar and the system swallows
   the touch, so the app looks unresponsive rather than misdrawn.
+- **Never hard-code the music path**, even though it is predictable. A directory
+  created under `/storage/emulated/0/Android/data/<pkg>/files` from outside the
+  app — over adb or MTP — is owned by `shell:ext_data_rw` and the app cannot even
+  list it. `getExternalFilesDir` creates it with the right ownership, which is
+  why `app_dirs` goes through JNI instead of formatting a string. Copying files
+  *into* an app-created directory from a PC is fine.
 - **Background playback needs a foreground service**, which does not exist yet.
   Right now the stream stays alive when backgrounded but the system mutes it
   (`mutedState:opControlAudio`), so audio only comes out while the app is on

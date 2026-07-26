@@ -1,7 +1,6 @@
-//! Spike 0 step 2: prove that a Tauri v2 Android app can drive funkot-core
-//! through cpal's AAudio host and actually make sound on a device.
+//! funkot-player: drives funkot-core's auto-DJ engine from a Tauri app.
 //!
-//! Deliberately minimal: no library UI, no queue, no persistence.
+//! Still minimal: no library UI, no queue, no persistence.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,6 +9,140 @@ use std::sync::Mutex;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use funkot_core::engine::Engine;
 use funkot_core::EngineOptions;
+
+/// Where the app keeps music and the analysis cache, as absolute paths.
+///
+/// Both directories exist by the time this is returned.
+#[derive(serde::Serialize, Clone, Debug)]
+struct AppDirs {
+    /// Drop tracks here. On Android this is the app's external files dir, which
+    /// shows up over MTP so a PC can copy into it.
+    music_dir: String,
+    /// `EngineOptions::cache_dir`. Must be absolute: the default in funkot-core
+    /// is the relative `"funkot-cache"`.
+    cache_dir: String,
+}
+
+/// Ask Android for the app's own directories.
+///
+/// The paths are predictable (`/storage/emulated/0/Android/data/<pkg>/files/...`)
+/// but hard-coding them does not work: a directory created from outside the app
+/// — over adb or MTP — is owned by `shell:ext_data_rw`, and the app then cannot
+/// even list it (`Permission denied`). `getExternalFilesDir` creates it with the
+/// right ownership, so the app has to be the one to ask.
+#[cfg(target_os = "android")]
+fn platform_dirs() -> Result<AppDirs, String> {
+    use jni::objects::{JObject, JString};
+    use jni::{Env, JavaVM};
+
+    fn absolute_path<'j>(env: &mut Env<'j>, file: &JObject<'j>) -> jni::errors::Result<String> {
+        let obj = env
+            .call_method(
+                file,
+                jni::jni_str!("getAbsolutePath"),
+                jni::jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        let s = unsafe { JString::from_raw(env, obj.into_raw()) };
+        // Bound to a local on purpose: the MUTF8Chars view borrows `s`, and
+        // returning the expression directly drops them in the wrong order.
+        let path = String::from(s.mutf8_chars(env)?);
+        Ok(path)
+    }
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    let raw_context = ctx.context() as jni::sys::jobject;
+
+    let (music, files): (String, String) = vm
+        .attach_current_thread(|env: &mut Env<'_>| -> jni::errors::Result<(String, String)> {
+            let context = unsafe { JObject::from_raw(env, raw_context) };
+
+            let music_kind = env
+                .get_static_field(
+                    jni::jni_str!("android/os/Environment"),
+                    jni::jni_str!("DIRECTORY_MUSIC"),
+                    jni::jni_sig!("Ljava/lang/String;"),
+                )?
+                .l()?;
+            let music_file = env
+                .call_method(
+                    &context,
+                    jni::jni_str!("getExternalFilesDir"),
+                    jni::jni_sig!("(Ljava/lang/String;)Ljava/io/File;"),
+                    &[(&music_kind).into()],
+                )?
+                .l()?;
+            // Null when external storage is unavailable (unmounted, or shared
+            // storage still locked on a freshly booted device).
+            if music_file.is_null() {
+                return Err(jni::errors::Error::NullPtr("getExternalFilesDir"));
+            }
+
+            let files_file = env
+                .call_method(
+                    &context,
+                    jni::jni_str!("getFilesDir"),
+                    jni::jni_sig!("()Ljava/io/File;"),
+                    &[],
+                )?
+                .l()?;
+
+            Ok((
+                absolute_path(env, &music_file)?,
+                absolute_path(env, &files_file)?,
+            ))
+        })
+        .map_err(|e: jni::errors::Error| format!("cannot resolve Android app dirs: {e}"))?;
+
+    // The cache is internal: it is derived data, and keeping it out of the
+    // MTP-visible folder means a PC only ever sees the music.
+    let cache = PathBuf::from(files).join("funkot-cache");
+    ensure_dirs(&PathBuf::from(&music), &cache)?;
+    Ok(AppDirs {
+        music_dir: music,
+        cache_dir: cache.to_string_lossy().into_owned(),
+    })
+}
+
+/// Desktop: everything under the per-app data directory Tauri resolves for us.
+#[cfg(not(target_os = "android"))]
+fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
+    use tauri::Manager;
+
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
+    let music = base.join("Music");
+    let cache = base.join("funkot-cache");
+    ensure_dirs(&music, &cache)?;
+    Ok(AppDirs {
+        music_dir: music.to_string_lossy().into_owned(),
+        cache_dir: cache.to_string_lossy().into_owned(),
+    })
+}
+
+fn ensure_dirs(music: &std::path::Path, cache: &std::path::Path) -> Result<(), String> {
+    for dir in [music, cache] {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn app_dirs(#[allow(unused)] app: tauri::AppHandle) -> Result<AppDirs, String> {
+    #[cfg(target_os = "android")]
+    let dirs = platform_dirs();
+    #[cfg(not(target_os = "android"))]
+    let dirs = platform_dirs(&app);
+    if let Ok(d) = &dirs {
+        log::info!("music: {} / cache: {}", d.music_dir, d.cache_dir);
+    }
+    dirs
+}
 
 /// Where the audio thread reports back to the UI. `cpal::Stream` is not `Send`
 /// on every platform, so it never leaves the thread that created it.
@@ -219,7 +352,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![start, poll_log])
+        .invoke_handler(tauri::generate_handler![app_dirs, start, poll_log])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
