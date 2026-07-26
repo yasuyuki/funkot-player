@@ -8,6 +8,9 @@
 # Local music and analysis cache used for testing
 /testdata/
 
+# Session handoff notes (local, not for publication)
+/HANDOFF.md
+
 # OS / editor noise
 .DS_Store
 Thumbs.db
