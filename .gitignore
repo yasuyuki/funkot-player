@@ -1,0 +1,15 @@
+# Rust / Tauri build output
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Node
+/node_modules/
+
+# Local music and analysis cache used for testing
+/testdata/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,49 @@
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>funkot-player</title>
+<style>
+  /* Tauri on Android draws edge-to-edge: without this the first control sits
+     under the status bar / cutout and the system eats the touch. */
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 0;
+         padding: calc(1rem + env(safe-area-inset-top, 3rem)) 1rem
+                  calc(1rem + env(safe-area-inset-bottom, 2rem));
+         background: #111; color: #eee; }
+  button { font-size: 1.2rem; padding: .8rem 1.6rem; width: 100%;
+           background: #2b6; color: #000; border: 0; border-radius: .4rem; }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: .8rem;
+        background: #000; padding: .6rem; border-radius: .3rem; margin-top: 1rem; }
+  .err { color: #f66; }
+</style>
+
+<button id="go">▶ start</button>
+<pre id="log">idle</pre>
+
+<script>
+  const ID = "jp.hatsuboshi.funkotplayer";
+  // Internal files dir, a placeholder until B-1 lands.
+  //
+  // The real home for music is the external dir
+  // (/storage/emulated/0/Android/data/<pkg>/files, visible from a PC over MTP),
+  // but it has to be created by the app itself via getExternalFilesDir(): one
+  // created from outside is owned by shell:ext_data_rw and the app cannot even
+  // traverse it. That needs a JNI call, which B-1 adds next to JNI_OnLoad.
+  const EXT = `/data/user/0/${ID}/files`;
+  const invoke = window.__TAURI__.core.invoke;
+  const log = document.getElementById("log");
+
+  document.getElementById("go").onclick = async () => {
+    log.textContent = "starting…";
+    try {
+      const found = await invoke("start", {
+        musicDir: `${EXT}/Music`,
+        cacheDir: `${EXT}/funkot-cache`,
+      });
+      log.textContent = `${found}\n`;
+      setInterval(async () => {
+        const lines = await invoke("poll_log");
+        log.textContent = `${found}\n` + lines.join("\n");
+      }, 500);
+    } catch (e) {
+      log.innerHTML = `<span class="err">${e}</span>`;
+    }
+  };
+</script>
