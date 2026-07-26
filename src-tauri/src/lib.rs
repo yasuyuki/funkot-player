@@ -271,6 +271,15 @@ fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>) {
     }
 }
 
+/// Whether `path` has one of the extensions the engine can decode.
+fn is_supported_track(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(),
+            "wav" | "mp3" | "flac" | "m4a" | "ogg"))
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 fn start(music_dir: String, cache_dir: String, state: tauri::State<AppState>) -> Result<String, String> {
     let mut started = state.started.lock().unwrap();
@@ -282,13 +291,7 @@ fn start(music_dir: String, cache_dir: String, state: tauri::State<AppState>) ->
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.extension()
-                .and_then(|s| s.to_str())
-                .map(|e| matches!(e.to_ascii_lowercase().as_str(),
-                    "wav" | "mp3" | "flac" | "m4a" | "ogg"))
-                .unwrap_or(false)
-        })
+        .filter(|p| is_supported_track(p))
         .collect();
     paths.sort();
 
@@ -350,6 +353,170 @@ fn is_paused() -> bool {
         .get()
         .map(|p| p.paused.load(Ordering::Relaxed))
         .unwrap_or(false)
+}
+
+/// One row of the library listing: a track plus whatever the analysis cache
+/// already knows about it.
+#[derive(serde::Serialize, Clone)]
+struct TrackRow {
+    /// Absolute path. Used as the UI's key.
+    path: String,
+    /// Display name (file name).
+    name: String,
+    /// Whether a cached analysis exists. If false, the bar fields are null.
+    analyzed: bool,
+    intro_bars: Option<u32>,
+    outro_bars: Option<u32>,
+    intro_manual: bool,
+    outro_manual: bool,
+    intro_low_confidence: bool,
+    outro_low_confidence: bool,
+}
+
+/// Guards against starting a second analysis worker while one is running.
+static ANALYZING: AtomicBool = AtomicBool::new(false);
+
+/// Build one `TrackRow` from whatever `cache::load` returns for `path`.
+///
+/// A hashing failure (unreadable file, etc.) is reported as unanalyzed rather
+/// than dropped, so one bad file does not remove itself from the listing.
+fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string();
+    let analysis = funkot_core::cache::content_hash(path)
+        .ok()
+        .and_then(|hash| funkot_core::cache::load(cache_dir, &hash));
+    match analysis {
+        Some(a) => TrackRow {
+            path: path.to_string_lossy().into_owned(),
+            name,
+            analyzed: true,
+            intro_bars: Some(a.intro_bars),
+            outro_bars: Some(a.outro_bars),
+            intro_manual: a.intro_bars_manual,
+            outro_manual: a.outro_bars_manual,
+            intro_low_confidence: a.intro_bars_low_confidence,
+            outro_low_confidence: a.outro_bars_low_confidence,
+        },
+        None => TrackRow {
+            path: path.to_string_lossy().into_owned(),
+            name,
+            analyzed: false,
+            intro_bars: None,
+            outro_bars: None,
+            intro_manual: false,
+            outro_manual: false,
+            intro_low_confidence: false,
+            outro_low_confidence: false,
+        },
+    }
+}
+
+/// Scan `music_dir` (top-level only) for supported tracks and report what the
+/// analysis cache already knows about each. Kicks off a background analysis
+/// worker (one thread, one track at a time) if anything is unanalyzed.
+#[tauri::command]
+fn refresh_library(app: tauri::AppHandle) -> Result<Vec<TrackRow>, String> {
+    #[cfg(target_os = "android")]
+    let dirs = platform_dirs()?;
+    #[cfg(not(target_os = "android"))]
+    let dirs = platform_dirs(&app)?;
+
+    let music_dir = PathBuf::from(&dirs.music_dir);
+    let cache_dir = PathBuf::from(&dirs.cache_dir);
+
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&music_dir)
+        .map_err(|e| format!("cannot read {}: {e}", music_dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| is_supported_track(p))
+        .collect();
+    paths.sort();
+
+    let rows: Vec<TrackRow> = paths.iter().map(|p| track_row(p, &cache_dir)).collect();
+
+    // Hand the worker only what is actually missing. `fill_missing` checks the
+    // cache *after* it is given a decoded buffer, so passing an already-analysed
+    // track still costs a full decode — adding one file to a large library would
+    // otherwise re-decode the whole library, which is the same heat and battery
+    // cost the serial worker exists to avoid.
+    let pending: Vec<PathBuf> = paths
+        .iter()
+        .zip(&rows)
+        .filter(|(_, row)| !row.analyzed)
+        .map(|(path, _)| path.clone())
+        .collect();
+    if !pending.is_empty() {
+        spawn_analysis_worker(app, pending, cache_dir);
+    }
+
+    Ok(rows)
+}
+
+/// Progress payload for the `analysis-progress` event.
+#[derive(serde::Serialize, Clone)]
+struct AnalysisProgress {
+    done: usize,
+    total: usize,
+    name: String,
+}
+
+/// Spawn the single background analysis thread, if one is not already running.
+///
+/// Deliberately serial, not parallelised across tracks: this runs on a phone,
+/// and analysing more than one file at a time would mean more heat and battery
+/// drain for no benefit the user can perceive (the worker already runs
+/// unattended in the background).
+fn spawn_analysis_worker(app: tauri::AppHandle, paths: Vec<PathBuf>, cache_dir: PathBuf) {
+    if ANALYZING.swap(true, Ordering::SeqCst) {
+        // Already running; refresh_library's caller will see progress events
+        // from the run already in flight.
+        return;
+    }
+
+    std::thread::Builder::new()
+        .name("funkot-analysis".into())
+        .spawn(move || {
+            use tauri::Emitter;
+
+            let total = paths.len();
+            for (i, path) in paths.iter().enumerate() {
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+
+                match funkot_core::decode::decode_file(path) {
+                    Ok(buffer) => {
+                        if let Err(e) = funkot_core::cache::fill_missing(path, &cache_dir, &buffer) {
+                            log::warn!("analysis failed for {}: {e}", path.display());
+                        }
+                        // `buffer` drops here, before the next track is decoded,
+                        // so only one track's worth of samples (tens of MB) is
+                        // ever resident at once.
+                    }
+                    Err(e) => {
+                        log::warn!("decode failed for {}: {e}", path.display());
+                    }
+                }
+
+                let _ = app.emit(
+                    "analysis-progress",
+                    AnalysisProgress {
+                        done: i + 1,
+                        total,
+                        name,
+                    },
+                );
+            }
+
+            ANALYZING.store(false, Ordering::SeqCst);
+            let _ = app.emit("analysis-done", ());
+        })
+        .expect("spawn analysis thread");
 }
 
 /// Publish the Android `Context` to `ndk-context`.
@@ -494,7 +661,8 @@ pub fn run() {
             poll_log,
             toggle_pause,
             skip_next,
-            is_paused
+            is_paused,
+            refresh_library
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

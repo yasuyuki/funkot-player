@@ -14,6 +14,9 @@
   pre { white-space: pre-wrap; word-break: break-all; font-size: .8rem;
         background: #000; padding: .6rem; border-radius: .3rem; margin-top: 1rem; }
   .err { color: #f66; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: .9rem; }
+  td, th { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #333; }
+  .low { color: #fa6; }
 </style>
 
 <button id="go">▶ start</button>
@@ -21,6 +24,11 @@
   <button id="toggle">⏸ pause / play</button>
   <button id="next">⏭ next</button>
 </div>
+<div class="row">
+  <button id="scan">⟳ scan</button>
+</div>
+<div id="progress"></div>
+<table id="library"></table>
 <pre id="log">idle</pre>
 
 <script>
@@ -70,4 +78,52 @@
       log.innerHTML = `<span class="err">${e}</span>`;
     }
   };
+
+  // --- Library scan + background analysis (B-3) ---
+  // No persisted index here on purpose: the cache JSON is the source of
+  // truth, so every scan re-walks the folder and re-reads the cache.
+  const progress = document.getElementById("progress");
+  const library = document.getElementById("library");
+
+  function renderLibrary(rows) {
+    const bars = (n, low) => {
+      if (n === null || n === undefined) return "-";
+      return low ? `${n}!` : `${n}`;
+    };
+    library.innerHTML =
+      "<tr><th>track</th><th>intro</th><th>outro</th></tr>" +
+      rows
+        .map(
+          (r) =>
+            `<tr><td>${r.name}</td>` +
+            `<td class="${r.intro_low_confidence ? "low" : ""}">${bars(r.intro_bars, r.intro_low_confidence)}</td>` +
+            `<td class="${r.outro_low_confidence ? "low" : ""}">${bars(r.outro_bars, r.outro_low_confidence)}</td></tr>`
+        )
+        .join("");
+  }
+
+  document.getElementById("scan").onclick = async () => {
+    try {
+      const rows = await invoke("refresh_library");
+      renderLibrary(rows);
+    } catch (e) {
+      log.innerHTML = `<span class="err">${e}</span>`;
+    }
+  };
+
+  window.__TAURI__.event.listen("analysis-progress", async (event) => {
+    const { done, total, name } = event.payload;
+    progress.textContent = `analyzing ${done}/${total}: ${name}`;
+    try {
+      const rows = await invoke("refresh_library");
+      renderLibrary(rows);
+    } catch (e) {
+      // Ignore: refresh_library skips launching a second worker while one is
+      // running, so a stray error here shouldn't stop progress display.
+    }
+  });
+
+  window.__TAURI__.event.listen("analysis-done", () => {
+    progress.textContent = "";
+  });
 </script>
