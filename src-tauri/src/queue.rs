@@ -1,6 +1,5 @@
-//! Host-owned playback queue: the `Arc<Mutex<VecDeque<PathBuf>>>` the plan
-//! calls for, plus the `TrackSource` that lets `Engine::new_with_source` read
-//! from it.
+//! Host-owned playback queue: the shared queue state the plan calls for, plus
+//! the `TrackSource` that lets `Engine::new_with_source` read from it.
 //!
 //! # Threading
 //!
@@ -14,12 +13,15 @@
 //!
 //! # What this does *not* decide
 //!
-//! Per `TrackSource`'s contract (`funkot-core/src/engine.rs`), `next` returning
-//! `None` ends the playlist for good (the loader thread exits; the engine
-//! cannot be handed more tracks afterwards). Whether a drained queue *should*
-//! ever reach that point — and how that interacts with `start()`'s current
-//! whole-folder loop — is a product decision left to the caller/wiring code,
-//! not to this module.
+//! Per `TrackSource`'s contract (`funkot-core/src/engine.rs`), `next`
+//! returning `None` ends the playlist for good: the loader thread exits and
+//! sets the engine's `loader_exhausted` latch, which nothing can clear
+//! afterwards (see `funkot-core/src/engine.rs:1409` and `:1944`). Since this
+//! app is used for continuous BGM playback, that's not acceptable, so
+//! `HostSource` never returns `None` while there is anything left to play at
+//! all — see [`DrainPolicy`] for what it falls back to once the host-managed
+//! queue drains. `next` only returns `None` when both the queue and the
+//! fallback source are exhausted.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -27,31 +29,46 @@ use std::sync::{Arc, Mutex};
 
 use funkot_core::engine::TrackSource;
 
-/// Shared handle to the host-owned queue. Cheap to clone; every clone points
-/// at the same underlying `VecDeque`.
-pub type SharedQueue = Arc<Mutex<VecDeque<PathBuf>>>;
-
-/// A fresh, empty queue.
-pub fn new_shared_queue() -> SharedQueue {
-    Arc::new(Mutex::new(VecDeque::new()))
+/// Shared, lock-protected queue state: the host-managed pending queue plus
+/// the most recently reserved (handed to the engine for preparation) track.
+///
+/// Both fields live behind the same `Mutex` so a reader can take a
+/// consistent snapshot of "what's playing next" and "what's queued after
+/// that" with a single lock acquisition.
+pub struct QueueState {
+    pending: VecDeque<PathBuf>,
+    reserved: Option<PathBuf>,
 }
 
-/// Append `path` to the tail. Returns the queue length after the insert.
+/// Shared handle to the host-owned queue. Cheap to clone; every clone points
+/// at the same underlying [`QueueState`].
+pub type SharedQueue = Arc<Mutex<QueueState>>;
+
+/// A fresh, empty queue with nothing reserved.
+pub fn new_shared_queue() -> SharedQueue {
+    Arc::new(Mutex::new(QueueState {
+        pending: VecDeque::new(),
+        reserved: None,
+    }))
+}
+
+/// Append `path` to the tail of the pending queue. Returns the pending
+/// queue's length after the insert.
 pub fn enqueue(queue: &SharedQueue, path: PathBuf) -> usize {
     let mut q = queue.lock().unwrap();
-    q.push_back(path);
-    q.len()
+    q.pending.push_back(path);
+    q.pending.len()
 }
 
-/// Move the item at `from` to `to` (both 0-based positions in the queue as it
-/// stands right now). Does not touch whatever the engine has already taken
-/// off the front for preparation — those are gone from this queue the moment
-/// `HostSource::next` returns them.
+/// Move the item at `from` to `to` (both 0-based positions in the pending
+/// queue as it stands right now). Does not touch `reserved`: once
+/// `HostSource::next` has taken an item out of the pending queue for
+/// preparation, it moves to `reserved` and is no longer reachable here.
 ///
 /// Errors (queue left unchanged) if either index is out of range.
 pub fn reorder(queue: &SharedQueue, from: usize, to: usize) -> Result<(), String> {
     let mut q = queue.lock().unwrap();
-    let len = q.len();
+    let len = q.pending.len();
     if from >= len || to >= len {
         return Err(format!(
             "reorder index out of range: len={len}, from={from}, to={to}"
@@ -60,24 +77,48 @@ pub fn reorder(queue: &SharedQueue, from: usize, to: usize) -> Result<(), String
     if from == to {
         return Ok(());
     }
-    let item = q.remove(from).expect("from checked above");
-    q.insert(to, item);
+    let item = q.pending.remove(from).expect("from checked above");
+    q.pending.insert(to, item);
     Ok(())
 }
 
-/// Remove and return the item at `index`.
+/// Remove and return the item at `index` from the pending queue.
 ///
 /// Errors if `index` is out of range (including an empty queue).
 pub fn dequeue(queue: &SharedQueue, index: usize) -> Result<PathBuf, String> {
     let mut q = queue.lock().unwrap();
-    let len = q.len();
-    q.remove(index)
+    let len = q.pending.len();
+    q.pending
+        .remove(index)
         .ok_or_else(|| format!("dequeue index out of range: len={len}, index={index}"))
 }
 
-/// Snapshot of the queue's current contents, for `state()`.
+/// Snapshot of the pending queue's current contents, for `state()`.
 pub fn snapshot(queue: &SharedQueue) -> Vec<PathBuf> {
-    queue.lock().unwrap().iter().cloned().collect()
+    queue.lock().unwrap().pending.iter().cloned().collect()
+}
+
+/// The track most recently handed to the engine by `HostSource::next`
+/// (whether it came from the pending queue or from the drain policy's
+/// fallback), or `None` if `next` hasn't been called yet or reported
+/// exhaustion.
+pub fn reserved(queue: &SharedQueue) -> Option<PathBuf> {
+    queue.lock().unwrap().reserved.clone()
+}
+
+/// `(reserved, pending)` read under a single lock acquisition, so callers get
+/// a consistent view instead of two snapshots that could straddle a `next()`
+/// call.
+pub fn state_snapshot(queue: &SharedQueue) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let q = queue.lock().unwrap();
+    (q.reserved.clone(), q.pending.iter().cloned().collect())
+}
+
+/// What to play once the host-managed pending queue runs dry.
+pub enum DrainPolicy {
+    /// BGM use case: keep cycling through the source folder's tracks in
+    /// order, wrapping back to the start once the end is reached.
+    ContinueFolder { tracks: Vec<PathBuf>, pos: usize },
 }
 
 /// `TrackSource` backed by a [`SharedQueue`] instead of a fixed playlist, so a
@@ -89,18 +130,47 @@ pub fn snapshot(queue: &SharedQueue) -> Vec<PathBuf> {
 /// values being contiguous or matching queue positions.
 pub struct HostSource {
     queue: SharedQueue,
+    policy: DrainPolicy,
     calls: usize,
 }
 
 impl HostSource {
-    pub fn new(queue: SharedQueue) -> Self {
-        Self { queue, calls: 0 }
+    pub fn new(queue: SharedQueue, policy: DrainPolicy) -> Self {
+        Self {
+            queue,
+            policy,
+            calls: 0,
+        }
     }
 }
 
 impl TrackSource for HostSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
-        let path = self.queue.lock().unwrap().pop_front()?;
+        let mut q = self.queue.lock().unwrap();
+        let path = match q.pending.pop_front() {
+            Some(path) => path,
+            None => match &mut self.policy {
+                DrainPolicy::ContinueFolder { tracks, pos } => {
+                    if tracks.is_empty() {
+                        q.reserved = None;
+                        return None;
+                    }
+                    // Wrap before indexing, not just after: `pos` is a public
+                    // field, so a caller can hand us one that is already past
+                    // the end. Panicking here would kill the loader thread and
+                    // stop playback with no way back (see the module docs on
+                    // the `loader_exhausted` latch).
+                    if *pos >= tracks.len() {
+                        *pos = 0;
+                    }
+                    let path = tracks[*pos].clone();
+                    *pos = (*pos + 1) % tracks.len();
+                    path
+                }
+            },
+        };
+        q.reserved = Some(path.clone());
+        drop(q);
         let index = self.calls;
         self.calls += 1;
         Some((index, path))
@@ -113,6 +183,20 @@ mod tests {
 
     fn p(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    fn empty_policy() -> DrainPolicy {
+        DrainPolicy::ContinueFolder {
+            tracks: Vec::new(),
+            pos: 0,
+        }
+    }
+
+    fn folder_policy(names: &[&str]) -> DrainPolicy {
+        DrainPolicy::ContinueFolder {
+            tracks: names.iter().map(|n| p(n)).collect(),
+            pos: 0,
+        }
     }
 
     #[test]
@@ -196,7 +280,7 @@ mod tests {
         for name in ["a", "b", "c"] {
             enqueue(&q, p(name));
         }
-        let mut source = HostSource::new(Arc::clone(&q));
+        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
         assert_eq!(source.next(), Some((0, p("a"))));
         assert_eq!(source.next(), Some((1, p("b"))));
         assert_eq!(source.next(), Some((2, p("c"))));
@@ -204,23 +288,18 @@ mod tests {
     }
 
     #[test]
-    fn host_source_returns_none_on_empty_queue() {
+    fn host_source_returns_none_when_pending_and_folder_are_both_empty() {
         let q = new_shared_queue();
-        let mut source = HostSource::new(q);
+        let mut source = HostSource::new(q, empty_policy());
         assert_eq!(source.next(), None);
     }
 
     #[test]
     fn host_source_sees_items_enqueued_after_construction() {
         let q = new_shared_queue();
-        let mut source = HostSource::new(Arc::clone(&q));
+        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
         assert_eq!(source.next(), None);
         enqueue(&q, p("late"));
-        // Once `next` has returned `None`, funkot-core's loader thread has
-        // already exited and will not call `next` again — this only checks
-        // that the queue/source themselves don't have some internal
-        // "exhausted" latch of their own; whether a live engine ever sees this
-        // item is a separate, unresolved question (see module docs).
         assert_eq!(source.next(), Some((0, p("late"))));
     }
 
@@ -236,5 +315,74 @@ mod tests {
         reorder(&q, 2, 0).unwrap();
         assert_eq!(dequeue(&q, 1).unwrap(), p("a"));
         assert_eq!(snapshot(&q), vec![p("c"), p("b")]);
+    }
+
+    #[test]
+    fn host_source_falls_back_to_folder_when_queue_drains() {
+        let q = new_shared_queue();
+        let mut source = HostSource::new(q, folder_policy(&["f1", "f2", "f3"]));
+        assert_eq!(source.next(), Some((0, p("f1"))));
+        assert_eq!(source.next(), Some((1, p("f2"))));
+        assert_eq!(source.next(), Some((2, p("f3"))));
+    }
+
+    #[test]
+    fn host_source_wraps_around_at_end_of_folder() {
+        let q = new_shared_queue();
+        let mut source = HostSource::new(q, folder_policy(&["f1", "f2"]));
+        assert_eq!(source.next(), Some((0, p("f1"))));
+        assert_eq!(source.next(), Some((1, p("f2"))));
+        assert_eq!(source.next(), Some((2, p("f1"))));
+        assert_eq!(source.next(), Some((3, p("f2"))));
+    }
+
+    #[test]
+    fn host_source_prefers_pending_queue_and_resumes_folder_position() {
+        let q = new_shared_queue();
+        let mut source = HostSource::new(Arc::clone(&q), folder_policy(&["f1", "f2", "f3"]));
+        assert_eq!(source.next(), Some((0, p("f1"))));
+        enqueue(&q, p("priority"));
+        assert_eq!(source.next(), Some((1, p("priority"))));
+        // Folder resumes from where it left off (f2), not from the start.
+        assert_eq!(source.next(), Some((2, p("f2"))));
+        assert_eq!(source.next(), Some((3, p("f3"))));
+    }
+
+    #[test]
+    fn reserved_reflects_the_most_recently_handed_out_track() {
+        let q = new_shared_queue();
+        assert_eq!(reserved(&q), None);
+        enqueue(&q, p("a"));
+        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
+        assert_eq!(source.next(), Some((0, p("a"))));
+        assert_eq!(reserved(&q), Some(p("a")));
+    }
+
+    #[test]
+    fn pending_queue_mutations_do_not_affect_reserved() {
+        let q = new_shared_queue();
+        enqueue(&q, p("a"));
+        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
+        assert_eq!(source.next(), Some((0, p("a"))));
+        assert_eq!(reserved(&q), Some(p("a")));
+
+        enqueue(&q, p("b"));
+        enqueue(&q, p("c"));
+        reorder(&q, 0, 1).unwrap();
+        dequeue(&q, 0).unwrap();
+
+        assert_eq!(reserved(&q), Some(p("a")));
+        assert_eq!(state_snapshot(&q).0, Some(p("a")));
+    }
+
+    #[test]
+    fn host_source_returns_none_and_clears_reserved_when_fully_exhausted() {
+        let q = new_shared_queue();
+        enqueue(&q, p("a"));
+        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
+        assert_eq!(source.next(), Some((0, p("a"))));
+        assert_eq!(reserved(&q), Some(p("a")));
+        assert_eq!(source.next(), None);
+        assert_eq!(reserved(&q), None);
     }
 }
