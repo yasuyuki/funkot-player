@@ -98,14 +98,6 @@ pub fn snapshot(queue: &SharedQueue) -> Vec<PathBuf> {
     queue.lock().unwrap().pending.iter().cloned().collect()
 }
 
-/// The track most recently handed to the engine by `HostSource::next`
-/// (whether it came from the pending queue or from the drain policy's
-/// fallback), or `None` if `next` hasn't been called yet or reported
-/// exhaustion.
-pub fn reserved(queue: &SharedQueue) -> Option<PathBuf> {
-    queue.lock().unwrap().reserved.clone()
-}
-
 /// `(reserved, pending)` read under a single lock acquisition, so callers get
 /// a consistent view instead of two snapshots that could straddle a `next()`
 /// call.
@@ -183,6 +175,13 @@ mod tests {
 
     fn p(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    /// The reserved track on its own. Production code always wants it
+    /// together with `pending`, so `state_snapshot` is the only accessor;
+    /// this just keeps the assertions below readable.
+    fn reserved(queue: &SharedQueue) -> Option<PathBuf> {
+        state_snapshot(queue).0
     }
 
     fn empty_policy() -> DrainPolicy {

@@ -1,10 +1,12 @@
 //! funkot-player: drives funkot-core's auto-DJ engine from a Tauri app.
 //!
-//! Still minimal: no library UI, no queue, no persistence.
+//! Still minimal: no library UI. The playback queue (`queue.rs`) is wired to
+//! the engine, and its contents survive a restart via `store.rs`.
 
 mod queue;
 mod store;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
@@ -13,6 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use funkot_core::engine::{Engine, NavAction};
 use funkot_core::EngineOptions;
+
+use queue::{DrainPolicy, HostSource, SharedQueue};
 
 /// Global handle to the running engine's playback controls.
 ///
@@ -162,14 +166,25 @@ fn app_dirs(#[allow(unused)] app: tauri::AppHandle) -> Result<AppDirs, String> {
 
 /// Where the audio thread reports back to the UI. `cpal::Stream` is not `Send`
 /// on every platform, so it never leaves the thread that created it.
-#[derive(Default)]
 struct AppState {
     log_rx: Mutex<Option<Receiver<String>>>,
     lines: Mutex<Vec<String>>,
     started: Mutex<bool>,
+    queue: SharedQueue,
 }
 
-fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>) {
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            log_rx: Mutex::new(None),
+            lines: Mutex::new(Vec::new()),
+            started: Mutex::new(false),
+            queue: queue::new_shared_queue(),
+        }
+    }
+}
+
+fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>, queue: SharedQueue) {
     macro_rules! say {
         ($($a:tt)*) => {{ let m = format!($($a)*); log::info!("{m}"); let _ = log.send(m); }};
     }
@@ -210,12 +225,16 @@ fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>) {
     let mut options = EngineOptions::default();
     options.output_sample_rate = supported.sample_rate();
     options.cache_dir = cache_dir;
-    options.loop_playlist = true;
 
-    let mut engine = match Engine::new(options, paths) {
+    // `options.loop_playlist` is not set here: `Engine::new_with_source`
+    // never reads it (only `Engine::new`'s internal `PlaylistSource` does).
+    // Looping once the host-managed queue drains is instead the job of
+    // `DrainPolicy::ContinueFolder`, passed to `HostSource` below.
+    let source = HostSource::new(queue, DrainPolicy::ContinueFolder { tracks: paths, pos: 0 });
+    let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
         Err(e) => {
-            say!("FAIL: Engine::new: {e}");
+            say!("FAIL: Engine::new_with_source: {e}");
             return;
         }
     };
@@ -307,9 +326,21 @@ fn start(music_dir: String, cache_dir: String, state: tauri::State<AppState>) ->
     let found = format!("{} tracks", paths.len());
     let cache = PathBuf::from(cache_dir);
 
+    // Restore whatever was still pending from a previous run before the
+    // engine starts pulling from the queue.
+    match store::load_queue(&cache) {
+        Ok(saved) => {
+            for path in saved {
+                queue::enqueue(&state.queue, path);
+            }
+        }
+        Err(e) => log::warn!("load_queue({}): {e}", cache.display()),
+    }
+    let queue = Arc::clone(&state.queue);
+
     std::thread::Builder::new()
         .name("funkot-audio".into())
-        .spawn(move || audio_thread(paths, cache, tx))
+        .spawn(move || audio_thread(paths, cache, tx, queue))
         .map_err(|e| format!("spawn audio thread: {e}"))?;
 
     service_set_running(true);
@@ -356,6 +387,87 @@ fn is_paused() -> bool {
         .get()
         .map(|p| p.paused.load(Ordering::Relaxed))
         .unwrap_or(false)
+}
+
+/// Snapshot of the playback queue, for the UI.
+#[derive(serde::Serialize, Clone)]
+struct QueueSnapshot {
+    /// Reserved = already handed to the engine to play next; the host can no
+    /// longer take it back.
+    reserved: Option<String>,
+    /// Waiting queue; its head is "reserved's successor".
+    pending: Vec<String>,
+}
+
+/// Resolve just the cache directory, mirroring the `platform_dirs` dance
+/// `refresh_library` already does.
+fn cache_dir_for(#[allow(unused)] app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(target_os = "android")]
+    let dirs = platform_dirs()?;
+    #[cfg(not(target_os = "android"))]
+    let dirs = platform_dirs(app)?;
+    Ok(PathBuf::from(dirs.cache_dir))
+}
+
+/// Save the queue's current pending contents to `queue.json`. Failure is
+/// logged, not propagated: the in-memory queue mutation already succeeded,
+/// and losing the on-disk mirror is not worth failing the caller's command
+/// over.
+fn persist_queue(app: &tauri::AppHandle, queue: &SharedQueue) {
+    let cache_dir = match cache_dir_for(app) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("save_queue: cannot resolve cache dir: {e}");
+            return;
+        }
+    };
+    let pending: VecDeque<PathBuf> = queue::snapshot(queue).into_iter().collect();
+    if let Err(e) = store::save_queue(&cache_dir, &pending) {
+        log::warn!("save_queue({}): {e}", cache_dir.display());
+    }
+}
+
+/// Append `path` to the tail of the pending queue. Returns the pending
+/// queue's length after the insert.
+#[tauri::command]
+fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
+    let len = queue::enqueue(&state.queue, PathBuf::from(path));
+    persist_queue(&app, &state.queue);
+    Ok(len)
+}
+
+/// Move a pending item from one position to another.
+#[tauri::command]
+fn reorder(
+    from: usize,
+    to: usize,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    queue::reorder(&state.queue, from, to)?;
+    persist_queue(&app, &state.queue);
+    Ok(())
+}
+
+/// Remove the item at `index` from the pending queue, returning its path.
+#[tauri::command]
+fn dequeue(index: usize, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<String, String> {
+    let path = queue::dequeue(&state.queue, index)?;
+    persist_queue(&app, &state.queue);
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Current queue contents, for the UI to render.
+#[tauri::command]
+fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
+    let (reserved, pending) = queue::state_snapshot(&state.queue);
+    Ok(QueueSnapshot {
+        reserved: reserved.map(|p| p.to_string_lossy().into_owned()),
+        pending: pending
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+    })
 }
 
 /// One row of the library listing: a track plus whatever the analysis cache
@@ -665,7 +777,11 @@ pub fn run() {
             toggle_pause,
             skip_next,
             is_paused,
-            refresh_library
+            refresh_library,
+            enqueue,
+            reorder,
+            dequeue,
+            queue_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
