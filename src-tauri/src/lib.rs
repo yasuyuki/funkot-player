@@ -2,6 +2,9 @@
 //!
 //! Still minimal: no library UI, no queue, no persistence.
 
+mod queue;
+mod store;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
