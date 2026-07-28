@@ -14,10 +14,12 @@ not actively supported but is not deliberately broken either.
 Usable as a folder player. On Android, drop tracks into the app's Music folder
 over MTP, press start, and it mixes the whole folder on a loop with DJ
 transitions — including with the screen off, with transport controls in the
-notification shade and on the lock screen. Verified on a Pixel 10 Pro
-(Android 17).
+notification shade and on the lock screen. Scanning the library analyses any
+new tracks in the background, showing progress as it goes. Verified on a
+Pixel 8 Pro, including an hour of uninterrupted playback backgrounded with
+the screen off.
 
-Not yet built: library scanning, the queue, and intro/outro bar editing.
+Not yet built: the queue, and intro/outro bar editing.
 
 ## Layout
 
