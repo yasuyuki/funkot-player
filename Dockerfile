@@ -61,4 +61,22 @@ RUN yes | sdkmanager --licenses >/dev/null \
 
 RUN rustup target add aarch64-linux-android
 
+# --- Host target ---------------------------------------------------------
+# What Tauri needs to build for Linux itself, as opposed to cross-compiling to
+# Android. Without these the crate cannot be built for the host at all, which
+# means `cargo test` has nowhere to run: the unit tests in src/queue.rs and
+# src/store.rs live inside the lib crate, so linking them pulls in all of Tauri
+# even though neither module touches it.
+#
+# Kept as its own layer, after the Android SDK/NDK rather than merged into the
+# apt-get at the top, so that touching this list does not invalidate those and
+# re-download ~1 GB of toolchain.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libwebkit2gtk-4.1-dev \
+    libgtk-3-dev \
+    librsvg2-dev \
+    libxdo-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /work/funkot-player
