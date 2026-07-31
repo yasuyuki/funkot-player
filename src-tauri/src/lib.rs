@@ -493,6 +493,11 @@ struct TrackRow {
     /// Whether a cached analysis exists. If false, the bar fields are null.
     analyzed: bool,
     intro_bars: Option<u32>,
+    /// The structural outro boundary — where the track collapses. This is the
+    /// number the UI shows and edits.
+    outro_structure_bars: Option<u32>,
+    /// The mix trigger the engine derives from the boundary. Read-only, shown
+    /// only so the effect of an edit is visible.
     outro_bars: Option<u32>,
     intro_manual: bool,
     outro_manual: bool,
@@ -522,9 +527,10 @@ fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
             name,
             analyzed: true,
             intro_bars: Some(a.intro_bars),
+            outro_structure_bars: Some(a.outro_structure_bars),
             outro_bars: Some(a.outro_bars),
             intro_manual: a.intro_bars_manual,
-            outro_manual: a.outro_bars_manual,
+            outro_manual: a.outro_structure_bars_manual || a.outro_bars_manual,
             intro_low_confidence: a.intro_bars_low_confidence,
             outro_low_confidence: a.outro_bars_low_confidence,
         },
@@ -533,6 +539,7 @@ fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
             name,
             analyzed: false,
             intro_bars: None,
+            outro_structure_bars: None,
             outro_bars: None,
             intro_manual: false,
             outro_manual: false,
@@ -576,10 +583,86 @@ fn refresh_library(app: tauri::AppHandle) -> Result<Vec<TrackRow>, String> {
         .map(|(path, _)| path.clone())
         .collect();
     if !pending.is_empty() {
-        spawn_analysis_worker(app, pending, cache_dir);
+        let overrides = store::load_overrides(&cache_dir);
+        spawn_analysis_worker(app, pending, cache_dir, overrides);
     }
 
     Ok(rows)
+}
+
+/// Push stored corrections into the engine's analysis cache for one track.
+///
+/// Only the sides present in `o` are written; the rest stay whatever the
+/// analyzer decided. Run after every fresh analysis — the analyzer has just
+/// overwritten the entry, and a `CACHE_VERSION` bump discards it entirely, so
+/// this is what makes a correction outlive an engine update.
+fn apply_override(
+    cache_dir: &std::path::Path,
+    hash: &str,
+    o: &store::BarOverride,
+) -> Result<(), String> {
+    if let Some(n) = o.intro_bars {
+        funkot_core::cache::set_manual_bars(cache_dir, hash, Some(n), None)
+            .map_err(|e| format!("cannot set intro bars: {e}"))?;
+    }
+    if let Some(n) = o.outro_structure_bars {
+        funkot_core::cache::set_manual_structure_bars(cache_dir, hash, n)
+            .map_err(|e| format!("cannot set outro bars: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Hand-edit one track's intro bars and/or outro boundary.
+///
+/// The outro number is the *structural* boundary — where the track collapses,
+/// which is what a listener can actually judge. The engine re-derives the mix
+/// trigger from it, so the transition keeps finishing exactly where the outro
+/// begins; pinning the trigger directly would break that relation.
+///
+/// Sides left as `null` are not touched, so the UI can send one cell at a time.
+#[tauri::command]
+fn set_bars(
+    app: tauri::AppHandle,
+    path: String,
+    intro_bars: Option<u32>,
+    outro_structure_bars: Option<u32>,
+) -> Result<TrackRow, String> {
+    #[cfg(target_os = "android")]
+    let dirs = platform_dirs()?;
+    #[cfg(not(target_os = "android"))]
+    let dirs = platform_dirs(&app)?;
+    let _ = &app;
+
+    let cache_dir = PathBuf::from(&dirs.cache_dir);
+    let track = PathBuf::from(&path);
+    let hash = funkot_core::cache::content_hash(&track)
+        .map_err(|e| format!("cannot hash {}: {e}", track.display()))?;
+
+    let edit = store::BarOverride {
+        intro_bars,
+        outro_structure_bars,
+    };
+    // The cache write comes first: if the track has no analysis yet there is
+    // nothing to edit, and storing the override anyway would leave the app
+    // claiming a correction the user cannot see taking effect.
+    apply_override(&cache_dir, &hash, &edit)?;
+
+    let mut overrides = store::load_overrides(&cache_dir);
+    let entry = overrides.entry(hash).or_default();
+    if let Some(n) = intro_bars {
+        entry.intro_bars = Some(n);
+    }
+    if let Some(n) = outro_structure_bars {
+        entry.outro_structure_bars = Some(n);
+    }
+    // Warn-only, as with the queue: the edit already took effect for playback,
+    // so failing the command here would misreport what happened. What is lost
+    // is only the ability to re-apply it after a future reanalysis.
+    if let Err(e) = store::save_overrides(&cache_dir, &overrides) {
+        log::warn!("cannot persist manual bars: {e}");
+    }
+
+    Ok(track_row(&track, &cache_dir))
 }
 
 /// Progress payload for the `analysis-progress` event.
@@ -590,13 +673,37 @@ struct AnalysisProgress {
     name: String,
 }
 
+/// Re-apply this track's stored corrections onto a just-written cache entry.
+///
+/// Skips hashing entirely when nothing is stored, so the common case (no
+/// corrections yet) costs nothing on top of the analysis run.
+fn reapply_overrides(path: &std::path::Path, cache_dir: &std::path::Path, o: &store::Overrides) {
+    if o.is_empty() {
+        return;
+    }
+    let Ok(hash) = funkot_core::cache::content_hash(path) else {
+        return;
+    };
+    let Some(entry) = o.get(&hash) else {
+        return;
+    };
+    if let Err(e) = apply_override(cache_dir, &hash, entry) {
+        log::warn!("cannot re-apply manual bars for {}: {e}", path.display());
+    }
+}
+
 /// Spawn the single background analysis thread, if one is not already running.
 ///
 /// Deliberately serial, not parallelised across tracks: this runs on a phone,
 /// and analysing more than one file at a time would mean more heat and battery
 /// drain for no benefit the user can perceive (the worker already runs
 /// unattended in the background).
-fn spawn_analysis_worker(app: tauri::AppHandle, paths: Vec<PathBuf>, cache_dir: PathBuf) {
+fn spawn_analysis_worker(
+    app: tauri::AppHandle,
+    paths: Vec<PathBuf>,
+    cache_dir: PathBuf,
+    overrides: store::Overrides,
+) {
     if ANALYZING.swap(true, Ordering::SeqCst) {
         // Already running; refresh_library's caller will see progress events
         // from the run already in flight.
@@ -620,6 +727,8 @@ fn spawn_analysis_worker(app: tauri::AppHandle, paths: Vec<PathBuf>, cache_dir: 
                     Ok(buffer) => {
                         if let Err(e) = funkot_core::cache::fill_missing(path, &cache_dir, &buffer) {
                             log::warn!("analysis failed for {}: {e}", path.display());
+                        } else {
+                            reapply_overrides(path, &cache_dir, &overrides);
                         }
                         // `buffer` drops here, before the next track is decoded,
                         // so only one track's worth of samples (tens of MB) is
@@ -790,6 +899,7 @@ pub fn run() {
             skip_next,
             is_paused,
             refresh_library,
+            set_bars,
             enqueue,
             reorder,
             dequeue,

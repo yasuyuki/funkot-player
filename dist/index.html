@@ -24,6 +24,10 @@
   button.mini[disabled] { opacity: .3; }
   td.act { width: 1%; white-space: nowrap; text-align: right; }
   .reserved { color: #6c9; }
+  /* Editable bar counts read as buttons; the derived mix trigger next to them
+     is greyed so it is clearly not something to tap. */
+  button.bars { min-width: 3.2rem; }
+  td.mix { color: #777; width: 1%; }
 </style>
 
 <button id="go">▶ start</button>
@@ -93,19 +97,48 @@
   const progress = document.getElementById("progress");
   const library = document.getElementById("library");
 
+  // --- Hand-correcting the bar counts (B-5) ---
+  // Tapping a bar count steps to the next value the engine recognises, wrapping
+  // at the end. A cycle rather than a text field because this is a phone and
+  // the sets are short: the analyzer's own output is always one of these.
+  //
+  // The outro cell edits the *structural boundary* -- where the track collapses
+  // -- not the mix trigger. The trigger is the engine's business: it derives it
+  // as boundary + a 16-bar lead-in so the transition finishes exactly where the
+  // outro begins. It is shown next to the boundary (greyed) only so the effect
+  // of an edit is visible, and cannot be tapped.
+  const INTRO_STEPS = [8, 16, 32, 48, 64, 80, 96];
+  const OUTRO_STEPS = [8, 16, 32, 64];
+
+  // Next value up from `n`, wrapping. An analyzed value that is not in the set
+  // (nothing guarantees one) steps to the smallest value above it instead of
+  // being silently snapped, so no tap is ever a no-op.
+  function nextStep(steps, n) {
+    return steps.find((s) => s > n) ?? steps[0];
+  }
+
+  // Kept so a single edited row can be swapped in without re-scanning.
+  let libraryRows = [];
+
   function renderLibrary(rows) {
-    const bars = (n, low) => {
-      if (n === null || n === undefined) return "-";
-      return low ? `${n}!` : `${n}`;
+    libraryRows = rows;
+    const cell = (n, low, manual, attr) => {
+      if (n === null || n === undefined) return "<td>-</td>";
+      const mark = manual ? "*" : low ? "!" : "";
+      return (
+        `<td class="${low && !manual ? "low" : ""}">` +
+        `<button class="mini bars" ${attr}="${n}">${n}${mark}</button></td>`
+      );
     };
     library.innerHTML =
-      "<tr><th>track</th><th>intro</th><th>outro</th><th></th></tr>" +
+      "<tr><th>track</th><th>intro</th><th>outro</th><th>mix</th><th></th></tr>" +
       rows
         .map(
           (r) =>
-            `<tr><td>${r.name}</td>` +
-            `<td class="${r.intro_low_confidence ? "low" : ""}">${bars(r.intro_bars, r.intro_low_confidence)}</td>` +
-            `<td class="${r.outro_low_confidence ? "low" : ""}">${bars(r.outro_bars, r.outro_low_confidence)}</td>` +
+            `<tr data-path="${r.path}"><td>${r.name}</td>` +
+            cell(r.intro_bars, r.intro_low_confidence, r.intro_manual, "data-intro") +
+            cell(r.outro_structure_bars, r.outro_low_confidence, r.outro_manual, "data-outro") +
+            `<td class="mix">${r.outro_bars ?? ""}</td>` +
             `<td class="act"><button class="mini" data-add="${r.path}">+</button></td></tr>`
         )
         .join("");
@@ -113,11 +146,28 @@
 
   // Delegated so the handler survives renderLibrary replacing every row.
   library.onclick = async (ev) => {
-    const b = ev.target.closest("button[data-add]");
+    const b = ev.target.closest("button");
     if (!b) return;
+    const path = b.closest("tr").dataset.path;
     try {
-      await invoke("enqueue", { path: b.dataset.add });
-      await refreshQueue();
+      if (b.dataset.add !== undefined) {
+        await invoke("enqueue", { path: b.dataset.add });
+        await refreshQueue();
+        return;
+      }
+      // One side per call: the untouched one stays whatever the analyzer said.
+      const args = { path, introBars: null, outroStructureBars: null };
+      if (b.dataset.intro !== undefined) {
+        args.introBars = nextStep(INTRO_STEPS, Number(b.dataset.intro));
+      } else if (b.dataset.outro !== undefined) {
+        args.outroStructureBars = nextStep(OUTRO_STEPS, Number(b.dataset.outro));
+      } else {
+        return;
+      }
+      // Redraw from what the command returns rather than re-scanning: a scan
+      // would re-walk the folder and could restart the analysis worker.
+      const row = await invoke("set_bars", args);
+      renderLibrary(libraryRows.map((r) => (r.path === row.path ? row : r)));
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
     }
