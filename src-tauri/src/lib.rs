@@ -327,13 +327,12 @@ fn start(music_dir: String, cache_dir: String, state: tauri::State<AppState>) ->
     let cache = PathBuf::from(cache_dir);
 
     // Restore whatever was still pending from a previous run before the
-    // engine starts pulling from the queue.
+    // engine starts pulling from the queue. Replaces rather than appends:
+    // anything queued in this process since launch was already mirrored into
+    // queue.json by the command that queued it, so appending would duplicate
+    // every entry queued before start was pressed.
     match store::load_queue(&cache) {
-        Ok(saved) => {
-            for path in saved {
-                queue::enqueue(&state.queue, path);
-            }
-        }
+        Ok(saved) => queue::replace_pending(&state.queue, saved),
         Err(e) => log::warn!("load_queue({}): {e}", cache.display()),
     }
     let queue = Arc::clone(&state.queue);

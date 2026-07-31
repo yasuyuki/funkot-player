@@ -60,6 +60,18 @@ pub fn enqueue(queue: &SharedQueue, path: PathBuf) -> usize {
     q.pending.len()
 }
 
+/// Replace the whole pending queue with `paths`, leaving `reserved` alone.
+///
+/// This is how the persisted queue is restored, and it must replace rather
+/// than append: `queue.json` is a mirror of the pending queue that every
+/// mutating command rewrites, so anything already queued in this process is
+/// *also* in the file. Appending would therefore duplicate every entry the
+/// user queued before pressing start.
+pub fn replace_pending(queue: &SharedQueue, paths: Vec<PathBuf>) {
+    let mut q = queue.lock().unwrap();
+    q.pending = paths.into();
+}
+
 /// Move the item at `from` to `to` (both 0-based positions in the pending
 /// queue as it stands right now). Does not touch `reserved`: once
 /// `HostSource::next` has taken an item out of the pending queue for
@@ -205,6 +217,31 @@ mod tests {
         assert_eq!(enqueue(&q, p("b")), 2);
         assert_eq!(enqueue(&q, p("c")), 3);
         assert_eq!(snapshot(&q), vec![p("a"), p("b"), p("c")]);
+    }
+
+    #[test]
+    fn replace_pending_overwrites_instead_of_appending() {
+        let q = new_shared_queue();
+        for name in ["a", "b"] {
+            enqueue(&q, p(name));
+        }
+        // What start() does with queue.json, whose contents mirror what is
+        // already queued here. Appending would give a, b, a, b.
+        replace_pending(&q, vec![p("a"), p("b")]);
+        assert_eq!(snapshot(&q), vec![p("a"), p("b")]);
+    }
+
+    #[test]
+    fn replace_pending_leaves_the_reserved_track_alone() {
+        let q = new_shared_queue();
+        enqueue(&q, p("a"));
+        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
+        assert_eq!(source.next(), Some((0, p("a"))));
+        assert_eq!(reserved(&q), Some(p("a")));
+
+        replace_pending(&q, vec![p("b")]);
+        assert_eq!(reserved(&q), Some(p("a")));
+        assert_eq!(snapshot(&q), vec![p("b")]);
     }
 
     #[test]
