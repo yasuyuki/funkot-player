@@ -125,6 +125,10 @@ pub enum DrainPolicy {
     ContinueFolder { tracks: Vec<PathBuf>, pos: usize },
 }
 
+/// Called with the pending queue's remaining contents each time [`HostSource`]
+/// takes an entry out of it. See [`HostSource::on_pending_consumed`].
+pub type PendingObserver = Box<dyn FnMut(&[PathBuf]) + Send>;
+
 /// `TrackSource` backed by a [`SharedQueue`] instead of a fixed playlist, so a
 /// host can append/reorder/remove tracks while the engine is already running.
 ///
@@ -136,6 +140,7 @@ pub struct HostSource {
     queue: SharedQueue,
     policy: DrainPolicy,
     calls: usize,
+    on_pending_consumed: Option<PendingObserver>,
 }
 
 impl HostSource {
@@ -144,17 +149,40 @@ impl HostSource {
             queue,
             policy,
             calls: 0,
+            on_pending_consumed: None,
         }
+    }
+
+    /// Run `observer` whenever `next` removes an entry from the pending queue,
+    /// passing what is left of it.
+    ///
+    /// Playback is the one way the pending queue shrinks without a command
+    /// being involved, so without this the host's on-disk copy would keep
+    /// listing tracks that have already been played and hand them back at the
+    /// next start.
+    ///
+    /// The observer runs on the engine's loader thread with the queue's lock
+    /// released, so it may block (the loader already decodes whole tracks);
+    /// it must not lock the queue itself, and the slice it is given is a
+    /// snapshot that a concurrent command may already have moved past.
+    ///
+    /// Not called when the queue was empty and [`DrainPolicy`] supplied the
+    /// track: nothing was consumed, so there is nothing new to report.
+    pub fn on_pending_consumed(mut self, observer: PendingObserver) -> Self {
+        self.on_pending_consumed = Some(observer);
+        self
     }
 }
 
 impl TrackSource for HostSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
         let mut q = self.queue.lock().unwrap();
+        let mut consumed_pending = true;
         let path = match q.pending.pop_front() {
             Some(path) => path,
             None => match &mut self.policy {
                 DrainPolicy::ContinueFolder { tracks, pos } => {
+                    consumed_pending = false;
                     if tracks.is_empty() {
                         q.reserved = None;
                         return None;
@@ -174,7 +202,16 @@ impl TrackSource for HostSource {
             },
         };
         q.reserved = Some(path.clone());
+        // Snapshot under the lock, notify without it: the observer writes to
+        // disk, and the queue's mutex is also taken by Tauri commands.
+        let remaining: Option<Vec<PathBuf>> =
+            consumed_pending.then(|| q.pending.iter().cloned().collect());
         drop(q);
+        if let (Some(remaining), Some(observer)) =
+            (remaining, self.on_pending_consumed.as_mut())
+        {
+            observer(&remaining);
+        }
         let index = self.calls;
         self.calls += 1;
         Some((index, path))
@@ -409,6 +446,71 @@ mod tests {
 
         assert_eq!(reserved(&q), Some(p("a")));
         assert_eq!(state_snapshot(&q).0, Some(p("a")));
+    }
+
+    /// Collects what the observer is handed, standing in for `queue.json`.
+    fn recording_observer() -> (Arc<Mutex<Vec<Vec<PathBuf>>>>, PendingObserver) {
+        let seen: Arc<Mutex<Vec<Vec<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        (
+            seen,
+            Box::new(move |pending: &[PathBuf]| {
+                sink.lock().unwrap().push(pending.to_vec());
+            }),
+        )
+    }
+
+    #[test]
+    fn playing_a_queued_track_reports_what_is_left() {
+        let q = new_shared_queue();
+        for name in ["a", "b", "c"] {
+            enqueue(&q, p(name));
+        }
+        let (seen, observer) = recording_observer();
+        let mut source =
+            HostSource::new(Arc::clone(&q), empty_policy()).on_pending_consumed(observer);
+
+        source.next();
+        source.next();
+
+        // Not [b, c] then [c]: the track handed to the engine is reserved, and
+        // reserved is deliberately not part of what gets persisted -- it is
+        // already gone as far as the queue is concerned.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![vec![p("b"), p("c")], vec![p("c")]]
+        );
+    }
+
+    #[test]
+    fn falling_back_to_the_folder_reports_nothing() {
+        let q = new_shared_queue();
+        let (seen, observer) = recording_observer();
+        let mut source =
+            HostSource::new(Arc::clone(&q), folder_policy(&["f1", "f2"])).on_pending_consumed(observer);
+
+        source.next();
+        source.next();
+
+        // The pending queue was empty throughout, so it never changed and
+        // there is nothing to write out.
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn draining_the_queue_reports_it_empty_before_the_folder_takes_over() {
+        let q = new_shared_queue();
+        enqueue(&q, p("a"));
+        let (seen, observer) = recording_observer();
+        let mut source =
+            HostSource::new(Arc::clone(&q), folder_policy(&["f1"])).on_pending_consumed(observer);
+
+        source.next(); // takes "a", queue now empty
+        source.next(); // falls back to the folder
+
+        // The empty report is the one that matters: without it, restarting the
+        // app would find "a" still listed and play it a second time.
+        assert_eq!(*seen.lock().unwrap(), vec![Vec::<PathBuf>::new()]);
     }
 
     #[test]

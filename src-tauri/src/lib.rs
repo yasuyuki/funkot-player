@@ -224,13 +224,26 @@ fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>, qu
 
     let mut options = EngineOptions::default();
     options.output_sample_rate = supported.sample_rate();
-    options.cache_dir = cache_dir;
+    options.cache_dir = cache_dir.clone();
 
     // `options.loop_playlist` is not set here: `Engine::new_with_source`
     // never reads it (only `Engine::new`'s internal `PlaylistSource` does).
     // Looping once the host-managed queue drains is instead the job of
     // `DrainPolicy::ContinueFolder`, passed to `HostSource` below.
-    let source = HostSource::new(queue, DrainPolicy::ContinueFolder { tracks: paths, pos: 0 });
+    //
+    // Playing a track is the one way the pending queue shrinks without a
+    // command running, so the source persists it too. Doing it here rather
+    // than from `queue_state` is what makes it survive backgrounding: that
+    // command only runs while the webview is polling, and the whole point of
+    // this app is to keep playing with the screen off.
+    let queue_dir = cache_dir;
+    let source = HostSource::new(queue, DrainPolicy::ContinueFolder { tracks: paths, pos: 0 })
+        .on_pending_consumed(Box::new(move |pending| {
+            let pending: VecDeque<PathBuf> = pending.iter().cloned().collect();
+            if let Err(e) = store::save_queue(&queue_dir, &pending) {
+                log::warn!("save_queue({}): {e}", queue_dir.display());
+            }
+        }));
     let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
         Err(e) => {
