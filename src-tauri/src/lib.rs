@@ -1345,7 +1345,8 @@ pub extern "C" fn JNI_OnLoad(
 /// way, just without a notification.
 #[cfg(target_os = "android")]
 fn service_call(method: &str) {
-    use jni::objects::JObject;
+    use jni::objects::{JClassLoader, JObject};
+    use jni::refs::LoaderContext;
     use jni::strings::JNIString;
     use jni::{errors::Result as JResult, Env, JavaVM};
 
@@ -1355,9 +1356,34 @@ fn service_call(method: &str) {
 
     let result: JResult<()> = vm.attach_current_thread(|env: &mut Env<'_>| {
         let context = unsafe { JObject::from_raw(env, raw_context) };
-        let class = env.find_class(jni::jni_str!(
-            "jp/hatsuboshi/funkotplayer/PlaybackService"
-        ))?;
+        // `env.find_class` walks the calling thread's classloader, and this
+        // command runs on Tauri's blocking-task thread pool (since `start`
+        // became `#[tauri::command(async)]`), not the JVM's main thread that
+        // `System.loadLibrary` attached originally. A thread JNI attaches on
+        // the fly gets the *system* classloader, which cannot see app classes
+        // like `PlaybackService` — so `find_class` fails there even though it
+        // works fine for e.g. `toggle_pause`, which stays on the UI thread.
+        // Route through the app `Context`'s own classloader instead, which is
+        // thread-independent.
+        //
+        // It has to be `Context.getClassLoader()`, the instance method. Asking
+        // the context object for its *class* and then that class's loader gives
+        // the loader of `android.app.Application` — a framework class, so that
+        // is the boot classloader, which cannot see app classes either.
+        let loader = env
+            .call_method(
+                &context,
+                jni::jni_str!("getClassLoader"),
+                jni::jni_sig!("()Ljava/lang/ClassLoader;"),
+                &[],
+            )?
+            .l()?;
+        let loader = env.cast_local::<JClassLoader>(loader)?;
+        let class = LoaderContext::Loader(&loader).load_class(
+            env,
+            jni::jni_str!("jp.hatsuboshi.funkotplayer.PlaybackService"),
+            true,
+        )?;
         env.call_static_method(
             &class,
             JNIString::new(method),
