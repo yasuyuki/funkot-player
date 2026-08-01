@@ -15,11 +15,11 @@ Usable as a folder player. On Android, drop tracks into the app's Music folder
 over MTP, press start, and it mixes the whole folder on a loop with DJ
 transitions — including with the screen off, with transport controls in the
 notification shade and on the lock screen. Scanning the library analyses any
-new tracks in the background, showing progress as it goes. Verified on a
-Pixel 8 Pro, including an hour of uninterrupted playback backgrounded with
-the screen off.
-
-Not yet built: the queue, and intro/outro bar editing.
+new tracks in the background, showing progress as it goes. Tracks can be
+queued, reordered and dropped, and the queue survives a restart. Tapping an
+intro or outro bar count corrects it, and the correction is re-applied after
+every fresh analysis. Verified on a Pixel 8 Pro, including an hour of
+uninterrupted playback backgrounded with the screen off.
 
 ## Layout
 
@@ -65,6 +65,50 @@ ADB=1 ./dev.sh adb logcat -s funkot
 
 The connect port differs from the pairing port; both are on the device's
 Wireless debugging screen.
+
+## Working with a device
+
+The adb key and the debug keystore both live in the `funkot-player-android-home`
+Docker volume. Deleting it means re-pairing *and* a new signing key, which turns
+the next `adb install -r` into `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
+- **Finding the device.** Both its IP (DHCP) and its wireless-debugging port
+  change. mDNS does not cross the container boundary, so scan for it:
+  `nmap -sn 192.168.10.0/24`, then `nmap -Pn -p 1024-65535 --open -T4 <ip>`.
+  Several ports answer; only one of them is adb, the rest go `offline` on
+  `adb connect`. Do not narrow the range — ports above 50000 are common.
+- **Never run two `ADB=1 ./dev.sh` at once.** `--network host` means every
+  container shares the host's port 5037, and the adb servers fight. The symptom
+  is `protocol fault (couldn't read status length)`, which looks like a device
+  fault but is self-inflicted. Note also that each container gets a *fresh* adb
+  server, so every invocation must `adb connect` again.
+- **Every reconnect pops a heads-up notification** ("Wireless debugging
+  connected") over the top of the screen, and it eats taps aimed at the controls
+  underneath — the tap opens Developer options instead, and the app looks
+  unresponsive. Give it ~10 s to fade, or `adb shell cmd statusbar collapse`,
+  before driving the UI.
+- **Reading the UI is cheaper than screenshots.** `adb shell uiautomator dump`
+  gives the WebView's text and bounds, so the table contents and button
+  positions can be read directly rather than eyeballed. Re-dump before each tap:
+  rows shift when the progress line appears or disappears.
+- **UI automation only works while the screen is awake.** Once it times out the
+  fingerprint lock takes over and adb cannot clear it (`wm dismiss-keyguard` and
+  `KEYCODE_WAKEUP` both fail, `dumpsys trust` stays `deviceLocked=1`). For
+  unattended runs set `adb shell svc power stayon true` first — it persists
+  across reboots, so **put it back to `false` when done**.
+- **`stayon` conflicts with any test that needs the screen off** (the B-4 soak).
+  Order: start playback with `stayon` on, `input keyevent KEYCODE_HOME`,
+  `svc power stayon false`, `input keyevent KEYCODE_SLEEP`, then confirm
+  `dumpsys power` reports `mWakefulness=Asleep|Dozing`. Reversing the last two
+  turns the screen back on.
+- Clearing the analysis cache:
+  `adb shell 'run-as jp.hatsuboshi.funkotplayer rm -rf files/funkot-cache'`.
+  Note this takes `library.json` — the hand-corrected bar counts — with it; see
+  the comment at the top of `src-tauri/src/store.rs`.
+- The three synthetic test tracks are in
+  `funkot-autodj-for-ui/testdata/spike-synth/` (gitignored). Regenerate with
+  `./dev.sh cargo run -p funkot-core --example gen_synth --features testutil
+  --release -- testdata/spike-synth`.
 
 ## Android notes
 
