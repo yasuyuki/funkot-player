@@ -11,9 +11,30 @@
                   calc(1rem + env(safe-area-inset-bottom, 2rem));
          background: #111; color: #eee; }
   button { font-size: 1.2rem; padding: .8rem 1.6rem; width: 100%;
-           background: #2b6; color: #000; border: 0; border-radius: .4rem; }
+           background: #2b6; color: #000; border: 0; border-radius: .4rem;
+           /* No transition: a tap must show up immediately, not after a fade. */
+           touch-action: manipulation; -webkit-tap-highlight-color: rgba(255,255,255,.25); }
+  button:active { filter: brightness(1.4); transform: scale(.98); }
+  button[disabled] { opacity: .45; }
   .row { display: flex; gap: .6rem; margin-top: .6rem; }
   .row button { background: #369; color: #fff; }
+  /* #status's colour is one of these classes, never an inline style, for the
+     same reason #toggle's state classes below are: keeping colour rules in
+     the stylesheet is what makes their precedence explicit and reviewable. */
+  #status { margin: 0 0 .6rem; font-size: .95rem; }
+  #status.idle { color: #777; }
+  #status.starting, #status.paused, #status.stalled { color: #fa6; }
+  #status.playing { color: #6c9; }
+  #status.failed { color: #f66; }
+  /* `.row button` sets a blue background for every button in the transport
+     row, #toggle included. Its playing/paused/off looks are expressed as
+     classes with an id-qualified selector (id + class beats element + class
+     no matter which rule comes later in the sheet) so the state the webview
+     computes always wins over that default, instead of depending on
+     declaration order. */
+  #toggle.st-playing { background: #2b6; color: #000; }
+  #toggle.st-paused { background: #b83; color: #000; }
+  #toggle.st-off, #go.st-off, #next.st-off { background: #444; color: #777; }
   pre { white-space: pre-wrap; word-break: break-all; font-size: .8rem;
         background: #000; padding: .6rem; border-radius: .3rem; margin-top: 1rem; }
   .err { color: #f66; }
@@ -33,6 +54,7 @@
   td.mix { color: #777; width: 1%; }
 </style>
 
+<div id="status" class="idle">idle</div>
 <button id="go">▶ start</button>
 <div class="row">
   <button id="toggle">⏸ pause / play</button>
@@ -49,6 +71,22 @@
 <script>
   const invoke = window.__TAURI__.core.invoke;
   const log = document.getElementById("log");
+  const status = document.getElementById("status");
+  const goBtn = document.getElementById("go");
+  const toggleBtn = document.getElementById("toggle");
+  const nextBtn = document.getElementById("next");
+  const scanBtn = document.getElementById("scan");
+
+  // Every command round-trips through the host, and some of them touch the
+  // filesystem; without this a tap looks ignored until the reply lands.
+  async function withBusy(button, fn) {
+    button.disabled = true;
+    try {
+      await fn();
+    } finally {
+      button.disabled = false;
+    }
+  }
 
   // The app asks the platform where its own directories are; never hard-code
   // them. On Android the path is predictable but a directory created from
@@ -60,7 +98,13 @@
     log.innerHTML = `<span class="err">${e}</span>`;
   });
 
-  document.getElementById("go").onclick = async () => {
+  // Guards the poll_log interval below against being armed twice: start()
+  // takes a moment to answer, and disabling #go while busy is the ordinary
+  // defence, but nothing stops the phase poll from re-enabling it before
+  // that reply lands.
+  let logPollTimer = null;
+
+  goBtn.onclick = () => withBusy(goBtn, async () => {
     log.textContent = "starting…";
     try {
       const d = await dirs;
@@ -69,30 +113,32 @@
         cacheDir: d.cache_dir,
       });
       log.textContent = `${found}\n`;
-      setInterval(async () => {
-        const lines = await invoke("poll_log");
-        log.textContent = `${found}\n` + lines.join("\n");
-      }, 500);
+      if (!logPollTimer) {
+        logPollTimer = setInterval(async () => {
+          const lines = await invoke("poll_log");
+          log.textContent = `${found}\n` + lines.join("\n");
+        }, 500);
+      }
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
     }
-  };
+  });
 
-  document.getElementById("toggle").onclick = async () => {
+  toggleBtn.onclick = () => withBusy(toggleBtn, async () => {
     try {
       await invoke("toggle_pause");
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
     }
-  };
+  });
 
-  document.getElementById("next").onclick = async () => {
+  nextBtn.onclick = () => withBusy(nextBtn, async () => {
     try {
       await invoke("skip_next");
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
     }
-  };
+  });
 
   // --- Library scan + background analysis (B-3) ---
   // No persisted index here on purpose: the cache JSON is the source of
@@ -148,57 +194,70 @@
   }
 
   // Delegated so the handler survives renderLibrary replacing every row.
-  library.onclick = async (ev) => {
+  // Only the tapped button goes disabled -- withBusy is scoped to it, not to
+  // the whole table -- so editing one row's bars does not freeze every other
+  // row's "+" button while the round trip is in flight.
+  library.onclick = (ev) => {
     const b = ev.target.closest("button");
     if (!b) return;
     const path = b.closest("tr").dataset.path;
-    try {
-      if (b.dataset.add !== undefined) {
-        await invoke("enqueue", { path: b.dataset.add });
-        await refreshQueue();
-        return;
+    withBusy(b, async () => {
+      try {
+        if (b.dataset.add !== undefined) {
+          await invoke("enqueue", { path: b.dataset.add });
+          await refreshQueue();
+          return;
+        }
+        // One side per call: the untouched one stays whatever the analyzer said.
+        const args = { path, introBars: null, outroStructureBars: null };
+        if (b.dataset.intro !== undefined) {
+          args.introBars = nextStep(INTRO_STEPS, Number(b.dataset.intro));
+        } else if (b.dataset.outro !== undefined) {
+          args.outroStructureBars = nextStep(OUTRO_STEPS, Number(b.dataset.outro));
+        } else {
+          return;
+        }
+        // Redraw from what the command returns rather than re-scanning: a scan
+        // would re-walk the folder and could restart the analysis worker.
+        const row = await invoke("set_bars", args);
+        renderLibrary(libraryRows.map((r) => (r.path === row.path ? row : r)));
+      } catch (e) {
+        log.innerHTML = `<span class="err">${e}</span>`;
       }
-      // One side per call: the untouched one stays whatever the analyzer said.
-      const args = { path, introBars: null, outroStructureBars: null };
-      if (b.dataset.intro !== undefined) {
-        args.introBars = nextStep(INTRO_STEPS, Number(b.dataset.intro));
-      } else if (b.dataset.outro !== undefined) {
-        args.outroStructureBars = nextStep(OUTRO_STEPS, Number(b.dataset.outro));
-      } else {
-        return;
-      }
-      // Redraw from what the command returns rather than re-scanning: a scan
-      // would re-walk the folder and could restart the analysis worker.
-      const row = await invoke("set_bars", args);
-      renderLibrary(libraryRows.map((r) => (r.path === row.path ? row : r)));
-    } catch (e) {
-      log.innerHTML = `<span class="err">${e}</span>`;
-    }
+    });
   };
 
-  document.getElementById("scan").onclick = async () => {
+  scanBtn.onclick = () => withBusy(scanBtn, async () => {
     try {
       const rows = await invoke("refresh_library");
       renderLibrary(rows);
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
-    }
-  };
-
-  window.__TAURI__.event.listen("analysis-progress", async (event) => {
-    const { done, total, name } = event.payload;
-    progress.textContent = `analyzing ${done}/${total}: ${name}`;
-    try {
-      const rows = await invoke("refresh_library");
-      renderLibrary(rows);
-    } catch (e) {
-      // Ignore: refresh_library skips launching a second worker while one is
-      // running, so a stray error here shouldn't stop progress display.
     }
   });
 
-  window.__TAURI__.event.listen("analysis-done", () => {
+  // The progress payload now carries the row the analysis just produced, so
+  // this only has to splice it into the table in place -- no `invoke` here
+  // at all, let alone a full `refresh_library` re-walk of the music folder on
+  // every one of potentially hundreds of tracks.
+  window.__TAURI__.event.listen("analysis-progress", (event) => {
+    const { done, total, name, row } = event.payload;
+    progress.textContent = `analyzing ${done}/${total}: ${name}`;
+    const idx = libraryRows.findIndex((r) => r.path === row.path);
+    if (idx === -1) return;
+    renderLibrary(libraryRows.map((r, i) => (i === idx ? row : r)));
+  });
+
+  window.__TAURI__.event.listen("analysis-done", async () => {
     progress.textContent = "";
+    // One last full rescan to catch anything the per-track splice above
+    // could not: files added to the folder mid-run, decode failures, etc.
+    try {
+      renderLibrary(await invoke("refresh_library"));
+    } catch (e) {
+      // Ignore, as elsewhere: a stray error here shouldn't disrupt the UI
+      // now that the worker itself has already finished.
+    }
   });
 
   // --- Host-owned queue (B-2) ---
@@ -242,28 +301,90 @@
     }
   }
 
-  queue.onclick = async (ev) => {
+  // Only the tapped button (↑ / ↓ / ✕) goes disabled, same reasoning as the
+  // library table above.
+  queue.onclick = (ev) => {
     const b = ev.target.closest("button");
     if (!b) return;
     const d = b.dataset;
-    try {
-      if (d.up !== undefined) {
-        await invoke("reorder", { from: Number(d.up), to: Number(d.up) - 1 });
-      } else if (d.down !== undefined) {
-        await invoke("reorder", { from: Number(d.down), to: Number(d.down) + 1 });
-      } else if (d.del !== undefined) {
-        await invoke("dequeue", { index: Number(d.del) });
+    withBusy(b, async () => {
+      try {
+        if (d.up !== undefined) {
+          await invoke("reorder", { from: Number(d.up), to: Number(d.up) - 1 });
+        } else if (d.down !== undefined) {
+          await invoke("reorder", { from: Number(d.down), to: Number(d.down) + 1 });
+        } else if (d.del !== undefined) {
+          await invoke("dequeue", { index: Number(d.del) });
+        }
+        await refreshQueue();
+      } catch (e) {
+        log.innerHTML = `<span class="err">${e}</span>`;
       }
-      await refreshQueue();
+    });
+  };
+
+  // --- Transport state (D) ---
+  // What the audio thread is actually doing, as opposed to which buttons the
+  // webview has tapped -- so a stalled engine, or a pause driven by the
+  // notification, shows up here too. See PHASE / player_state in lib.rs.
+  const PHASE_LABEL = {
+    idle: "idle",
+    starting: "starting — preparing the first track",
+    playing: "playing",
+    paused: "paused",
+    stalled: "waiting for the next track to be prepared",
+    failed: "failed — see the log below; restart the app to try again",
+  };
+
+  function applyPhase(phase) {
+    status.textContent = PHASE_LABEL[phase] ?? phase;
+    status.className = phase;
+
+    // "idle" only, not "failed" as well: the audio thread can only fail after
+    // start() has already flipped its `started` latch, so offering the button
+    // again would just answer "already started" in red. A failed start needs
+    // the app restarted, and saying so in the status line beats a button that
+    // looks like it would retry.
+    const goEnabled = phase === "idle";
+    goBtn.disabled = !goEnabled;
+    goBtn.classList.toggle("st-off", !goEnabled);
+
+    toggleBtn.classList.remove("st-playing", "st-paused", "st-off");
+    if (phase === "playing" || phase === "stalled") {
+      toggleBtn.disabled = false;
+      toggleBtn.textContent = "⏸ pause";
+      toggleBtn.classList.add("st-playing");
+    } else if (phase === "paused") {
+      toggleBtn.disabled = false;
+      toggleBtn.textContent = "▶ play";
+      toggleBtn.classList.add("st-paused");
+    } else {
+      // idle, starting, failed
+      toggleBtn.disabled = true;
+      toggleBtn.classList.add("st-off");
+    }
+
+    const nextEnabled = phase === "playing" || phase === "paused" || phase === "stalled";
+    nextBtn.disabled = !nextEnabled;
+    nextBtn.classList.toggle("st-off", !nextEnabled);
+  }
+
+  async function refreshPlayerState() {
+    try {
+      applyPhase((await invoke("player_state")).phase);
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
     }
-  };
+  }
 
-  // Polled rather than event-driven: the reserved slot changes when the engine
-  // pulls the next track, which happens on its own schedule with nothing
-  // reporting it back. start() also reloads queue.json, so the persisted queue
-  // shows up here without the UI having to know when that happened.
-  refreshQueue();
-  setInterval(refreshQueue, 1000);
+  // One timer for both: the reserved slot and the phase both change on the
+  // audio thread's own schedule, with nothing else reporting it back, so both
+  // have to be polled -- and there is no reason to run two separate timers
+  // for it. start() also reloads queue.json, so the persisted queue shows up
+  // here without the UI having to know when that happened.
+  async function pollState() {
+    await Promise.all([refreshQueue(), refreshPlayerState()]);
+  }
+  pollState();
+  setInterval(pollState, 500);
 </script>

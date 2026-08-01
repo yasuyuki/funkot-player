@@ -7,8 +7,8 @@ mod queue;
 mod store;
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -29,6 +29,61 @@ struct Playback {
 }
 
 static PLAYBACK: OnceLock<Playback> = OnceLock::new();
+
+/// What the transport is doing, as the audio thread sees it. The webview polls
+/// this rather than guessing from which commands it has sent, so the
+/// notification's buttons and a stalled engine both show up in the UI.
+///
+/// Independent of `PLAYBACK`: `start()` needs to record `Starting` before the
+/// audio thread exists to set `PLAYBACK`, so this cannot live inside it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Phase {
+    Idle = 0,
+    Starting = 1,
+    Playing = 2,
+    Paused = 3,
+    Stalled = 4,
+    Failed = 5,
+}
+
+impl Phase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Phase::Idle => "idle",
+            Phase::Starting => "starting",
+            Phase::Playing => "playing",
+            Phase::Paused => "paused",
+            Phase::Stalled => "stalled",
+            Phase::Failed => "failed",
+        }
+    }
+
+    /// Unknown values fall back to `Idle` rather than panicking: this only
+    /// ever decodes what `set_phase` itself wrote, but a `static` outliving a
+    /// future refactor that adds a variant should not be able to crash a
+    /// running app over a stale encoding.
+    fn from_u8(v: u8) -> Phase {
+        match v {
+            1 => Phase::Starting,
+            2 => Phase::Playing,
+            3 => Phase::Paused,
+            4 => Phase::Stalled,
+            5 => Phase::Failed,
+            _ => Phase::Idle,
+        }
+    }
+}
+
+static PHASE: AtomicU8 = AtomicU8::new(Phase::Idle as u8);
+
+fn set_phase(p: Phase) {
+    PHASE.store(p as u8, Ordering::Relaxed);
+}
+
+fn get_phase() -> Phase {
+    Phase::from_u8(PHASE.load(Ordering::Relaxed))
+}
 
 /// Where the app keeps music, the analysis cache, and its own data, as
 /// absolute paths.
@@ -183,7 +238,7 @@ fn resolve_dirs(#[allow(unused)] app: &tauri::AppHandle) -> Result<AppDirs, Stri
     dirs
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn app_dirs(app: tauri::AppHandle) -> Result<AppDirs, String> {
     let dirs = resolve_dirs(&app);
     if let Ok(d) = &dirs {
@@ -199,6 +254,14 @@ struct AppState {
     lines: Mutex<Vec<String>>,
     started: Mutex<bool>,
     queue: SharedQueue,
+    /// Serialises writes of `queue.json`. The queue-mutating commands run on
+    /// Tauri's blocking threadpool, so two of them really do overlap — tapping
+    /// ✕ on one row and ↑ on another in quick succession is enough. Each takes
+    /// its snapshot *inside* this lock, so the last write is always the latest
+    /// state; without it the two snapshots can reach `fs::write` in the
+    /// opposite order and leave the file a queue behind, or interleave inside
+    /// the truncate-then-write and leave it torn.
+    save_lock: Mutex<()>,
 }
 
 impl Default for AppState {
@@ -208,6 +271,148 @@ impl Default for AppState {
             lines: Mutex::new(Vec::new()),
             started: Mutex::new(false),
             queue: queue::new_shared_queue(),
+            save_lock: Mutex::new(()),
+        }
+    }
+}
+
+/// Turns "was this callback's output bit-exact silence?" into a UI phase.
+///
+/// The engine fills the buffer with zeros while it waits for the loader
+/// (see funkot-core engine.rs `render`), and skips the mix bus at bit-exact
+/// silence, so a whole silent buffer is the one signal a host gets that
+/// playback has starved.
+///
+/// It is not a *proof* of one: a track with a real digital-silence break
+/// decodes to bit-exact zeros too, and nothing downstream of the decoder
+/// necessarily disturbs them. Hence [`STALL_AFTER`] rather than reacting to
+/// the first quiet buffer — the stall this exists to report runs for minutes,
+/// so waiting a couple of seconds costs nothing and keeps a produced silence
+/// from being announced as a fault.
+///
+/// Deliberately does no logging of its own: this runs inside the cpal
+/// callback, and `log` formats a string and writes to the logd socket, which
+/// is exactly the kind of unbounded work that turns a reported stall into a
+/// reported stall *plus* a dropout. The audio thread watches [`PHASE`] from
+/// its idle loop instead and logs the edges from there.
+struct StallWatch {
+    silent_frames: u64,
+    stall_after_frames: u64,
+    /// Whether a non-silent buffer has ever been seen. Distinguishes "still
+    /// warming up for the first track" (`Starting`) from "was playing, went
+    /// quiet" (`Stalled`) — both look like silence to the counter alone.
+    started: bool,
+}
+
+/// How long the output has to stay bit-exact silent before it is called a
+/// stall. See [`StallWatch`] for why this is not simply "one buffer".
+const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl StallWatch {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            silent_frames: 0,
+            stall_after_frames: STALL_AFTER.as_secs() * u64::from(sample_rate),
+            started: false,
+        }
+    }
+
+    /// Feed one callback's frame count and whether its buffer was bit-exact
+    /// silence; returns the phase the UI should show for it.
+    fn observe(&mut self, frames: u64, silent: bool) -> Phase {
+        if !silent {
+            self.silent_frames = 0;
+            self.started = true;
+            return Phase::Playing;
+        }
+
+        self.silent_frames += frames;
+        if !self.started {
+            return Phase::Starting;
+        }
+        if self.silent_frames >= self.stall_after_frames {
+            return Phase::Stalled;
+        }
+        Phase::Playing
+    }
+
+    /// Drop whatever silence has accumulated so far without touching
+    /// `started`. Used when pausing: the buffers written while paused are
+    /// deliberate silence, not starvation, and must not count toward a stall
+    /// that fires the moment playback resumes.
+    fn reset_silence(&mut self) {
+        self.silent_frames = 0;
+    }
+}
+
+#[cfg(test)]
+mod stall_watch_tests {
+    use super::*;
+
+    /// A 2 Hz "sample rate", so `STALL_AFTER` works out to 4 frames and the
+    /// assertions below can count them by hand.
+    fn watch() -> StallWatch {
+        let w = StallWatch::new(2);
+        assert_eq!(w.stall_after_frames, 4, "tests below assume a 4-frame threshold");
+        w
+    }
+
+    #[test]
+    fn starting_until_the_first_sound() {
+        let mut w = watch();
+        assert!(w.observe(4, true) == Phase::Starting);
+        assert!(w.observe(4, true) == Phase::Starting);
+    }
+
+    #[test]
+    fn playing_once_sound_arrives() {
+        let mut w = watch();
+        w.observe(4, true);
+        assert!(w.observe(4, false) == Phase::Playing);
+    }
+
+    #[test]
+    fn stalls_after_enough_silence_once_started() {
+        let mut w = watch();
+        w.observe(4, false); // started
+        assert!(w.observe(3, true) == Phase::Playing); // under the threshold
+        assert!(w.observe(1, true) == Phase::Stalled); // crossed 4 frames
+        assert!(w.observe(100, true) == Phase::Stalled); // stays stalled
+    }
+
+    #[test]
+    fn recovers_to_playing_once_sound_returns() {
+        let mut w = watch();
+        w.observe(4, false);
+        w.observe(4, true);
+        assert!(w.observe(1, true) == Phase::Stalled);
+        assert!(w.observe(4, false) == Phase::Playing);
+    }
+
+    /// Pausing writes silence deliberately. Without the reset, a long pause
+    /// would bank enough silent frames to report a stall on the very first
+    /// buffer after resuming — while the engine is in fact fine.
+    #[test]
+    fn pausing_does_not_bank_silence_toward_a_stall() {
+        let mut w = watch();
+        w.observe(4, false); // started
+        for _ in 0..10 {
+            w.reset_silence(); // what the callback does on every paused buffer
+        }
+        assert!(w.observe(3, true) == Phase::Playing);
+    }
+
+    #[test]
+    fn phase_survives_the_round_trip_through_the_atomic() {
+        for p in [
+            Phase::Idle,
+            Phase::Starting,
+            Phase::Playing,
+            Phase::Paused,
+            Phase::Stalled,
+            Phase::Failed,
+        ] {
+            assert!(Phase::from_u8(p as u8) == p, "{} did not round-trip", p.as_str());
         }
     }
 }
@@ -230,6 +435,7 @@ fn audio_thread(
         Some(d) => d,
         None => {
             say!("FAIL: no default output device");
+            set_phase(Phase::Failed);
             return;
         }
     };
@@ -240,6 +446,7 @@ fn audio_thread(
         Ok(c) => c,
         Err(e) => {
             say!("FAIL: default_output_config: {e}");
+            set_phase(Phase::Failed);
             return;
         }
     };
@@ -253,11 +460,17 @@ fn audio_thread(
 
     if supported.channels() != 2 {
         say!("FAIL: engine renders interleaved stereo; device wants {} ch", supported.channels());
+        set_phase(Phase::Failed);
         return;
     }
 
     let mut options = EngineOptions::default();
     options.output_sample_rate = supported.sample_rate();
+    // Kept apart from `options.cache_dir` (which takes ownership below): the
+    // C-3 loader-status log needs to hash and look up the cache itself, on
+    // this same thread, to say whether the track `HostSource::next` just
+    // reserved was already analyzed.
+    let cache_dir_for_log = cache_dir.clone();
     options.cache_dir = cache_dir;
 
     // `options.loop_playlist` is not set here: `Engine::new_with_source`
@@ -277,11 +490,25 @@ fn audio_thread(
             if let Err(e) = store::save_queue(&queue_dir, &pending) {
                 log::warn!("save_queue({}): {e}", queue_dir.display());
             }
+        }))
+        .on_reserved(Box::new(move |path| {
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string();
+            let analysis = if analyzed_cache_entry(path, &cache_dir_for_log).is_some() {
+                "cached"
+            } else {
+                "missing"
+            };
+            log::info!("loader: preparing {name} (analysis: {analysis})");
         }));
     let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
         Err(e) => {
             say!("FAIL: Engine::new_with_source: {e}");
+            set_phase(Phase::Failed);
             return;
         }
     };
@@ -298,12 +525,15 @@ fn audio_thread(
         nav_tx: engine.nav_sender(),
     });
 
+    let mut stall = StallWatch::new(supported.sample_rate());
     let err_log = log.clone();
     let stream = device.build_output_stream(
         supported.config(),
         move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
             if paused.load(Ordering::Relaxed) {
                 out.fill(0.0);
+                stall.reset_silence();
+                set_phase(Phase::Paused);
                 return;
             }
             let frames = engine.render(out);
@@ -311,6 +541,12 @@ fn audio_thread(
             if written < out.len() {
                 out[written..].fill(0.0);
             }
+            // Bit-exact silence is the one signal a host gets that the
+            // engine had nothing prepared for this buffer; see `StallWatch`.
+            let silent = out.iter().all(|s| *s == 0.0);
+            let total_frames = (out.len() / 2) as u64;
+            let phase = stall.observe(total_frames, silent);
+            set_phase(phase);
         },
         move |e| {
             let m = format!("stream error: {e}");
@@ -324,19 +560,45 @@ fn audio_thread(
         Ok(s) => s,
         Err(e) => {
             say!("FAIL: build_output_stream: {e}");
+            set_phase(Phase::Failed);
             return;
         }
     };
 
     if let Err(e) = stream.play() {
         say!("FAIL: stream.play: {e}");
+        set_phase(Phase::Failed);
         return;
     }
     say!("PLAYING");
 
-    // Hold the stream alive; it dies with this thread.
+    // Hold the stream alive — it dies with this thread — and, while we are
+    // here anyway, keep a log of when the output went quiet. `StallWatch`
+    // works this out inside the cpal callback but must not do the logging
+    // there; this thread has nothing else to do and can block freely.
+    //
+    // The pair of lines this writes is what identifies a stall after the
+    // fact: read together with the "loader: preparing X (analysis: …)" line
+    // above it, logcat says both that playback starved and what the loader
+    // was busy with at the time.
+    let mut stalled_since: Option<std::time::Instant> = None;
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
+        // A second's granularity on a gap that runs for minutes. Kept coarse
+        // on purpose: this thread lives for the whole listening session, and
+        // the rest of the app goes out of its way not to wake a phone up for
+        // no reason.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        match (get_phase() == Phase::Stalled, stalled_since) {
+            (true, None) => {
+                log::warn!("output has gone silent: the engine has no prepared track ready");
+                stalled_since = Some(std::time::Instant::now());
+            }
+            (false, Some(since)) => {
+                log::info!("output resumed after {:.1}s of silence", since.elapsed().as_secs_f64());
+                stalled_since = None;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -349,7 +611,7 @@ fn is_supported_track(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start(
     music_dir: String,
     cache_dir: String,
@@ -370,6 +632,8 @@ fn start(
     paths.sort();
 
     if paths.len() < 2 {
+        // Early error: nothing has been set up yet, so the phase is left at
+        // whatever it already was (Idle, on a fresh launch).
         return Err(format!("need >= 2 tracks in {}, found {}", dir.display(), paths.len()));
     }
 
@@ -393,10 +657,22 @@ fn start(
     }
     let queue = Arc::clone(&state.queue);
 
-    std::thread::Builder::new()
+    // Before `analyze_missing`, not after: the worker holds off while the
+    // phase says `Starting`, and it can only see that if it is already set.
+    set_phase(Phase::Starting);
+
+    // Kick off analysis for anything the folder holds that the cache does not
+    // already have a complete entry for, so the loader thread never has to
+    // run a synchronous analysis mid-playback (see `analyze_missing`).
+    analyze_missing(&app, &paths, &cache, &data);
+
+    if let Err(e) = std::thread::Builder::new()
         .name("funkot-audio".into())
         .spawn(move || audio_thread(paths, cache, data, tx, queue))
-        .map_err(|e| format!("spawn audio thread: {e}"))?;
+    {
+        set_phase(Phase::Idle);
+        return Err(format!("spawn audio thread: {e}"));
+    }
 
     service_set_running(true);
 
@@ -422,6 +698,10 @@ fn toggle_pause() -> Result<bool, String> {
     let playback = PLAYBACK.get().ok_or("not playing")?;
     // fetch_xor(true) returns the *previous* value; the new state is its negation.
     let now_paused = !playback.paused.fetch_xor(true, Ordering::Relaxed);
+    // Written here too, not just left for the next audio callback: the UI
+    // polls PHASE, and without this it would not see the new state until the
+    // callback runs again, which never happens at all once actually paused.
+    set_phase(if now_paused { Phase::Paused } else { Phase::Playing });
     service_sync_state();
     Ok(now_paused)
 }
@@ -444,6 +724,21 @@ fn is_paused() -> bool {
         .unwrap_or(false)
 }
 
+/// What the UI paints. Cheap enough to poll twice a second.
+#[derive(serde::Serialize, Clone)]
+struct PlayerState {
+    phase: &'static str,
+    paused: bool,
+}
+
+#[tauri::command]
+fn player_state() -> PlayerState {
+    PlayerState {
+        phase: get_phase().as_str(),
+        paused: is_paused(),
+    }
+}
+
 /// Snapshot of the playback queue, for the UI.
 #[derive(serde::Serialize, Clone)]
 struct QueueSnapshot {
@@ -458,7 +753,7 @@ struct QueueSnapshot {
 /// logged, not propagated: the in-memory queue mutation already succeeded,
 /// and losing the on-disk mirror is not worth failing the caller's command
 /// over.
-fn persist_queue(app: &tauri::AppHandle, queue: &SharedQueue) {
+fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
     let data_dir = match resolve_dirs(app) {
         Ok(d) => PathBuf::from(d.data_dir),
         Err(e) => {
@@ -466,7 +761,16 @@ fn persist_queue(app: &tauri::AppHandle, queue: &SharedQueue) {
             return;
         }
     };
-    let pending: VecDeque<PathBuf> = queue::snapshot(queue).into_iter().collect();
+    // Snapshot and write under one lock, so concurrent commands cannot write
+    // out of order; see `AppState::save_lock`. Poisoning is not a concern:
+    // nothing under this guard can panic in a way that leaves shared state
+    // half-updated, so recovering the guard is better than taking the app
+    // down over a stale mirror.
+    let _saving = state
+        .save_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pending: VecDeque<PathBuf> = queue::snapshot(&state.queue).into_iter().collect();
     if let Err(e) = store::save_queue(&data_dir, &pending) {
         log::warn!("save_queue({}): {e}", data_dir.display());
     }
@@ -474,15 +778,15 @@ fn persist_queue(app: &tauri::AppHandle, queue: &SharedQueue) {
 
 /// Append `path` to the tail of the pending queue. Returns the pending
 /// queue's length after the insert.
-#[tauri::command]
+#[tauri::command(async)]
 fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
     let len = queue::enqueue(&state.queue, PathBuf::from(path));
-    persist_queue(&app, &state.queue);
+    persist_queue(&app, &state);
     Ok(len)
 }
 
 /// Move a pending item from one position to another.
-#[tauri::command]
+#[tauri::command(async)]
 fn reorder(
     from: usize,
     to: usize,
@@ -490,15 +794,15 @@ fn reorder(
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
     queue::reorder(&state.queue, from, to)?;
-    persist_queue(&app, &state.queue);
+    persist_queue(&app, &state);
     Ok(())
 }
 
 /// Remove the item at `index` from the pending queue, returning its path.
-#[tauri::command]
+#[tauri::command(async)]
 fn dequeue(index: usize, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<String, String> {
     let path = queue::dequeue(&state.queue, index)?;
-    persist_queue(&app, &state.queue);
+    persist_queue(&app, &state);
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -541,20 +845,35 @@ struct TrackRow {
 /// Guards against starting a second analysis worker while one is running.
 static ANALYZING: AtomicBool = AtomicBool::new(false);
 
-/// Build one `TrackRow` from whatever `cache::load` returns for `path`.
+/// The cache entry for `path`, but only if it is *complete* -- present and
+/// with `needs_reanalysis` clear. `cache::load` alone is not enough: a kept
+/// entry with a stripped auto side (see `cache::purge_auto`) still loads, but
+/// the loader thread would have to run a fresh analysis on it before playback
+/// could use it, which is exactly the synchronous-analysis stall this exists
+/// to keep out of the audio path. Centralised so the library listing
+/// (`track_row`), the pick of what to hand the background worker
+/// (`analyze_missing`), and the loader-status log in `audio_thread` cannot
+/// drift on what "still needs analysis" means.
 ///
-/// A hashing failure (unreadable file, etc.) is reported as unanalyzed rather
-/// than dropped, so one bad file does not remove itself from the listing.
+/// A hashing failure (unreadable file, etc.) reads the same as "not cached".
+fn analyzed_cache_entry(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+) -> Option<funkot_core::TrackAnalysis> {
+    funkot_core::cache::content_hash(path)
+        .ok()
+        .and_then(|hash| funkot_core::cache::load(cache_dir, &hash))
+        .filter(|a| !a.needs_reanalysis)
+}
+
+/// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `path`.
 fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("?")
         .to_string();
-    let analysis = funkot_core::cache::content_hash(path)
-        .ok()
-        .and_then(|hash| funkot_core::cache::load(cache_dir, &hash));
-    match analysis {
+    match analyzed_cache_entry(path, cache_dir) {
         Some(a) => TrackRow {
             path: path.to_string_lossy().into_owned(),
             name,
@@ -582,10 +901,143 @@ fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
     }
 }
 
+#[cfg(test)]
+mod cache_state_tests {
+    use super::*;
+
+    /// Fresh temp dir per test, cleaned up on drop. Same shape as the one in
+    /// `store`'s tests; not shared because neither module should have to
+    /// export test scaffolding to the other.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "funkot-player-cache-test-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A file to hash plus a plausible analysis of it. The contents are never
+    /// decoded — only `content_hash` reads them — so any bytes will do.
+    fn track_with_analysis(dir: &Path) -> (PathBuf, funkot_core::TrackAnalysis) {
+        let track = dir.join("track.wav");
+        std::fs::write(&track, vec![0u8; 4096]).unwrap();
+        let buffer = funkot_core::decode::AudioBuffer {
+            sample_rate: 48_000,
+            frames: 48_000 * 200,
+            samples: Vec::new(),
+        };
+        (track, funkot_core::cache::provisional(&buffer, "track.wav"))
+    }
+
+    fn store_for(track: &Path, cache_dir: &Path, analysis: &funkot_core::TrackAnalysis) {
+        let hash = funkot_core::cache::content_hash(track).unwrap();
+        funkot_core::cache::store(cache_dir, &hash, analysis).unwrap();
+    }
+
+    #[test]
+    fn no_cache_entry_reads_as_unanalyzed() {
+        let dir = TempDir::new("none");
+        let (track, _) = track_with_analysis(&dir.0);
+        assert!(analyzed_cache_entry(&track, &dir.0).is_none());
+        assert!(!track_row(&track, &dir.0).analyzed);
+    }
+
+    #[test]
+    fn a_complete_entry_reads_as_analyzed() {
+        let dir = TempDir::new("complete");
+        let (track, analysis) = track_with_analysis(&dir.0);
+        store_for(&track, &dir.0, &analysis);
+
+        assert!(analyzed_cache_entry(&track, &dir.0).is_some());
+        let row = track_row(&track, &dir.0);
+        assert!(row.analyzed);
+        assert_eq!(row.intro_bars, Some(analysis.intro_bars));
+    }
+
+    /// The regression this whole change turns on. An entry that loads but has
+    /// `needs_reanalysis` set is one the engine's loader will re-analyse *on
+    /// its own thread, mid-playback* — so the library must not call it
+    /// analyzed, or the background worker skips it and the listener gets the
+    /// silence instead.
+    #[test]
+    fn an_entry_needing_reanalysis_reads_as_unanalyzed() {
+        let dir = TempDir::new("stale");
+        let (track, mut analysis) = track_with_analysis(&dir.0);
+        analysis.needs_reanalysis = true;
+        store_for(&track, &dir.0, &analysis);
+
+        assert!(analyzed_cache_entry(&track, &dir.0).is_none());
+        let row = track_row(&track, &dir.0);
+        assert!(!row.analyzed);
+        // And the numbers are withheld too: showing bars the engine is about
+        // to recompute invites hand-correcting a value that is on its way out.
+        assert_eq!(row.intro_bars, None);
+        assert_eq!(row.outro_structure_bars, None);
+    }
+
+    #[test]
+    fn an_unreadable_file_reads_as_unanalyzed_rather_than_erroring() {
+        let dir = TempDir::new("missing-file");
+        assert!(analyzed_cache_entry(&dir.0.join("nope.wav"), &dir.0).is_none());
+    }
+}
+
+/// Kick off a background analysis worker for whatever in `paths` the cache
+/// does not already have a complete entry for (see `analyzed_cache_entry`).
+/// Shared by `refresh_library`, which wants the listing to fill in live, and
+/// `start`, which wants it so the loader thread is never the one running a
+/// fresh analysis while it is also the only thing feeding the engine.
+///
+/// A no-op (and silent) when nothing is missing.
+fn analyze_missing(app: &tauri::AppHandle, paths: &[PathBuf], cache_dir: &Path, data_dir: &Path) {
+    // Hand the worker only what is actually missing. `fill_missing` checks the
+    // cache *after* it is given a decoded buffer, so passing an already-analysed
+    // track still costs a full decode — adding one file to a large library would
+    // otherwise re-decode the whole library, which is the same heat and battery
+    // cost the serial worker exists to avoid.
+    let pending: Vec<PathBuf> = paths
+        .iter()
+        .filter(|p| analyzed_cache_entry(p, cache_dir).is_none())
+        .cloned()
+        .collect();
+    analyze_these(app, pending, cache_dir, data_dir);
+}
+
+/// As [`analyze_missing`], for a caller that has already worked out which
+/// tracks are unanalysed and should not pay to hash them all over again.
+fn analyze_these(
+    app: &tauri::AppHandle,
+    pending: Vec<PathBuf>,
+    cache_dir: &Path,
+    data_dir: &Path,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    log::info!("{} track(s) need analysis", pending.len());
+    let overrides = store::load_overrides(data_dir);
+    spawn_analysis_worker(app.clone(), pending, cache_dir.to_path_buf(), overrides);
+}
+
 /// Scan `music_dir` (top-level only) for supported tracks and report what the
 /// analysis cache already knows about each. Kicks off a background analysis
 /// worker (one thread, one track at a time) if anything is unanalyzed.
-#[tauri::command]
+#[tauri::command(async)]
 fn refresh_library(app: tauri::AppHandle) -> Result<Vec<TrackRow>, String> {
     let dirs = resolve_dirs(&app)?;
     let music_dir = PathBuf::from(&dirs.music_dir);
@@ -601,21 +1053,16 @@ fn refresh_library(app: tauri::AppHandle) -> Result<Vec<TrackRow>, String> {
 
     let rows: Vec<TrackRow> = paths.iter().map(|p| track_row(p, &cache_dir)).collect();
 
-    // Hand the worker only what is actually missing. `fill_missing` checks the
-    // cache *after* it is given a decoded buffer, so passing an already-analysed
-    // track still costs a full decode — adding one file to a large library would
-    // otherwise re-decode the whole library, which is the same heat and battery
-    // cost the serial worker exists to avoid.
+    // Reuse what `track_row` already worked out rather than calling
+    // `analyze_missing`, which would hash every file a second time: `analyzed`
+    // is exactly `analyzed_cache_entry(...).is_some()`.
     let pending: Vec<PathBuf> = paths
         .iter()
         .zip(&rows)
         .filter(|(_, row)| !row.analyzed)
         .map(|(path, _)| path.clone())
         .collect();
-    if !pending.is_empty() {
-        let overrides = store::load_overrides(&data_dir);
-        spawn_analysis_worker(app, pending, cache_dir, overrides);
-    }
+    analyze_these(&app, pending, &cache_dir, &data_dir);
 
     Ok(rows)
 }
@@ -650,7 +1097,7 @@ fn apply_override(
 /// begins; pinning the trigger directly would break that relation.
 ///
 /// Sides left as `null` are not touched, so the UI can send one cell at a time.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_bars(
     app: tauri::AppHandle,
     path: String,
@@ -692,11 +1139,18 @@ fn set_bars(
 }
 
 /// Progress payload for the `analysis-progress` event.
+///
+/// Carries the row the analysis just produced (post `reapply_overrides`) so
+/// the webview can splice it into its table in place instead of calling
+/// `refresh_library` on every event -- see C-4: that command re-walks the
+/// music folder and re-reads the cache for every track, which is wasted work
+/// for an update that only ever touches the one track just analyzed.
 #[derive(serde::Serialize, Clone)]
 struct AnalysisProgress {
     done: usize,
     total: usize,
     name: String,
+    row: TrackRow,
 }
 
 /// Re-apply this track's stored corrections onto a just-written cache entry.
@@ -715,6 +1169,38 @@ fn reapply_overrides(path: &std::path::Path, cache_dir: &std::path::Path, o: &st
     };
     if let Err(e) = apply_override(cache_dir, &hash, entry) {
         log::warn!("cannot re-apply manual bars for {}: {e}", path.display());
+    }
+}
+
+/// Longest the analysis worker will hold off waiting for playback to get
+/// going. Only a bound on a phase that should never stick: if the first track
+/// somehow never produces sound, analysing the rest of the folder is still
+/// better than analysing nothing.
+const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Block until the first track is actually making sound.
+///
+/// The engine's loader analyses a track itself when the cache has no complete
+/// entry for it (`funkot-core` `cache::get_or_analyze`, reached from
+/// `prepare_track` and from the first track's Upgrade). That analysis is what
+/// this worker exists to do ahead of time — but for the *first* track the
+/// loader is already doing it, on the one thread feeding the engine, and
+/// piling on there is how a press of start turns into a wait for silence.
+///
+/// Note what this does **not** wait for. `Starting` ends at the first
+/// non-silent buffer, which the loader reaches on a ~20 s head preview
+/// (`prepare_first_live`) — its full analysis of that same first track is
+/// still running afterwards. So this buys the decode-and-first-sound burst,
+/// not the whole of track one, and the worker can still briefly overlap the
+/// loader on that file. The per-track cache re-check in the worker loop is
+/// what keeps that overlap from costing a second full analysis.
+///
+/// Idle (nothing playing) does not wait at all, which is the plain
+/// press-scan-before-start case.
+fn wait_out_startup() {
+    let until = std::time::Instant::now() + STARTUP_WAIT;
+    while get_phase() == Phase::Starting && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
 
@@ -741,6 +1227,8 @@ fn spawn_analysis_worker(
         .spawn(move || {
             use tauri::Emitter;
 
+            wait_out_startup();
+
             let total = paths.len();
             for (i, path) in paths.iter().enumerate() {
                 let name = path
@@ -748,6 +1236,26 @@ fn spawn_analysis_worker(
                     .and_then(|s| s.to_str())
                     .unwrap_or("?")
                     .to_string();
+
+                // Re-checked here, not just when the list was built: the
+                // engine's loader analyses whatever it prepares, so by the
+                // time this worker reaches a track the loader may already
+                // have done it. `fill_missing` would notice too, but only
+                // after a full decode — and it is the decode, tens of MB and
+                // seconds of CPU, that is worth not repeating on a phone.
+                if analyzed_cache_entry(path, &cache_dir).is_some() {
+                    log::info!("analysis: {name} was done elsewhere, skipping");
+                    let _ = app.emit(
+                        "analysis-progress",
+                        AnalysisProgress {
+                            done: i + 1,
+                            total,
+                            name,
+                            row: track_row(path, &cache_dir),
+                        },
+                    );
+                    continue;
+                }
 
                 match funkot_core::decode::decode_file(path) {
                     Ok(buffer) => {
@@ -765,12 +1273,16 @@ fn spawn_analysis_worker(
                     }
                 }
 
+                // Built after `reapply_overrides` so a successful run's row
+                // reflects the corrected numbers, not the analyzer's raw ones.
+                let row = track_row(path, &cache_dir);
                 let _ = app.emit(
                     "analysis-progress",
                     AnalysisProgress {
                         done: i + 1,
                         total,
                         name,
+                        row,
                     },
                 );
             }
@@ -893,7 +1405,11 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
     };
     match action {
         0 => {
-            playback.paused.fetch_xor(true, Ordering::Relaxed);
+            // fetch_xor(true) returns the *previous* value; the new state is
+            // its negation. Written to PHASE here too, so stopping from the
+            // notification does not leave the in-app UI reporting "playing".
+            let now_paused = !playback.paused.fetch_xor(true, Ordering::Relaxed);
+            set_phase(if now_paused { Phase::Paused } else { Phase::Playing });
         }
         1 => {
             let _ = playback.nav_tx.try_send(NavAction::TransitionToNext);
@@ -924,6 +1440,7 @@ pub fn run() {
             toggle_pause,
             skip_next,
             is_paused,
+            player_state,
             refresh_library,
             set_bars,
             enqueue,

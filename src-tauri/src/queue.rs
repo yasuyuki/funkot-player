@@ -24,7 +24,7 @@
 //! fallback source are exhausted.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use funkot_core::engine::TrackSource;
@@ -129,6 +129,11 @@ pub enum DrainPolicy {
 /// takes an entry out of it. See [`HostSource::on_pending_consumed`].
 pub type PendingObserver = Box<dyn FnMut(&[PathBuf]) + Send>;
 
+/// Called with the track [`HostSource::next`] is about to hand back, every
+/// time it is called, regardless of whether the track came from the pending
+/// queue or the folder-drain fallback. See [`HostSource::on_reserved`].
+pub type ReservedObserver = Box<dyn FnMut(&Path) + Send>;
+
 /// `TrackSource` backed by a [`SharedQueue`] instead of a fixed playlist, so a
 /// host can append/reorder/remove tracks while the engine is already running.
 ///
@@ -141,6 +146,7 @@ pub struct HostSource {
     policy: DrainPolicy,
     calls: usize,
     on_pending_consumed: Option<PendingObserver>,
+    on_reserved: Option<ReservedObserver>,
 }
 
 impl HostSource {
@@ -150,6 +156,7 @@ impl HostSource {
             policy,
             calls: 0,
             on_pending_consumed: None,
+            on_reserved: None,
         }
     }
 
@@ -170,6 +177,24 @@ impl HostSource {
     /// track: nothing was consumed, so there is nothing new to report.
     pub fn on_pending_consumed(mut self, observer: PendingObserver) -> Self {
         self.on_pending_consumed = Some(observer);
+        self
+    }
+
+    /// Run `observer` with the path `next` is about to hand back, every call,
+    /// whether it came from the pending queue or the folder-drain fallback.
+    ///
+    /// Unlike [`Self::on_pending_consumed`], this fires unconditionally: it
+    /// is the one hook that sees *every* track the loader is about to
+    /// prepare, which is what makes it useful for logging "here is what the
+    /// loader is about to do and whether its analysis cache is warm" ahead of
+    /// a stall, rather than only for tracks that happened to come through the
+    /// host queue.
+    ///
+    /// Same threading rule as `on_pending_consumed`: runs on the loader
+    /// thread with the queue's lock released, so it may block but must not
+    /// lock the queue itself.
+    pub fn on_reserved(mut self, observer: ReservedObserver) -> Self {
+        self.on_reserved = Some(observer);
         self
     }
 }
@@ -211,6 +236,9 @@ impl TrackSource for HostSource {
             (remaining, self.on_pending_consumed.as_mut())
         {
             observer(&remaining);
+        }
+        if let Some(observer) = self.on_reserved.as_mut() {
+            observer(&path);
         }
         let index = self.calls;
         self.calls += 1;
@@ -511,6 +539,55 @@ mod tests {
         // The empty report is the one that matters: without it, restarting the
         // app would find "a" still listed and play it a second time.
         assert_eq!(*seen.lock().unwrap(), vec![Vec::<PathBuf>::new()]);
+    }
+
+    /// Collects what the `on_reserved` observer is handed.
+    fn recording_reserved_observer() -> (Arc<Mutex<Vec<PathBuf>>>, ReservedObserver) {
+        let seen: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        (seen, Box::new(move |path: &Path| sink.lock().unwrap().push(path.to_path_buf())))
+    }
+
+    #[test]
+    fn on_reserved_fires_for_tracks_from_the_pending_queue() {
+        let q = new_shared_queue();
+        for name in ["a", "b"] {
+            enqueue(&q, p(name));
+        }
+        let (seen, observer) = recording_reserved_observer();
+        let mut source = HostSource::new(Arc::clone(&q), empty_policy()).on_reserved(observer);
+
+        source.next();
+        source.next();
+
+        assert_eq!(*seen.lock().unwrap(), vec![p("a"), p("b")]);
+    }
+
+    #[test]
+    fn on_reserved_fires_for_tracks_from_the_folder_fallback() {
+        let q = new_shared_queue();
+        let (seen, observer) = recording_reserved_observer();
+        let mut source =
+            HostSource::new(q, folder_policy(&["f1", "f2"])).on_reserved(observer);
+
+        source.next();
+        source.next();
+
+        assert_eq!(*seen.lock().unwrap(), vec![p("f1"), p("f2")]);
+    }
+
+    #[test]
+    fn on_reserved_fires_regardless_of_which_source_a_track_came_from() {
+        let q = new_shared_queue();
+        enqueue(&q, p("priority"));
+        let (seen, observer) = recording_reserved_observer();
+        let mut source =
+            HostSource::new(Arc::clone(&q), folder_policy(&["f1"])).on_reserved(observer);
+
+        source.next(); // from the pending queue
+        source.next(); // pending drained, falls back to the folder
+
+        assert_eq!(*seen.lock().unwrap(), vec![p("priority"), p("f1")]);
     }
 
     #[test]
