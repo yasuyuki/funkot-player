@@ -16,14 +16,19 @@
 //! Entries are keyed by `funkot_core::cache::content_hash`, the same key the
 //! engine's cache uses, so moving or renaming a file keeps its corrections.
 //!
-//! # Where this file lives
+//! # Where these files live
 //!
-//! Callers are expected to pass one of the directories `app_dirs` (in
-//! `lib.rs`) already creates — this module does not invent a new directory or
-//! ask for any new permission. `queue.json` is derived/internal state, not
-//! something the user should see or touch directly, so the natural choice is
-//! the same directory `AppDirs::cache_dir` points at (already internal-only:
-//! `filesDir/funkot-cache` on Android, `AppData/funkot-cache` on desktop).
+//! In `AppDirs::data_dir`, and deliberately *not* in the analysis cache.
+//! Both files are the listener's own work — the queue they built and the
+//! corrections they made — whereas the cache holds derived data that is meant
+//! to be disposable, and that the README tells people to delete outright when
+//! analysis misbehaves. User data under a directory whose published repair
+//! step is `rm -rf` does not survive the first repair. `data_dir` is still
+//! internal storage (`filesDir` on Android, the app data dir on desktop), so
+//! this asks for no new permission and stays out of the MTP-visible folder.
+//!
+//! Early builds did keep both files in the cache; `migrate_from` moves
+//! anything still there.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -32,6 +37,34 @@ use std::path::{Path, PathBuf};
 
 const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
+
+/// Move both files from a previous location into `dir`, if they are still
+/// there. Safe to call on every launch; a no-op once nothing is left behind.
+///
+/// A file already present at the destination wins and the stale copy is left
+/// alone: the destination is the live one, and overwriting it with an older
+/// copy would undo everything that happened since the move.
+///
+/// Failures are logged, not returned. Losing the move costs the user their
+/// queue and corrections *later*; failing the launch costs them the app now.
+pub fn migrate_from(old_dir: &Path, dir: &Path) {
+    if old_dir == dir {
+        return;
+    }
+    for name in [QUEUE_FILE, LIBRARY_FILE] {
+        let from = old_dir.join(name);
+        let to = dir.join(name);
+        if !from.exists() || to.exists() {
+            continue;
+        }
+        // Both directories are inside the app's own storage, so this is always
+        // a same-filesystem rename — there is no cross-device case to handle.
+        match fs::rename(&from, &to) {
+            Ok(()) => log::info!("moved {name} out of {}", old_dir.display()),
+            Err(e) => log::warn!("cannot move {name} out of {}: {e}", old_dir.display()),
+        }
+    }
+}
 
 /// Load the queue previously saved under `dir`.
 ///
@@ -216,6 +249,67 @@ mod tests {
         let dir = TempDir::new("overrides-corrupt");
         fs::write(dir.0.join(LIBRARY_FILE), b"{not json").unwrap();
         assert!(load_overrides(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn migrate_moves_both_files_and_leaves_nothing_behind() {
+        let old = TempDir::new("migrate-old");
+        let new = TempDir::new("migrate-new");
+
+        let mut queue: VecDeque<PathBuf> = VecDeque::new();
+        queue.push_back(PathBuf::from("/music/a.flac"));
+        save_queue(&old.0, &queue).unwrap();
+        let mut o = Overrides::new();
+        o.insert("aaa".into(), BarOverride { intro_bars: Some(32), outro_structure_bars: None });
+        save_overrides(&old.0, &o).unwrap();
+
+        migrate_from(&old.0, &new.0);
+
+        assert_eq!(load_queue(&new.0).unwrap(), vec![PathBuf::from("/music/a.flac")]);
+        assert_eq!(load_overrides(&new.0), o);
+        assert!(!old.0.join(QUEUE_FILE).exists());
+        assert!(!old.0.join(LIBRARY_FILE).exists());
+    }
+
+    /// The whole point is that this runs on every launch.
+    #[test]
+    fn migrate_with_nothing_to_move_is_a_no_op() {
+        let old = TempDir::new("migrate-empty-old");
+        let new = TempDir::new("migrate-empty-new");
+        migrate_from(&old.0, &new.0);
+        assert!(load_queue(&new.0).unwrap().is_empty());
+        assert!(load_overrides(&new.0).is_empty());
+    }
+
+    /// A leftover in the old location must never clobber the live file.
+    #[test]
+    fn migrate_keeps_the_destination_when_both_exist() {
+        let old = TempDir::new("migrate-both-old");
+        let new = TempDir::new("migrate-both-new");
+
+        let mut stale: VecDeque<PathBuf> = VecDeque::new();
+        stale.push_back(PathBuf::from("/music/stale.flac"));
+        save_queue(&old.0, &stale).unwrap();
+        let mut live: VecDeque<PathBuf> = VecDeque::new();
+        live.push_back(PathBuf::from("/music/live.flac"));
+        save_queue(&new.0, &live).unwrap();
+
+        migrate_from(&old.0, &new.0);
+
+        assert_eq!(load_queue(&new.0).unwrap(), vec![PathBuf::from("/music/live.flac")]);
+    }
+
+    /// `data_dir == cache_dir` would otherwise rename a file onto itself.
+    #[test]
+    fn migrate_from_the_same_directory_leaves_the_file_alone() {
+        let dir = TempDir::new("migrate-same");
+        let mut queue: VecDeque<PathBuf> = VecDeque::new();
+        queue.push_back(PathBuf::from("/music/a.flac"));
+        save_queue(&dir.0, &queue).unwrap();
+
+        migrate_from(&dir.0, &dir.0);
+
+        assert_eq!(load_queue(&dir.0).unwrap(), vec![PathBuf::from("/music/a.flac")]);
     }
 
     #[test]

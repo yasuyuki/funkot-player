@@ -103,8 +103,9 @@ the next `adb install -r` into `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
   turns the screen back on.
 - Clearing the analysis cache:
   `adb shell 'run-as jp.hatsuboshi.funkotplayer rm -rf files/funkot-cache'`.
-  Note this takes `library.json` — the hand-corrected bar counts — with it; see
-  the comment at the top of `src-tauri/src/store.rs`.
+  This drops only derived data. The queue and the hand-corrected bar counts sit
+  beside the cache in `files/`, not inside it, precisely so that this command
+  stays safe to hand out; see the comment at the top of `src-tauri/src/store.rs`.
 - The three synthetic test tracks are in
   `funkot-autodj-for-ui/testdata/spike-synth/` (gitignored). Regenerate with
   `./dev.sh cargo run -p funkot-core --example gen_synth --features testutil

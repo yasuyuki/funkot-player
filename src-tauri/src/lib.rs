@@ -30,9 +30,10 @@ struct Playback {
 
 static PLAYBACK: OnceLock<Playback> = OnceLock::new();
 
-/// Where the app keeps music and the analysis cache, as absolute paths.
+/// Where the app keeps music, the analysis cache, and its own data, as
+/// absolute paths.
 ///
-/// Both directories exist by the time this is returned.
+/// All three directories exist by the time this is returned.
 #[derive(serde::Serialize, Clone, Debug)]
 struct AppDirs {
     /// Drop tracks here. On Android this is the app's external files dir, which
@@ -41,6 +42,10 @@ struct AppDirs {
     /// `EngineOptions::cache_dir`. Must be absolute: the default in funkot-core
     /// is the relative `"funkot-cache"`.
     cache_dir: String,
+    /// The queue and the hand-corrected bar counts (see `store`). Held apart
+    /// from `cache_dir` because deleting the cache is a documented repair for
+    /// bad analysis, and it must not take the listener's own work with it.
+    data_dir: String,
 }
 
 /// Ask Android for the app's own directories.
@@ -116,13 +121,16 @@ fn platform_dirs() -> Result<AppDirs, String> {
         })
         .map_err(|e: jni::errors::Error| format!("cannot resolve Android app dirs: {e}"))?;
 
-    // The cache is internal: it is derived data, and keeping it out of the
-    // MTP-visible folder means a PC only ever sees the music.
-    let cache = PathBuf::from(files).join("funkot-cache");
-    ensure_dirs(&PathBuf::from(&music), &cache)?;
+    // Both are internal: the cache is derived data and the app's own data is
+    // nobody else's business, and keeping them out of the MTP-visible folder
+    // means a PC only ever sees the music.
+    let data = PathBuf::from(&files);
+    let cache = data.join("funkot-cache");
+    ensure_dirs(&PathBuf::from(&music), &cache, &data)?;
     Ok(AppDirs {
         music_dir: music,
         cache_dir: cache.to_string_lossy().into_owned(),
+        data_dir: files,
     })
 }
 
@@ -137,29 +145,49 @@ fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
         .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
     let music = base.join("Music");
     let cache = base.join("funkot-cache");
-    ensure_dirs(&music, &cache)?;
+    ensure_dirs(&music, &cache, &base)?;
     Ok(AppDirs {
         music_dir: music.to_string_lossy().into_owned(),
         cache_dir: cache.to_string_lossy().into_owned(),
+        data_dir: base.to_string_lossy().into_owned(),
     })
 }
 
-fn ensure_dirs(music: &std::path::Path, cache: &std::path::Path) -> Result<(), String> {
-    for dir in [music, cache] {
+/// Runs `store::migrate_from` once per process rather than once per call.
+/// Only the first caller can find anything to move; the rest would race it and
+/// log a failure for a rename whose source another thread just consumed.
+static MIGRATED: std::sync::Once = std::sync::Once::new();
+
+fn ensure_dirs(
+    music: &std::path::Path,
+    cache: &std::path::Path,
+    data: &std::path::Path,
+) -> Result<(), String> {
+    for dir in [music, cache, data] {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
+    // Rescue the queue and the manual bars from where older builds put them.
+    // Hooked in here because every path into the app resolves its directories
+    // through this function, so there is no launch that can skip it.
+    MIGRATED.call_once(|| store::migrate_from(cache, data));
     Ok(())
 }
 
-#[tauri::command]
-fn app_dirs(#[allow(unused)] app: tauri::AppHandle) -> Result<AppDirs, String> {
+/// Resolve the app's directories, hiding the platform split from callers.
+fn resolve_dirs(#[allow(unused)] app: &tauri::AppHandle) -> Result<AppDirs, String> {
     #[cfg(target_os = "android")]
     let dirs = platform_dirs();
     #[cfg(not(target_os = "android"))]
-    let dirs = platform_dirs(&app);
+    let dirs = platform_dirs(app);
+    dirs
+}
+
+#[tauri::command]
+fn app_dirs(app: tauri::AppHandle) -> Result<AppDirs, String> {
+    let dirs = resolve_dirs(&app);
     if let Ok(d) = &dirs {
-        log::info!("music: {} / cache: {}", d.music_dir, d.cache_dir);
+        log::info!("music: {} / cache: {} / data: {}", d.music_dir, d.cache_dir, d.data_dir);
     }
     dirs
 }
@@ -184,7 +212,13 @@ impl Default for AppState {
     }
 }
 
-fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>, queue: SharedQueue) {
+fn audio_thread(
+    paths: Vec<PathBuf>,
+    cache_dir: PathBuf,
+    data_dir: PathBuf,
+    log: Sender<String>,
+    queue: SharedQueue,
+) {
     macro_rules! say {
         ($($a:tt)*) => {{ let m = format!($($a)*); log::info!("{m}"); let _ = log.send(m); }};
     }
@@ -224,7 +258,7 @@ fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>, qu
 
     let mut options = EngineOptions::default();
     options.output_sample_rate = supported.sample_rate();
-    options.cache_dir = cache_dir.clone();
+    options.cache_dir = cache_dir;
 
     // `options.loop_playlist` is not set here: `Engine::new_with_source`
     // never reads it (only `Engine::new`'s internal `PlaylistSource` does).
@@ -236,7 +270,7 @@ fn audio_thread(paths: Vec<PathBuf>, cache_dir: PathBuf, log: Sender<String>, qu
     // than from `queue_state` is what makes it survive backgrounding: that
     // command only runs while the webview is polling, and the whole point of
     // this app is to keep playing with the screen off.
-    let queue_dir = cache_dir;
+    let queue_dir = data_dir;
     let source = HostSource::new(queue, DrainPolicy::ContinueFolder { tracks: paths, pos: 0 })
         .on_pending_consumed(Box::new(move |pending| {
             let pending: VecDeque<PathBuf> = pending.iter().cloned().collect();
@@ -316,7 +350,12 @@ fn is_supported_track(path: &std::path::Path) -> bool {
 }
 
 #[tauri::command]
-fn start(music_dir: String, cache_dir: String, state: tauri::State<AppState>) -> Result<String, String> {
+fn start(
+    music_dir: String,
+    cache_dir: String,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
     let mut started = state.started.lock().unwrap();
     if *started {
         return Err("already started".into());
@@ -338,21 +377,25 @@ fn start(music_dir: String, cache_dir: String, state: tauri::State<AppState>) ->
     *state.log_rx.lock().unwrap() = Some(rx);
     let found = format!("{} tracks", paths.len());
     let cache = PathBuf::from(cache_dir);
+    // Resolved here rather than taken as an argument: the webview passes the
+    // music and cache paths because it displays them, but the data dir is
+    // internal and it has no business naming it.
+    let data = PathBuf::from(resolve_dirs(&app)?.data_dir);
 
     // Restore whatever was still pending from a previous run before the
     // engine starts pulling from the queue. Replaces rather than appends:
     // anything queued in this process since launch was already mirrored into
     // queue.json by the command that queued it, so appending would duplicate
     // every entry queued before start was pressed.
-    match store::load_queue(&cache) {
+    match store::load_queue(&data) {
         Ok(saved) => queue::replace_pending(&state.queue, saved),
-        Err(e) => log::warn!("load_queue({}): {e}", cache.display()),
+        Err(e) => log::warn!("load_queue({}): {e}", data.display()),
     }
     let queue = Arc::clone(&state.queue);
 
     std::thread::Builder::new()
         .name("funkot-audio".into())
-        .spawn(move || audio_thread(paths, cache, tx, queue))
+        .spawn(move || audio_thread(paths, cache, data, tx, queue))
         .map_err(|e| format!("spawn audio thread: {e}"))?;
 
     service_set_running(true);
@@ -411,31 +454,21 @@ struct QueueSnapshot {
     pending: Vec<String>,
 }
 
-/// Resolve just the cache directory, mirroring the `platform_dirs` dance
-/// `refresh_library` already does.
-fn cache_dir_for(#[allow(unused)] app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    #[cfg(target_os = "android")]
-    let dirs = platform_dirs()?;
-    #[cfg(not(target_os = "android"))]
-    let dirs = platform_dirs(app)?;
-    Ok(PathBuf::from(dirs.cache_dir))
-}
-
 /// Save the queue's current pending contents to `queue.json`. Failure is
 /// logged, not propagated: the in-memory queue mutation already succeeded,
 /// and losing the on-disk mirror is not worth failing the caller's command
 /// over.
 fn persist_queue(app: &tauri::AppHandle, queue: &SharedQueue) {
-    let cache_dir = match cache_dir_for(app) {
-        Ok(d) => d,
+    let data_dir = match resolve_dirs(app) {
+        Ok(d) => PathBuf::from(d.data_dir),
         Err(e) => {
-            log::warn!("save_queue: cannot resolve cache dir: {e}");
+            log::warn!("save_queue: cannot resolve data dir: {e}");
             return;
         }
     };
     let pending: VecDeque<PathBuf> = queue::snapshot(queue).into_iter().collect();
-    if let Err(e) = store::save_queue(&cache_dir, &pending) {
-        log::warn!("save_queue({}): {e}", cache_dir.display());
+    if let Err(e) = store::save_queue(&data_dir, &pending) {
+        log::warn!("save_queue({}): {e}", data_dir.display());
     }
 }
 
@@ -554,13 +587,10 @@ fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
 /// worker (one thread, one track at a time) if anything is unanalyzed.
 #[tauri::command]
 fn refresh_library(app: tauri::AppHandle) -> Result<Vec<TrackRow>, String> {
-    #[cfg(target_os = "android")]
-    let dirs = platform_dirs()?;
-    #[cfg(not(target_os = "android"))]
-    let dirs = platform_dirs(&app)?;
-
+    let dirs = resolve_dirs(&app)?;
     let music_dir = PathBuf::from(&dirs.music_dir);
     let cache_dir = PathBuf::from(&dirs.cache_dir);
+    let data_dir = PathBuf::from(&dirs.data_dir);
 
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&music_dir)
         .map_err(|e| format!("cannot read {}: {e}", music_dir.display()))?
@@ -583,7 +613,7 @@ fn refresh_library(app: tauri::AppHandle) -> Result<Vec<TrackRow>, String> {
         .map(|(path, _)| path.clone())
         .collect();
     if !pending.is_empty() {
-        let overrides = store::load_overrides(&cache_dir);
+        let overrides = store::load_overrides(&data_dir);
         spawn_analysis_worker(app, pending, cache_dir, overrides);
     }
 
@@ -627,13 +657,9 @@ fn set_bars(
     intro_bars: Option<u32>,
     outro_structure_bars: Option<u32>,
 ) -> Result<TrackRow, String> {
-    #[cfg(target_os = "android")]
-    let dirs = platform_dirs()?;
-    #[cfg(not(target_os = "android"))]
-    let dirs = platform_dirs(&app)?;
-    let _ = &app;
-
+    let dirs = resolve_dirs(&app)?;
     let cache_dir = PathBuf::from(&dirs.cache_dir);
+    let data_dir = PathBuf::from(&dirs.data_dir);
     let track = PathBuf::from(&path);
     let hash = funkot_core::cache::content_hash(&track)
         .map_err(|e| format!("cannot hash {}: {e}", track.display()))?;
@@ -647,7 +673,7 @@ fn set_bars(
     // claiming a correction the user cannot see taking effect.
     apply_override(&cache_dir, &hash, &edit)?;
 
-    let mut overrides = store::load_overrides(&cache_dir);
+    let mut overrides = store::load_overrides(&data_dir);
     let entry = overrides.entry(hash).or_default();
     if let Some(n) = intro_bars {
         entry.intro_bars = Some(n);
@@ -658,7 +684,7 @@ fn set_bars(
     // Warn-only, as with the queue: the edit already took effect for playback,
     // so failing the command here would misreport what happened. What is lost
     // is only the ability to re-apply it after a future reanalysis.
-    if let Err(e) = store::save_overrides(&cache_dir, &overrides) {
+    if let Err(e) = store::save_overrides(&data_dir, &overrides) {
         log::warn!("cannot persist manual bars: {e}");
     }
 
