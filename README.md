@@ -184,6 +184,15 @@ place it matters, but they are easy to undo by accident:
   looked simply absent. Backing the notification with a `MediaSession` and
   `Notification.MediaStyle` is what moves it to the media area and the lock
   screen. Both use framework APIs, so neither costs a dependency.
+- **Never resolve an app class with `find_class` off the UI thread.** Commands
+  marked `#[tauri::command(async)]` run on Tauri's blocking thread pool, and a
+  thread JNI attaches on the fly gets the *system* classloader, which cannot see
+  `jp.hatsuboshi.funkotplayer.*`. `service_call` goes through
+  `Context.getClassLoader()` for this reason — and it has to be that instance
+  method, not the loader of the context object's class, which is
+  `android.app.Application`'s and therefore the boot loader. Getting this wrong
+  costs the notification, the foreground service and the MediaSession, while
+  leaving playback itself working, so it is easy to miss.
 - The Tauri CLI must be a **project-local** npm install. A global one makes the
   generated Gradle task run `node tauri` and fail to resolve it.
 
