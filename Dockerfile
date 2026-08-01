@@ -77,6 +77,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     librsvg2-dev \
     libxdo-dev \
     libssl-dev \
+    # Running the desktop build (GUI=1 ./dev.sh, see dev.sh): cpal speaks ALSA
+    # on Linux and there is no sound card in the container, so the pulse plugin
+    # below forwards to WSLg's PulseAudio. xdotool and imagemagick are how the
+    # window gets driven and captured from a second container.
+    libasound2-plugins \
+    pulseaudio-utils \
+    xdotool \
+    imagemagick \
     && rm -rf /var/lib/apt/lists/*
+
+# ALSA has no default device here, and cpal asks for "default". Without this the
+# desktop build fails to open a stream instead of reaching PulseAudio.
+RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
 
 WORKDIR /work/funkot-player

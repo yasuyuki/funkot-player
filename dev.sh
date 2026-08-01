@@ -17,6 +17,10 @@
 # wireless debugging:
 #   ADB=1 ./dev.sh adb devices -l
 #
+# GUI=1 runs the desktop build on WSLg's display and sound card:
+#   ./dev.sh cargo build --manifest-path src-tauri/Cargo.toml --release
+#   GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
+#
 # /root/.android is a named volume on every run, not just for adb: the debug
 # keystore lives there, and letting it be regenerated per build changes the APK
 # signature and makes `adb install -r` fail with INSTALL_FAILED_UPDATE_INCOMPATIBLE.
@@ -42,8 +46,38 @@ CHOWN="chown -R \"\$HOST_UID:\$HOST_GID\" /work/funkot-player 2>/dev/null || tru
 
 [ "${ADB:-0}" = 1 ] && NET="--network host" || NET=""
 
+# GUI=1 runs the desktop build with a screen and a sound card: the X11 socket
+# and WSLg's PulseAudio socket are passed in, and cpal's ALSA host reaches the
+# latter through the pulse plugin (see /etc/asound.conf in the Dockerfile).
+#
+# GDK_BACKEND=x11 is not cosmetic. Left to itself GDK connects to the wayland-0
+# socket in XDG_RUNTIME_DIR, and a Wayland window cannot be driven or captured
+# from a second container -- xdotool and import both work on X11 only.
+#
+# The app's data lives on the host so the analysis cache and the queue survive a
+# restart; drop the tracks to play into .desktop-data/Music.
+GUI_ARGS=""
+if [ "${GUI:-0}" = 1 ]; then
+    [ -S /mnt/wslg/PulseServer ] || {
+        echo "GUI=1 expects WSLg's PulseServer socket at /mnt/wslg/PulseServer" >&2
+        exit 1
+    }
+    mkdir -p "$PWD/.desktop-data/Music"
+    GUI_ARGS="--shm-size=1g
+        -v /tmp/.X11-unix:/tmp/.X11-unix
+        -v /mnt/wslg:/mnt/wslg
+        -v $PWD/.desktop-data:/root/.local/share/jp.hatsuboshi.funkotplayer
+        -e DISPLAY=${DISPLAY:-:0}
+        -e GDK_BACKEND=x11
+        -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
+        -e PULSE_SERVER=unix:/mnt/wslg/PulseServer
+        -e WEBKIT_DISABLE_COMPOSITING_MODE=1
+        -e WEBKIT_DISABLE_DMABUF_RENDERER=1
+        -e RUST_LOG=${RUST_LOG:-info}"
+fi
+
 # shellcheck disable=SC2086
-exec docker run --rm -i $NET \
+exec docker run --rm -i $NET $GUI_ARGS \
     -v "$PWD":/work/funkot-player \
     -v "$(cd "$CORE_DIR" && pwd)":/work/funkot-autodj-for-ui:ro \
     -v funkot-player-cargo-registry:/usr/local/cargo/registry \

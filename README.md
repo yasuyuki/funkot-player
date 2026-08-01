@@ -66,6 +66,36 @@ ADB=1 ./dev.sh adb logcat -s funkot
 The connect port differs from the pairing port; both are on the device's
 Wireless debugging screen.
 
+## Running the desktop build
+
+Android is the platform this player is developed against; the desktop build
+exists so a transition can be compared against what `funkot-autodj --render`
+produces for the same playlist, which is far easier over speakers than over a
+phone. On WSL, `GUI=1` hands the container WSLg's X11 and PulseAudio sockets:
+
+```sh
+./dev.sh cargo build --manifest-path src-tauri/Cargo.toml --release
+cp <tracks> .desktop-data/Music/                      # created on first run
+GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
+```
+
+- **Audio goes out through ALSA's pulse plugin**, not a sound card. cpal's Linux
+  host is ALSA, the container has no device, and `/etc/asound.conf` in the image
+  points `default` at PulseAudio. Two `snd_pcm_avail_delay` I/O errors at stream
+  start are the plugin settling and do not repeat.
+- **The window is X11 on purpose** (`GDK_BACKEND=x11` in `dev.sh`). Under
+  Wayland the window cannot be driven or captured from a second container;
+  on X11 `xdotool` and `import` both work, and both are in the image:
+  ```sh
+  ./dev.sh sh -c 'w=$(xdotool search --name "^funkot-player$" | tail -1);
+      xdotool mousemove --window $w 210 40 click 1'   # window-relative
+  ```
+  Screen-absolute coordinates are the wrong tool: the window manager offsets
+  the frame, so `mousemove --window` is what lands on the button.
+- `⏸` and `⏭` come out as tofu in the container — it ships no font covering
+  those code points. Not an app bug; a real desktop has the glyphs.
+- This is the Linux path. **Windows and macOS builds are still untried.**
+
 ## Working with a device
 
 The adb key and the debug keystore both live in the `funkot-player-android-home`

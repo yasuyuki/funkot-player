@@ -16,3 +16,6 @@
 Thumbs.db
 .idea/
 .vscode/
+
+# Desktop run data (GUI=1 ./dev.sh): music dropped in by hand + analysis cache
+/.desktop-data/
