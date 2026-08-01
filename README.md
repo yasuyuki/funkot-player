@@ -91,6 +91,11 @@ the next `adb install -r` into `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
   gives the WebView's text and bounds, so the table contents and button
   positions can be read directly rather than eyeballed. Re-dump before each tap:
   rows shift when the progress line appears or disappears.
+- **Checking whether playback is paused: read the media session, not the audio
+  stream.** `toggle_pause` only flips a flag; the callback keeps handing AAudio
+  silence, so `dumpsys audio` reports the app's player as `state:started`
+  either way. `dumpsys media_session` is the one that moves —
+  `state=PLAYING(3)` vs `state=PAUSED(2)`.
 - **UI automation only works while the screen is awake.** Once it times out the
   fingerprint lock takes over and adb cannot clear it (`wm dismiss-keyguard` and
   `KEYCODE_WAKEUP` both fail, `dumpsys trust` stays `deviceLocked=1`). For
