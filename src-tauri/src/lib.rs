@@ -47,9 +47,10 @@ enum Phase {
     Stalled = 4,
     Failed = 5,
     /// The audio callback has stopped running (or the stream reported an
-    /// error) and is not coming back on its own. See `CallbackWatch`. Distinct
-    /// from `Stalled`, which means the callback is alive but has nothing
-    /// prepared to play — here nothing is calling `render` at all any more.
+    /// error). `audio_thread` closes the stream and retries reopen until the
+    /// device returns; see `CallbackWatch`. Distinct from `Stalled`, which
+    /// means the callback is alive but has nothing prepared to play — here
+    /// nothing is calling `render` at all any more.
     Disconnected = 6,
 }
 
@@ -105,10 +106,9 @@ fn get_phase() -> Phase {
 /// Resuming writes nothing to `PHASE`. If the callback is alive it publishes
 /// `Playing`, `Starting`, or `Stalled` itself within about one buffer
 /// (~21ms), and if it is not, `audio_thread`'s watchdog (`CallbackWatch`)
-/// catches that within a few seconds and sets `Phase::Disconnected`. Writing
-/// `Playing` here would be asserting something nobody has confirmed: on a
-/// Bluetooth speaker that dropped, the callback that would have overwritten
-/// it is exactly the one that is never coming back.
+/// catches that within a few seconds and sets `Phase::Disconnected` (then
+/// retries reopen). Writing `Playing` here would assert something nobody has
+/// confirmed yet.
 fn flip_paused(paused: &AtomicBool) -> bool {
     // fetch_xor(true) returns the *previous* value; the new state is its negation.
     let now_paused = !paused.fetch_xor(true, Ordering::Relaxed);
@@ -390,11 +390,11 @@ const STUCK_SECS_BEFORE_LOST: u32 = 3;
 ///
 /// This exists for exactly the failure `StallWatch` cannot see: when the
 /// output device disconnects (e.g. a Bluetooth speaker drops), cpal's AAudio
-/// host on Android has no recovery path and the callback thread simply stops
-/// being called — not "produces silence", *stops running*. `StallWatch` lives
-/// inside that same callback, so it cannot report anything once the callback
-/// itself is gone; only an outside observer comparing [`CALLBACK_TICKS`]
-/// against its own clock can notice.
+/// host on Android stops calling the data callback — not "produces silence",
+/// *stops running*. `StallWatch` lives inside that same callback, so it cannot
+/// report anything once the callback itself is gone; only an outside observer
+/// comparing [`CALLBACK_TICKS`] against its own clock can notice. `audio_thread`
+/// then drops the stream and retries reopen.
 ///
 /// Like `StallWatch`, this is a pure state machine with no channel, lock, or
 /// clock of its own, so it can be driven and tested without any of those —
@@ -821,11 +821,28 @@ static EVENTS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// from inside the callback: the callback not running at all any more.
 static CALLBACK_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Set (never cleared) by the cpal error callback. Read by `CallbackWatch` to
-/// let a genuine stream error shorten how long a stall has to run before it
-/// is reported — see its doc comment for why this alone never triggers a
-/// report.
+/// Set by the cpal error callback; cleared by `audio_thread` when it drops a
+/// lost stream before reopen. Read by `CallbackWatch` to let a genuine stream
+/// error shorten how long a stall has to run before it is reported — see its
+/// doc comment for why this alone never triggers a report.
 static STREAM_ERROR_SEEN: AtomicBool = AtomicBool::new(false);
+
+/// How long to wait after closing a lost stream (or a failed reopen) before
+/// trying `open_output_stream` again. No retry cap — stay in `Disconnected`
+/// until the device comes back.
+const REOPEN_COOLDOWN: Duration = Duration::from_secs(2);
+
+/// State owned by the audio callback across stream reopen. Held in
+/// `Arc<Mutex<_>>` so `audio_thread` can drop and rebuild the cpal stream
+/// without rebuilding the `Engine`.
+struct RenderState {
+    engine: Engine,
+    stall: StallWatch,
+    /// Edge-detects the end of a transition from `Engine::transition_frames_into`
+    /// at buffer boundaries; see `PlaybackEvent::TransitionEnded` in the
+    /// callback below.
+    was_in_transition: bool,
+}
 
 /// UNIX-epoch milliseconds of the last nav this app itself requested via
 /// [`request_skip_next`], or `0` for "none pending". Lets `events_thread`
@@ -963,6 +980,118 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
     }
 }
 
+/// Open (or reopen) the default output device at the engine's sample rate.
+///
+/// Looks up `default_output_device` every call so a reconnect after Bluetooth
+/// drop can see the device again. Uses `sample_rate` from Engine creation
+/// (not the device's current default) and stereo / `BufferSize::Default`.
+/// Sample format is f32, matching the first open.
+fn open_output_stream(
+    sample_rate: u32,
+    render: Arc<Mutex<RenderState>>,
+    paused: Arc<AtomicBool>,
+    event_tx: SyncSender<PlaybackEvent>,
+    err_log: Sender<String>,
+) -> Result<cpal::Stream, String> {
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| "no default output device".to_string())?;
+    let supported = device
+        .default_output_config()
+        .map_err(|e| format!("default_output_config: {e}"))?;
+    if supported.channels() != 2 {
+        return Err(format!(
+            "engine renders interleaved stereo; device wants {} ch",
+            supported.channels()
+        ));
+    }
+    let config = cpal::StreamConfig {
+        channels: 2,
+        sample_rate,
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let stream = device
+        .build_output_stream(
+            config,
+            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                // First thing, unconditionally: this is the proof the callback is
+                // still alive at all, including while paused. See
+                // `CALLBACK_TICKS` and `CallbackWatch`.
+                CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed);
+                // try_lock: never block the realtime callback on the audio
+                // thread's reopen / drop path (same idea as funkot-cli ClipPlayer).
+                let Ok(mut state) = render.try_lock() else {
+                    out.fill(0.0);
+                    return;
+                };
+                if paused.load(Ordering::Relaxed) {
+                    out.fill(0.0);
+                    state.stall.reset_silence();
+                    set_phase(Phase::Paused);
+                    return;
+                }
+                let frames = state.engine.render(out);
+                let written = frames * 2;
+                if written < out.len() {
+                    out[written..].fill(0.0);
+                }
+                // Bit-exact silence is the one signal a host gets that the
+                // engine had nothing prepared for this buffer; see `StallWatch`.
+                let silent = out.iter().all(|s| *s == 0.0);
+                let total_frames = (out.len() / 2) as u64;
+                let phase = state.stall.observe(total_frames, silent);
+                set_phase(phase);
+
+                // The returned `Vec` drops here, on the audio thread, which frees
+                // it here too — not just allocates it here. `pending_events`
+                // already grows and gets collected on every transition, so
+                // neither the allocation nor this free is new work this adds;
+                // it is the engine's existing cost, and it happens only a few
+                // times per transition (a few times a minute at most), which is
+                // judged cheap enough for the callback.
+                for ev in state.engine.poll_events() {
+                    if event_tx.try_send(PlaybackEvent::Engine(ev)).is_err() {
+                        EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                // Edge-detects the end of a transition from
+                // `Engine::transition_frames_into` at buffer boundaries, since
+                // the engine has no event of its own for "the overlap just
+                // finished" (see `PlaybackEvent::TransitionEnded`). A nav that
+                // arrives *during* a transition makes the engine abort and
+                // immediately start a new one within the same `render` call, so
+                // this still reads `Some` afterwards and the edge for the
+                // interrupted transition is never seen here — only a second
+                // `TransitionStarted` arrives, with no `TransitionEnded` in
+                // between. That is a deliberate consequence of only sampling at
+                // buffer boundaries; `NowTracker::on_transition_started` is what
+                // actually copes with it, by folding the interrupted transition
+                // into the display the moment the second one starts rather than
+                // waiting for an end edge that will never come.
+                let in_transition = state.engine.transition_frames_into().is_some();
+                if state.was_in_transition && !in_transition {
+                    if event_tx.try_send(PlaybackEvent::TransitionEnded).is_err() {
+                        EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                state.was_in_transition = in_transition;
+            },
+            move |e| {
+                let m = format!("stream error: {e}");
+                log::error!("{m}");
+                let _ = err_log.send(m);
+                STREAM_ERROR_SEEN.store(true, Ordering::Relaxed);
+            },
+            None,
+        )
+        .map_err(|e| format!("build_output_stream: {e}"))?;
+    stream
+        .play()
+        .map_err(|e| format!("stream.play: {e}"))?;
+    Ok(stream)
+}
+
 fn audio_thread(
     paths: Vec<PathBuf>,
     cache_dir: PathBuf,
@@ -1010,8 +1139,12 @@ fn audio_thread(
         return;
     }
 
+    // Fixed for the life of this Engine; reopen uses the same rate even if the
+    // device's default sample rate has changed in the meantime.
+    let sample_rate = supported.sample_rate();
+
     let mut options = EngineOptions::default();
-    options.output_sample_rate = supported.sample_rate();
+    options.output_sample_rate = sample_rate;
     // Kept apart from `options.cache_dir` (which takes ownership below): the
     // C-3 loader-status log needs to hash and look up the cache itself, on
     // this same thread, to say whether the track `HostSource::next` just
@@ -1062,8 +1195,8 @@ fn audio_thread(
     engine.set_realtime(true);
     say!("engine created");
 
-    // Grab the nav sender before `engine` moves into the cpal closure below,
-    // and publish both it and a fresh `paused` flag for Tauri commands and the
+    // Grab the nav sender before `engine` moves into `RenderState`, and publish
+    // both it and a fresh `paused` flag for Tauri commands and the
     // notification's JNI callback to reach.
     let paused = Arc::new(AtomicBool::new(false));
     let _ = PLAYBACK.set(Playback {
@@ -1071,8 +1204,11 @@ fn audio_thread(
         nav_tx: engine.nav_sender(),
     });
 
-    let mut stall = StallWatch::new(supported.sample_rate());
-    let err_log = log.clone();
+    let render = Arc::new(Mutex::new(RenderState {
+        engine,
+        stall: StallWatch::new(sample_rate),
+        was_in_transition: false,
+    }));
 
     // Bounded, and drained on its own thread rather than by the caller of
     // `player_state` — see `events_thread`. 64 is generous for a channel
@@ -1098,87 +1234,20 @@ fn audio_thread(
         log::warn!("spawn funkot-events: {e}");
     }
 
-    // Edge-detects the end of a transition from `Engine::transition_frames_into`
-    // at buffer boundaries, since the engine has no event of its own for
-    // "the overlap just finished" (see `PlaybackEvent::TransitionEnded`).
-    // A nav that arrives *during* a transition makes the engine abort and
-    // immediately start a new one within the same `render` call, so this
-    // still reads `Some` afterwards and the edge for the interrupted
-    // transition is never seen here — only a second `TransitionStarted`
-    // arrives, with no `TransitionEnded` in between. That is a deliberate
-    // consequence of only sampling at buffer boundaries; `NowTracker::
-    // on_transition_started` is what actually copes with it, by folding the
-    // interrupted transition into the display the moment the second one
-    // starts rather than waiting for an end edge that will never come.
-    let mut was_in_transition = false;
-    let stream = device.build_output_stream(
-        supported.config(),
-        move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // First thing, unconditionally: this is the proof the callback is
-            // still alive at all, including while paused. See
-            // `CALLBACK_TICKS` and `CallbackWatch`.
-            CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed);
-            if paused.load(Ordering::Relaxed) {
-                out.fill(0.0);
-                stall.reset_silence();
-                set_phase(Phase::Paused);
-                return;
-            }
-            let frames = engine.render(out);
-            let written = frames * 2;
-            if written < out.len() {
-                out[written..].fill(0.0);
-            }
-            // Bit-exact silence is the one signal a host gets that the
-            // engine had nothing prepared for this buffer; see `StallWatch`.
-            let silent = out.iter().all(|s| *s == 0.0);
-            let total_frames = (out.len() / 2) as u64;
-            let phase = stall.observe(total_frames, silent);
-            set_phase(phase);
-
-            // The returned `Vec` drops here, on the audio thread, which frees
-            // it here too — not just allocates it here. `pending_events`
-            // already grows and gets collected on every transition, so
-            // neither the allocation nor this free is new work this adds;
-            // it is the engine's existing cost, and it happens only a few
-            // times per transition (a few times a minute at most), which is
-            // judged cheap enough for the callback.
-            for ev in engine.poll_events() {
-                if event_tx.try_send(PlaybackEvent::Engine(ev)).is_err() {
-                    EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            let in_transition = engine.transition_frames_into().is_some();
-            if was_in_transition && !in_transition {
-                if event_tx.try_send(PlaybackEvent::TransitionEnded).is_err() {
-                    EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            was_in_transition = in_transition;
-        },
-        move |e| {
-            let m = format!("stream error: {e}");
-            log::error!("{m}");
-            let _ = err_log.send(m);
-            STREAM_ERROR_SEEN.store(true, Ordering::Relaxed);
-        },
-        None,
-    );
-
-    let stream = match stream {
-        Ok(s) => s,
+    let mut stream: Option<cpal::Stream> = match open_output_stream(
+        sample_rate,
+        Arc::clone(&render),
+        Arc::clone(&paused),
+        event_tx.clone(),
+        log.clone(),
+    ) {
+        Ok(s) => Some(s),
         Err(e) => {
-            say!("FAIL: build_output_stream: {e}");
+            say!("FAIL: {e}");
             set_phase(Phase::Failed);
             return;
         }
     };
-
-    if let Err(e) = stream.play() {
-        say!("FAIL: stream.play: {e}");
-        set_phase(Phase::Failed);
-        return;
-    }
     say!("PLAYING");
 
     // Hold the stream alive — it dies with this thread — and, while we are
@@ -1190,7 +1259,12 @@ fn audio_thread(
     // fact: read together with the "loader: preparing X (analysis: …)" line
     // above it, logcat says both that playback starved and what the loader
     // was busy with at the time.
-    let mut stalled_since: Option<std::time::Instant> = None;
+    //
+    // When the callback is lost, this loop drops the stream, clears
+    // `STREAM_ERROR_SEEN`, and retries `open_output_stream` after
+    // `REOPEN_COOLDOWN` until the device returns. Engine / queue / playhead
+    // stay in `RenderState`.
+    let mut stalled_since: Option<Instant> = None;
     // Last value seen from `EVENTS_DROPPED`, so the warning below reports
     // only the increase since the last check rather than the running total
     // every second.
@@ -1198,17 +1272,66 @@ fn audio_thread(
     // See `CallbackWatch`. Seeded from the current tick count rather than 0
     // so the first `observe` a second from now compares against a callback
     // that has actually had a chance to run, not a spurious jump from 0.
+    // Recreated after each successful reopen.
     let mut cb_watch = CallbackWatch::new(CALLBACK_TICKS.load(Ordering::Relaxed));
     // Whether the last watchdog check already reported the callback lost, so
     // the log line below fires once, on the alive-to-lost edge, and not every
     // second the callback stays lost.
     let mut reported_lost = false;
+    let mut retry_after: Option<Instant> = None;
     loop {
         // A second's granularity on a gap that runs for minutes. Kept coarse
         // on purpose: this thread lives for the whole listening session, and
         // the rest of the app goes out of its way not to wake a phone up for
         // no reason.
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(1));
+
+        // No open stream: stay Disconnected and retry reopen on the cooldown.
+        // Do not set `Failed` — that is for the initial setup path only.
+        if stream.is_none() {
+            set_phase(Phase::Disconnected);
+            let ready = retry_after
+                .map(|t| Instant::now() >= t)
+                .unwrap_or(true);
+            if ready {
+                // Reset silence *before* `play()` so the first buffers of the
+                // new stream cannot observe a stale `silent_frames` count.
+                // Safe: no callback is running while `stream` is `None`.
+                if let Ok(mut state) = render.lock() {
+                    state.stall.reset_silence();
+                }
+                match open_output_stream(
+                    sample_rate,
+                    Arc::clone(&render),
+                    Arc::clone(&paused),
+                    event_tx.clone(),
+                    log.clone(),
+                ) {
+                    Ok(s) => {
+                        cb_watch =
+                            CallbackWatch::new(CALLBACK_TICKS.load(Ordering::Relaxed));
+                        stream = Some(s);
+                        reported_lost = false;
+                        retry_after = None;
+                        say!("output device reopened");
+                    }
+                    Err(e) => {
+                        log::warn!("output device reopen failed: {e}");
+                        retry_after = Some(Instant::now() + REOPEN_COOLDOWN);
+                    }
+                }
+            }
+            let dropped = EVENTS_DROPPED.load(Ordering::Relaxed);
+            if dropped > events_dropped_seen {
+                log::warn!(
+                    "dropped {} playback event(s): the events channel (capacity 64) is full",
+                    dropped - events_dropped_seen
+                );
+                events_dropped_seen = dropped;
+            }
+            continue;
+        }
+
         // The callback check comes first because it decides how to read PHASE
         // below: once the callback is gone, PHASE is whatever this loop last
         // wrote, not a report from the engine.
@@ -1220,14 +1343,12 @@ fn audio_thread(
         // `Stalled`, so leaving this to run would read the phase this loop
         // itself just wrote as "no longer stalled" and log a resume that never
         // happened — directly on top of the disconnect it is meant to help
-        // diagnose. Holding `stalled_since` instead of clearing it keeps the
-        // measurement honest if the callback ever does come back: the silence
-        // really did start when the stall did.
+        // diagnose.
         if !lost {
             match (get_phase() == Phase::Stalled, stalled_since) {
                 (true, None) => {
                     log::warn!("output has gone silent: the engine has no prepared track ready");
-                    stalled_since = Some(std::time::Instant::now());
+                    stalled_since = Some(Instant::now());
                 }
                 (false, Some(since)) => {
                     log::info!("output resumed after {:.1}s of silence", since.elapsed().as_secs_f64());
@@ -1248,21 +1369,27 @@ fn audio_thread(
             );
             events_dropped_seen = dropped;
         }
-        // The data callback has stopped running (or the stream reported an
-        // error while stuck) and, on the AAudio host this app ships on, is
-        // never coming back. PHASE is deliberately not latched here: this
-        // just keeps re-asserting `Disconnected` for as long as the callback
-        // stays lost, so if it ever does resume, the very next buffer's
-        // `set_phase` inside the callback overwrites it without this loop
-        // having to notice or cooperate.
+        // Callback gone (or error while stuck): close the stream and retry
+        // reopen after cooldown. PHASE stays `Disconnected` until the data
+        // callback's `set_phase` overwrites it — this loop must not write
+        // `Playing` on a successful reopen.
         if lost {
             set_phase(Phase::Disconnected);
             if !reported_lost {
                 log::error!(
-                    "output device disconnected: playback has stopped and will not resume on its own; restart the app"
+                    "output device disconnected: closing stream and retrying reopen"
                 );
                 reported_lost = true;
             }
+            // Drop *before* clearing the flag: stream drop joins cpal's worker
+            // so the error callback finishes first.
+            drop(stream.take());
+            STREAM_ERROR_SEEN.store(false, Ordering::Relaxed);
+            // Do not carry a pre-disconnect stall across reopen — otherwise the
+            // next non-stalled buffer logs a silence duration that includes the
+            // time the device was gone.
+            stalled_since = None;
+            retry_after = Some(Instant::now() + REOPEN_COOLDOWN);
         } else {
             reported_lost = false;
         }
