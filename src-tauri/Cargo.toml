@@ -40,3 +40,19 @@ ndk-context = "0.1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger = "0.11"
+
+# The shipped APK is a --debug build (see README), so the dev profile is what
+# runs on the phone. Unoptimized, funkot-core's decode/analysis/stretch is ~26x
+# slower: a full-track Preserve stretch measured 162s instead of 6.3s, which is
+# longer than the 20s head preview `prepare_first_live` plays while it runs, so
+# the first track went silent for minutes waiting for the Upgrade.
+#
+# funkot-autodj sets this in its own workspace root, but profile settings come
+# from the workspace being built -- as a path dependency here, funkot-core got
+# this crate's (absent) settings instead. Do not delete without making the
+# Android build --release.
+#
+# "*" covers signalsmith-stretch too: cc passes OPT_LEVEL to the C++ compiler,
+# so the header-only DSP is what the -O0 penalty mostly lands on.
+[profile.dev.package."*"]
+opt-level = 2
