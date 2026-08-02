@@ -995,6 +995,39 @@ fn file_name_str(path: &Path) -> String {
         .to_string()
 }
 
+/// Title for the Android notification / MediaSession. Same as UI
+/// `now_playing`: the current file name, or `"funkot-player"` when nothing is
+/// playing (lock screen must not get an empty title).
+fn notification_title_for(now: Option<&Path>) -> String {
+    now.map(file_name_str)
+        .unwrap_or_else(|| "funkot-player".to_string())
+}
+
+/// Used by the Android `currentTitle` JNI entry; desktop builds only exercise
+/// [`notification_title_for`] in unit tests.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn notification_title() -> String {
+    notification_title_for(NOW.lock().unwrap().now.as_deref())
+}
+
+#[cfg(test)]
+mod notification_title_tests {
+    use super::*;
+
+    #[test]
+    fn with_now_uses_file_name() {
+        assert_eq!(
+            notification_title_for(Some(Path::new("/music/track.wav"))),
+            "track.wav"
+        );
+    }
+
+    #[test]
+    fn without_now_falls_back() {
+        assert_eq!(notification_title_for(None), "funkot-player");
+    }
+}
+
 /// Drains the audio thread's event channel and folds it into [`NOW`]. Its own
 /// thread rather than the UI's 500ms poll (`player_state`): Android suspends
 /// the WebView's JS timers once the screen turns off, which is exactly the
@@ -1006,10 +1039,28 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
         match ev {
             PlaybackEvent::Engine(EngineEvent::TransitionStarted { from, to }) => {
                 let origin = resolve_nav_origin();
-                NOW.lock().unwrap().on_transition_started(from, to, origin);
+                // Only an interrupt fold moves `now`; a plain TransitionStarted
+                // leaves it alone, so sync only when the title would change.
+                let changed = {
+                    let mut tracker = NOW.lock().unwrap();
+                    let before = tracker.now.clone();
+                    tracker.on_transition_started(from, to, origin);
+                    tracker.now != before
+                };
+                if changed {
+                    service_sync_state();
+                }
             }
             PlaybackEvent::Engine(EngineEvent::TrackStarted { path, .. }) => {
-                NOW.lock().unwrap().on_track_started(path);
+                let changed = {
+                    let mut tracker = NOW.lock().unwrap();
+                    let before = tracker.now.clone();
+                    tracker.on_track_started(path);
+                    tracker.now != before
+                };
+                if changed {
+                    service_sync_state();
+                }
             }
             PlaybackEvent::Engine(EngineEvent::TrackFailed { path, message }) => {
                 log::warn!("track failed: {} ({message})", path.display());
@@ -1018,7 +1069,13 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 log::info!("engine reports finished");
             }
             PlaybackEvent::TransitionEnded => {
-                let completed = NOW.lock().unwrap().on_transition_ended();
+                let (completed, changed) = {
+                    let mut tracker = NOW.lock().unwrap();
+                    let before = tracker.now.clone();
+                    let completed = tracker.on_transition_ended();
+                    let changed = tracker.now != before;
+                    (completed, changed)
+                };
                 if let Some((from, to, origin)) = completed {
                     log::info!(
                         "transition: {} -> {} ({})",
@@ -1026,6 +1083,9 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                         to.display(),
                         if origin == Origin::Automatic { "automatic" } else { "manual" }
                     );
+                }
+                if changed {
+                    service_sync_state();
                 }
             }
         }
@@ -2297,6 +2357,20 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
         _ => {}
     }
     pack_native_control_state(playback.paused.load(Ordering::Relaxed), get_phase())
+}
+
+/// Current notification / MediaSession title (`NowTracker.now` file name).
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentTitle<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: jni::objects::JClass<'local>,
+) -> jni::sys::jstring {
+    let title = notification_title();
+    env.with_env(|env| {
+        Ok::<_, jni::errors::Error>(env.new_string(&title)?.into_raw())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

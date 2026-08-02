@@ -86,6 +86,10 @@ class PlaybackService : Service() {
          */
         @JvmStatic
         external fun onNativeControl(action: Int): Int
+
+        /** Current track file name for the notification / MediaSession title. */
+        @JvmStatic
+        external fun currentTitle(): String
     }
 
     private lateinit var session: MediaSession
@@ -106,7 +110,7 @@ class PlaybackService : Service() {
             })
             setMetadata(
                 MediaMetadata.Builder()
-                    .putString(MediaMetadata.METADATA_KEY_TITLE, "funkot-player")
+                    .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle())
                     .build(),
             )
             isActive = true
@@ -122,10 +126,12 @@ class PlaybackService : Service() {
         }
         val paused = (packed and 1) != 0
         val phase = packed ushr 1
+        val title = currentTitle()
 
         ensureChannel()
         setPlaybackState(paused, phase)
-        val notification = buildNotification(paused, phase)
+        setSessionTitle(title)
+        val notification = buildNotification(paused, phase, title)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -155,9 +161,19 @@ class PlaybackService : Service() {
     private fun applyControlState(packed: Int) {
         val paused = (packed and 1) != 0
         val phase = packed ushr 1
+        val title = currentTitle()
         setPlaybackState(paused, phase)
+        setSessionTitle(title)
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification(paused, phase))
+            .notify(NOTIFICATION_ID, buildNotification(paused, phase, title))
+    }
+
+    private fun setSessionTitle(title: String) {
+        session.setMetadata(
+            MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+                .build(),
+        )
     }
 
     private fun setPlaybackState(paused: Boolean, phase: Int) {
@@ -201,7 +217,7 @@ class PlaybackService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-    private fun buildNotification(paused: Boolean, phase: Int): Notification {
+    private fun buildNotification(paused: Boolean, phase: Int, title: String): Notification {
         val contentIntent = PendingIntent.getActivity(
             this,
             0,
@@ -232,7 +248,7 @@ class PlaybackService : Service() {
 
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_play)
-            .setContentTitle("funkot-player")
+            .setContentTitle(title)
             .setContentText(contentText)
             .setOngoing(true)
             .setContentIntent(contentIntent)
