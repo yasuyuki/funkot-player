@@ -18,6 +18,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 cpal = "0.18"
 log = "0.4"
+# Embedded tags for Android MediaSession title/artist (probe only; no decode).
+symphonia = { version = "0.6", default-features = false, features = [
+    "mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "alac", "id3v2",
+] }
 
 # Path dependency on purpose: the two repos are kept separate to stop sources
 # mixing, not to make this one build in isolation. ./dev.sh mounts the sibling

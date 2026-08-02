@@ -87,9 +87,13 @@ class PlaybackService : Service() {
         @JvmStatic
         external fun onNativeControl(action: Int): Int
 
-        /** Current track file name for the notification / MediaSession title. */
+        /** Resolved track title for the notification / MediaSession. */
         @JvmStatic
         external fun currentTitle(): String
+
+        /** Resolved track artist for MediaSession (empty when absent). */
+        @JvmStatic
+        external fun currentArtist(): String
     }
 
     private lateinit var session: MediaSession
@@ -111,6 +115,7 @@ class PlaybackService : Service() {
             setMetadata(
                 MediaMetadata.Builder()
                     .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle())
+                    .putString(MediaMetadata.METADATA_KEY_ARTIST, currentArtist())
                     .build(),
             )
             isActive = true
@@ -127,10 +132,11 @@ class PlaybackService : Service() {
         val paused = (packed and 1) != 0
         val phase = packed ushr 1
         val title = currentTitle()
+        val artist = currentArtist()
 
         ensureChannel()
         setPlaybackState(paused, phase)
-        setSessionTitle(title)
+        setSessionMetadata(title, artist)
         val notification = buildNotification(paused, phase, title)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -162,16 +168,18 @@ class PlaybackService : Service() {
         val paused = (packed and 1) != 0
         val phase = packed ushr 1
         val title = currentTitle()
+        val artist = currentArtist()
         setPlaybackState(paused, phase)
-        setSessionTitle(title)
+        setSessionMetadata(title, artist)
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification(paused, phase, title))
     }
 
-    private fun setSessionTitle(title: String) {
+    private fun setSessionMetadata(title: String, artist: String) {
         session.setMetadata(
             MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
                 .build(),
         )
     }

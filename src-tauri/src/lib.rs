@@ -6,12 +6,18 @@
 mod queue;
 mod store;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::{MetadataOptions, StandardTag};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use funkot_core::engine::{Engine, EngineEvent, NavAction};
@@ -986,8 +992,8 @@ fn resolve_nav_origin() -> Origin {
 }
 
 /// Display name only — paths themselves stay in `NowTracker`, because the ⚑
-/// flag work (S5) needs to match on the path and resolving a real track title
-/// is a separate step (S3) this does not attempt.
+/// flag work (S5) needs to match on the path. MediaSession title/artist are
+/// resolved separately from embedded tags ([`session_metadata_for`]).
 fn file_name_str(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -995,36 +1001,201 @@ fn file_name_str(path: &Path) -> String {
         .to_string()
 }
 
-/// Title for the Android notification / MediaSession. Same as UI
-/// `now_playing`: the current file name, or `"funkot-player"` when nothing is
-/// playing (lock screen must not get an empty title).
-fn notification_title_for(now: Option<&Path>) -> String {
-    now.map(file_name_str)
-        .unwrap_or_else(|| "funkot-player".to_string())
+/// Raw embedded tags cached per path (probe once; sync/pause must not reopen).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CachedTags {
+    title: Option<String>,
+    artist: Option<String>,
+}
+
+static TAG_CACHE: LazyLock<Mutex<HashMap<PathBuf, CachedTags>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Resolve MediaSession title/artist from optional `now` path + cached tags.
+///
+/// Blank (whitespace-only) tags are treated as absent. When `now` is set but
+/// title is missing, falls back to [`file_name_str`]; artist falls back to `""`.
+fn session_metadata_for(now: Option<&Path>, tags: &CachedTags) -> (String, String) {
+    let Some(path) = now else {
+        return ("funkot-player".to_string(), String::new());
+    };
+    let title = tags
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| file_name_str(path));
+    let artist = tags
+        .artist
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    (title, artist)
+}
+
+fn probe_tags_inner(path: &Path) -> Result<CachedTags, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut title = None;
+    let mut artist = None;
+    if let Some(rev) = format.metadata().skip_to_latest() {
+        for tag in &rev.media.tags {
+            match &tag.std {
+                Some(StandardTag::TrackTitle(s)) if title.is_none() => {
+                    let t = s.trim();
+                    if !t.is_empty() {
+                        title = Some(t.to_string());
+                    }
+                }
+                Some(StandardTag::Artist(s)) if artist.is_none() => {
+                    let a = s.trim();
+                    if !a.is_empty() {
+                        artist = Some(a.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(CachedTags { title, artist })
+}
+
+/// Path-keyed tag cache. Successful probes (including "no tags") are stored;
+/// I/O / probe errors are not, so a transient open failure can retry.
+fn cached_tags_for(path: &Path) -> CachedTags {
+    {
+        let cache = TAG_CACHE.lock().unwrap();
+        if let Some(tags) = cache.get(path) {
+            return tags.clone();
+        }
+    }
+    match probe_tags_inner(path) {
+        Ok(tags) => {
+            TAG_CACHE
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), tags.clone());
+            tags
+        }
+        Err(err) => {
+            log::debug!("tag probe failed for {}: {err}", path.display());
+            CachedTags::default()
+        }
+    }
+}
+
+/// Last resolved `(now path, title, artist)` so `currentTitle` / `currentArtist`
+/// JNI see one consistent snapshot even when Kotlin calls them back-to-back.
+static LAST_SESSION_META: Mutex<(Option<PathBuf>, String, String)> =
+    Mutex::new((None, String::new(), String::new()));
+
+/// Current MediaSession title/artist from `NOW.now` (+ path-cached tags).
+fn session_metadata() -> (String, String) {
+    let now = NOW.lock().unwrap().now.clone();
+    {
+        let last = LAST_SESSION_META.lock().unwrap();
+        if last.0 == now {
+            return (last.1.clone(), last.2.clone());
+        }
+    }
+    let meta = match now.as_ref() {
+        None => session_metadata_for(None, &CachedTags::default()),
+        Some(path) => {
+            let tags = cached_tags_for(path);
+            session_metadata_for(Some(path.as_path()), &tags)
+        }
+    };
+    *LAST_SESSION_META.lock().unwrap() = (now, meta.0.clone(), meta.1.clone());
+    meta
 }
 
 /// Used by the Android `currentTitle` JNI entry; desktop builds only exercise
-/// [`notification_title_for`] in unit tests.
+/// [`session_metadata_for`] in unit tests.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn notification_title() -> String {
-    notification_title_for(NOW.lock().unwrap().now.as_deref())
+    session_metadata().0
+}
+
+/// Used by the Android `currentArtist` JNI entry.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn notification_artist() -> String {
+    session_metadata().1
 }
 
 #[cfg(test)]
-mod notification_title_tests {
+mod session_metadata_tests {
     use super::*;
 
     #[test]
-    fn with_now_uses_file_name() {
+    fn tagged_title_and_artist() {
+        let tags = CachedTags {
+            title: Some("My Title".into()),
+            artist: Some("The Artist".into()),
+        };
         assert_eq!(
-            notification_title_for(Some(Path::new("/music/track.wav"))),
-            "track.wav"
+            session_metadata_for(Some(Path::new("/music/track.flac")), &tags),
+            ("My Title".into(), "The Artist".into())
+        );
+    }
+
+    #[test]
+    fn missing_title_falls_back_to_file_name() {
+        let tags = CachedTags {
+            title: None,
+            artist: Some("The Artist".into()),
+        };
+        assert_eq!(
+            session_metadata_for(Some(Path::new("/music/track.wav")), &tags),
+            ("track.wav".into(), "The Artist".into())
         );
     }
 
     #[test]
     fn without_now_falls_back() {
-        assert_eq!(notification_title_for(None), "funkot-player");
+        let tags = CachedTags {
+            title: Some("ignored".into()),
+            artist: Some("ignored".into()),
+        };
+        assert_eq!(
+            session_metadata_for(None, &tags),
+            ("funkot-player".into(), String::new())
+        );
+    }
+
+    #[test]
+    fn blank_tags_treated_as_absent() {
+        let tags = CachedTags {
+            title: Some("   ".into()),
+            artist: Some("\t".into()),
+        };
+        assert_eq!(
+            session_metadata_for(Some(Path::new("/music/track.wav")), &tags),
+            ("track.wav".into(), String::new())
+        );
+    }
+
+    /// S2 regression: no tags → file name title, empty artist.
+    #[test]
+    fn untagged_uses_file_name() {
+        assert_eq!(
+            session_metadata_for(Some(Path::new("/music/track.wav")), &CachedTags::default()),
+            ("track.wav".into(), String::new())
+        );
     }
 }
 
@@ -2359,7 +2530,7 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
     pack_native_control_state(playback.paused.load(Ordering::Relaxed), get_phase())
 }
 
-/// Current notification / MediaSession title (`NowTracker.now` file name).
+/// Current notification / MediaSession title (embedded tag or file name).
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentTitle<'local>(
@@ -2369,6 +2540,20 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentTitle<'
     let title = notification_title();
     env.with_env(|env| {
         Ok::<_, jni::errors::Error>(env.new_string(&title)?.into_raw())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// Current MediaSession artist (embedded tag, or empty when absent).
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentArtist<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: jni::objects::JClass<'local>,
+) -> jni::sys::jstring {
+    let artist = notification_artist();
+    env.with_env(|env| {
+        Ok::<_, jni::errors::Error>(env.new_string(&artist)?.into_raw())
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
