@@ -1915,8 +1915,14 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
 struct TrackRow {
     /// Absolute path. Used as the UI's key.
     path: String,
-    /// Display name (file name).
+    /// Display name (file name). Edit tab uses this.
     name: String,
+    /// Tag TITLE, or file name when absent (same resolution as session metadata).
+    title: String,
+    /// Tag ARTIST, or `""` when absent.
+    artist: String,
+    /// Rounded seconds from analysis `total_frames` / `sample_rate`, if analyzed.
+    duration_secs: Option<u32>,
     /// Whether a cached analysis exists. If false, the bar fields are null.
     analyzed: bool,
     intro_bars: Option<u32>,
@@ -1958,15 +1964,20 @@ fn analyzed_cache_entry(
 
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `path`.
 fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("?")
-        .to_string();
+    let name = file_name_str(path);
+    let tags = cached_tags_for(path);
+    let (title, artist) = session_metadata_for(Some(path), &tags);
     match analyzed_cache_entry(path, cache_dir) {
         Some(a) => TrackRow {
             path: path.to_string_lossy().into_owned(),
             name,
+            title,
+            artist,
+            duration_secs: if a.sample_rate == 0 {
+                None
+            } else {
+                Some(((a.total_frames as f64) / (a.sample_rate as f64)).round() as u32)
+            },
             analyzed: true,
             intro_bars: Some(a.intro_bars),
             outro_structure_bars: Some(a.outro_structure_bars),
@@ -1979,6 +1990,9 @@ fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
         None => TrackRow {
             path: path.to_string_lossy().into_owned(),
             name,
+            title,
+            artist,
+            duration_secs: None,
             analyzed: false,
             intro_bars: None,
             outro_structure_bars: None,
@@ -2057,6 +2071,11 @@ mod cache_state_tests {
         let row = track_row(&track, &dir.0);
         assert!(row.analyzed);
         assert_eq!(row.intro_bars, Some(analysis.intro_bars));
+        // Tagless fixture: title falls back to file name, artist empty;
+        // duration comes from provisional frames / sample_rate (200s).
+        assert_eq!(row.title, row.name);
+        assert_eq!(row.artist, "");
+        assert_eq!(row.duration_secs, Some(200));
     }
 
     /// The regression this whole change turns on. An entry that loads but has

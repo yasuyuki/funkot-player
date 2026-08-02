@@ -58,6 +58,25 @@
      is greyed so it is clearly not something to tap. */
   button.bars { min-width: 3.2rem; }
   td.mix { color: #777; width: 1%; }
+  /* Play / edit mode tabs + overflow (scan). UI-only; does not touch transport. */
+  .tabs-bar { display: flex; align-items: center; gap: .4rem; margin-top: .8rem; }
+  .tabs { display: flex; gap: .3rem; flex: 1; }
+  button.tab { width: auto; flex: 1; font-size: 1rem; padding: .45rem .8rem;
+               background: #333; color: #aaa; }
+  button.tab.active { background: #369; color: #fff; }
+  .overflow { position: relative; flex: 0 0 auto; }
+  button.menu-btn { width: auto; font-size: 1.2rem; padding: .35rem .7rem;
+                    background: #333; color: #eee; }
+  .menu { position: absolute; right: 0; top: 100%; margin-top: .25rem;
+          background: #222; border: 1px solid #444; border-radius: .3rem;
+          padding: .25rem; z-index: 10; min-width: 7rem; }
+  .menu[hidden] { display: none; }
+  .menu button { width: 100%; font-size: .95rem; padding: .5rem .7rem;
+                 background: transparent; color: #eee; text-align: left;
+                 border-radius: .2rem; }
+  .menu button:active { background: #369; }
+  .panel[hidden] { display: none; }
+  td.dur { width: 1%; white-space: nowrap; color: #999; }
 </style>
 
 <div id="status" class="idle">idle</div>
@@ -67,11 +86,25 @@
   <button id="toggle">⏸ pause / play</button>
   <button id="next">⏭ next</button>
 </div>
-<div class="row">
-  <button id="scan">⟳ scan</button>
+<div class="tabs-bar">
+  <div class="tabs">
+    <button type="button" id="tab-play" class="tab active">再生</button>
+    <button type="button" id="tab-edit" class="tab">編集</button>
+  </div>
+  <div class="overflow">
+    <button type="button" id="menu-btn" class="menu-btn" aria-label="menu">⋮</button>
+    <div id="menu" class="menu" hidden>
+      <button type="button" id="scan">scan</button>
+    </div>
+  </div>
 </div>
 <div id="progress"></div>
-<table id="library"></table>
+<div id="panel-play" class="panel">
+  <table id="playlist"></table>
+</div>
+<div id="panel-edit" class="panel" hidden>
+  <table id="library"></table>
+</div>
 <table id="queue"></table>
 <pre id="log">idle</pre>
 
@@ -153,6 +186,32 @@
   // truth, so every scan re-walks the folder and re-reads the cache.
   const progress = document.getElementById("progress");
   const library = document.getElementById("library");
+  const playlist = document.getElementById("playlist");
+  const panelPlay = document.getElementById("panel-play");
+  const panelEdit = document.getElementById("panel-edit");
+  const tabPlay = document.getElementById("tab-play");
+  const tabEdit = document.getElementById("tab-edit");
+  const menuBtn = document.getElementById("menu-btn");
+  const menu = document.getElementById("menu");
+
+  // --- Play / edit tabs (S4) ---
+  // Pure UI: switching panels must not invoke start/pause/skip or stop audio.
+  function showTab(which) {
+    const play = which === "play";
+    panelPlay.hidden = !play;
+    panelEdit.hidden = play;
+    tabPlay.classList.toggle("active", play);
+    tabEdit.classList.toggle("active", !play);
+  }
+  tabPlay.onclick = () => showTab("play");
+  tabEdit.onclick = () => showTab("edit");
+
+  menuBtn.onclick = (ev) => {
+    ev.stopPropagation();
+    menu.hidden = !menu.hidden;
+  };
+  document.addEventListener("click", () => { menu.hidden = true; });
+  menu.onclick = (ev) => ev.stopPropagation();
 
   // --- Hand-correcting the bar counts (B-5) ---
   // Tapping a bar count steps to the next value the engine recognises, wrapping
@@ -174,6 +233,24 @@
     return steps.find((s) => s > n) ?? steps[0];
   }
 
+  function formatDuration(secs) {
+    if (secs === null || secs === undefined) return "-";
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  // Tag strings (and file names) go into innerHTML cells; escape so a TITLE
+  // containing `<` cannot become markup. Paths in data-* stay unescaped —
+  // same as before — and are only read back via dataset, not as HTML.
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
   // Kept so a single edited row can be swapped in without re-scanning.
   let libraryRows = [];
 
@@ -187,16 +264,29 @@
         `<button class="mini bars" ${attr}="${n}">${n}${mark}</button></td>`
       );
     };
+    // Edit tab: existing bar table (track / intro / outro / mix / +).
     library.innerHTML =
       "<tr><th>track</th><th>intro</th><th>outro</th><th>mix</th><th></th></tr>" +
       rows
         .map(
           (r) =>
-            `<tr data-path="${r.path}"><td>${r.name}</td>` +
+            `<tr data-path="${esc(r.path)}"><td>${esc(r.name)}</td>` +
             cell(r.intro_bars, r.intro_low_confidence, r.intro_manual, "data-intro") +
             cell(r.outro_structure_bars, r.outro_low_confidence, r.outro_manual, "data-outro") +
             `<td class="mix">${r.outro_bars ?? ""}</td>` +
-            `<td class="act"><button class="mini" data-add="${r.path}">+</button></td></tr>`
+            `<td class="act"><button class="mini" data-add="${esc(r.path)}">+</button></td></tr>`
+        )
+        .join("");
+    // Play tab: title / artist / duration / + (no intro/outro/mix).
+    playlist.innerHTML =
+      "<tr><th>曲名</th><th>アーティスト</th><th>曲長</th><th></th></tr>" +
+      rows
+        .map(
+          (r) =>
+            `<tr data-path="${esc(r.path)}"><td>${esc(r.title)}</td>` +
+            `<td>${esc(r.artist)}</td>` +
+            `<td class="dur">${formatDuration(r.duration_secs)}</td>` +
+            `<td class="act"><button class="mini" data-add="${esc(r.path)}">+</button></td></tr>`
         )
         .join("");
   }
@@ -235,7 +325,21 @@
     });
   };
 
+  playlist.onclick = (ev) => {
+    const b = ev.target.closest("button");
+    if (!b || b.dataset.add === undefined) return;
+    withBusy(b, async () => {
+      try {
+        await invoke("enqueue", { path: b.dataset.add });
+        await refreshQueue();
+      } catch (e) {
+        log.innerHTML = `<span class="err">${e}</span>`;
+      }
+    });
+  };
+
   scanBtn.onclick = () => withBusy(scanBtn, async () => {
+    menu.hidden = true;
     try {
       const rows = await invoke("refresh_library");
       renderLibrary(rows);
