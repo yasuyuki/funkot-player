@@ -46,6 +46,9 @@ class PlaybackService : Service() {
         private const val CONTROL_NEXT = 1
         private const val CONTROL_QUERY = 2
 
+        /** Must match Rust `Phase::Disconnected as u8`. */
+        private const val PHASE_DISCONNECTED = 6
+
         init {
             // Same native library the rest of the app loads (see generated
             // Rust.kt); loading it again here is a no-op if it is already
@@ -77,9 +80,12 @@ class PlaybackService : Service() {
             )
         }
 
-        /** Returns whether playback is paused *after* applying the action. */
+        /**
+         * Packed control state after applying the action:
+         * bit0 = paused; bits 1.. = phase discriminant (must match Rust).
+         */
         @JvmStatic
-        external fun onNativeControl(action: Int): Boolean
+        external fun onNativeControl(action: Int): Int
     }
 
     private lateinit var session: MediaSession
@@ -92,8 +98,8 @@ class PlaybackService : Service() {
             setCallback(object : MediaSession.Callback() {
                 // The media UI shows play or pause depending on the state we
                 // publish, so both callbacks mean the same thing here: toggle.
-                override fun onPlay() = applyPaused(onNativeControl(CONTROL_TOGGLE))
-                override fun onPause() = applyPaused(onNativeControl(CONTROL_TOGGLE))
+                override fun onPlay() = applyControlState(onNativeControl(CONTROL_TOGGLE))
+                override fun onPause() = applyControlState(onNativeControl(CONTROL_TOGGLE))
                 override fun onSkipToNext() {
                     onNativeControl(CONTROL_NEXT)
                 }
@@ -108,16 +114,18 @@ class PlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val paused = when (intent?.action) {
+        val packed = when (intent?.action) {
             ACTION_TOGGLE -> onNativeControl(CONTROL_TOGGLE)
             ACTION_NEXT -> onNativeControl(CONTROL_NEXT)
             // Also covers the first start (null action): query, never assume.
             else -> onNativeControl(CONTROL_QUERY)
         }
+        val paused = (packed and 1) != 0
+        val phase = packed ushr 1
 
         ensureChannel()
-        setPlaybackState(paused)
-        val notification = buildNotification(paused)
+        setPlaybackState(paused, phase)
+        val notification = buildNotification(paused, phase)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -144,20 +152,27 @@ class PlaybackService : Service() {
     }
 
     /** Re-publish state and notification after a control came from the session. */
-    private fun applyPaused(paused: Boolean) {
-        setPlaybackState(paused)
+    private fun applyControlState(packed: Int) {
+        val paused = (packed and 1) != 0
+        val phase = packed ushr 1
+        setPlaybackState(paused, phase)
         getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification(paused))
+            .notify(NOTIFICATION_ID, buildNotification(paused, phase))
     }
 
-    private fun setPlaybackState(paused: Boolean) {
+    private fun setPlaybackState(paused: Boolean, phase: Int) {
+        val state = when {
+            phase == PHASE_DISCONNECTED -> PlaybackState.STATE_BUFFERING
+            paused -> PlaybackState.STATE_PAUSED
+            else -> PlaybackState.STATE_PLAYING
+        }
         session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
                     PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT,
                 )
                 .setState(
-                    if (paused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING,
+                    state,
                     PlaybackState.PLAYBACK_POSITION_UNKNOWN,
                     1.0f,
                 )
@@ -186,7 +201,7 @@ class PlaybackService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-    private fun buildNotification(paused: Boolean): Notification {
+    private fun buildNotification(paused: Boolean, phase: Int): Notification {
         val contentIntent = PendingIntent.getActivity(
             this,
             0,
@@ -209,10 +224,16 @@ class PlaybackService : Service() {
             selfIntent(ACTION_NEXT, 1),
         ).build()
 
+        val contentText = when {
+            phase == PHASE_DISCONNECTED -> "出力切断中"
+            paused -> "一時停止中"
+            else -> "再生中"
+        }
+
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_play)
             .setContentTitle("funkot-player")
-            .setContentText(if (paused) "一時停止中" else "再生中")
+            .setContentText(contentText)
             .setOngoing(true)
             .setContentIntent(contentIntent)
             .addAction(toggle)

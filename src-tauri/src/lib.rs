@@ -99,9 +99,10 @@ fn get_phase() -> Phase {
 /// notification's play/pause) so the two cannot drift on what pausing or
 /// resuming does to `PHASE` — they used to duplicate this and disagree.
 ///
-/// Pausing writes `Phase::Paused` here, immediately: the flag is now set,
-/// definitely, whether or not the cpal callback is even still alive to see
-/// it, so there is nothing worth waiting for.
+/// Pausing writes `Phase::Paused` here immediately — except when already
+/// `Disconnected`: the flag still flips (so reconnect resumes paused), but
+/// overwriting `PHASE` would briefly show `paused` in the UI until
+/// `audio_thread`'s ~1s watchdog writes `Disconnected` back.
 ///
 /// Resuming writes nothing to `PHASE`. If the callback is alive it publishes
 /// `Playing`, `Starting`, or `Stalled` itself within about one buffer
@@ -112,10 +113,17 @@ fn get_phase() -> Phase {
 fn flip_paused(paused: &AtomicBool) -> bool {
     // fetch_xor(true) returns the *previous* value; the new state is its negation.
     let now_paused = !paused.fetch_xor(true, Ordering::Relaxed);
-    if now_paused {
+    if now_paused && get_phase() != Phase::Disconnected {
         set_phase(Phase::Paused);
     }
     now_paused
+}
+
+/// Pack paused + phase for the Android `onNativeControl` JNI return value.
+/// bit0 = paused; bits 1.. = `Phase as u8`. Must stay in lockstep with Kotlin.
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn pack_native_control_state(paused: bool, phase: Phase) -> i32 {
+    ((phase as i32) << 1) | (paused as i32)
 }
 
 /// Where the app keeps music, the analysis cache, and its own data, as
@@ -554,6 +562,50 @@ mod stall_watch_tests {
         ] {
             assert!(Phase::from_u8(p as u8) == p, "{} did not round-trip", p.as_str());
         }
+    }
+}
+
+#[cfg(test)]
+mod flip_paused_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// `PHASE` is process-global; these tests must not interleave with each other
+    /// under cargo's default multi-threaded runner.
+    static PHASE_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn pause_while_disconnected_keeps_phase() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        set_phase(Phase::Disconnected);
+        let paused = AtomicBool::new(false);
+        assert!(flip_paused(&paused));
+        assert!(paused.load(Ordering::Relaxed));
+        assert!(get_phase() == Phase::Disconnected);
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
+    fn pause_while_playing_sets_paused_phase() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        set_phase(Phase::Playing);
+        let paused = AtomicBool::new(false);
+        assert!(flip_paused(&paused));
+        assert!(paused.load(Ordering::Relaxed));
+        assert!(get_phase() == Phase::Paused);
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
+    fn pack_native_control_state_encodes_paused_and_phase() {
+        // Pure encoder; does not touch `PHASE`.
+        assert!(
+            pack_native_control_state(true, Phase::Disconnected)
+                == ((Phase::Disconnected as i32) << 1) | 1
+        );
+        assert!(
+            pack_native_control_state(false, Phase::Playing) == (Phase::Playing as i32) << 1
+        );
     }
 }
 
@@ -2221,20 +2273,18 @@ fn service_sync_state() {
 }
 
 /// Called from `PlaybackService`'s notification actions. `action` is
-/// 0 = toggle play/pause, 1 = skip to next track.
+/// 0 = toggle play/pause, 1 = skip to next track, 2 = query only.
 #[cfg(target_os = "android")]
 #[no_mangle]
-/// Returns whether playback is paused *after* the action, so the Kotlin side
-/// can keep the MediaSession state and the notification in step without holding
-/// its own copy of the flag.
+/// Returns packed `paused` + `phase` *after* the action so Kotlin can keep
+/// MediaSession / notification in step (see `pack_native_control_state`).
 pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeControl(
     _env: *mut std::ffi::c_void,
     _class: *mut std::ffi::c_void,
     action: i32,
-) -> jni::sys::jboolean {
-    // jni-sys 0.4 defines jboolean as a real `bool`, not the u8 it used to be.
+) -> jni::sys::jint {
     let Some(playback) = PLAYBACK.get() else {
-        return false;
+        return pack_native_control_state(false, get_phase());
     };
     match action {
         0 => {
@@ -2246,7 +2296,7 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
         // 2 = query only, used when the app's own buttons changed the flag.
         _ => {}
     }
-    playback.paused.load(Ordering::Relaxed)
+    pack_native_control_state(playback.paused.load(Ordering::Relaxed), get_phase())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
