@@ -1,5 +1,6 @@
-//! Persistence for the playback queue (`queue.json`) and for the bar counts
-//! the user has corrected by hand (`library.json`).
+//! Persistence for the playback queue (`queue.json`), the bar counts the
+//! user has corrected by hand (`library.json`), and transition flags the
+//! listener marked as bad (`flags.json`).
 //!
 //! # Why the app keeps its own copy of the manual bars
 //!
@@ -19,16 +20,17 @@
 //! # Where these files live
 //!
 //! In `AppDirs::data_dir`, and deliberately *not* in the analysis cache.
-//! Both files are the listener's own work — the queue they built and the
-//! corrections they made — whereas the cache holds derived data that is meant
-//! to be disposable, and that the README tells people to delete outright when
-//! analysis misbehaves. User data under a directory whose published repair
-//! step is `rm -rf` does not survive the first repair. `data_dir` is still
-//! internal storage (`filesDir` on Android, the app data dir on desktop), so
-//! this asks for no new permission and stays out of the MTP-visible folder.
+//! These files are the listener's own work — the queue they built, the
+//! corrections they made, and the transitions they flagged — whereas the
+//! cache holds derived data that is meant to be disposable, and that the
+//! README tells people to delete outright when analysis misbehaves. User
+//! data under a directory whose published repair step is `rm -rf` does not
+//! survive the first repair. `data_dir` is still internal storage
+//! (`filesDir` on Android, the app data dir on desktop), so this asks for
+//! no new permission and stays out of the MTP-visible folder.
 //!
-//! Early builds did keep both files in the cache; `migrate_from` moves
-//! anything still there.
+//! Early builds did keep queue/library in the cache; `migrate_from` moves
+//! anything still there (including `flags.json` if present).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -37,9 +39,11 @@ use std::path::{Path, PathBuf};
 
 const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
+const FLAGS_FILE: &str = "flags.json";
 
-/// Move both files from a previous location into `dir`, if they are still
-/// there. Safe to call on every launch; a no-op once nothing is left behind.
+/// Move persisted files from a previous location into `dir`, if they are
+/// still there. Safe to call on every launch; a no-op once nothing is left
+/// behind.
 ///
 /// A file already present at the destination wins and the stale copy is left
 /// alone: the destination is the live one, and overwriting it with an older
@@ -51,7 +55,7 @@ pub fn migrate_from(old_dir: &Path, dir: &Path) {
     if old_dir == dir {
         return;
     }
-    for name in [QUEUE_FILE, LIBRARY_FILE] {
+    for name in [QUEUE_FILE, LIBRARY_FILE, FLAGS_FILE] {
         let from = old_dir.join(name);
         let to = dir.join(name);
         if !from.exists() || to.exists() {
@@ -136,6 +140,46 @@ pub fn save_overrides(dir: &Path, overrides: &Overrides) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(overrides)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(LIBRARY_FILE), json)
+}
+
+/// One automatic transition pair the listener flagged as bad.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TransitionFlag {
+    pub count: u32,
+    /// Unix epoch milliseconds of the most recent flag press for this pair.
+    pub last_flagged_ms: u64,
+}
+
+/// Keyed by `"from_hash\tto_hash"` (content hashes joined by a single TAB).
+pub type Flags = BTreeMap<String, TransitionFlag>;
+
+/// Build the map key for a flagged transition pair.
+pub fn flag_key(from_hash: &str, to_hash: &str) -> String {
+    format!("{from_hash}\t{to_hash}")
+}
+
+/// Load transition flags saved under `dir`.
+///
+/// Missing or corrupt → empty map (same policy as [`load_overrides`]).
+pub fn load_flags(dir: &Path) -> Flags {
+    let bytes = match fs::read(dir.join(FLAGS_FILE)) {
+        Ok(b) => b,
+        Err(_) => return Flags::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(e) => {
+            log::warn!("{FLAGS_FILE} is unreadable, starting empty: {e}");
+            Flags::new()
+        }
+    }
+}
+
+/// Persist `flags` under `dir`, overwriting any previous save.
+pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(flags)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(FLAGS_FILE), json)
 }
 
 #[cfg(test)]
@@ -252,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_moves_both_files_and_leaves_nothing_behind() {
+    fn migrate_moves_all_files_and_leaves_nothing_behind() {
         let old = TempDir::new("migrate-old");
         let new = TempDir::new("migrate-new");
 
@@ -262,13 +306,24 @@ mod tests {
         let mut o = Overrides::new();
         o.insert("aaa".into(), BarOverride { intro_bars: Some(32), outro_structure_bars: None });
         save_overrides(&old.0, &o).unwrap();
+        let mut flags = Flags::new();
+        flags.insert(
+            flag_key("from", "to"),
+            TransitionFlag {
+                count: 1,
+                last_flagged_ms: 1,
+            },
+        );
+        save_flags(&old.0, &flags).unwrap();
 
         migrate_from(&old.0, &new.0);
 
         assert_eq!(load_queue(&new.0).unwrap(), vec![PathBuf::from("/music/a.flac")]);
         assert_eq!(load_overrides(&new.0), o);
+        assert_eq!(load_flags(&new.0), flags);
         assert!(!old.0.join(QUEUE_FILE).exists());
         assert!(!old.0.join(LIBRARY_FILE).exists());
+        assert!(!old.0.join(FLAGS_FILE).exists());
     }
 
     /// The whole point is that this runs on every launch.
@@ -279,6 +334,7 @@ mod tests {
         migrate_from(&old.0, &new.0);
         assert!(load_queue(&new.0).unwrap().is_empty());
         assert!(load_overrides(&new.0).is_empty());
+        assert!(load_flags(&new.0).is_empty());
     }
 
     /// A leftover in the old location must never clobber the live file.
@@ -319,5 +375,62 @@ mod tests {
         save_queue(&dir.0, &queue).unwrap();
         let loaded = load_queue(&dir.0).unwrap();
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn flags_round_trip() {
+        let dir = TempDir::new("flags-roundtrip");
+        let mut flags = Flags::new();
+        flags.insert(
+            flag_key("aaa", "bbb"),
+            TransitionFlag {
+                count: 3,
+                last_flagged_ms: 1_700_000_000_000,
+            },
+        );
+        save_flags(&dir.0, &flags).unwrap();
+        assert_eq!(load_flags(&dir.0), flags);
+    }
+
+    #[test]
+    fn missing_flags_file_is_empty() {
+        let dir = TempDir::new("flags-missing");
+        assert!(load_flags(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn corrupt_flags_file_is_empty_not_a_panic() {
+        let dir = TempDir::new("flags-corrupt");
+        fs::write(dir.0.join(FLAGS_FILE), b"{not json").unwrap();
+        assert!(load_flags(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn flagging_same_key_twice_increments_count() {
+        let dir = TempDir::new("flags-merge");
+        let key = flag_key("from_hash", "to_hash");
+
+        let mut flags = Flags::new();
+        flags.insert(
+            key.clone(),
+            TransitionFlag {
+                count: 1,
+                last_flagged_ms: 100,
+            },
+        );
+        save_flags(&dir.0, &flags).unwrap();
+
+        let mut flags = load_flags(&dir.0);
+        let entry = flags.entry(key.clone()).or_insert(TransitionFlag {
+            count: 0,
+            last_flagged_ms: 0,
+        });
+        entry.count += 1;
+        entry.last_flagged_ms = 200;
+        save_flags(&dir.0, &flags).unwrap();
+
+        let loaded = load_flags(&dir.0);
+        assert_eq!(loaded[&key].count, 2);
+        assert_eq!(loaded[&key].last_flagged_ms, 200);
     }
 }

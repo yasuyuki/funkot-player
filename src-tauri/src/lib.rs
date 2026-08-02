@@ -294,6 +294,22 @@ fn app_dirs(app: tauri::AppHandle) -> Result<AppDirs, String> {
     dirs
 }
 
+/// Serialises writes under `data_dir` (`queue.json` and `flags.json`).
+///
+/// The mutating commands run on Tauri's blocking threadpool, so two of them
+/// really do overlap — tapping ✕ on one row and ↑ on another in quick
+/// succession is enough. Each takes its snapshot *inside* this lock, so the
+/// last write is always the latest state; without it the two snapshots can
+/// reach `fs::write` in the opposite order and leave the file a revision
+/// behind, or interleave inside the truncate-then-write and leave it torn.
+///
+/// Process-wide (not on `AppState`) so Android notification JNI can share the
+/// same lock without a Tauri handle.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Key last written by `flag_last_transition`, for a single-shot undo.
+static LAST_FLAG_UNDO: Mutex<Option<String>> = Mutex::new(None);
+
 /// Where the audio thread reports back to the UI. `cpal::Stream` is not `Send`
 /// on every platform, so it never leaves the thread that created it.
 struct AppState {
@@ -301,14 +317,6 @@ struct AppState {
     lines: Mutex<Vec<String>>,
     started: Mutex<bool>,
     queue: SharedQueue,
-    /// Serialises writes of `queue.json`. The queue-mutating commands run on
-    /// Tauri's blocking threadpool, so two of them really do overlap — tapping
-    /// ✕ on one row and ↑ on another in quick succession is enough. Each takes
-    /// its snapshot *inside* this lock, so the last write is always the latest
-    /// state; without it the two snapshots can reach `fs::write` in the
-    /// opposite order and leave the file a queue behind, or interleave inside
-    /// the truncate-then-write and leave it torn.
-    save_lock: Mutex<()>,
 }
 
 impl Default for AppState {
@@ -318,7 +326,6 @@ impl Default for AppState {
             lines: Mutex::new(Vec::new()),
             started: Mutex::new(false),
             queue: queue::new_shared_queue(),
-            save_lock: Mutex::new(()),
         }
     }
 }
@@ -1829,6 +1836,117 @@ fn player_state() -> PlayerState {
     }
 }
 
+/// Result of recording the last automatic transition as a bad mix.
+#[derive(serde::Serialize, Clone)]
+struct FlagResult {
+    from_title: String,
+    to_title: String,
+    count: u32,
+}
+
+/// Record `NowTracker::last_transition` into `flags.json`. Playback is
+/// untouched: no nav, pause, or engine call.
+///
+/// `record_undo` is true for the in-app button (toast 取消). The notification
+/// path passes false so a background ⚑ cannot steal the toast's undo target.
+fn flag_last_transition_impl(data_dir: &Path, record_undo: bool) -> Result<FlagResult, String> {
+    let (from, to) = {
+        let now = NOW.lock().unwrap();
+        let t = now
+            .last_transition
+            .as_ref()
+            .ok_or_else(|| "no transition to flag".to_string())?;
+        (t.from.clone(), t.to.clone())
+    };
+
+    let from_hash = funkot_core::cache::content_hash(&from)
+        .map_err(|e| format!("cannot hash {}: {e}", from.display()))?;
+    let to_hash = funkot_core::cache::content_hash(&to)
+        .map_err(|e| format!("cannot hash {}: {e}", to.display()))?;
+
+    let from_title = {
+        let tags = cached_tags_for(&from);
+        session_metadata_for(Some(from.as_path()), &tags).0
+    };
+    let to_title = {
+        let tags = cached_tags_for(&to);
+        session_metadata_for(Some(to.as_path()), &tags).0
+    };
+
+    let key = store::flag_key(&from_hash, &to_hash);
+
+    // Unlike `set_bars` (warn-and-succeed), a failed write here must not
+    // advertise success: the toast offers undo, and undoing a count that
+    // never landed on disk would silently drop an older flag.
+    let count = {
+        let _saving = SAVE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut flags = store::load_flags(data_dir);
+        let entry = flags.entry(key.clone()).or_insert(store::TransitionFlag {
+            count: 0,
+            last_flagged_ms: 0,
+        });
+        entry.count = entry.count.saturating_add(1);
+        entry.last_flagged_ms = now_ms();
+        let count = entry.count;
+        store::save_flags(data_dir, &flags).map_err(|e| format!("cannot persist flags: {e}"))?;
+        if record_undo {
+            *LAST_FLAG_UNDO
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key);
+        }
+        count
+    };
+
+    Ok(FlagResult {
+        from_title,
+        to_title,
+        count,
+    })
+}
+
+#[tauri::command(async)]
+fn flag_last_transition(app: tauri::AppHandle) -> Result<FlagResult, String> {
+    let dirs = resolve_dirs(&app)?;
+    flag_last_transition_impl(Path::new(&dirs.data_dir), true)
+}
+
+/// Undo the most recent `flag_last_transition` (single-shot).
+#[tauri::command(async)]
+fn undo_last_flag(app: tauri::AppHandle) -> Result<(), String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = {
+        let slot = LAST_FLAG_UNDO
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.clone().ok_or_else(|| "nothing to undo".to_string())?
+    };
+
+    let mut flags = store::load_flags(&data_dir);
+    match flags.get(&key).map(|e| e.count) {
+        Some(0 | 1) => {
+            flags.remove(&key);
+        }
+        Some(_) => {
+            flags.get_mut(&key).expect("key present").count -= 1;
+        }
+        None => {}
+    }
+    store::save_flags(&data_dir, &flags).map_err(|e| format!("cannot persist flags: {e}"))?;
+    // Only consume the undo token after the write lands, so a failed save
+    // leaves the toast's 取消 usable.
+    *LAST_FLAG_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    Ok(())
+}
+
 /// Snapshot of the playback queue, for the UI.
 #[derive(serde::Serialize, Clone)]
 struct QueueSnapshot {
@@ -1852,12 +1970,11 @@ fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
         }
     };
     // Snapshot and write under one lock, so concurrent commands cannot write
-    // out of order; see `AppState::save_lock`. Poisoning is not a concern:
-    // nothing under this guard can panic in a way that leaves shared state
-    // half-updated, so recovering the guard is better than taking the app
-    // down over a stale mirror.
-    let _saving = state
-        .save_lock
+    // out of order; see `SAVE_LOCK`. Poisoning is not a concern: nothing under
+    // this guard can panic in a way that leaves shared state half-updated, so
+    // recovering the guard is better than taking the app down over a stale
+    // mirror.
+    let _saving = SAVE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let pending: VecDeque<PathBuf> = queue::snapshot(&state.queue).into_iter().collect();
@@ -2522,8 +2639,13 @@ fn service_sync_state() {
     service_call("syncFrom");
 }
 
+/// Outcome of the most recent notification ⚑ (`CONTROL_FLAG` = 3).
+#[cfg(target_os = "android")]
+static LAST_FLAG_OK: AtomicBool = AtomicBool::new(false);
+
 /// Called from `PlaybackService`'s notification actions. `action` is
-/// 0 = toggle play/pause, 1 = skip to next track, 2 = query only.
+/// 0 = toggle play/pause, 1 = skip to next track, 2 = query only,
+/// 3 = flag last automatic transition (no playback change).
 #[cfg(target_os = "android")]
 #[no_mangle]
 /// Returns packed `paused` + `phase` *after* the action so Kotlin can keep
@@ -2533,6 +2655,23 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
     _class: *mut std::ffi::c_void,
     action: i32,
 ) -> jni::sys::jint {
+    // Flagging only needs `NOW` + `data_dir`; it must not depend on the audio
+    // thread having published `PLAYBACK` yet (and must still set LAST_FLAG_OK).
+    if action == 3 {
+        // Do not touch LAST_FLAG_UNDO — the in-app toast's 取消 must keep
+        // pointing at whatever the listener himself flagged.
+        let ok = match platform_dirs() {
+            Ok(dirs) => flag_last_transition_impl(Path::new(&dirs.data_dir), false).is_ok(),
+            Err(_) => false,
+        };
+        LAST_FLAG_OK.store(ok, Ordering::Relaxed);
+        let paused = PLAYBACK
+            .get()
+            .map(|p| p.paused.load(Ordering::Relaxed))
+            .unwrap_or(false);
+        return pack_native_control_state(paused, get_phase());
+    }
+
     let Some(playback) = PLAYBACK.get() else {
         return pack_native_control_state(false, get_phase());
     };
@@ -2547,6 +2686,16 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
         _ => {}
     }
     pack_native_control_state(playback.paused.load(Ordering::Relaxed), get_phase())
+}
+
+/// Whether the last notification ⚑ (`onNativeControl(3)`) persisted successfully.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_lastFlagOk(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+) -> jni::sys::jboolean {
+    LAST_FLAG_OK.load(Ordering::Relaxed) as jni::sys::jboolean
 }
 
 /// Current notification / MediaSession title (embedded tag or file name).
@@ -2598,6 +2747,8 @@ pub fn run() {
             skip_next,
             is_paused,
             player_state,
+            flag_last_transition,
+            undo_last_flag,
             refresh_library,
             set_bars,
             enqueue,

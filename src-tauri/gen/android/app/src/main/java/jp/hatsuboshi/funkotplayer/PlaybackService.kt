@@ -13,7 +13,12 @@ import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.util.Log
+import android.widget.Toast
 
 /**
  * Foreground service whose only job is to keep this process foreground-
@@ -39,15 +44,19 @@ class PlaybackService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val ACTION_TOGGLE = "jp.hatsuboshi.funkotplayer.action.TOGGLE"
         private const val ACTION_NEXT = "jp.hatsuboshi.funkotplayer.action.NEXT"
+        private const val ACTION_FLAG = "jp.hatsuboshi.funkotplayer.action.FLAG"
         private const val ACTION_SYNC = "jp.hatsuboshi.funkotplayer.action.SYNC"
 
         /** Must match the `action` values handled in `onNativeControl` (Rust). */
         private const val CONTROL_TOGGLE = 0
         private const val CONTROL_NEXT = 1
         private const val CONTROL_QUERY = 2
+        private const val CONTROL_FLAG = 3
 
         /** Must match Rust `Phase::Disconnected as u8`. */
         private const val PHASE_DISCONNECTED = 6
+
+        private const val FLAG_FEEDBACK_MS = 4_000L
 
         init {
             // Same native library the rest of the app loads (see generated
@@ -87,6 +96,10 @@ class PlaybackService : Service() {
         @JvmStatic
         external fun onNativeControl(action: Int): Int
 
+        /** Whether the last notification ⚑ persisted successfully. */
+        @JvmStatic
+        external fun lastFlagOk(): Boolean
+
         /** Resolved track title for the notification / MediaSession. */
         @JvmStatic
         external fun currentTitle(): String
@@ -97,6 +110,15 @@ class PlaybackService : Service() {
     }
 
     private lateinit var session: MediaSession
+
+    /**
+     * Transient feedback after tapping ⚑; cleared after [FLAG_FEEDBACK_MS].
+     * Android 13+ media UI ignores [Notification.Builder.setSubText], so we
+     * also flash it via MediaMetadata artist + a Toast.
+     */
+    private var flagFeedback: String? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var clearFlagFeedback: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -110,6 +132,13 @@ class PlaybackService : Service() {
                 override fun onPause() = applyControlState(onNativeControl(CONTROL_TOGGLE))
                 override fun onSkipToNext() {
                     onNativeControl(CONTROL_NEXT)
+                }
+                // Android 13+ media controls read PlaybackState custom actions,
+                // not Notification.Action. ACTION_FLAG is that custom action.
+                override fun onCustomAction(action: String, extras: Bundle?) {
+                    if (action != ACTION_FLAG) return
+                    onNativeControl(CONTROL_FLAG)
+                    showFlagFeedback(lastFlagOk())
                 }
             })
             setMetadata(
@@ -126,6 +155,9 @@ class PlaybackService : Service() {
         val packed = when (intent?.action) {
             ACTION_TOGGLE -> onNativeControl(CONTROL_TOGGLE)
             ACTION_NEXT -> onNativeControl(CONTROL_NEXT)
+            ACTION_FLAG -> onNativeControl(CONTROL_FLAG).also {
+                showFlagFeedback(lastFlagOk())
+            }
             // Also covers the first start (null action): query, never assume.
             else -> onNativeControl(CONTROL_QUERY)
         }
@@ -158,6 +190,8 @@ class PlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        clearFlagFeedback?.let { mainHandler.removeCallbacks(it) }
+        clearFlagFeedback = null
         session.isActive = false
         session.release()
         super.onDestroy()
@@ -175,11 +209,35 @@ class PlaybackService : Service() {
             .notify(NOTIFICATION_ID, buildNotification(paused, phase, title))
     }
 
+    private fun showFlagFeedback(ok: Boolean) {
+        val msg = if (ok) "記録しました" else "記録できませんでした"
+        flagFeedback = msg
+        Log.i("funkot", "flag feedback: $msg")
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+        clearFlagFeedback?.let { mainHandler.removeCallbacks(it) }
+        // Publish now; callers may also refresh — setSessionMetadata keeps
+        // flagFeedback on the artist line until the timer clears it.
+        val packed = onNativeControl(CONTROL_QUERY)
+        applyControlState(packed)
+
+        val clear = Runnable {
+            flagFeedback = null
+            clearFlagFeedback = null
+            applyControlState(onNativeControl(CONTROL_QUERY))
+        }
+        clearFlagFeedback = clear
+        mainHandler.postDelayed(clear, FLAG_FEEDBACK_MS)
+    }
+
     private fun setSessionMetadata(title: String, artist: String) {
+        // Android 13+ media UI ignores Notification.setSubText; while feedback
+        // is active, surface it on the artist line the controls already show.
+        val displayArtist = flagFeedback ?: artist
         session.setMetadata(
             MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, displayArtist)
                 .build(),
         )
     }
@@ -190,10 +248,20 @@ class PlaybackService : Service() {
             paused -> PlaybackState.STATE_PAUSED
             else -> PlaybackState.STATE_PLAYING
         }
+        // Android 13+ derives media-control buttons from PlaybackState, not
+        // from Notification.Action. With PLAY_PAUSE + SKIP_TO_NEXT and no
+        // SKIP_TO_PREVIOUS, the custom ⚑ fills compact slot 2 (pause | ⚑ | next).
         session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
                     PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT,
+                )
+                .addCustomAction(
+                    PlaybackState.CustomAction.Builder(
+                        ACTION_FLAG,
+                        "⚑",
+                        R.drawable.ic_flag,
+                    ).build(),
                 )
                 .setState(
                     state,
@@ -237,6 +305,8 @@ class PlaybackService : Service() {
         // Own drawables rather than android.R.drawable.*: a framework resource
         // id handed out under this app's package name is a mismatch the system
         // UI has to resolve, and it is not worth the risk for three tiny paths.
+        // Pre-Android 13 still paints these Notification.Actions; 13+ uses the
+        // PlaybackState custom action instead (see setPlaybackState).
         val toggle = Notification.Action.Builder(
             Icon.createWithResource(this, if (paused) R.drawable.ic_play else R.drawable.ic_pause),
             if (paused) "再生" else "一時停止",
@@ -247,6 +317,11 @@ class PlaybackService : Service() {
             "次へ",
             selfIntent(ACTION_NEXT, 1),
         ).build()
+        val flag = Notification.Action.Builder(
+            Icon.createWithResource(this, R.drawable.ic_flag),
+            "⚑",
+            selfIntent(ACTION_FLAG, 2),
+        ).build()
 
         val contentText = when {
             phase == PHASE_DISCONNECTED -> "出力切断中"
@@ -254,7 +329,7 @@ class PlaybackService : Service() {
             else -> "再生中"
         }
 
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_play)
             .setContentTitle(title)
             .setContentText(contentText)
@@ -262,11 +337,13 @@ class PlaybackService : Service() {
             .setContentIntent(contentIntent)
             .addAction(toggle)
             .addAction(next)
+            .addAction(flag)
             .setStyle(
                 Notification.MediaStyle()
                     .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(0, 1),
+                    .setShowActionsInCompactView(0, 1, 2),
             )
-            .build()
+        flagFeedback?.let { builder.setSubText(it) }
+        return builder.build()
     }
 }
