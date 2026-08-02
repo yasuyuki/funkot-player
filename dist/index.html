@@ -22,10 +22,16 @@
      same reason #toggle's state classes below are: keeping colour rules in
      the stylesheet is what makes their precedence explicit and reviewable. */
   #status { margin: 0 0 .6rem; font-size: .95rem; }
+  /* Below #status, so it reads as a detail of it rather than a second status
+     line. The reserved height is what keeps the transport buttons from
+     jumping down a line the moment a title arrives -- an empty div collapses
+     to nothing, and ▶ start would move out from under a thumb already on
+     its way to it. */
+  #now { margin: 0 0 .6rem; min-height: 1.2em; font-size: .85rem; color: #999; }
   #status.idle { color: #777; }
   #status.starting, #status.paused, #status.stalled { color: #fa6; }
   #status.playing { color: #6c9; }
-  #status.failed { color: #f66; }
+  #status.failed, #status.disconnected { color: #f66; }
   /* `.row button` sets a blue background for every button in the transport
      row, #toggle included. Its playing/paused/off looks are expressed as
      classes with an id-qualified selector (id + class beats element + class
@@ -55,6 +61,7 @@
 </style>
 
 <div id="status" class="idle">idle</div>
+<div id="now"></div>
 <button id="go">▶ start</button>
 <div class="row">
   <button id="toggle">⏸ pause / play</button>
@@ -72,6 +79,7 @@
   const invoke = window.__TAURI__.core.invoke;
   const log = document.getElementById("log");
   const status = document.getElementById("status");
+  const nowEl = document.getElementById("now");
   const goBtn = document.getElementById("go");
   const toggleBtn = document.getElementById("toggle");
   const nextBtn = document.getElementById("next");
@@ -334,6 +342,7 @@
     paused: "paused",
     stalled: "waiting for the next track to be prepared",
     failed: "failed — see the log below; restart the app to try again",
+    disconnected: "output device lost — restart the app to resume playback",
   };
 
   function applyPhase(phase) {
@@ -359,7 +368,7 @@
       toggleBtn.textContent = "▶ play";
       toggleBtn.classList.add("st-paused");
     } else {
-      // idle, starting, failed
+      // idle, starting, failed, disconnected
       toggleBtn.disabled = true;
       toggleBtn.classList.add("st-off");
     }
@@ -371,7 +380,12 @@
 
   async function refreshPlayerState() {
     try {
-      applyPhase((await invoke("player_state")).phase);
+      const state = await invoke("player_state");
+      applyPhase(state.phase);
+      // `previous` and `last_transition` also come back here, but v1 shows
+      // nothing about transitions while a track is playing -- they exist for
+      // the ⚑ flag work (S5), not for display yet.
+      nowEl.textContent = state.now_playing ?? "";
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
     }

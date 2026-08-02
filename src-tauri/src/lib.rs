@@ -8,12 +8,13 @@ mod store;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use funkot_core::engine::{Engine, NavAction};
+use funkot_core::engine::{Engine, EngineEvent, NavAction};
 use funkot_core::EngineOptions;
 
 use queue::{DrainPolicy, HostSource, SharedQueue};
@@ -45,6 +46,11 @@ enum Phase {
     Paused = 3,
     Stalled = 4,
     Failed = 5,
+    /// The audio callback has stopped running (or the stream reported an
+    /// error) and is not coming back on its own. See `CallbackWatch`. Distinct
+    /// from `Stalled`, which means the callback is alive but has nothing
+    /// prepared to play — here nothing is calling `render` at all any more.
+    Disconnected = 6,
 }
 
 impl Phase {
@@ -56,6 +62,7 @@ impl Phase {
             Phase::Paused => "paused",
             Phase::Stalled => "stalled",
             Phase::Failed => "failed",
+            Phase::Disconnected => "disconnected",
         }
     }
 
@@ -70,6 +77,7 @@ impl Phase {
             3 => Phase::Paused,
             4 => Phase::Stalled,
             5 => Phase::Failed,
+            6 => Phase::Disconnected,
             _ => Phase::Idle,
         }
     }
@@ -83,6 +91,31 @@ fn set_phase(p: Phase) {
 
 fn get_phase() -> Phase {
     Phase::from_u8(PHASE.load(Ordering::Relaxed))
+}
+
+/// Flips a `Playback`'s paused flag and reports the new state. Shared between
+/// `toggle_pause` (in-app button) and `onNativeControl` action 0 (the
+/// notification's play/pause) so the two cannot drift on what pausing or
+/// resuming does to `PHASE` — they used to duplicate this and disagree.
+///
+/// Pausing writes `Phase::Paused` here, immediately: the flag is now set,
+/// definitely, whether or not the cpal callback is even still alive to see
+/// it, so there is nothing worth waiting for.
+///
+/// Resuming writes nothing to `PHASE`. If the callback is alive it publishes
+/// `Playing`, `Starting`, or `Stalled` itself within about one buffer
+/// (~21ms), and if it is not, `audio_thread`'s watchdog (`CallbackWatch`)
+/// catches that within a few seconds and sets `Phase::Disconnected`. Writing
+/// `Playing` here would be asserting something nobody has confirmed: on a
+/// Bluetooth speaker that dropped, the callback that would have overwritten
+/// it is exactly the one that is never coming back.
+fn flip_paused(paused: &AtomicBool) -> bool {
+    // fetch_xor(true) returns the *previous* value; the new state is its negation.
+    let now_paused = !paused.fetch_xor(true, Ordering::Relaxed);
+    if now_paused {
+        set_phase(Phase::Paused);
+    }
+    now_paused
 }
 
 /// Where the app keeps music, the analysis cache, and its own data, as
@@ -345,6 +378,112 @@ impl StallWatch {
     }
 }
 
+/// How long [`CALLBACK_TICKS`] can go unmoved before the callback is declared
+/// dead. At the engine's 1026-frame buffer and 48 kHz, the callback runs
+/// about 47 times a second, so a full second of no movement is already well
+/// past anything a live stream should ever do; three gives scheduling jitter
+/// room without meaningfully delaying the report.
+const STUCK_SECS_BEFORE_LOST: u32 = 3;
+
+/// Turns "is the cpal data callback still being invoked at all" into a UI
+/// phase decision.
+///
+/// This exists for exactly the failure `StallWatch` cannot see: when the
+/// output device disconnects (e.g. a Bluetooth speaker drops), cpal's AAudio
+/// host on Android has no recovery path and the callback thread simply stops
+/// being called — not "produces silence", *stops running*. `StallWatch` lives
+/// inside that same callback, so it cannot report anything once the callback
+/// itself is gone; only an outside observer comparing [`CALLBACK_TICKS`]
+/// against its own clock can notice.
+///
+/// Like `StallWatch`, this is a pure state machine with no channel, lock, or
+/// clock of its own, so it can be driven and tested without any of those —
+/// the caller (`audio_thread`'s idle loop) supplies both the current tick
+/// count and its own once-a-second cadence.
+struct CallbackWatch {
+    last_ticks: u64,
+    stuck_secs: u32,
+}
+
+impl CallbackWatch {
+    fn new(ticks: u64) -> Self {
+        Self { last_ticks: ticks, stuck_secs: 0 }
+    }
+
+    /// Call once a second with the current value of [`CALLBACK_TICKS`] and
+    /// whether the stream's error callback has fired since the last stream
+    /// (re)start. Returns whether the callback should be reported lost.
+    ///
+    /// `error_seen` alone never reports a loss: if `ticks` is still moving the
+    /// stream is plainly still alive (cpal can call the error callback for
+    /// conditions it recovers from on its own), and a false "disconnected"
+    /// would be worse than staying silent about a hiccup that already passed.
+    /// It only shortens how long a genuine stall has to run before it is
+    /// reported, from `STUCK_SECS_BEFORE_LOST` seconds down to one.
+    fn observe(&mut self, ticks: u64, error_seen: bool) -> bool {
+        if ticks != self.last_ticks {
+            self.last_ticks = ticks;
+            self.stuck_secs = 0;
+            return false;
+        }
+        self.stuck_secs += 1;
+        error_seen || self.stuck_secs >= STUCK_SECS_BEFORE_LOST
+    }
+}
+
+#[cfg(test)]
+mod cb_watch_tests {
+    use super::*;
+
+    #[test]
+    fn moving_ticks_never_report_lost() {
+        let mut w = CallbackWatch::new(0);
+        for t in 1..=10 {
+            assert!(!w.observe(t, false));
+        }
+    }
+
+    #[test]
+    fn stuck_under_the_threshold_is_not_lost() {
+        let mut w = CallbackWatch::new(5);
+        assert!(!w.observe(5, false));
+        assert!(!w.observe(5, false));
+    }
+
+    #[test]
+    fn stuck_for_the_full_threshold_is_lost() {
+        let mut w = CallbackWatch::new(5);
+        assert!(!w.observe(5, false)); // 1
+        assert!(!w.observe(5, false)); // 2
+        assert!(w.observe(5, false)); // 3: STUCK_SECS_BEFORE_LOST reached
+    }
+
+    #[test]
+    fn recovering_after_stuck_resets_and_reports_alive() {
+        let mut w = CallbackWatch::new(5);
+        assert!(!w.observe(5, false));
+        assert!(!w.observe(5, false));
+        assert!(w.observe(5, false));
+        // Ticks move again: self-recovers, no latching.
+        assert!(!w.observe(6, false));
+        // And the stuck counter really was reset, not just skipped this once.
+        assert!(!w.observe(6, false));
+        assert!(!w.observe(6, false));
+    }
+
+    #[test]
+    fn error_seen_with_stuck_ticks_reports_lost_on_the_first_observation() {
+        let mut w = CallbackWatch::new(5);
+        assert!(w.observe(5, true));
+    }
+
+    #[test]
+    fn error_seen_with_moving_ticks_is_not_lost() {
+        let mut w = CallbackWatch::new(5);
+        assert!(!w.observe(6, true));
+    }
+}
+
 #[cfg(test)]
 mod stall_watch_tests {
     use super::*;
@@ -411,8 +550,415 @@ mod stall_watch_tests {
             Phase::Paused,
             Phase::Stalled,
             Phase::Failed,
+            Phase::Disconnected,
         ] {
             assert!(Phase::from_u8(p as u8) == p, "{} did not round-trip", p.as_str());
+        }
+    }
+}
+
+/// Who started a transition. Only distinguishes "should this feed the ⚑
+/// flag work (S5)" — a listener's own skip is not a mixing judgement worth
+/// reviewing, so it must not be confused for one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Origin {
+    Automatic,
+    Manual,
+}
+
+/// What crosses the audio thread's event channel. `EngineEvent` is
+/// everything the engine itself reports; `TransitionEnded` is synthesized by
+/// the cpal callback (see its comment) because the engine has no event of
+/// its own for "the overlap just finished".
+enum PlaybackEvent {
+    Engine(EngineEvent),
+    TransitionEnded,
+}
+
+/// A transition that has finished, kept only long enough to answer "what did
+/// the ⚑ flag work (S5) need to know about the last mix".
+struct CompletedTransition {
+    from: PathBuf,
+    to: PathBuf,
+    origin: Origin,
+    at: Instant,
+}
+
+/// Folds the engine's `TrackStarted`/`TransitionStarted` events (plus the
+/// synthesized `TransitionEnded`) into "what is playing now". Kept free of
+/// channels and mutexes so it can be tested as a plain state machine — the
+/// only clock it reads is the `Instant` stamped on a completed transition,
+/// which no test asserts on.
+///
+/// The display switch happens on transition *end*, not start: a transition
+/// overlaps two tracks for tens of seconds at 180 BPM, and switching at the
+/// start would show the wrong title/notification for most of that overlap.
+struct NowTracker {
+    now: Option<PathBuf>,
+    previous: Option<PathBuf>,
+    in_progress: Option<(PathBuf, PathBuf, Origin)>,
+    /// The last transition worth flagging — i.e. not a listener-triggered
+    /// skip and not a same-track restart. See `on_transition_ended`.
+    last_transition: Option<CompletedTransition>,
+}
+
+impl NowTracker {
+    const fn new() -> Self {
+        Self {
+            now: None,
+            previous: None,
+            in_progress: None,
+            last_transition: None,
+        }
+    }
+
+    /// Records the transition as in-progress; `now` does not change until it
+    /// completes (see the struct doc comment) — except when one is already
+    /// in progress, in which case that one is folded into `now`/`previous`
+    /// right here instead.
+    ///
+    /// A transition already being in progress means a nav interrupted it: the
+    /// engine's `begin_transition_to` calls `abort_active_transition()` and
+    /// starts the new transition within the same `render()` call (nav is
+    /// drained frame by frame inside `render`, so an interruption always
+    /// completes inside one buffer). That means `on_transition_ended`'s
+    /// buffer-boundary edge — `transition_frames_into()` going from `Some` to
+    /// `None` — can *never* fire for the interrupted transition; it stays
+    /// `Some` straight through into the new one. Waiting for it here would
+    /// leave `now` on the pre-interruption track for as long as the second
+    /// transition takes to finish, which is exactly the "wrong title for
+    /// tens of seconds" problem switching on transition-end exists to avoid.
+    ///
+    /// The interrupted transition is not recorded as `last_transition`: the
+    /// listener never heard it through to the end, so it is not a mixing
+    /// decision worth flagging.
+    fn on_transition_started(&mut self, from: PathBuf, to: PathBuf, origin: Origin) {
+        if let Some((old_from, old_to, _)) = self.in_progress.take() {
+            self.previous = Some(old_from);
+            self.now = Some(old_to);
+        }
+        self.in_progress = Some((from, to, origin));
+    }
+
+    /// The engine pushes `TransitionStarted` then `TrackStarted` for the
+    /// track it just began mixing in, so a `TrackStarted` that arrives while
+    /// a transition is in progress is that same entry announcing itself —
+    /// not a new track playing solo. Only a `TrackStarted` with nothing in
+    /// progress (the first track, or a track that started without a
+    /// transition) should move `now`.
+    fn on_track_started(&mut self, path: PathBuf) {
+        if self.in_progress.is_none() {
+            self.now = Some(path);
+        }
+    }
+
+    /// Applies the completed transition and returns `(from, to, origin)` for
+    /// the caller to log, regardless of whether it also went into
+    /// `last_transition`. A no-op (returns `None`) if nothing was in
+    /// progress. An interrupted transition never reaches here at all — see
+    /// `on_transition_started`, which folds it into `now`/`previous` itself
+    /// the moment the interruption is observed — so by the time this runs,
+    /// `in_progress`, if present, always describes the transition that is
+    /// actually ending.
+    fn on_transition_ended(&mut self) -> Option<(PathBuf, PathBuf, Origin)> {
+        let (from, to, origin) = self.in_progress.take()?;
+        self.previous = Some(from.clone());
+        self.now = Some(to.clone());
+        // A listener's own skip (Manual) and a same-track restart (from ==
+        // to) both still switch the displayed title above, but neither is a
+        // mixing decision worth flagging: the operator picked it themselves.
+        if origin == Origin::Automatic && from != to {
+            self.last_transition = Some(CompletedTransition {
+                from: from.clone(),
+                to: to.clone(),
+                origin,
+                at: Instant::now(),
+            });
+        }
+        Some((from, to, origin))
+    }
+}
+
+#[cfg(test)]
+mod now_tracker_tests {
+    use super::*;
+
+    fn p(name: &str) -> PathBuf {
+        PathBuf::from(name)
+    }
+
+    #[test]
+    fn first_track_started_sets_now_and_leaves_previous_none() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        assert_eq!(t.now, Some(p("a.wav")));
+        assert_eq!(t.previous, None);
+    }
+
+    #[test]
+    fn transition_started_alone_does_not_move_now_until_it_ends() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
+        assert_eq!(t.now, Some(p("a.wav")), "TransitionStarted alone must not switch now");
+        t.on_transition_ended();
+        assert_eq!(t.now, Some(p("b.wav")));
+        assert_eq!(t.previous, Some(p("a.wav")));
+    }
+
+    #[test]
+    fn track_started_mid_transition_does_not_jump_ahead_of_transition_ended() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
+        // The engine announces the entry it just mixed in with its own
+        // TrackStarted; that must not be mistaken for a standalone track.
+        t.on_track_started(p("b.wav"));
+        assert_eq!(t.now, Some(p("a.wav")));
+    }
+
+    /// Regression test for a nav interrupting a transition already in
+    /// progress (e.g. ⏭ pressed while an automatic mix is underway).
+    /// `on_transition_ended` can never fire for the interrupted A→B — see
+    /// `on_transition_started`'s doc comment — so this must fold it into
+    /// `now`/`previous` itself, immediately, when B→C starts. Without this,
+    /// `now` would stay on A until the *second* transition finishes.
+    #[test]
+    fn a_transition_started_while_one_is_in_progress_folds_the_interrupted_one_in() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
+        t.on_transition_started(p("b.wav"), p("c.wav"), Origin::Automatic);
+        assert_eq!(t.now, Some(p("b.wav")), "the interrupted transition's destination is what is actually playing");
+        assert_eq!(t.previous, Some(p("a.wav")));
+        // The listener never heard A→B through to the end, so it must not
+        // become a ⚑ candidate.
+        assert!(t.last_transition.is_none());
+    }
+
+    /// Continuation of the above: once the second transition (the one that
+    /// did the interrupting) itself completes normally, it is recorded like
+    /// any other automatic transition.
+    #[test]
+    fn the_transition_that_did_the_interrupting_is_recorded_normally_once_it_ends() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
+        t.on_transition_started(p("b.wav"), p("c.wav"), Origin::Automatic);
+        t.on_transition_ended();
+        assert_eq!(t.now, Some(p("c.wav")));
+        assert_eq!(t.previous, Some(p("b.wav")));
+        let last = t.last_transition.as_ref().expect("B->C should be recorded");
+        assert_eq!(last.from, p("b.wav"));
+        assert_eq!(last.to, p("c.wav"));
+    }
+
+    #[test]
+    fn automatic_transition_is_recorded_as_the_last_completed_transition() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
+        t.on_transition_ended();
+        let last = t.last_transition.as_ref().expect("automatic transition should be recorded");
+        assert_eq!(last.from, p("a.wav"));
+        assert_eq!(last.to, p("b.wav"));
+        assert_eq!(last.origin, Origin::Automatic);
+    }
+
+    #[test]
+    fn manual_transition_is_not_recorded_as_the_last_automatic_transition() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Manual);
+        t.on_transition_ended();
+        assert!(t.last_transition.is_none());
+        // The title switch still happens; only the flag-worthy record does not.
+        assert_eq!(t.now, Some(p("b.wav")));
+    }
+
+    #[test]
+    fn restart_current_is_not_recorded_as_the_last_automatic_transition() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        t.on_transition_started(p("a.wav"), p("a.wav"), Origin::Automatic);
+        t.on_transition_ended();
+        assert!(t.last_transition.is_none());
+        assert_eq!(t.now, Some(p("a.wav")));
+    }
+
+    #[test]
+    fn transition_ended_without_one_in_progress_is_a_no_op() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        let before_now = t.now.clone();
+        let before_previous = t.previous.clone();
+        assert!(t.on_transition_ended().is_none());
+        assert_eq!(t.now, before_now);
+        assert_eq!(t.previous, before_previous);
+        assert!(t.last_transition.is_none());
+    }
+}
+
+/// Shared "what is playing now" state. Written only by `events_thread` (the
+/// dedicated drain thread, never the cpal callback — see `audio_thread`) and
+/// read by `player_state`.
+static NOW: Mutex<NowTracker> = Mutex::new(NowTracker::new());
+
+/// Count of `PlaybackEvent`s the cpal callback could not hand to
+/// `events_thread` because the channel (capacity 64) was full. Bumped with
+/// `fetch_add` only — no logging — for the same reason `StallWatch` does not
+/// log from inside the callback either. `audio_thread`'s idle loop reports
+/// increases from here once a second; capacity 64 should never fill under
+/// normal use, so any increase means a transition edge — and therefore a
+/// potential ⚑ flag — was lost and is worth a warning.
+static EVENTS_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Incremented by one, with `fetch_add` only, at the very top of the cpal
+/// data callback — before even the `paused` early return, since a paused
+/// callback is still being invoked and that is exactly the fact this exists
+/// to prove. `audio_thread`'s idle loop compares this against its own clock
+/// (see `CallbackWatch`) to notice the one failure `StallWatch` cannot see
+/// from inside the callback: the callback not running at all any more.
+static CALLBACK_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Set (never cleared) by the cpal error callback. Read by `CallbackWatch` to
+/// let a genuine stream error shorten how long a stall has to run before it
+/// is reported — see its doc comment for why this alone never triggers a
+/// report.
+static STREAM_ERROR_SEEN: AtomicBool = AtomicBool::new(false);
+
+/// UNIX-epoch milliseconds of the last nav this app itself requested via
+/// [`request_skip_next`], or `0` for "none pending". Lets `events_thread`
+/// tell a listener's own skip apart from a `TransitionStarted` the engine
+/// raised on its own, without the audio thread having to carry that
+/// knowledge across the event channel itself.
+static NAV_REQUESTED_MS: AtomicU64 = AtomicU64::new(0);
+
+/// How long a nav mark in [`NAV_REQUESTED_MS`] stays valid. Not a real
+/// deadline — a safety valve: `begin_nav` silently drops `TransitionToNext`
+/// whenever `next_track` is `None` (see funkot-core `engine.rs`), and that is
+/// not some rare edge case — it is true for a stretch after *every*
+/// transition starts, until the loader has the following track ready again.
+/// Tap skip during that window and the mark is never consumed by a matching
+/// `TransitionStarted`; without an expiry it would stick around and mislabel
+/// some later, unrelated automatic transition as manual. A false Manual only
+/// keeps that automatic transition out of `last_transition` (the ⚑
+/// candidate) — it does not affect what is displayed as playing.
+const NAV_MARK_TTL: Duration = Duration::from_secs(10);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Ask the engine to transition to the next track, marking the request so
+/// `events_thread` can attribute the resulting `TransitionStarted` to this
+/// app rather than to the engine's own automatic mixing. Both places that can
+/// ask for a skip — the `skip_next` command and the notification's
+/// `onNativeControl` action 1 — go through this so the mark is never set in
+/// one place and missed in the other.
+fn request_skip_next() -> Result<(), String> {
+    let playback = PLAYBACK.get().ok_or("not playing")?;
+    NAV_REQUESTED_MS.store(now_ms(), Ordering::Relaxed);
+    // A full channel (capacity 8) just means a nav is already queued; that is
+    // normal under repeated taps and not an error worth surfacing.
+    let _ = playback.nav_tx.try_send(NavAction::TransitionToNext);
+    Ok(())
+}
+
+/// Whether a nav marked at `marked_ms` (`0` for "no mark") is still fresh
+/// enough at `now_ms` to explain a `TransitionStarted` arriving now. Split out
+/// from `resolve_nav_origin` as a pure function purely so the TTL arithmetic
+/// can be unit-tested without going through the statics.
+fn nav_origin(marked_ms: u64, now_ms: u64) -> Origin {
+    if marked_ms != 0 && now_ms.saturating_sub(marked_ms) <= NAV_MARK_TTL.as_millis() as u64 {
+        Origin::Manual
+    } else {
+        Origin::Automatic
+    }
+}
+
+#[cfg(test)]
+mod nav_origin_tests {
+    use super::*;
+
+    #[test]
+    fn no_mark_is_automatic() {
+        assert_eq!(nav_origin(0, 1_000), Origin::Automatic);
+    }
+
+    #[test]
+    fn a_mark_within_the_ttl_is_manual() {
+        assert_eq!(nav_origin(1_000, 6_000), Origin::Manual);
+    }
+
+    #[test]
+    fn a_mark_past_the_ttl_is_automatic() {
+        let ttl_ms = NAV_MARK_TTL.as_millis() as u64;
+        assert_eq!(nav_origin(1_000, 1_000 + ttl_ms + 1), Origin::Automatic);
+    }
+
+    #[test]
+    fn a_mark_exactly_at_the_ttl_boundary_is_still_manual() {
+        let ttl_ms = NAV_MARK_TTL.as_millis() as u64;
+        assert_eq!(nav_origin(1_000, 1_000 + ttl_ms), Origin::Manual);
+    }
+}
+
+/// Consumes the current nav mark (if any and still fresh) and reports what
+/// origin the transition it is being asked about should be attributed to.
+/// Consuming rather than peeking is what keeps a second, unrelated
+/// `TransitionStarted` shortly after a skip from also being blamed on it.
+fn resolve_nav_origin() -> Origin {
+    let marked = NAV_REQUESTED_MS.swap(0, Ordering::Relaxed);
+    nav_origin(marked, now_ms())
+}
+
+/// Display name only — paths themselves stay in `NowTracker`, because the ⚑
+/// flag work (S5) needs to match on the path and resolving a real track title
+/// is a separate step (S3) this does not attempt.
+fn file_name_str(path: &Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string()
+}
+
+/// Drains the audio thread's event channel and folds it into [`NOW`]. Its own
+/// thread rather than the UI's 500ms poll (`player_state`): Android suspends
+/// the WebView's JS timers once the screen turns off, which is exactly the
+/// "still playing, screen off" case this app exists for, so draining from
+/// there would let events pile up past the channel's capacity instead of
+/// just arriving late.
+fn events_thread(rx: Receiver<PlaybackEvent>) {
+    for ev in rx {
+        match ev {
+            PlaybackEvent::Engine(EngineEvent::TransitionStarted { from, to }) => {
+                let origin = resolve_nav_origin();
+                NOW.lock().unwrap().on_transition_started(from, to, origin);
+            }
+            PlaybackEvent::Engine(EngineEvent::TrackStarted { path, .. }) => {
+                NOW.lock().unwrap().on_track_started(path);
+            }
+            PlaybackEvent::Engine(EngineEvent::TrackFailed { path, message }) => {
+                log::warn!("track failed: {} ({message})", path.display());
+            }
+            PlaybackEvent::Engine(EngineEvent::Finished) => {
+                log::info!("engine reports finished");
+            }
+            PlaybackEvent::TransitionEnded => {
+                let completed = NOW.lock().unwrap().on_transition_ended();
+                if let Some((from, to, origin)) = completed {
+                    log::info!(
+                        "transition: {} -> {} ({})",
+                        from.display(),
+                        to.display(),
+                        if origin == Origin::Automatic { "automatic" } else { "manual" }
+                    );
+                }
+            }
         }
     }
 }
@@ -527,9 +1073,51 @@ fn audio_thread(
 
     let mut stall = StallWatch::new(supported.sample_rate());
     let err_log = log.clone();
+
+    // Bounded, and drained on its own thread rather than by the caller of
+    // `player_state` — see `events_thread`. 64 is generous for a channel
+    // that only ever carries a handful of events per transition; a full
+    // channel is reported via `EVENTS_DROPPED`, not blocked on, because this
+    // sender lives in the cpal callback.
+    //
+    // `try_send` itself never blocks, but it is not lock-free either:
+    // `events_thread` spends nearly all its time parked in `recv()`, and
+    // waking a parked receiver is std's job, done by briefly taking an
+    // internal `Mutex<Waker>` inside `sync_channel`. Uncontended (nothing
+    // else is fighting over that mutex), that is a cheap userland
+    // lock/unlock, and it only happens a few times per transition — a few
+    // times a minute at most — which is judged cheap enough for this
+    // callback. It is not the same "touches no lock at all" guarantee the
+    // rest of the callback holds to; it is a bet that this particular,
+    // rare, uncontended lock is fine.
+    let (event_tx, event_rx) = mpsc::sync_channel::<PlaybackEvent>(64);
+    if let Err(e) = std::thread::Builder::new()
+        .name("funkot-events".into())
+        .spawn(move || events_thread(event_rx))
+    {
+        log::warn!("spawn funkot-events: {e}");
+    }
+
+    // Edge-detects the end of a transition from `Engine::transition_frames_into`
+    // at buffer boundaries, since the engine has no event of its own for
+    // "the overlap just finished" (see `PlaybackEvent::TransitionEnded`).
+    // A nav that arrives *during* a transition makes the engine abort and
+    // immediately start a new one within the same `render` call, so this
+    // still reads `Some` afterwards and the edge for the interrupted
+    // transition is never seen here — only a second `TransitionStarted`
+    // arrives, with no `TransitionEnded` in between. That is a deliberate
+    // consequence of only sampling at buffer boundaries; `NowTracker::
+    // on_transition_started` is what actually copes with it, by folding the
+    // interrupted transition into the display the moment the second one
+    // starts rather than waiting for an end edge that will never come.
+    let mut was_in_transition = false;
     let stream = device.build_output_stream(
         supported.config(),
         move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            // First thing, unconditionally: this is the proof the callback is
+            // still alive at all, including while paused. See
+            // `CALLBACK_TICKS` and `CallbackWatch`.
+            CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed);
             if paused.load(Ordering::Relaxed) {
                 out.fill(0.0);
                 stall.reset_silence();
@@ -547,11 +1135,32 @@ fn audio_thread(
             let total_frames = (out.len() / 2) as u64;
             let phase = stall.observe(total_frames, silent);
             set_phase(phase);
+
+            // The returned `Vec` drops here, on the audio thread, which frees
+            // it here too — not just allocates it here. `pending_events`
+            // already grows and gets collected on every transition, so
+            // neither the allocation nor this free is new work this adds;
+            // it is the engine's existing cost, and it happens only a few
+            // times per transition (a few times a minute at most), which is
+            // judged cheap enough for the callback.
+            for ev in engine.poll_events() {
+                if event_tx.try_send(PlaybackEvent::Engine(ev)).is_err() {
+                    EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let in_transition = engine.transition_frames_into().is_some();
+            if was_in_transition && !in_transition {
+                if event_tx.try_send(PlaybackEvent::TransitionEnded).is_err() {
+                    EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            was_in_transition = in_transition;
         },
         move |e| {
             let m = format!("stream error: {e}");
             log::error!("{m}");
             let _ = err_log.send(m);
+            STREAM_ERROR_SEEN.store(true, Ordering::Relaxed);
         },
         None,
     );
@@ -582,22 +1191,80 @@ fn audio_thread(
     // above it, logcat says both that playback starved and what the loader
     // was busy with at the time.
     let mut stalled_since: Option<std::time::Instant> = None;
+    // Last value seen from `EVENTS_DROPPED`, so the warning below reports
+    // only the increase since the last check rather than the running total
+    // every second.
+    let mut events_dropped_seen = 0u64;
+    // See `CallbackWatch`. Seeded from the current tick count rather than 0
+    // so the first `observe` a second from now compares against a callback
+    // that has actually had a chance to run, not a spurious jump from 0.
+    let mut cb_watch = CallbackWatch::new(CALLBACK_TICKS.load(Ordering::Relaxed));
+    // Whether the last watchdog check already reported the callback lost, so
+    // the log line below fires once, on the alive-to-lost edge, and not every
+    // second the callback stays lost.
+    let mut reported_lost = false;
     loop {
         // A second's granularity on a gap that runs for minutes. Kept coarse
         // on purpose: this thread lives for the whole listening session, and
         // the rest of the app goes out of its way not to wake a phone up for
         // no reason.
         std::thread::sleep(std::time::Duration::from_secs(1));
-        match (get_phase() == Phase::Stalled, stalled_since) {
-            (true, None) => {
-                log::warn!("output has gone silent: the engine has no prepared track ready");
-                stalled_since = Some(std::time::Instant::now());
+        // The callback check comes first because it decides how to read PHASE
+        // below: once the callback is gone, PHASE is whatever this loop last
+        // wrote, not a report from the engine.
+        let lost = cb_watch.observe(
+            CALLBACK_TICKS.load(Ordering::Relaxed),
+            STREAM_ERROR_SEEN.load(Ordering::Relaxed),
+        );
+        // Skipped entirely while the callback is lost. `Disconnected` is not
+        // `Stalled`, so leaving this to run would read the phase this loop
+        // itself just wrote as "no longer stalled" and log a resume that never
+        // happened — directly on top of the disconnect it is meant to help
+        // diagnose. Holding `stalled_since` instead of clearing it keeps the
+        // measurement honest if the callback ever does come back: the silence
+        // really did start when the stall did.
+        if !lost {
+            match (get_phase() == Phase::Stalled, stalled_since) {
+                (true, None) => {
+                    log::warn!("output has gone silent: the engine has no prepared track ready");
+                    stalled_since = Some(std::time::Instant::now());
+                }
+                (false, Some(since)) => {
+                    log::info!("output resumed after {:.1}s of silence", since.elapsed().as_secs_f64());
+                    stalled_since = None;
+                }
+                _ => {}
             }
-            (false, Some(since)) => {
-                log::info!("output resumed after {:.1}s of silence", since.elapsed().as_secs_f64());
-                stalled_since = None;
+        }
+        // Capacity 64 should never fill under normal use; an increase here
+        // means a transition edge — and therefore a potential ⚑ flag — was
+        // lost, which is worth knowing about even though nothing can be done
+        // about it after the fact.
+        let dropped = EVENTS_DROPPED.load(Ordering::Relaxed);
+        if dropped > events_dropped_seen {
+            log::warn!(
+                "dropped {} playback event(s): the events channel (capacity 64) is full",
+                dropped - events_dropped_seen
+            );
+            events_dropped_seen = dropped;
+        }
+        // The data callback has stopped running (or the stream reported an
+        // error while stuck) and, on the AAudio host this app ships on, is
+        // never coming back. PHASE is deliberately not latched here: this
+        // just keeps re-asserting `Disconnected` for as long as the callback
+        // stays lost, so if it ever does resume, the very next buffer's
+        // `set_phase` inside the callback overwrites it without this loop
+        // having to notice or cooperate.
+        if lost {
+            set_phase(Phase::Disconnected);
+            if !reported_lost {
+                log::error!(
+                    "output device disconnected: playback has stopped and will not resume on its own; restart the app"
+                );
+                reported_lost = true;
             }
-            _ => {}
+        } else {
+            reported_lost = false;
         }
     }
 }
@@ -696,12 +1363,7 @@ fn poll_log(state: tauri::State<AppState>) -> Vec<String> {
 #[tauri::command]
 fn toggle_pause() -> Result<bool, String> {
     let playback = PLAYBACK.get().ok_or("not playing")?;
-    // fetch_xor(true) returns the *previous* value; the new state is its negation.
-    let now_paused = !playback.paused.fetch_xor(true, Ordering::Relaxed);
-    // Written here too, not just left for the next audio callback: the UI
-    // polls PHASE, and without this it would not see the new state until the
-    // callback runs again, which never happens at all once actually paused.
-    set_phase(if now_paused { Phase::Paused } else { Phase::Playing });
+    let now_paused = flip_paused(&playback.paused);
     service_sync_state();
     Ok(now_paused)
 }
@@ -709,11 +1371,7 @@ fn toggle_pause() -> Result<bool, String> {
 /// Ask the engine to transition to the next track.
 #[tauri::command]
 fn skip_next() -> Result<(), String> {
-    let playback = PLAYBACK.get().ok_or("not playing")?;
-    // A full channel (capacity 8) just means a nav is already queued; that is
-    // normal under repeated taps and not an error worth surfacing.
-    let _ = playback.nav_tx.try_send(NavAction::TransitionToNext);
-    Ok(())
+    request_skip_next()
 }
 
 #[tauri::command]
@@ -724,18 +1382,40 @@ fn is_paused() -> bool {
         .unwrap_or(false)
 }
 
+/// One completed transition, for display. See `NowTracker::last_transition`
+/// for why this is only ever the last *automatic* one.
+#[derive(serde::Serialize, Clone)]
+struct TransitionInfo {
+    from: String,
+    to: String,
+    automatic: bool,
+    seconds_ago: f64,
+}
+
 /// What the UI paints. Cheap enough to poll twice a second.
 #[derive(serde::Serialize, Clone)]
 struct PlayerState {
     phase: &'static str,
     paused: bool,
+    now_playing: Option<String>,
+    previous: Option<String>,
+    last_transition: Option<TransitionInfo>,
 }
 
 #[tauri::command]
 fn player_state() -> PlayerState {
+    let now = NOW.lock().unwrap();
     PlayerState {
         phase: get_phase().as_str(),
         paused: is_paused(),
+        now_playing: now.now.as_deref().map(file_name_str),
+        previous: now.previous.as_deref().map(file_name_str),
+        last_transition: now.last_transition.as_ref().map(|t| TransitionInfo {
+            from: file_name_str(&t.from),
+            to: file_name_str(&t.to),
+            automatic: t.origin == Origin::Automatic,
+            seconds_ago: t.at.elapsed().as_secs_f64(),
+        }),
     }
 }
 
@@ -1431,14 +2111,10 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
     };
     match action {
         0 => {
-            // fetch_xor(true) returns the *previous* value; the new state is
-            // its negation. Written to PHASE here too, so stopping from the
-            // notification does not leave the in-app UI reporting "playing".
-            let now_paused = !playback.paused.fetch_xor(true, Ordering::Relaxed);
-            set_phase(if now_paused { Phase::Paused } else { Phase::Playing });
+            flip_paused(&playback.paused);
         }
         1 => {
-            let _ = playback.nav_tx.try_send(NavAction::TransitionToNext);
+            let _ = request_skip_next();
         }
         // 2 = query only, used when the app's own buttons changed the flag.
         _ => {}
