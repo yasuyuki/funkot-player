@@ -1912,6 +1912,58 @@ fn flag_last_transition(app: tauri::AppHandle) -> Result<FlagResult, String> {
     flag_last_transition_impl(Path::new(&dirs.data_dir), true)
 }
 
+/// List flagged transitions aggregated by track × role for the edit tab.
+///
+/// Loads `flags.json` under `SAVE_LOCK`, scans `music_dir` for hash→meta
+/// (title / artist / low-confidence), then returns [`store::aggregate_flags`].
+/// Does not start analysis or mutate flags.
+#[tauri::command(async)]
+fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackRow>, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let music_dir = PathBuf::from(&dirs.music_dir);
+    let cache_dir = PathBuf::from(&dirs.cache_dir);
+
+    let flags = {
+        let _saving = SAVE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        store::load_flags(&data_dir)
+    };
+
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&music_dir)
+        .map_err(|e| format!("cannot read {}: {e}", music_dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| is_supported_track(p))
+        .collect();
+    paths.sort();
+
+    let mut meta_by_hash = std::collections::BTreeMap::new();
+    for path in &paths {
+        let Ok(hash) = funkot_core::cache::content_hash(path) else {
+            continue;
+        };
+        let tags = cached_tags_for(path);
+        let (title, artist) = session_metadata_for(Some(path.as_path()), &tags);
+        let (intro_low_confidence, outro_low_confidence) =
+            match analyzed_cache_entry(path, &cache_dir) {
+                Some(a) => (a.intro_bars_low_confidence, a.outro_bars_low_confidence),
+                None => (false, false),
+            };
+        meta_by_hash.insert(
+            hash,
+            store::FlagTrackMeta {
+                title,
+                artist,
+                intro_low_confidence,
+                outro_low_confidence,
+            },
+        );
+    }
+
+    Ok(store::aggregate_flags(&flags, &meta_by_hash))
+}
+
 /// Undo the most recent `flag_last_transition` (single-shot).
 #[tauri::command(async)]
 fn undo_last_flag(app: tauri::AppHandle) -> Result<(), String> {
@@ -2749,6 +2801,7 @@ pub fn run() {
             player_state,
             flag_last_transition,
             undo_last_flag,
+            list_flagged_tracks,
             refresh_library,
             set_bars,
             enqueue,

@@ -182,6 +182,154 @@ pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
     fs::write(dir.join(FLAGS_FILE), json)
 }
 
+/// Display / confidence metadata for one content hash, used by
+/// [`aggregate_flags`]. Built by the command from the music folder scan.
+#[derive(Debug, Clone)]
+pub struct FlagTrackMeta {
+    pub title: String,
+    pub artist: String,
+    pub intro_low_confidence: bool,
+    pub outro_low_confidence: bool,
+}
+
+/// One partner of a [`FlaggedTrackRow`] (the other side of a flagged pair).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FlagPartner {
+    pub track_hash: String,
+    pub title: String,
+    pub count: u32,
+    pub missing: bool,
+}
+
+/// One aggregated row: a track in one role (outgoing or incoming).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FlaggedTrackRow {
+    pub track_hash: String,
+    /// `"outgoing"` (出る側) or `"incoming"` (入る側).
+    pub role: String,
+    pub title: String,
+    pub artist: String,
+    pub count: u32,
+    pub low_confidence: bool,
+    pub missing: bool,
+    pub partners: Vec<FlagPartner>,
+}
+
+const MISSING_TITLE: &str = "ライブラリにない曲";
+const ROLE_OUTGOING: &str = "outgoing";
+const ROLE_INCOMING: &str = "incoming";
+
+/// Aggregate raw `from\tto` flags into track×role rows for the edit tab.
+///
+/// Pure: no I/O. `meta_by_hash` is whatever the caller resolved from the
+/// library scan; hashes absent from it become `missing` rows.
+pub fn aggregate_flags(
+    flags: &Flags,
+    meta_by_hash: &BTreeMap<String, FlagTrackMeta>,
+) -> Vec<FlaggedTrackRow> {
+    use std::collections::HashMap;
+
+    // (track_hash, role) → (total count, partner_hash → count)
+    let mut acc: HashMap<(String, &'static str), (u32, HashMap<String, u32>)> = HashMap::new();
+
+    for (key, flag) in flags {
+        let Some((from, to)) = key.split_once('\t') else {
+            continue;
+        };
+        if from.is_empty() || to.is_empty() {
+            continue;
+        }
+        let count = flag.count;
+        if count == 0 {
+            continue;
+        }
+
+        for (track, role, partner) in [
+            (from, ROLE_OUTGOING, to),
+            (to, ROLE_INCOMING, from),
+        ] {
+            let entry = acc
+                .entry((track.to_string(), role))
+                .or_insert_with(|| (0, HashMap::new()));
+            entry.0 = entry.0.saturating_add(count);
+            let partner_count = entry.1.entry(partner.to_string()).or_insert(0);
+            *partner_count = partner_count.saturating_add(count);
+        }
+    }
+
+    let resolve = |hash: &str| -> (String, String, bool, bool, bool) {
+        match meta_by_hash.get(hash) {
+            Some(m) => (
+                m.title.clone(),
+                m.artist.clone(),
+                m.intro_low_confidence,
+                m.outro_low_confidence,
+                false,
+            ),
+            None => (MISSING_TITLE.to_string(), String::new(), false, false, true),
+        }
+    };
+
+    let mut rows: Vec<FlaggedTrackRow> = acc
+        .into_iter()
+        .map(|((track_hash, role), (count, partners_map))| {
+            let (title, artist, intro_low, outro_low, missing) = resolve(&track_hash);
+            let low_confidence = if missing {
+                false
+            } else if role == ROLE_OUTGOING {
+                outro_low
+            } else {
+                intro_low
+            };
+
+            let mut partners: Vec<FlagPartner> = partners_map
+                .into_iter()
+                .map(|(partner_hash, pcount)| {
+                    let (ptitle, _, _, _, pmissing) = resolve(&partner_hash);
+                    FlagPartner {
+                        track_hash: partner_hash,
+                        title: ptitle,
+                        count: pcount,
+                        missing: pmissing,
+                    }
+                })
+                .collect();
+            partners.sort_by(|a, b| {
+                b.count
+                    .cmp(&a.count)
+                    .then_with(|| a.title.cmp(&b.title))
+                    .then_with(|| a.track_hash.cmp(&b.track_hash))
+            });
+
+            FlaggedTrackRow {
+                track_hash,
+                role: role.to_string(),
+                title,
+                artist,
+                count,
+                low_confidence,
+                missing,
+                partners,
+            }
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| {
+                // outgoing before incoming
+                let ra = if a.role == ROLE_OUTGOING { 0 } else { 1 };
+                let rb = if b.role == ROLE_OUTGOING { 0 } else { 1 };
+                ra.cmp(&rb)
+            })
+            .then_with(|| a.title.cmp(&b.title))
+            .then_with(|| a.track_hash.cmp(&b.track_hash))
+    });
+
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +580,195 @@ mod tests {
         let loaded = load_flags(&dir.0);
         assert_eq!(loaded[&key].count, 2);
         assert_eq!(loaded[&key].last_flagged_ms, 200);
+    }
+
+    fn meta(
+        title: &str,
+        artist: &str,
+        intro_low: bool,
+        outro_low: bool,
+    ) -> FlagTrackMeta {
+        FlagTrackMeta {
+            title: title.into(),
+            artist: artist.into(),
+            intro_low_confidence: intro_low,
+            outro_low_confidence: outro_low,
+        }
+    }
+
+    fn flag(count: u32) -> TransitionFlag {
+        TransitionFlag {
+            count,
+            last_flagged_ms: 0,
+        }
+    }
+
+    /// Outgoing and incoming of the same pair are separate parent rows.
+    #[test]
+    fn aggregate_splits_outgoing_and_incoming() {
+        let mut flags = Flags::new();
+        flags.insert(flag_key("aaa", "bbb"), flag(1));
+        let mut meta_map = BTreeMap::new();
+        meta_map.insert("aaa".into(), meta("Alpha", "ArtA", false, true));
+        meta_map.insert("bbb".into(), meta("Beta", "ArtB", true, false));
+
+        let rows = aggregate_flags(&flags, &meta_map);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].role, ROLE_OUTGOING);
+        assert_eq!(rows[0].track_hash, "aaa");
+        assert_eq!(rows[0].title, "Alpha");
+        assert!(rows[0].low_confidence); // outro
+        assert_eq!(rows[0].partners.len(), 1);
+        assert_eq!(rows[0].partners[0].track_hash, "bbb");
+
+        assert_eq!(rows[1].role, ROLE_INCOMING);
+        assert_eq!(rows[1].track_hash, "bbb");
+        assert_eq!(rows[1].title, "Beta");
+        assert!(rows[1].low_confidence); // intro
+        assert_eq!(rows[1].partners[0].track_hash, "aaa");
+    }
+
+    /// Multiple partners for one track×role sum into one parent count.
+    #[test]
+    fn aggregate_sums_counts_across_partners() {
+        let mut flags = Flags::new();
+        flags.insert(flag_key("aaa", "bbb"), flag(2));
+        flags.insert(flag_key("aaa", "ccc"), flag(3));
+        let mut meta_map = BTreeMap::new();
+        meta_map.insert("aaa".into(), meta("Alpha", "", false, false));
+        meta_map.insert("bbb".into(), meta("Beta", "", false, false));
+        meta_map.insert("ccc".into(), meta("Gamma", "", false, false));
+
+        let rows = aggregate_flags(&flags, &meta_map);
+        let out = rows
+            .iter()
+            .find(|r| r.track_hash == "aaa" && r.role == ROLE_OUTGOING)
+            .expect("outgoing aaa");
+        assert_eq!(out.count, 5);
+        assert_eq!(out.partners.len(), 2);
+        assert_eq!(out.partners[0].track_hash, "ccc");
+        assert_eq!(out.partners[0].count, 3);
+        assert_eq!(out.partners[1].track_hash, "bbb");
+        assert_eq!(out.partners[1].count, 2);
+    }
+
+    /// Parent sort: count desc → outgoing before incoming → title asc.
+    /// `last_flagged_ms` must not affect order.
+    #[test]
+    fn aggregate_sorts_by_count_role_title() {
+        let mut flags = Flags::new();
+        flags.insert(
+            flag_key("aaa", "bbb"),
+            TransitionFlag {
+                count: 1,
+                last_flagged_ms: 9_999,
+            },
+        );
+        flags.insert(
+            flag_key("ccc", "ddd"),
+            TransitionFlag {
+                count: 3,
+                last_flagged_ms: 1,
+            },
+        );
+        flags.insert(flag_key("bbb", "eee"), flag(1));
+        let mut meta_map = BTreeMap::new();
+        meta_map.insert("aaa".into(), meta("Alpha", "", false, false));
+        meta_map.insert("bbb".into(), meta("Beta", "", false, false));
+        meta_map.insert("ccc".into(), meta("Gamma", "", false, false));
+        meta_map.insert("ddd".into(), meta("Delta", "", false, false));
+        meta_map.insert("eee".into(), meta("Epsilon", "", false, false));
+
+        let rows = aggregate_flags(&flags, &meta_map);
+        // count=3: ccc outgoing, ddd incoming
+        // count=1: aaa outgoing, bbb outgoing (+incoming from aaa), eee incoming, …
+        assert_eq!(rows[0].track_hash, "ccc");
+        assert_eq!(rows[0].role, ROLE_OUTGOING);
+        assert_eq!(rows[0].count, 3);
+        assert_eq!(rows[1].track_hash, "ddd");
+        assert_eq!(rows[1].role, ROLE_INCOMING);
+        assert_eq!(rows[1].count, 3);
+
+        // Among count=1 outgoing: Alpha before Beta (title asc); outgoing before incoming.
+        let count1: Vec<_> = rows.iter().filter(|r| r.count == 1).collect();
+        let outgoings: Vec<_> = count1
+            .iter()
+            .filter(|r| r.role == ROLE_OUTGOING)
+            .map(|r| r.title.as_str())
+            .collect();
+        assert_eq!(outgoings, vec!["Alpha", "Beta"]);
+        assert!(count1
+            .iter()
+            .position(|r| r.role == ROLE_OUTGOING)
+            .unwrap()
+            < count1
+                .iter()
+                .position(|r| r.role == ROLE_INCOMING)
+                .unwrap());
+    }
+
+    #[test]
+    fn aggregate_marks_missing_hashes() {
+        let mut flags = Flags::new();
+        flags.insert(flag_key("aaa", "zzz"), flag(2));
+        let mut meta_map = BTreeMap::new();
+        meta_map.insert(
+            "aaa".into(),
+            meta("Alpha", "Art", false, true),
+        );
+
+        let rows = aggregate_flags(&flags, &meta_map);
+        let missing = rows
+            .iter()
+            .find(|r| r.track_hash == "zzz")
+            .expect("missing incoming");
+        assert!(missing.missing);
+        assert_eq!(missing.title, MISSING_TITLE);
+        assert!(!missing.low_confidence); // never ⚠ on missing
+        assert_eq!(missing.role, ROLE_INCOMING);
+
+        let out = rows
+            .iter()
+            .find(|r| r.track_hash == "aaa")
+            .expect("outgoing aaa");
+        assert!(!out.missing);
+        assert!(out.low_confidence);
+        assert_eq!(out.partners[0].track_hash, "zzz");
+        assert!(out.partners[0].missing);
+        assert_eq!(out.partners[0].title, MISSING_TITLE);
+    }
+
+    /// Partners: count desc, then title asc.
+    #[test]
+    fn aggregate_sorts_partners_by_count_then_title() {
+        let mut flags = Flags::new();
+        flags.insert(flag_key("aaa", "bbb"), flag(2));
+        flags.insert(flag_key("aaa", "ccc"), flag(2));
+        flags.insert(flag_key("aaa", "ddd"), flag(5));
+        let mut meta_map = BTreeMap::new();
+        meta_map.insert("aaa".into(), meta("Alpha", "", false, false));
+        meta_map.insert("bbb".into(), meta("Zulu", "", false, false));
+        meta_map.insert("ccc".into(), meta("Mike", "", false, false));
+        meta_map.insert("ddd".into(), meta("Delta", "", false, false));
+
+        let rows = aggregate_flags(&flags, &meta_map);
+        let out = rows
+            .iter()
+            .find(|r| r.role == ROLE_OUTGOING && r.track_hash == "aaa")
+            .expect("outgoing");
+        assert_eq!(
+            out.partners
+                .iter()
+                .map(|p| (p.title.as_str(), p.count))
+                .collect::<Vec<_>>(),
+            vec![("Delta", 5), ("Mike", 2), ("Zulu", 2)]
+        );
+    }
+
+    #[test]
+    fn aggregate_empty_flags_is_empty() {
+        let flags = Flags::new();
+        let meta_map = BTreeMap::new();
+        assert!(aggregate_flags(&flags, &meta_map).is_empty());
     }
 }

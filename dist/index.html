@@ -82,6 +82,25 @@
   .menu button:active { background: #369; }
   .panel[hidden] { display: none; }
   td.dur { width: 1%; white-space: nowrap; color: #999; }
+  /* Edit-tab secondary: 直すべきつなぎ / すべての曲 */
+  .subtabs { display: flex; gap: .3rem; margin-top: .6rem; }
+  #flagged-list { margin-top: .6rem; }
+  .flagged-empty { color: #999; margin: .8rem 0 .4rem; }
+  button.linkish { width: auto; font-size: inherit; padding: 0;
+                   background: transparent; color: #6af;
+                   text-decoration: underline; border-radius: 0; }
+  .flagged-row { border-bottom: 1px solid #333; }
+  .flagged-head { width: 100%; text-align: left; background: transparent;
+                  color: #eee; font-size: .95rem; padding: .5rem .2rem;
+                  display: flex; flex-wrap: wrap; gap: .35rem .6rem;
+                  align-items: baseline; border-radius: 0; }
+  .flagged-artist { color: #999; font-size: .85rem; }
+  .flagged-role { color: #aaa; font-size: .85rem; }
+  .flagged-count { margin-left: auto; }
+  .flagged-warn { color: #fa6; }
+  .flagged-partners { padding: .15rem .2rem .55rem 1rem; font-size: .9rem; color: #ccc; }
+  .flagged-partners[hidden] { display: none; }
+  .flagged-pair { padding: .12rem 0; }
 </style>
 
 <div id="status" class="idle">idle</div>
@@ -110,7 +129,12 @@
   <table id="playlist"></table>
 </div>
 <div id="panel-edit" class="panel" hidden>
-  <table id="library"></table>
+  <div class="subtabs tabs">
+    <button type="button" id="subtab-flags" class="tab active">直すべきつなぎ</button>
+    <button type="button" id="subtab-all" class="tab">すべての曲</button>
+  </div>
+  <div id="flagged-list"></div>
+  <table id="library" hidden></table>
 </div>
 <table id="queue"></table>
 <pre id="log">idle</pre>
@@ -247,12 +271,91 @@
 
   // --- Play / edit tabs (S4) ---
   // Pure UI: switching panels must not invoke start/pause/skip or stop audio.
+  const flaggedList = document.getElementById("flagged-list");
+  const subtabFlags = document.getElementById("subtab-flags");
+  const subtabAll = document.getElementById("subtab-all");
+
+  function showEditSub(which) {
+    const flags = which === "flags";
+    flaggedList.hidden = !flags;
+    library.hidden = flags;
+    subtabFlags.classList.toggle("active", flags);
+    subtabAll.classList.toggle("active", !flags);
+    if (flags) loadFlaggedTracks();
+  }
+
+  let flaggedLoadGen = 0;
+  async function loadFlaggedTracks() {
+    const gen = ++flaggedLoadGen;
+    try {
+      const rows = await invoke("list_flagged_tracks");
+      if (gen !== flaggedLoadGen) return;
+      renderFlaggedTracks(rows);
+    } catch (e) {
+      if (gen !== flaggedLoadGen) return;
+      log.innerHTML = `<span class="err">${e}</span>`;
+    }
+  }
+
+  function renderFlaggedTracks(rows) {
+    if (!rows.length) {
+      flaggedList.innerHTML =
+        `<p class="flagged-empty">直すべきつなぎはありません</p>` +
+        `<button type="button" class="linkish" id="see-all-tracks">すべての曲を見る</button>`;
+      document.getElementById("see-all-tracks").onclick = () => showEditSub("all");
+      return;
+    }
+    flaggedList.innerHTML = rows
+      .map((r) => {
+        const roleLabel = r.role === "outgoing" ? "出る側" : "入る側";
+        const artist = r.artist
+          ? `<span class="flagged-artist">${esc(r.artist)}</span>`
+          : "";
+        const warn = r.low_confidence
+          ? `<span class="flagged-warn">⚠</span>`
+          : "";
+        const partners = r.partners
+          .map((p) => {
+            const left = r.role === "outgoing" ? r.title : p.title;
+            const right = r.role === "outgoing" ? p.title : r.title;
+            const mul = p.count > 1 ? `×${p.count}` : "";
+            return (
+              `<div class="flagged-pair" data-partner-hash="${esc(p.track_hash)}">` +
+              `${esc(left)} → ${esc(right)}${mul}</div>`
+            );
+          })
+          .join("");
+        return (
+          `<div class="flagged-row" data-track-hash="${esc(r.track_hash)}" data-role="${esc(r.role)}">` +
+          `<button type="button" class="flagged-head">` +
+          `<span class="flagged-title">${esc(r.title)}</span>${artist}` +
+          `<span class="flagged-role">${roleLabel}</span>` +
+          `<span class="flagged-count">${r.count}</span>${warn}` +
+          `</button>` +
+          `<div class="flagged-partners" hidden>${partners}</div>` +
+          `</div>`
+        );
+      })
+      .join("");
+  }
+
+  flaggedList.onclick = (ev) => {
+    const head = ev.target.closest(".flagged-head");
+    if (!head || !flaggedList.contains(head)) return;
+    const partners = head.parentElement.querySelector(".flagged-partners");
+    if (partners) partners.hidden = !partners.hidden;
+  };
+
+  subtabFlags.onclick = () => showEditSub("flags");
+  subtabAll.onclick = () => showEditSub("all");
+
   function showTab(which) {
     const play = which === "play";
     panelPlay.hidden = !play;
     panelEdit.hidden = play;
     tabPlay.classList.toggle("active", play);
     tabEdit.classList.toggle("active", !play);
+    if (!play) loadFlaggedTracks();
   }
   tabPlay.onclick = () => showTab("play");
   tabEdit.onclick = () => showTab("edit");
