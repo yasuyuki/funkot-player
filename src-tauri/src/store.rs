@@ -32,7 +32,7 @@
 //! Early builds did keep queue/library in the cache; `migrate_from` moves
 //! anything still there (including `flags.json` if present).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
 const FLAGS_FILE: &str = "flags.json";
+const DISMISSED_FILE: &str = "dismissed.json";
 
 /// Move persisted files from a previous location into `dir`, if they are
 /// still there. Safe to call on every launch; a no-op once nothing is left
@@ -55,7 +56,7 @@ pub fn migrate_from(old_dir: &Path, dir: &Path) {
     if old_dir == dir {
         return;
     }
-    for name in [QUEUE_FILE, LIBRARY_FILE, FLAGS_FILE] {
+    for name in [QUEUE_FILE, LIBRARY_FILE, FLAGS_FILE, DISMISSED_FILE] {
         let from = old_dir.join(name);
         let to = dir.join(name);
         if !from.exists() || to.exists() {
@@ -182,14 +183,58 @@ pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
     fs::write(dir.join(FLAGS_FILE), json)
 }
 
-/// Display / confidence metadata for one content hash, used by
-/// [`aggregate_flags`]. Built by the command from the music folder scan.
+/// Keys of track×role rows the listener dismissed from the edit list.
+///
+/// Does not remove the underlying flag pairs — only hides those rows from
+/// [`aggregate_flags`]. Keyed by [`dismiss_key`].
+pub type Dismissed = BTreeSet<String>;
+
+/// Build the map key for a dismissed track×role row.
+pub fn dismiss_key(track_hash: &str, role: &str) -> String {
+    format!("{track_hash}\t{role}")
+}
+
+/// Load dismissed track×role keys saved under `dir`.
+///
+/// Missing or corrupt → empty set (same policy as [`load_flags`]).
+pub fn load_dismissed(dir: &Path) -> Dismissed {
+    let bytes = match fs::read(dir.join(DISMISSED_FILE)) {
+        Ok(b) => b,
+        Err(_) => return Dismissed::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(set) => set,
+        Err(e) => {
+            log::warn!("{DISMISSED_FILE} is unreadable, starting empty: {e}");
+            Dismissed::new()
+        }
+    }
+}
+
+/// Persist `dismissed` under `dir`, overwriting any previous save.
+pub fn save_dismissed(dir: &Path, dismissed: &Dismissed) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(dismissed)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(DISMISSED_FILE), json)
+}
+
+/// Display / confidence / bar metadata for one content hash, used by
+/// [`aggregate_flags`]. Built by the command from the music folder scan
+/// (same sources as `track_row` / `analyzed_cache_entry`).
 #[derive(Debug, Clone)]
 pub struct FlagTrackMeta {
     pub title: String,
     pub artist: String,
     pub intro_low_confidence: bool,
     pub outro_low_confidence: bool,
+    pub path: Option<String>,
+    pub intro_bars: Option<u32>,
+    pub outro_structure_bars: Option<u32>,
+    /// Mix-trigger bars derived by the engine (read-only in the UI).
+    pub outro_bars: Option<u32>,
+    pub intro_manual: bool,
+    pub outro_manual: bool,
+    pub analyzed: bool,
 }
 
 /// One partner of a [`FlaggedTrackRow`] (the other side of a flagged pair).
@@ -213,6 +258,14 @@ pub struct FlaggedTrackRow {
     pub low_confidence: bool,
     pub missing: bool,
     pub partners: Vec<FlagPartner>,
+    pub path: Option<String>,
+    pub intro_bars: Option<u32>,
+    pub outro_structure_bars: Option<u32>,
+    /// Mix-trigger bars derived by the engine (read-only in the UI).
+    pub outro_bars: Option<u32>,
+    pub intro_manual: bool,
+    pub outro_manual: bool,
+    pub analyzed: bool,
 }
 
 const MISSING_TITLE: &str = "ライブラリにない曲";
@@ -223,9 +276,12 @@ const ROLE_INCOMING: &str = "incoming";
 ///
 /// Pure: no I/O. `meta_by_hash` is whatever the caller resolved from the
 /// library scan; hashes absent from it become `missing` rows.
+/// Rows whose `(track_hash, role)` is in `dismissed` are omitted; partner
+/// tallies still come from the full `flags` map.
 pub fn aggregate_flags(
     flags: &Flags,
     meta_by_hash: &BTreeMap<String, FlagTrackMeta>,
+    dismissed: &Dismissed,
 ) -> Vec<FlaggedTrackRow> {
     use std::collections::HashMap;
 
@@ -257,7 +313,20 @@ pub fn aggregate_flags(
         }
     }
 
-    let resolve = |hash: &str| -> (String, String, bool, bool, bool) {
+    let resolve = |hash: &str| -> (
+        String,
+        String,
+        bool,
+        bool,
+        bool,
+        Option<String>,
+        Option<u32>,
+        Option<u32>,
+        Option<u32>,
+        bool,
+        bool,
+        bool,
+    ) {
         match meta_by_hash.get(hash) {
             Some(m) => (
                 m.title.clone(),
@@ -265,15 +334,51 @@ pub fn aggregate_flags(
                 m.intro_low_confidence,
                 m.outro_low_confidence,
                 false,
+                m.path.clone(),
+                m.intro_bars,
+                m.outro_structure_bars,
+                m.outro_bars,
+                m.intro_manual,
+                m.outro_manual,
+                m.analyzed,
             ),
-            None => (MISSING_TITLE.to_string(), String::new(), false, false, true),
+            None => (
+                MISSING_TITLE.to_string(),
+                String::new(),
+                false,
+                false,
+                true,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+            ),
         }
     };
 
     let mut rows: Vec<FlaggedTrackRow> = acc
         .into_iter()
+        .filter(|((track_hash, role), _)| {
+            !dismissed.contains(&dismiss_key(track_hash, role))
+        })
         .map(|((track_hash, role), (count, partners_map))| {
-            let (title, artist, intro_low, outro_low, missing) = resolve(&track_hash);
+            let (
+                title,
+                artist,
+                intro_low,
+                outro_low,
+                missing,
+                path,
+                intro_bars,
+                outro_structure_bars,
+                outro_bars,
+                intro_manual,
+                outro_manual,
+                analyzed,
+            ) = resolve(&track_hash);
             let low_confidence = if missing {
                 false
             } else if role == ROLE_OUTGOING {
@@ -285,7 +390,8 @@ pub fn aggregate_flags(
             let mut partners: Vec<FlagPartner> = partners_map
                 .into_iter()
                 .map(|(partner_hash, pcount)| {
-                    let (ptitle, _, _, _, pmissing) = resolve(&partner_hash);
+                    let (ptitle, _, _, _, pmissing, _, _, _, _, _, _, _) =
+                        resolve(&partner_hash);
                     FlagPartner {
                         track_hash: partner_hash,
                         title: ptitle,
@@ -310,6 +416,13 @@ pub fn aggregate_flags(
                 low_confidence,
                 missing,
                 partners,
+                path,
+                intro_bars,
+                outro_structure_bars,
+                outro_bars,
+                intro_manual,
+                outro_manual,
+                analyzed,
             }
         })
         .collect();
@@ -593,6 +706,13 @@ mod tests {
             artist: artist.into(),
             intro_low_confidence: intro_low,
             outro_low_confidence: outro_low,
+            path: Some(format!("/music/{title}.flac")),
+            intro_bars: Some(16),
+            outro_structure_bars: Some(32),
+            outro_bars: Some(48),
+            intro_manual: false,
+            outro_manual: false,
+            analyzed: true,
         }
     }
 
@@ -612,7 +732,7 @@ mod tests {
         meta_map.insert("aaa".into(), meta("Alpha", "ArtA", false, true));
         meta_map.insert("bbb".into(), meta("Beta", "ArtB", true, false));
 
-        let rows = aggregate_flags(&flags, &meta_map);
+        let rows = aggregate_flags(&flags, &meta_map, &Dismissed::new());
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].role, ROLE_OUTGOING);
         assert_eq!(rows[0].track_hash, "aaa");
@@ -620,12 +740,18 @@ mod tests {
         assert!(rows[0].low_confidence); // outro
         assert_eq!(rows[0].partners.len(), 1);
         assert_eq!(rows[0].partners[0].track_hash, "bbb");
+        assert_eq!(rows[0].path.as_deref(), Some("/music/Alpha.flac"));
+        assert!(rows[0].analyzed);
+        assert_eq!(rows[0].intro_bars, Some(16));
+        assert_eq!(rows[0].outro_structure_bars, Some(32));
+        assert_eq!(rows[0].outro_bars, Some(48));
 
         assert_eq!(rows[1].role, ROLE_INCOMING);
         assert_eq!(rows[1].track_hash, "bbb");
         assert_eq!(rows[1].title, "Beta");
         assert!(rows[1].low_confidence); // intro
         assert_eq!(rows[1].partners[0].track_hash, "aaa");
+        assert!(rows[1].analyzed);
     }
 
     /// Multiple partners for one track×role sum into one parent count.
@@ -639,7 +765,7 @@ mod tests {
         meta_map.insert("bbb".into(), meta("Beta", "", false, false));
         meta_map.insert("ccc".into(), meta("Gamma", "", false, false));
 
-        let rows = aggregate_flags(&flags, &meta_map);
+        let rows = aggregate_flags(&flags, &meta_map, &Dismissed::new());
         let out = rows
             .iter()
             .find(|r| r.track_hash == "aaa" && r.role == ROLE_OUTGOING)
@@ -679,7 +805,7 @@ mod tests {
         meta_map.insert("ddd".into(), meta("Delta", "", false, false));
         meta_map.insert("eee".into(), meta("Epsilon", "", false, false));
 
-        let rows = aggregate_flags(&flags, &meta_map);
+        let rows = aggregate_flags(&flags, &meta_map, &Dismissed::new());
         // count=3: ccc outgoing, ddd incoming
         // count=1: aaa outgoing, bbb outgoing (+incoming from aaa), eee incoming, …
         assert_eq!(rows[0].track_hash, "ccc");
@@ -717,7 +843,7 @@ mod tests {
             meta("Alpha", "Art", false, true),
         );
 
-        let rows = aggregate_flags(&flags, &meta_map);
+        let rows = aggregate_flags(&flags, &meta_map, &Dismissed::new());
         let missing = rows
             .iter()
             .find(|r| r.track_hash == "zzz")
@@ -726,6 +852,13 @@ mod tests {
         assert_eq!(missing.title, MISSING_TITLE);
         assert!(!missing.low_confidence); // never ⚠ on missing
         assert_eq!(missing.role, ROLE_INCOMING);
+        assert!(!missing.analyzed);
+        assert_eq!(missing.path, None);
+        assert_eq!(missing.intro_bars, None);
+        assert_eq!(missing.outro_structure_bars, None);
+        assert_eq!(missing.outro_bars, None);
+        assert!(!missing.intro_manual);
+        assert!(!missing.outro_manual);
 
         let out = rows
             .iter()
@@ -733,9 +866,70 @@ mod tests {
             .expect("outgoing aaa");
         assert!(!out.missing);
         assert!(out.low_confidence);
+        assert!(out.analyzed);
         assert_eq!(out.partners[0].track_hash, "zzz");
         assert!(out.partners[0].missing);
         assert_eq!(out.partners[0].title, MISSING_TITLE);
+    }
+
+    /// Dismissing one side of a pair hides only that row; flags stay intact.
+    #[test]
+    fn aggregate_hides_dismissed_row_only() {
+        let mut flags = Flags::new();
+        flags.insert(flag_key("aaa", "bbb"), flag(1));
+        let mut meta_map = BTreeMap::new();
+        meta_map.insert("aaa".into(), meta("Alpha", "", false, false));
+        meta_map.insert("bbb".into(), meta("Beta", "", false, false));
+
+        let rows = aggregate_flags(&flags, &meta_map, &Dismissed::new());
+        assert_eq!(rows.len(), 2);
+
+        let mut dismissed = Dismissed::new();
+        dismissed.insert(dismiss_key("aaa", ROLE_OUTGOING));
+        let rows = aggregate_flags(&flags, &meta_map, &dismissed);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].track_hash, "bbb");
+        assert_eq!(rows[0].role, ROLE_INCOMING);
+        assert!(flags.contains_key(&flag_key("aaa", "bbb")));
+        assert_eq!(flags[&flag_key("aaa", "bbb")].count, 1);
+    }
+
+    #[test]
+    fn aggregate_hides_both_dismissed_rows() {
+        let mut flags = Flags::new();
+        flags.insert(flag_key("aaa", "bbb"), flag(1));
+        let mut meta_map = BTreeMap::new();
+        meta_map.insert("aaa".into(), meta("Alpha", "", false, false));
+        meta_map.insert("bbb".into(), meta("Beta", "", false, false));
+
+        let mut dismissed = Dismissed::new();
+        dismissed.insert(dismiss_key("aaa", ROLE_OUTGOING));
+        dismissed.insert(dismiss_key("bbb", ROLE_INCOMING));
+        assert!(aggregate_flags(&flags, &meta_map, &dismissed).is_empty());
+        assert!(flags.contains_key(&flag_key("aaa", "bbb")));
+    }
+
+    #[test]
+    fn dismissed_round_trip() {
+        let dir = TempDir::new("dismissed-roundtrip");
+        let mut dismissed = Dismissed::new();
+        dismissed.insert(dismiss_key("aaa", ROLE_OUTGOING));
+        dismissed.insert(dismiss_key("bbb", ROLE_INCOMING));
+        save_dismissed(&dir.0, &dismissed).unwrap();
+        assert_eq!(load_dismissed(&dir.0), dismissed);
+    }
+
+    #[test]
+    fn missing_dismissed_file_is_empty() {
+        let dir = TempDir::new("dismissed-missing");
+        assert!(load_dismissed(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn corrupt_dismissed_file_is_empty_not_a_panic() {
+        let dir = TempDir::new("dismissed-corrupt");
+        fs::write(dir.0.join(DISMISSED_FILE), b"{not json").unwrap();
+        assert!(load_dismissed(&dir.0).is_empty());
     }
 
     /// Partners: count desc, then title asc.
@@ -751,7 +945,7 @@ mod tests {
         meta_map.insert("ccc".into(), meta("Mike", "", false, false));
         meta_map.insert("ddd".into(), meta("Delta", "", false, false));
 
-        let rows = aggregate_flags(&flags, &meta_map);
+        let rows = aggregate_flags(&flags, &meta_map, &Dismissed::new());
         let out = rows
             .iter()
             .find(|r| r.role == ROLE_OUTGOING && r.track_hash == "aaa")
@@ -769,6 +963,6 @@ mod tests {
     fn aggregate_empty_flags_is_empty() {
         let flags = Flags::new();
         let meta_map = BTreeMap::new();
-        assert!(aggregate_flags(&flags, &meta_map).is_empty());
+        assert!(aggregate_flags(&flags, &meta_map, &Dismissed::new()).is_empty());
     }
 }

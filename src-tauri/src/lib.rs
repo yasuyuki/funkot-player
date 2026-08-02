@@ -310,6 +310,9 @@ static SAVE_LOCK: Mutex<()> = Mutex::new(());
 /// Key last written by `flag_last_transition`, for a single-shot undo.
 static LAST_FLAG_UNDO: Mutex<Option<String>> = Mutex::new(None);
 
+/// Dismiss key last written by `dismiss_flags`, for a single-shot undo.
+static LAST_DISMISS_UNDO: Mutex<Option<String>> = Mutex::new(None);
+
 /// Where the audio thread reports back to the UI. `cpal::Stream` is not `Send`
 /// on every platform, so it never leaves the thread that created it.
 struct AppState {
@@ -1891,6 +1894,12 @@ fn flag_last_transition_impl(data_dir: &Path, record_undo: bool) -> Result<FlagR
         entry.last_flagged_ms = now_ms();
         let count = entry.count;
         store::save_flags(data_dir, &flags).map_err(|e| format!("cannot persist flags: {e}"))?;
+        // Re-flagging clears dismiss hides for this pair's two list rows.
+        let mut dismissed = store::load_dismissed(data_dir);
+        dismissed.remove(&store::dismiss_key(&from_hash, "outgoing"));
+        dismissed.remove(&store::dismiss_key(&to_hash, "incoming"));
+        store::save_dismissed(data_dir, &dismissed)
+            .map_err(|e| format!("cannot persist dismissed: {e}"))?;
         if record_undo {
             *LAST_FLAG_UNDO
                 .lock()
@@ -1924,11 +1933,11 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
     let music_dir = PathBuf::from(&dirs.music_dir);
     let cache_dir = PathBuf::from(&dirs.cache_dir);
 
-    let flags = {
+    let (flags, dismissed) = {
         let _saving = SAVE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        store::load_flags(&data_dir)
+        (store::load_flags(&data_dir), store::load_dismissed(&data_dir))
     };
 
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&music_dir)
@@ -1943,25 +1952,88 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
         let Ok(hash) = funkot_core::cache::content_hash(path) else {
             continue;
         };
-        let tags = cached_tags_for(path);
-        let (title, artist) = session_metadata_for(Some(path.as_path()), &tags);
-        let (intro_low_confidence, outro_low_confidence) =
-            match analyzed_cache_entry(path, &cache_dir) {
-                Some(a) => (a.intro_bars_low_confidence, a.outro_bars_low_confidence),
-                None => (false, false),
-            };
+        // Same path/bars/manual/analyzed sources as the library table.
+        let row = track_row(path, &cache_dir);
         meta_by_hash.insert(
             hash,
             store::FlagTrackMeta {
-                title,
-                artist,
-                intro_low_confidence,
-                outro_low_confidence,
+                title: row.title,
+                artist: row.artist,
+                intro_low_confidence: row.intro_low_confidence,
+                outro_low_confidence: row.outro_low_confidence,
+                path: Some(row.path),
+                intro_bars: row.intro_bars,
+                outro_structure_bars: row.outro_structure_bars,
+                outro_bars: row.outro_bars,
+                intro_manual: row.intro_manual,
+                outro_manual: row.outro_manual,
+                analyzed: row.analyzed,
             },
         );
     }
 
-    Ok(store::aggregate_flags(&flags, &meta_by_hash))
+    Ok(store::aggregate_flags(&flags, &meta_by_hash, &dismissed))
+}
+
+/// Hide one track×role row from the flagged list (`outgoing` / `incoming`).
+///
+/// Writes `dismissed.json` only — `flags.json` is unchanged. Returns `1` when
+/// a new dismiss key was recorded (and arms undo); `0` when already dismissed
+/// or `role` is not a known value (undo slot left alone).
+#[tauri::command(async)]
+fn dismiss_flags(
+    app: tauri::AppHandle,
+    track_hash: String,
+    role: String,
+) -> Result<u32, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+
+    if role != "outgoing" && role != "incoming" {
+        return Ok(0);
+    }
+
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut dismissed = store::load_dismissed(&data_dir);
+    let key = store::dismiss_key(&track_hash, &role);
+    if !dismissed.insert(key.clone()) {
+        // Already dismissed — do not clobber a previous toast's undo target.
+        return Ok(0);
+    }
+    store::save_dismissed(&data_dir, &dismissed)
+        .map_err(|e| format!("cannot persist dismissed: {e}"))?;
+    *LAST_DISMISS_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key);
+    Ok(1)
+}
+
+/// Restore the dismiss key last written by [`dismiss_flags`] (single-shot).
+#[tauri::command(async)]
+fn undo_last_dismiss(app: tauri::AppHandle) -> Result<(), String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = {
+        let slot = LAST_DISMISS_UNDO
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.clone().ok_or_else(|| "nothing to undo".to_string())?
+    };
+
+    let mut dismissed = store::load_dismissed(&data_dir);
+    dismissed.remove(&key);
+    store::save_dismissed(&data_dir, &dismissed)
+        .map_err(|e| format!("cannot persist dismissed: {e}"))?;
+    *LAST_DISMISS_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    Ok(())
 }
 
 /// Undo the most recent `flag_last_transition` (single-shot).
@@ -2802,6 +2874,8 @@ pub fn run() {
             flag_last_transition,
             undo_last_flag,
             list_flagged_tracks,
+            dismiss_flags,
+            undo_last_dismiss,
             refresh_library,
             set_bars,
             enqueue,

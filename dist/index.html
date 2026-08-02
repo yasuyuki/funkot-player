@@ -84,23 +84,37 @@
   td.dur { width: 1%; white-space: nowrap; color: #999; }
   /* Edit-tab secondary: 直すべきつなぎ / すべての曲 */
   .subtabs { display: flex; gap: .3rem; margin-top: .6rem; }
-  #flagged-list { margin-top: .6rem; }
+  #flagged-list, #flagged-detail { margin-top: .6rem; }
+  #flagged-detail[hidden], #flagged-list[hidden] { display: none; }
   .flagged-empty { color: #999; margin: .8rem 0 .4rem; }
   button.linkish { width: auto; font-size: inherit; padding: 0;
                    background: transparent; color: #6af;
                    text-decoration: underline; border-radius: 0; }
-  .flagged-row { border-bottom: 1px solid #333; }
-  .flagged-head { width: 100%; text-align: left; background: transparent;
+  .flagged-row { border-bottom: 1px solid #333; display: flex;
+                 align-items: baseline; gap: .4rem; }
+  .flagged-head { flex: 1; text-align: left; background: transparent;
                   color: #eee; font-size: .95rem; padding: .5rem .2rem;
                   display: flex; flex-wrap: wrap; gap: .35rem .6rem;
                   align-items: baseline; border-radius: 0; }
+  .flagged-head[disabled] { opacity: .55; }
   .flagged-artist { color: #999; font-size: .85rem; }
   .flagged-role { color: #aaa; font-size: .85rem; }
   .flagged-count { margin-left: auto; }
   .flagged-warn { color: #fa6; }
-  .flagged-partners { padding: .15rem .2rem .55rem 1rem; font-size: .9rem; color: #ccc; }
-  .flagged-partners[hidden] { display: none; }
-  .flagged-pair { padding: .12rem 0; }
+  .flagged-unanalyzed { color: #999; font-size: .85rem; }
+  .flagged-detail-meta { font-size: .9rem; color: #ccc; margin: .4rem 0 .8rem; }
+  .flagged-detail-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .8rem; }
+  .flagged-detail-actions button { width: auto; font-size: .95rem;
+                                   padding: .45rem .9rem; background: #444; color: #eee; }
+  .chip-editor { margin: .4rem 0 .8rem; }
+  .chip-editor h3 { margin: 0 0 .25rem; font-size: .95rem; font-weight: 600; }
+  .chip-scale { font-size: .8rem; color: #888; margin: 0 0 .35rem; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: .35rem; }
+  button.chip { width: auto; font-size: 1rem; padding: .25rem .6rem;
+                background: #444; color: #eee; }
+  button.chip.current { background: #369; color: #fff; }
+  .chip-hint { font-size: .8rem; color: #999; margin: .35rem 0 0; }
+  tr.chip-editor-row td { padding: .2rem .4rem .55rem; border-bottom: 1px solid #333; }
 </style>
 
 <div id="status" class="idle">idle</div>
@@ -134,6 +148,7 @@
     <button type="button" id="subtab-all" class="tab">すべての曲</button>
   </div>
   <div id="flagged-list"></div>
+  <div id="flagged-detail" hidden></div>
   <table id="library" hidden></table>
 </div>
 <table id="queue"></table>
@@ -161,19 +176,18 @@
     flagToast.replaceChildren();
   }
 
-  function showFlagToast(fromTitle, toTitle) {
+  // One shared toast slot: a new show replaces the previous (bar / dismiss / flag).
+  function showUndoToast(message, onUndo) {
     hideFlagToast();
     flagToast.hidden = false;
-    flagToast.appendChild(
-      document.createTextNode(`${fromTitle} → ${toTitle} を記録 ｜ `)
-    );
+    flagToast.appendChild(document.createTextNode(`${message} ｜ `));
     const undo = document.createElement("button");
     undo.type = "button";
     undo.className = "undo-flag";
     undo.textContent = "取消";
     undo.onclick = () => withBusy(undo, async () => {
       try {
-        await invoke("undo_last_flag");
+        await onUndo();
         hideFlagToast();
       } catch (e) {
         log.innerHTML = `<span class="err">${e}</span>`;
@@ -181,6 +195,12 @@
     });
     flagToast.appendChild(undo);
     flagToastTimer = setTimeout(hideFlagToast, 8000);
+  }
+
+  function showFlagToast(fromTitle, toTitle) {
+    showUndoToast(`${fromTitle} → ${toTitle} を記録`, async () => {
+      await invoke("undo_last_flag");
+    });
   }
 
   // Every command round-trips through the host, and some of them touch the
@@ -272,16 +292,33 @@
   // --- Play / edit tabs (S4) ---
   // Pure UI: switching panels must not invoke start/pause/skip or stop audio.
   const flaggedList = document.getElementById("flagged-list");
+  const flaggedDetail = document.getElementById("flagged-detail");
   const subtabFlags = document.getElementById("subtab-flags");
   const subtabAll = document.getElementById("subtab-all");
+  let flaggedRows = [];
+  let openChipKey = null; // "path\\tintro|outro" — at most one library chip editor
+
+  function showFlaggedList() {
+    flaggedDetail.hidden = true;
+    flaggedDetail.replaceChildren();
+    flaggedList.hidden = false;
+  }
 
   function showEditSub(which) {
     const flags = which === "flags";
-    flaggedList.hidden = !flags;
     library.hidden = flags;
     subtabFlags.classList.toggle("active", flags);
     subtabAll.classList.toggle("active", !flags);
-    if (flags) loadFlaggedTracks();
+    if (flags) {
+      showFlaggedList();
+      loadFlaggedTracks();
+    } else {
+      flaggedList.hidden = true;
+      flaggedDetail.hidden = true;
+      // Detail-side set_bars updates libraryRows while #library is hidden;
+      // redraw so the all-tracks table matches memory (and disk).
+      if (libraryRows.length) renderLibrary(libraryRows);
+    }
   }
 
   let flaggedLoadGen = 0;
@@ -290,11 +327,23 @@
     try {
       const rows = await invoke("list_flagged_tracks");
       if (gen !== flaggedLoadGen) return;
+      flaggedRows = rows;
+      showFlaggedList();
       renderFlaggedTracks(rows);
     } catch (e) {
       if (gen !== flaggedLoadGen) return;
       log.innerHTML = `<span class="err">${e}</span>`;
     }
+  }
+
+  async function dismissAndReload(trackHash, role) {
+    const n = await invoke("dismiss_flags", { trackHash, role });
+    await loadFlaggedTracks();
+    if (!n) return;
+    showUndoToast("削除しました", async () => {
+      await invoke("undo_last_dismiss");
+      await loadFlaggedTracks();
+    });
   }
 
   function renderFlaggedTracks(rows) {
@@ -305,46 +354,176 @@
       document.getElementById("see-all-tracks").onclick = () => showEditSub("all");
       return;
     }
-    flaggedList.innerHTML = rows
-      .map((r) => {
-        const roleLabel = r.role === "outgoing" ? "出る側" : "入る側";
-        const artist = r.artist
-          ? `<span class="flagged-artist">${esc(r.artist)}</span>`
-          : "";
-        const warn = r.low_confidence
-          ? `<span class="flagged-warn">⚠</span>`
-          : "";
-        const partners = r.partners
-          .map((p) => {
-            const left = r.role === "outgoing" ? r.title : p.title;
-            const right = r.role === "outgoing" ? p.title : r.title;
-            const mul = p.count > 1 ? `×${p.count}` : "";
-            return (
-              `<div class="flagged-pair" data-partner-hash="${esc(p.track_hash)}">` +
-              `${esc(left)} → ${esc(right)}${mul}</div>`
-            );
-          })
-          .join("");
-        return (
-          `<div class="flagged-row" data-track-hash="${esc(r.track_hash)}" data-role="${esc(r.role)}">` +
+    flaggedList.innerHTML = "";
+    rows.forEach((r, idx) => {
+      const roleLabel = r.role === "outgoing" ? "出る側" : "入る側";
+      const artist = r.artist
+        ? `<span class="flagged-artist">${esc(r.artist)}</span>`
+        : "";
+      const warn = r.low_confidence
+        ? `<span class="flagged-warn">⚠</span>`
+        : "";
+      const row = document.createElement("div");
+      row.className = "flagged-row";
+      row.dataset.idx = String(idx);
+
+      if (r.missing) {
+        row.innerHTML =
+          `<button type="button" class="flagged-head" disabled>` +
+          `<span class="flagged-title">${esc(r.title)}</span>${artist}` +
+          `<span class="flagged-role">${roleLabel}</span>` +
+          `<span class="flagged-count">${r.count}</span>` +
+          `</button>` +
+          `<button type="button" class="mini flagged-ok">〔問題なかった〕</button>`;
+        row.querySelector(".flagged-ok").onclick = (ev) => {
+          ev.stopPropagation();
+          const b = ev.currentTarget;
+          withBusy(b, () => dismissAndReload(r.track_hash, r.role));
+        };
+      } else if (!r.analyzed) {
+        row.innerHTML =
+          `<button type="button" class="flagged-head" disabled>` +
+          `<span class="flagged-title">${esc(r.title)}</span>${artist}` +
+          `<span class="flagged-role">${roleLabel}</span>` +
+          `<span class="flagged-count">${r.count}</span>${warn}` +
+          `<span class="flagged-unanalyzed">未解析</span>` +
+          `</button>`;
+      } else {
+        row.innerHTML =
           `<button type="button" class="flagged-head">` +
           `<span class="flagged-title">${esc(r.title)}</span>${artist}` +
           `<span class="flagged-role">${roleLabel}</span>` +
           `<span class="flagged-count">${r.count}</span>${warn}` +
-          `</button>` +
-          `<div class="flagged-partners" hidden>${partners}</div>` +
-          `</div>`
-        );
-      })
-      .join("");
+          `</button>`;
+        row.querySelector(".flagged-head").onclick = () => showFlaggedDetail(r);
+      }
+      flaggedList.appendChild(row);
+    });
   }
 
-  flaggedList.onclick = (ev) => {
-    const head = ev.target.closest(".flagged-head");
-    if (!head || !flaggedList.contains(head)) return;
-    const partners = head.parentElement.querySelector(".flagged-partners");
-    if (partners) partners.hidden = !partners.hidden;
-  };
+  function showFlaggedDetail(row) {
+    flaggedList.hidden = true;
+    flaggedDetail.hidden = false;
+    flaggedDetail.replaceChildren();
+
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "linkish";
+    back.textContent = "← 一覧へ";
+    back.onclick = () => {
+      showFlaggedList();
+      renderFlaggedTracks(flaggedRows);
+    };
+    flaggedDetail.appendChild(back);
+
+    const roleLabel = row.role === "outgoing" ? "出る側" : "入る側";
+    const meta = document.createElement("div");
+    meta.className = "flagged-detail-meta";
+    const partnersText = row.partners
+      .map((p) => {
+        const left = row.role === "outgoing" ? row.title : p.title;
+        const right = row.role === "outgoing" ? p.title : row.title;
+        const mul = p.count > 1 ? `×${p.count}` : "";
+        return `${left} → ${right}${mul}`;
+      })
+      .join(" / ");
+    meta.innerHTML =
+      `<div><strong>${esc(row.title)}</strong>` +
+      (row.artist ? ` <span class="flagged-artist">${esc(row.artist)}</span>` : "") +
+      `</div>` +
+      `<div>${roleLabel} · ${row.count}回` +
+      (row.low_confidence ? ` <span class="flagged-warn">⚠</span>` : "") +
+      `</div>` +
+      `<div>${esc(partnersText)}</div>`;
+    flaggedDetail.appendChild(meta);
+
+    const kind = row.role === "outgoing" ? "outro" : "intro";
+    const steps = kind === "outro" ? OUTRO_STEPS : INTRO_STEPS;
+    const chipHost = document.createElement("div");
+    flaggedDetail.appendChild(chipHost);
+
+    function mountChip() {
+      const current =
+        kind === "outro" ? row.outro_structure_bars : row.intro_bars;
+      const manual = kind === "outro" ? row.outro_manual : row.intro_manual;
+      chipHost.replaceChildren(
+        renderChipEditor({
+          steps,
+          current,
+          kind,
+          manual,
+          onPick: async (value) => {
+            if (!row.path) {
+              throw "no path for this track";
+            }
+            const prevIntro = row.intro_bars;
+            const prevOutro = row.outro_structure_bars;
+            const args = {
+              path: row.path,
+              introBars: null,
+              outroStructureBars: null,
+            };
+            if (kind === "intro") args.introBars = value;
+            else args.outroStructureBars = value;
+            const updated = await invoke("set_bars", args);
+            applyFlaggedBarUpdate(row, updated);
+            mountChip();
+            syncLibraryRow(updated);
+            showUndoToast("変更しました", async () => {
+              const undoArgs = {
+                path: row.path,
+                introBars: null,
+                outroStructureBars: null,
+              };
+              if (kind === "intro") undoArgs.introBars = prevIntro;
+              else undoArgs.outroStructureBars = prevOutro;
+              const restored = await invoke("set_bars", undoArgs);
+              applyFlaggedBarUpdate(row, restored);
+              mountChip();
+              syncLibraryRow(restored);
+            });
+          },
+        })
+      );
+    }
+    mountChip();
+
+    const actions = document.createElement("div");
+    actions.className = "flagged-detail-actions";
+    for (const [label, cls] of [
+      ["〔直った〕", "flagged-fixed"],
+      ["〔問題なかった〕", "flagged-ok"],
+    ]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = cls;
+      b.textContent = label;
+      b.onclick = () => withBusy(b, () => dismissAndReload(row.track_hash, row.role));
+      actions.appendChild(b);
+    }
+    flaggedDetail.appendChild(actions);
+  }
+
+  function applyFlaggedBarUpdate(row, updated) {
+    Object.assign(row, {
+      intro_bars: updated.intro_bars,
+      outro_structure_bars: updated.outro_structure_bars,
+      outro_bars: updated.outro_bars,
+      intro_manual: updated.intro_manual,
+      outro_manual: updated.outro_manual,
+      analyzed: updated.analyzed,
+    });
+    const i = flaggedRows.findIndex(
+      (r) => r.track_hash === row.track_hash && r.role === row.role
+    );
+    if (i >= 0) flaggedRows[i] = row;
+  }
+
+  function syncLibraryRow(updated) {
+    if (!libraryRows.length) return;
+    libraryRows = libraryRows.map((r) => (r.path === updated.path ? updated : r));
+    if (!library.hidden) renderLibrary(libraryRows);
+  }
 
   subtabFlags.onclick = () => showEditSub("flags");
   subtabAll.onclick = () => showEditSub("all");
@@ -355,7 +534,11 @@
     panelEdit.hidden = play;
     tabPlay.classList.toggle("active", play);
     tabEdit.classList.toggle("active", !play);
-    if (!play) loadFlaggedTracks();
+    // Refresh the flags list only when that subtab is showing — do not unhide
+    // it over すべての曲.
+    if (!play && subtabFlags.classList.contains("active")) {
+      loadFlaggedTracks();
+    }
   }
   tabPlay.onclick = () => showTab("play");
   tabEdit.onclick = () => showTab("edit");
@@ -367,24 +550,52 @@
   document.addEventListener("click", () => { menu.hidden = true; });
   menu.onclick = (ev) => ev.stopPropagation();
 
-  // --- Hand-correcting the bar counts (B-5) ---
-  // Tapping a bar count steps to the next value the engine recognises, wrapping
-  // at the end. A cycle rather than a text field because this is a phone and
-  // the sets are short: the analyzer's own output is always one of these.
-  //
-  // The outro cell edits the *structural boundary* -- where the track collapses
-  // -- not the mix trigger. The trigger is the engine's business: it derives it
-  // as boundary + a 16-bar lead-in so the transition finishes exactly where the
-  // outro begins. It is shown next to the boundary (greyed) only so the effect
-  // of an edit is visible, and cannot be tapped.
+  // --- Hand-correcting the bar counts (B-5 / S8) ---
+  // Chip picker instead of cycling: every candidate is visible, including a
+  // current value that is not in the default step set. The outro cell edits
+  // the *structural boundary*; mix is derived and read-only.
   const INTRO_STEPS = [8, 16, 32, 48, 64, 80, 96];
   const OUTRO_STEPS = [8, 16, 32, 64];
 
-  // Next value up from `n`, wrapping. An analyzed value that is not in the set
-  // (nothing guarantees one) steps to the smallest value above it instead of
-  // being silently snapped, so no tap is ever a no-op.
-  function nextStep(steps, n) {
-    return steps.find((s) => s > n) ?? steps[0];
+  function chipValues(steps, current) {
+    const set = new Set(steps);
+    if (current !== null && current !== undefined) set.add(Number(current));
+    return Array.from(set).sort((a, b) => a - b);
+  }
+
+  function renderChipEditor({ steps, current, kind, onPick, manual }) {
+    const root = document.createElement("div");
+    root.className = "chip-editor";
+    const title = document.createElement("h3");
+    title.textContent = kind === "intro" ? "イントロ" : "アウトロ";
+    root.appendChild(title);
+    const scale = document.createElement("div");
+    scale.className = "chip-scale";
+    scale.textContent = "短い ←──────→ 長い";
+    root.appendChild(scale);
+    const row = document.createElement("div");
+    row.className = "chip-row";
+    const cur = current === null || current === undefined ? null : Number(current);
+    for (const v of chipValues(steps, cur)) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "mini chip" + (cur === v ? " current" : "");
+      b.textContent = String(v) + (cur === v && manual ? "*" : "");
+      b.onclick = () => {
+        if (cur === v) return;
+        withBusy(b, () => onPick(v));
+      };
+      row.appendChild(b);
+    }
+    root.appendChild(row);
+    const hint = document.createElement("p");
+    hint.className = "chip-hint";
+    hint.textContent =
+      kind === "outro"
+        ? "長くすると切り替わりが早くなる"
+        : "長くするほどイントロを飛ばし、短い前振りで入る";
+    root.appendChild(hint);
+    return root;
   }
 
   function formatDuration(secs) {
@@ -410,6 +621,7 @@
 
   function renderLibrary(rows) {
     libraryRows = rows;
+    openChipKey = null;
     const cell = (n, low, manual, attr) => {
       if (n === null || n === undefined) return "<td>-</td>";
       const mark = manual ? "*" : low ? "!" : "";
@@ -445,14 +657,70 @@
         .join("");
   }
 
+  function closeLibraryChipEditor() {
+    library.querySelectorAll("tr.chip-editor-row").forEach((tr) => tr.remove());
+    openChipKey = null;
+  }
+
+  function openLibraryChipEditor(trackTr, kind) {
+    const path = trackTr.dataset.path;
+    const key = `${path}\t${kind}`;
+    if (openChipKey === key) {
+      closeLibraryChipEditor();
+      return;
+    }
+    closeLibraryChipEditor();
+    const row = libraryRows.find((r) => r.path === path);
+    if (!row || !row.analyzed) return;
+    const steps = kind === "intro" ? INTRO_STEPS : OUTRO_STEPS;
+    const current = kind === "intro" ? row.intro_bars : row.outro_structure_bars;
+    const editorTr = document.createElement("tr");
+    editorTr.className = "chip-editor-row";
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    const applyBarPick = async (value) => {
+      const prevIntro = row.intro_bars;
+      const prevOutro = row.outro_structure_bars;
+      const args = { path, introBars: null, outroStructureBars: null };
+      if (kind === "intro") args.introBars = value;
+      else args.outroStructureBars = value;
+      const updated = await invoke("set_bars", args);
+      libraryRows = libraryRows.map((r) => (r.path === updated.path ? updated : r));
+      renderLibrary(libraryRows);
+      // Re-open the same editor on the refreshed row.
+      const fresh = Array.from(library.querySelectorAll("tr[data-path]")).find(
+        (tr) => tr.dataset.path === path
+      );
+      if (fresh) {
+        openChipKey = null;
+        openLibraryChipEditor(fresh, kind);
+      }
+      showUndoToast("変更しました", async () => {
+        const undoArgs = { path, introBars: null, outroStructureBars: null };
+        if (kind === "intro") undoArgs.introBars = prevIntro;
+        else undoArgs.outroStructureBars = prevOutro;
+        const restored = await invoke("set_bars", undoArgs);
+        libraryRows = libraryRows.map((r) => (r.path === restored.path ? restored : r));
+        renderLibrary(libraryRows);
+      });
+    };
+    const manual = kind === "intro" ? row.intro_manual : row.outro_manual;
+    td.appendChild(
+      renderChipEditor({ steps, current, kind, manual, onPick: applyBarPick })
+    );
+    editorTr.appendChild(td);
+    trackTr.after(editorTr);
+    openChipKey = key;
+  }
+
   // Delegated so the handler survives renderLibrary replacing every row.
-  // Only the tapped button goes disabled -- withBusy is scoped to it, not to
-  // the whole table -- so editing one row's bars does not freeze every other
-  // row's "+" button while the round trip is in flight.
+  // Bar cells toggle a chip editor under the row; "+" still enqueues.
   library.onclick = (ev) => {
     const b = ev.target.closest("button");
-    if (!b) return;
-    const path = b.closest("tr").dataset.path;
+    if (!b || !library.contains(b)) return;
+    if (b.classList.contains("chip")) return; // handled by chip onclick
+    const trackTr = b.closest("tr[data-path]");
+    if (!trackTr) return;
     withBusy(b, async () => {
       try {
         if (b.dataset.add !== undefined) {
@@ -460,19 +728,14 @@
           await refreshQueue();
           return;
         }
-        // One side per call: the untouched one stays whatever the analyzer said.
-        const args = { path, introBars: null, outroStructureBars: null };
         if (b.dataset.intro !== undefined) {
-          args.introBars = nextStep(INTRO_STEPS, Number(b.dataset.intro));
-        } else if (b.dataset.outro !== undefined) {
-          args.outroStructureBars = nextStep(OUTRO_STEPS, Number(b.dataset.outro));
-        } else {
+          openLibraryChipEditor(trackTr, "intro");
           return;
         }
-        // Redraw from what the command returns rather than re-scanning: a scan
-        // would re-walk the folder and could restart the analysis worker.
-        const row = await invoke("set_bars", args);
-        renderLibrary(libraryRows.map((r) => (r.path === row.path ? row : r)));
+        if (b.dataset.outro !== undefined) {
+          openLibraryChipEditor(trackTr, "outro");
+          return;
+        }
       } catch (e) {
         log.innerHTML = `<span class="err">${e}</span>`;
       }
