@@ -1055,6 +1055,12 @@
       if (auditionActive) {
         nextBtn.disabled = true;
         nextBtn.classList.add("st-off");
+        // Audition transport is 〔再開〕 only — hide pause/play.
+        toggleBtn.disabled = true;
+        toggleBtn.classList.remove("st-playing", "st-paused");
+        toggleBtn.classList.add("st-off");
+        status.textContent = "auditioning — use 〔再開〕 to return";
+        status.className = "playing";
       }
       const againBtn = flaggedDetail.querySelector("button.audition-again");
       if (againBtn) {
