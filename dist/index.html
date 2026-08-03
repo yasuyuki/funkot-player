@@ -126,7 +126,7 @@
 <div id="status" class="idle">idle</div>
 <div id="now"></div>
 <div id="audition-banner" hidden>
-  <span>自動再生を中断しました</span>
+  <span id="audition-what">自動再生を中断しました</span>
   <span>｜</span>
   <button type="button" id="audition-resume">〔再開〕</button>
 </div>
@@ -176,6 +176,7 @@
   const flagBtn = document.getElementById("flag");
   const flagToast = document.getElementById("flag-toast");
   const auditionBanner = document.getElementById("audition-banner");
+  const auditionWhat = document.getElementById("audition-what");
   const auditionResumeBtn = document.getElementById("audition-resume");
   const scanBtn = document.getElementById("scan");
   let flagToastTimer = null;
@@ -524,14 +525,18 @@
       b.disabled = disabled;
       if (!disabled) {
         b.onclick = () => withBusy(b, async () => {
-          const dirs = await invoke("app_dirs");
-          await invoke("audition_transition", {
-            fromPath,
-            toPath,
-            musicDir: dirs.music_dir,
-            cacheDir: dirs.cache_dir,
-          });
-          await refreshPlayerState();
+          try {
+            const dirs = await invoke("app_dirs");
+            await invoke("audition_transition", {
+              fromPath,
+              toPath,
+              musicDir: dirs.music_dir,
+              cacheDir: dirs.cache_dir,
+            });
+            await refreshPlayerState();
+          } catch (e) {
+            log.innerHTML = `<span class="err">${e}</span>`;
+          }
         });
       }
       listenHost.appendChild(b);
@@ -542,12 +547,16 @@
     againBtn.textContent = "もう一度聴く";
     againBtn.disabled = !(auditionActive || auditionHasPair);
     againBtn.onclick = () => withBusy(againBtn, async () => {
-      const dirs = await invoke("app_dirs");
-      await invoke("audition_again", {
-        musicDir: dirs.music_dir,
-        cacheDir: dirs.cache_dir,
-      });
-      await refreshPlayerState();
+      try {
+        const dirs = await invoke("app_dirs");
+        await invoke("audition_again", {
+          musicDir: dirs.music_dir,
+          cacheDir: dirs.cache_dir,
+        });
+        await refreshPlayerState();
+      } catch (e) {
+        log.innerHTML = `<span class="err">${e}</span>`;
+      }
     });
     listenHost.appendChild(againBtn);
     flaggedDetail.appendChild(listenHost);
@@ -560,34 +569,7 @@
     confirmBtn.className = "flagged-fixed";
     confirmBtn.textContent = "〔確定〕";
     confirmBtn.onclick = () => withBusy(confirmBtn, async () => {
-      if (!row.path) {
-        throw "no path for this track";
-      }
-      const args = {
-        path: row.path,
-        introBars: null,
-        outroStructureBars: null,
-      };
-      if (row.role === "outgoing") {
-        args.outroStructureBars = row.outro_structure_bars;
-      } else {
-        args.introBars = row.intro_bars;
-      }
-      const updated = await invoke("set_bars", args);
-      applyFlaggedBarUpdate(row, updated);
-      syncLibraryRow(updated);
-      await dismissAndReload(row.track_hash, row.role);
-    });
-    actions.appendChild(confirmBtn);
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.type = "button";
-    cancelBtn.className = "flagged-ok";
-    cancelBtn.textContent = "〔キャンセル〕";
-    cancelBtn.onclick = () => withBusy(cancelBtn, async () => {
-      // Drop chip undo toast so 「取消」cannot rewrite bars after baseline restore.
-      hideFlagToast();
-      if (dirty) {
+      try {
         if (!row.path) {
           throw "no path for this track";
         }
@@ -596,14 +578,49 @@
           introBars: null,
           outroStructureBars: null,
         };
-        if (kind === "intro") args.introBars = baselineIntro;
-        else args.outroStructureBars = baselineOutro;
-        const restored = await invoke("set_bars", args);
-        applyFlaggedBarUpdate(row, restored);
-        syncLibraryRow(restored);
+        if (row.role === "outgoing") {
+          args.outroStructureBars = row.outro_structure_bars;
+        } else {
+          args.introBars = row.intro_bars;
+        }
+        const updated = await invoke("set_bars", args);
+        applyFlaggedBarUpdate(row, updated);
+        syncLibraryRow(updated);
+        await dismissAndReload(row.track_hash, row.role);
+      } catch (e) {
+        log.innerHTML = `<span class="err">${e}</span>`;
       }
-      showFlaggedList();
-      renderFlaggedTracks(flaggedRows);
+    });
+    actions.appendChild(confirmBtn);
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "flagged-ok";
+    cancelBtn.textContent = "〔キャンセル〕";
+    cancelBtn.onclick = () => withBusy(cancelBtn, async () => {
+      try {
+        // Drop chip undo toast so 「取消」cannot rewrite bars after baseline restore.
+        hideFlagToast();
+        if (dirty) {
+          if (!row.path) {
+            throw "no path for this track";
+          }
+          const args = {
+            path: row.path,
+            introBars: null,
+            outroStructureBars: null,
+          };
+          if (kind === "intro") args.introBars = baselineIntro;
+          else args.outroStructureBars = baselineOutro;
+          const restored = await invoke("set_bars", args);
+          applyFlaggedBarUpdate(row, restored);
+          syncLibraryRow(restored);
+        }
+        showFlaggedList();
+        renderFlaggedTracks(flaggedRows);
+      } catch (e) {
+        log.innerHTML = `<span class="err">${e}</span>`;
+      }
     });
     actions.appendChild(cancelBtn);
 
@@ -611,8 +628,12 @@
   }
 
   auditionResumeBtn.onclick = () => withBusy(auditionResumeBtn, async () => {
-    await invoke("resume_autodj");
-    await refreshPlayerState();
+    try {
+      await invoke("resume_autodj");
+      await refreshPlayerState();
+    } catch (e) {
+      log.innerHTML = `<span class="err">${e}</span>`;
+    }
   });
 
   function applyFlaggedBarUpdate(row, updated) {
@@ -1017,9 +1038,16 @@
       // Transition details stay off the always-visible UI; only the ⚑ button
       // enables when there is something to flag, and a toast appears right
       // after a press.
-      nowEl.textContent = state.now_playing ?? "";
       auditionActive = !!state.auditioning;
       auditionHasPair = !!(state.audition_from && state.audition_to);
+      // `NOW` is parked while auditioning, so `now_playing` is the pre-audition
+      // main track — showing it next to the audition audio would just be wrong.
+      // The banner carries the pair instead.
+      nowEl.textContent = auditionActive ? "" : (state.now_playing ?? "");
+      auditionWhat.textContent =
+        state.audition_from && state.audition_to
+          ? `「${state.audition_from}」→「${state.audition_to}」を試聴中`
+          : "自動再生を中断しました";
       auditionBanner.hidden = !auditionActive;
       const flagEnabled = !!state.last_transition && !auditionActive;
       flagBtn.disabled = !flagEnabled;

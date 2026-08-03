@@ -1278,15 +1278,22 @@ fn is_stale_audition_event(audition: bool, auditioning: bool) -> bool {
     audition && !auditioning
 }
 
+/// Lock [`NOW`], unless this event is a stale audition event.
+///
+/// The [`AUDITIONING`] read has to happen *under* the `NOW` lock rather than
+/// before it: `resume_autodj` clears the flag and only then restores the
+/// parked titles, so a check made outside can pass, block on the lock, and
+/// write the audition's titles over the restored ones.
+fn lock_now_unless_stale(audition: bool) -> Option<std::sync::MutexGuard<'static, NowTracker>> {
+    let now = NOW.lock().unwrap();
+    if is_stale_audition_event(audition, AUDITIONING.load(Ordering::Relaxed)) {
+        return None;
+    }
+    Some(now)
+}
+
 fn events_thread(rx: Receiver<PlaybackEvent>) {
     for ev in rx {
-        let audition = match &ev {
-            PlaybackEvent::Engine { audition, .. } => *audition,
-            PlaybackEvent::TransitionEnded { audition } => *audition,
-        };
-        if is_stale_audition_event(audition, AUDITIONING.load(Ordering::Relaxed)) {
-            continue;
-        }
         match ev {
             PlaybackEvent::Engine {
                 event: EngineEvent::TransitionStarted { from, to },
@@ -1302,7 +1309,9 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 // Only an interrupt fold moves `now`; a plain TransitionStarted
                 // leaves it alone, so sync only when the title would change.
                 let changed = {
-                    let mut tracker = NOW.lock().unwrap();
+                    let Some(mut tracker) = lock_now_unless_stale(audition) else {
+                        continue;
+                    };
                     let before = tracker.now.clone();
                     tracker.on_transition_started(from, to, origin);
                     tracker.now != before
@@ -1313,10 +1322,12 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
             }
             PlaybackEvent::Engine {
                 event: EngineEvent::TrackStarted { path, .. },
-                ..
+                audition,
             } => {
                 let changed = {
-                    let mut tracker = NOW.lock().unwrap();
+                    let Some(mut tracker) = lock_now_unless_stale(audition) else {
+                        continue;
+                    };
                     let before = tracker.now.clone();
                     tracker.on_track_started(path);
                     tracker.now != before
@@ -1337,9 +1348,11 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
             } => {
                 log::info!("engine reports finished");
             }
-            PlaybackEvent::TransitionEnded { .. } => {
+            PlaybackEvent::TransitionEnded { audition } => {
                 let (completed, changed) = {
-                    let mut tracker = NOW.lock().unwrap();
+                    let Some(mut tracker) = lock_now_unless_stale(audition) else {
+                        continue;
+                    };
                     let before = tracker.now.clone();
                     let completed = tracker.on_transition_ended();
                     let changed = tracker.now != before;
@@ -1836,6 +1849,11 @@ fn is_supported_track(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// `start_impl`'s "the audio thread is already up" error. Named because
+/// `audition_transition` singles it out to fall through on, so it must not be
+/// spelled out at both ends.
+const ALREADY_STARTED: &str = "already started";
+
 /// Start the main audio thread. `initial_paused` is for cold-start audition:
 /// PLAYBACK is published paused so the main engine never becomes audible
 /// before an audition engine is installed.
@@ -1856,7 +1874,7 @@ fn start_impl(
 ) -> Result<String, String> {
     let mut started = state.started.lock().unwrap();
     if *started {
-        return Err("already started".into());
+        return Err(ALREADY_STARTED.into());
     }
 
     let dir = PathBuf::from(music_dir);
@@ -1995,11 +2013,12 @@ fn build_audition_engine(
 
 fn install_audition(engine: Engine) -> Result<(), String> {
     let playback = PLAYBACK.get().ok_or("not playing")?;
+    let first_install = !AUDITIONING.load(Ordering::Relaxed);
     // Park main-engine display only on the first install of a session. A
     // second install (「もう一度聴く」 while still auditioning) must not
     // snapshot the audition titles as if they were the main engine's.
     // Lock order: NOW before AUDITION_SESSION (never reverse).
-    if !AUDITIONING.load(Ordering::Relaxed) {
+    if first_install {
         let mut now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut session = AUDITION_SESSION
             .lock()
@@ -2009,6 +2028,10 @@ fn install_audition(engine: Engine) -> Result<(), String> {
         session.parked_in_progress = now.in_progress.clone();
         now.in_progress = None;
     }
+    // Raise the flag before the engine goes in: the callback can run the moment
+    // the render lock is released, and `events_thread` drops audition-tagged
+    // events while the flag is down.
+    AUDITIONING.store(true, Ordering::Relaxed);
     let in_transition = engine.transition_frames_into().is_some();
     // Take any previous audition engine under the render lock, then drop it
     // after unlock so Engine teardown does not hold the realtime mutex.
@@ -2024,7 +2047,6 @@ fn install_audition(engine: Engine) -> Result<(), String> {
         previous
     };
     drop(previous);
-    AUDITIONING.store(true, Ordering::Relaxed);
     playback.paused.store(false, Ordering::Relaxed);
     Ok(())
 }
@@ -2050,7 +2072,17 @@ fn audition_transition(
     let cold_start = PLAYBACK.get().is_none();
     if cold_start {
         // Cold audition: paused main engine, empty pending (no load_queue).
-        start_impl(&music_dir, &cache_dir, &app, &state, true, false)?;
+        // Another start can win the race — the ▶ button, or a second audition
+        // press — because PLAYBACK is published only after the engine is
+        // built, so `is_none()` stays true for seconds after `start`. Waiting
+        // for that thread is right; failing here would leave the button dead
+        // with no explanation. The main engine is then not paused, so it can
+        // be briefly audible until `install_audition` takes the callback over.
+        match start_impl(&music_dir, &cache_dir, &app, &state, true, false) {
+            Ok(_) => {}
+            Err(e) if e == ALREADY_STARTED => {}
+            Err(e) => return Err(e),
+        }
         wait_for_playback()?;
     }
     let playback = PLAYBACK.get().ok_or("not playing")?;
