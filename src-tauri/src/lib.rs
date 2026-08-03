@@ -20,7 +20,9 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTag};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use funkot_core::engine::{Engine, EngineEvent, NavAction};
+use funkot_core::engine::{
+    prepare_tracks_parallel, Engine, EngineEvent, NavAction, PreparedTrack,
+};
 use funkot_core::EngineOptions;
 
 use queue::{DrainPolicy, HostSource, SharedQueue};
@@ -33,9 +35,36 @@ use queue::{DrainPolicy, HostSource, SharedQueue};
 struct Playback {
     paused: Arc<AtomicBool>,
     nav_tx: SyncSender<NavAction>,
+    /// Shared with the cpal callback so Tauri commands can install / clear an
+    /// audition `Engine` without touching the main one.
+    render: Arc<Mutex<RenderState>>,
+    sample_rate: u32,
 }
 
 static PLAYBACK: OnceLock<Playback> = OnceLock::new();
+
+/// True while an audition `Engine` is installed in [`RenderState::audition`].
+/// `events_thread` uses this only to drop stale audition-tagged events after
+/// resume; origin itself comes from the event payload's `audition` flag.
+static AUDITIONING: AtomicBool = AtomicBool::new(false);
+
+/// Volatile audition session (no persistence). `pair` survives `resume_autodj`
+/// so 「もう一度聴く」 can re-run after returning to the main engine.
+/// `parked_*` snapshot [`NOW`] across an audition so resume restores the
+/// main-engine titles (audition events otherwise overwrite them).
+struct AuditionSession {
+    pair: Option<(PathBuf, PathBuf)>,
+    parked_now: Option<PathBuf>,
+    parked_previous: Option<PathBuf>,
+    parked_in_progress: Option<(PathBuf, PathBuf, Origin)>,
+}
+
+static AUDITION_SESSION: Mutex<AuditionSession> = Mutex::new(AuditionSession {
+    pair: None,
+    parked_now: None,
+    parked_previous: None,
+    parked_in_progress: None,
+});
 
 /// What the transport is doing, as the audio thread sees it. The webview polls
 /// this rather than guessing from which commands it has sent, so the
@@ -626,21 +655,26 @@ mod flip_paused_tests {
 }
 
 /// Who started a transition. Only distinguishes "should this feed the ⚑
-/// flag work (S5)" — a listener's own skip is not a mixing judgement worth
-/// reviewing, so it must not be confused for one.
+/// flag work (S5)" — a listener's own skip, or an edit-tab audition mix, is
+/// not a mixing judgement worth reviewing, so it must not be confused for one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Origin {
     Automatic,
     Manual,
+    Audition,
 }
 
 /// What crosses the audio thread's event channel. `EngineEvent` is
 /// everything the engine itself reports; `TransitionEnded` is synthesized by
 /// the cpal callback (see its comment) because the engine has no event of
 /// its own for "the overlap just finished".
+///
+/// `audition` is stamped at send time from whether the callback was rendering
+/// the audition engine — receivers must not re-read [`AUDITIONING`], or a
+/// late event after `resume_autodj` would be mis-attributed.
 enum PlaybackEvent {
-    Engine(EngineEvent),
-    TransitionEnded,
+    Engine { event: EngineEvent, audition: bool },
+    TransitionEnded { audition: bool },
 }
 
 /// A transition that has finished, kept only long enough to answer "what did
@@ -845,6 +879,16 @@ mod now_tracker_tests {
     }
 
     #[test]
+    fn audition_transition_is_not_recorded_as_the_last_automatic_transition() {
+        let mut t = NowTracker::new();
+        t.on_track_started(p("a.wav"));
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Audition);
+        t.on_transition_ended();
+        assert!(t.last_transition.is_none());
+        assert_eq!(t.now, Some(p("b.wav")));
+    }
+
+    #[test]
     fn restart_current_is_not_recorded_as_the_last_automatic_transition() {
         let mut t = NowTracker::new();
         t.on_track_started(p("a.wav"));
@@ -902,13 +946,15 @@ const REOPEN_COOLDOWN: Duration = Duration::from_secs(2);
 
 /// State owned by the audio callback across stream reopen. Held in
 /// `Arc<Mutex<_>>` so `audio_thread` can drop and rebuild the cpal stream
-/// without rebuilding the `Engine`.
+/// without rebuilding the `Engine`. The main `engine` stays put while
+/// `audition` is `Some` so the main playhead freezes (not rendered).
 struct RenderState {
     engine: Engine,
+    audition: Option<Engine>,
     stall: StallWatch,
     /// Edge-detects the end of a transition from `Engine::transition_frames_into`
     /// at buffer boundaries; see `PlaybackEvent::TransitionEnded` in the
-    /// callback below.
+    /// callback below. Tracks whichever engine the callback is rendering.
     was_in_transition: bool,
 }
 
@@ -945,6 +991,9 @@ fn now_ms() -> u64 {
 /// `onNativeControl` action 1 — go through this so the mark is never set in
 /// one place and missed in the other.
 fn request_skip_next() -> Result<(), String> {
+    if AUDITIONING.load(Ordering::Relaxed) {
+        return Err("skip is disabled while auditioning".into());
+    }
     let playback = PLAYBACK.get().ok_or("not playing")?;
     NAV_REQUESTED_MS.store(now_ms(), Ordering::Relaxed);
     // A full channel (capacity 8) just means a nav is already queued; that is
@@ -962,6 +1011,14 @@ fn nav_origin(marked_ms: u64, now_ms: u64) -> Origin {
         Origin::Manual
     } else {
         Origin::Automatic
+    }
+}
+
+fn origin_label(origin: Origin) -> &'static str {
+    match origin {
+        Origin::Automatic => "automatic",
+        Origin::Manual => "manual",
+        Origin::Audition => "audition",
     }
 }
 
@@ -1215,11 +1272,33 @@ mod session_metadata_tests {
 /// "still playing, screen off" case this app exists for, so draining from
 /// there would let events pile up past the channel's capacity instead of
 /// just arriving late.
+/// Drop audition-tagged events that arrive after [`resume_autodj`] cleared
+/// [`AUDITIONING`]. Pure so the stale-after-resume rule is unit-testable.
+fn is_stale_audition_event(audition: bool, auditioning: bool) -> bool {
+    audition && !auditioning
+}
+
 fn events_thread(rx: Receiver<PlaybackEvent>) {
     for ev in rx {
+        let audition = match &ev {
+            PlaybackEvent::Engine { audition, .. } => *audition,
+            PlaybackEvent::TransitionEnded { audition } => *audition,
+        };
+        if is_stale_audition_event(audition, AUDITIONING.load(Ordering::Relaxed)) {
+            continue;
+        }
         match ev {
-            PlaybackEvent::Engine(EngineEvent::TransitionStarted { from, to }) => {
-                let origin = resolve_nav_origin();
+            PlaybackEvent::Engine {
+                event: EngineEvent::TransitionStarted { from, to },
+                audition,
+            } => {
+                // Origin from the send-time tag, not `AUDITIONING` — a delayed
+                // audition event after resume must not look automatic/manual.
+                let origin = if audition {
+                    Origin::Audition
+                } else {
+                    resolve_nav_origin()
+                };
                 // Only an interrupt fold moves `now`; a plain TransitionStarted
                 // leaves it alone, so sync only when the title would change.
                 let changed = {
@@ -1232,7 +1311,10 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     service_sync_state();
                 }
             }
-            PlaybackEvent::Engine(EngineEvent::TrackStarted { path, .. }) => {
+            PlaybackEvent::Engine {
+                event: EngineEvent::TrackStarted { path, .. },
+                ..
+            } => {
                 let changed = {
                     let mut tracker = NOW.lock().unwrap();
                     let before = tracker.now.clone();
@@ -1243,13 +1325,19 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     service_sync_state();
                 }
             }
-            PlaybackEvent::Engine(EngineEvent::TrackFailed { path, message }) => {
+            PlaybackEvent::Engine {
+                event: EngineEvent::TrackFailed { path, message },
+                ..
+            } => {
                 log::warn!("track failed: {} ({message})", path.display());
             }
-            PlaybackEvent::Engine(EngineEvent::Finished) => {
+            PlaybackEvent::Engine {
+                event: EngineEvent::Finished,
+                ..
+            } => {
                 log::info!("engine reports finished");
             }
-            PlaybackEvent::TransitionEnded => {
+            PlaybackEvent::TransitionEnded { .. } => {
                 let (completed, changed) = {
                     let mut tracker = NOW.lock().unwrap();
                     let before = tracker.now.clone();
@@ -1262,7 +1350,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                         "transition: {} -> {} ({})",
                         from.display(),
                         to.display(),
-                        if origin == Origin::Automatic { "automatic" } else { "manual" }
+                        origin_label(origin)
                     );
                 }
                 if changed {
@@ -1270,6 +1358,27 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stale_audition_event_tests {
+    use super::*;
+
+    #[test]
+    fn audition_events_while_auditioning_are_kept() {
+        assert!(!is_stale_audition_event(true, true));
+    }
+
+    #[test]
+    fn audition_events_after_resume_are_dropped() {
+        assert!(is_stale_audition_event(true, false));
+    }
+
+    #[test]
+    fn main_engine_events_are_never_stale() {
+        assert!(!is_stale_audition_event(false, false));
+        assert!(!is_stale_audition_event(false, true));
     }
 }
 
@@ -1324,11 +1433,48 @@ fn open_output_stream(
                     set_phase(Phase::Paused);
                     return;
                 }
-                let frames = state.engine.render(out);
-                let written = frames * 2;
-                if written < out.len() {
-                    out[written..].fill(0.0);
-                }
+                // Audition, when present, owns the callback; main is not
+                // rendered so its playhead stays frozen until resume. Scoped
+                // so the engine borrow ends before `stall` / `was_in_transition`.
+                // Stamp `audition` at send time from this buffer's engine choice.
+                let audition = state.audition.is_some();
+                let (events, in_transition) = {
+                    let engine = match state.audition.as_mut() {
+                        Some(aud) => aud,
+                        None => &mut state.engine,
+                    };
+                    let frames = engine.render(out);
+                    let written = frames * 2;
+                    if written < out.len() {
+                        out[written..].fill(0.0);
+                    }
+                    // The returned `Vec` drops here, on the audio thread, which
+                    // frees it here too — not just allocates it here.
+                    // `pending_events` already grows and gets collected on every
+                    // transition, so neither the allocation nor this free is
+                    // new work this adds; it is the engine's existing cost, and
+                    // it happens only a few times per transition (a few times a
+                    // minute at most), which is judged cheap enough for the
+                    // callback.
+                    let events = engine.poll_events();
+                    // Edge-detects the end of a transition from
+                    // `Engine::transition_frames_into` at buffer boundaries,
+                    // since the engine has no event of its own for "the overlap
+                    // just finished" (see `PlaybackEvent::TransitionEnded`). A
+                    // nav that arrives *during* a transition makes the engine
+                    // abort and immediately start a new one within the same
+                    // `render` call, so this still reads `Some` afterwards and
+                    // the edge for the interrupted transition is never seen
+                    // here — only a second `TransitionStarted` arrives, with no
+                    // `TransitionEnded` in between. That is a deliberate
+                    // consequence of only sampling at buffer boundaries;
+                    // `NowTracker::on_transition_started` is what actually
+                    // copes with it, by folding the interrupted transition into
+                    // the display the moment the second one starts rather than
+                    // waiting for an end edge that will never come.
+                    let in_transition = engine.transition_frames_into().is_some();
+                    (events, in_transition)
+                };
                 // Bit-exact silence is the one signal a host gets that the
                 // engine had nothing prepared for this buffer; see `StallWatch`.
                 let silent = out.iter().all(|s| *s == 0.0);
@@ -1336,35 +1482,22 @@ fn open_output_stream(
                 let phase = state.stall.observe(total_frames, silent);
                 set_phase(phase);
 
-                // The returned `Vec` drops here, on the audio thread, which frees
-                // it here too — not just allocates it here. `pending_events`
-                // already grows and gets collected on every transition, so
-                // neither the allocation nor this free is new work this adds;
-                // it is the engine's existing cost, and it happens only a few
-                // times per transition (a few times a minute at most), which is
-                // judged cheap enough for the callback.
-                for ev in state.engine.poll_events() {
-                    if event_tx.try_send(PlaybackEvent::Engine(ev)).is_err() {
+                for ev in events {
+                    if event_tx
+                        .try_send(PlaybackEvent::Engine {
+                            event: ev,
+                            audition,
+                        })
+                        .is_err()
+                    {
                         EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                // Edge-detects the end of a transition from
-                // `Engine::transition_frames_into` at buffer boundaries, since
-                // the engine has no event of its own for "the overlap just
-                // finished" (see `PlaybackEvent::TransitionEnded`). A nav that
-                // arrives *during* a transition makes the engine abort and
-                // immediately start a new one within the same `render` call, so
-                // this still reads `Some` afterwards and the edge for the
-                // interrupted transition is never seen here — only a second
-                // `TransitionStarted` arrives, with no `TransitionEnded` in
-                // between. That is a deliberate consequence of only sampling at
-                // buffer boundaries; `NowTracker::on_transition_started` is what
-                // actually copes with it, by folding the interrupted transition
-                // into the display the moment the second one starts rather than
-                // waiting for an end edge that will never come.
-                let in_transition = state.engine.transition_frames_into().is_some();
                 if state.was_in_transition && !in_transition {
-                    if event_tx.try_send(PlaybackEvent::TransitionEnded).is_err() {
+                    if event_tx
+                        .try_send(PlaybackEvent::TransitionEnded { audition })
+                        .is_err()
+                    {
                         EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -1391,6 +1524,7 @@ fn audio_thread(
     data_dir: PathBuf,
     log: Sender<String>,
     queue: SharedQueue,
+    initial_paused: bool,
 ) {
     macro_rules! say {
         ($($a:tt)*) => {{ let m = format!($($a)*); log::info!("{m}"); let _ = log.send(m); }};
@@ -1489,19 +1623,23 @@ fn audio_thread(
     say!("engine created");
 
     // Grab the nav sender before `engine` moves into `RenderState`, and publish
-    // both it and a fresh `paused` flag for Tauri commands and the
-    // notification's JNI callback to reach.
-    let paused = Arc::new(AtomicBool::new(false));
-    let _ = PLAYBACK.set(Playback {
-        paused: Arc::clone(&paused),
-        nav_tx: engine.nav_sender(),
-    });
-
+    // it with `render` / `paused` for Tauri commands and the notification's
+    // JNI callback. Cold-start audition sets `initial_paused` so the main
+    // engine never becomes audible before the audition engine is installed.
+    let paused = Arc::new(AtomicBool::new(initial_paused));
+    let nav_tx = engine.nav_sender();
     let render = Arc::new(Mutex::new(RenderState {
         engine,
+        audition: None,
         stall: StallWatch::new(sample_rate),
         was_in_transition: false,
     }));
+    let _ = PLAYBACK.set(Playback {
+        paused: Arc::clone(&paused),
+        nav_tx,
+        render: Arc::clone(&render),
+        sample_rate,
+    });
 
     // Bounded, and drained on its own thread rather than by the caller of
     // `player_state` — see `events_thread`. 64 is generous for a channel
@@ -1698,19 +1836,30 @@ fn is_supported_track(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-#[tauri::command(async)]
-fn start(
-    music_dir: String,
-    cache_dir: String,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
+/// Start the main audio thread. `initial_paused` is for cold-start audition:
+/// PLAYBACK is published paused so the main engine never becomes audible
+/// before an audition engine is installed.
+///
+/// `load_persisted_queue`: UI ▶ loads `queue.json`; cold-start audition leaves
+/// pending empty. Folder `ContinueFolder` supply does not write `queue.json`
+/// (`on_pending_consumed` only runs when something was taken from pending), so
+/// an empty cold start keeps the file untouched. Do **not** `load_queue` /
+/// `replace_pending` later in `resume_autodj` either — the loader may already
+/// have taken folder tracks, and injecting pending then would reorder them.
+fn start_impl(
+    music_dir: &str,
+    cache_dir: &str,
+    app: &tauri::AppHandle,
+    state: &AppState,
+    initial_paused: bool,
+    load_persisted_queue: bool,
 ) -> Result<String, String> {
     let mut started = state.started.lock().unwrap();
     if *started {
         return Err("already started".into());
     }
 
-    let dir = PathBuf::from(&music_dir);
+    let dir = PathBuf::from(music_dir);
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -1731,16 +1880,18 @@ fn start(
     // Resolved here rather than taken as an argument: the webview passes the
     // music and cache paths because it displays them, but the data dir is
     // internal and it has no business naming it.
-    let data = PathBuf::from(resolve_dirs(&app)?.data_dir);
+    let data = PathBuf::from(resolve_dirs(app)?.data_dir);
 
     // Restore whatever was still pending from a previous run before the
     // engine starts pulling from the queue. Replaces rather than appends:
     // anything queued in this process since launch was already mirrored into
     // queue.json by the command that queued it, so appending would duplicate
     // every entry queued before start was pressed.
-    match store::load_queue(&data) {
-        Ok(saved) => queue::replace_pending(&state.queue, saved),
-        Err(e) => log::warn!("load_queue({}): {e}", data.display()),
+    if load_persisted_queue {
+        match store::load_queue(&data) {
+            Ok(saved) => queue::replace_pending(&state.queue, saved),
+            Err(e) => log::warn!("load_queue({}): {e}", data.display()),
+        }
     }
     let queue = Arc::clone(&state.queue);
 
@@ -1751,11 +1902,11 @@ fn start(
     // Kick off analysis for anything the folder holds that the cache does not
     // already have a complete entry for, so the loader thread never has to
     // run a synchronous analysis mid-playback (see `analyze_missing`).
-    analyze_missing(&app, &paths, &cache, &data);
+    analyze_missing(app, &paths, &cache, &data);
 
     if let Err(e) = std::thread::Builder::new()
         .name("funkot-audio".into())
-        .spawn(move || audio_thread(paths, cache, data, tx, queue))
+        .spawn(move || audio_thread(paths, cache, data, tx, queue, initial_paused))
     {
         set_phase(Phase::Idle);
         return Err(format!("spawn audio thread: {e}"));
@@ -1765,6 +1916,215 @@ fn start(
 
     *started = true;
     Ok(found)
+}
+
+#[tauri::command(async)]
+fn start(
+    music_dir: String,
+    cache_dir: String,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
+    start_impl(&music_dir, &cache_dir, &app, &state, false, true)
+}
+
+/// How long cold-start audition waits for the audio thread to publish PLAYBACK.
+const PLAYBACK_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn wait_for_playback() -> Result<&'static Playback, String> {
+    let deadline = Instant::now() + PLAYBACK_READY_TIMEOUT;
+    loop {
+        if let Some(p) = PLAYBACK.get() {
+            return Ok(p);
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for playback to become ready".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Fast-forward a non-realtime audition engine to ~8 bars before A's outro.
+fn fast_forward_audition(engine: &mut Engine, from: &PreparedTrack, bar_frames: f64) {
+    let preroll = (8.0 * bar_frames).round() as u64;
+    let target = from.outro_start_out.saturating_sub(preroll);
+    let start_ph = from.first_downbeat_out.min(target);
+    let mut remaining = target.saturating_sub(start_ph);
+    let mut buf = vec![0.0f32; 65_536 * 2];
+    while remaining > 0 {
+        let chunk_frames = remaining.min(65_536) as usize;
+        let written = engine.render(&mut buf[..chunk_frames * 2]);
+        let _ = engine.poll_events();
+        if written == 0 {
+            break;
+        }
+        remaining = remaining.saturating_sub(written as u64);
+    }
+}
+
+/// Build a two-track audition engine at `sample_rate`, fast-forwarded to the mix.
+fn build_audition_engine(
+    from_path: &Path,
+    to_path: &Path,
+    cache_dir: &Path,
+    sample_rate: u32,
+) -> Result<Engine, String> {
+    let mut options = EngineOptions::default();
+    options.output_sample_rate = sample_rate;
+    options.cache_dir = cache_dir.to_path_buf();
+
+    let paths = vec![from_path.to_path_buf(), to_path.to_path_buf()];
+    let prepared = prepare_tracks_parallel(&options, &paths, 0)
+        .map_err(|e| format!("prepare audition tracks: {e}"))?;
+    if prepared.len() != 2 {
+        return Err(format!(
+            "expected 2 prepared tracks, got {}",
+            prepared.len()
+        ));
+    }
+    let from = prepared[0].clone();
+    let bar_frames = options.bar_frames();
+
+    let mut engine = Engine::from_prepared(options, prepared)
+        .map_err(|e| format!("audition Engine::from_prepared: {e}"))?;
+    engine.set_realtime(false);
+    fast_forward_audition(&mut engine, &from, bar_frames);
+    engine.set_realtime(true);
+    Ok(engine)
+}
+
+fn install_audition(engine: Engine) -> Result<(), String> {
+    let playback = PLAYBACK.get().ok_or("not playing")?;
+    // Park main-engine display only on the first install of a session. A
+    // second install (「もう一度聴く」 while still auditioning) must not
+    // snapshot the audition titles as if they were the main engine's.
+    // Lock order: NOW before AUDITION_SESSION (never reverse).
+    if !AUDITIONING.load(Ordering::Relaxed) {
+        let mut now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut session = AUDITION_SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        session.parked_now = now.now.clone();
+        session.parked_previous = now.previous.clone();
+        session.parked_in_progress = now.in_progress.clone();
+        now.in_progress = None;
+    }
+    let in_transition = engine.transition_frames_into().is_some();
+    // Take any previous audition engine under the render lock, then drop it
+    // after unlock so Engine teardown does not hold the realtime mutex.
+    let previous = {
+        let mut state = playback
+            .render
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = state.audition.take();
+        state.audition = Some(engine);
+        state.was_in_transition = in_transition;
+        state.stall.reset_silence();
+        previous
+    };
+    drop(previous);
+    AUDITIONING.store(true, Ordering::Relaxed);
+    playback.paused.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn audition_transition(
+    from_path: String,
+    to_path: String,
+    music_dir: String,
+    cache_dir: String,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    let from = PathBuf::from(&from_path);
+    let to = PathBuf::from(&to_path);
+    if !from.is_file() {
+        return Err(format!("from track not found: {from_path}"));
+    }
+    if !to.is_file() {
+        return Err(format!("to track not found: {to_path}"));
+    }
+
+    let cold_start = PLAYBACK.get().is_none();
+    if cold_start {
+        // Cold audition: paused main engine, empty pending (no load_queue).
+        start_impl(&music_dir, &cache_dir, &app, &state, true, false)?;
+        wait_for_playback()?;
+    }
+    let playback = PLAYBACK.get().ok_or("not playing")?;
+    let sample_rate = playback.sample_rate;
+
+    let engine = build_audition_engine(&from, &to, Path::new(&cache_dir), sample_rate)?;
+    {
+        let mut session = AUDITION_SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        session.pair = Some((from, to));
+    }
+    install_audition(engine)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn resume_autodj() -> Result<(), String> {
+    let playback = PLAYBACK.get().ok_or("not playing")?;
+    // Take the audition engine under the render lock; drop it after unlock.
+    let previous = {
+        let mut state = playback
+            .render
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = state.audition.take();
+        state.was_in_transition = state.engine.transition_frames_into().is_some();
+        state.stall.reset_silence();
+        previous
+    };
+    drop(previous);
+    AUDITIONING.store(false, Ordering::Relaxed);
+    // Lock order: NOW before AUDITION_SESSION (never reverse).
+    {
+        let mut now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut session = AUDITION_SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        now.now = session.parked_now.take();
+        now.previous = session.parked_previous.take();
+        now.in_progress = session.parked_in_progress.take();
+    }
+    service_sync_state();
+    // Spec: resume returns to auto-DJ — including cold-start where main was
+    // only ever paused under audition. Cold start left pending empty on
+    // purpose; do not load_queue / replace_pending here (folder loader order).
+    playback.paused.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn audition_again(
+    music_dir: String,
+    cache_dir: String,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    let (from, to) = {
+        let session = AUDITION_SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        session
+            .pair
+            .clone()
+            .ok_or_else(|| "no audition pair to replay".to_string())?
+    };
+    audition_transition(
+        from.to_string_lossy().into_owned(),
+        to.to_string_lossy().into_owned(),
+        music_dir,
+        cache_dir,
+        app,
+        state,
+    )
 }
 
 /// Drain whatever the audio thread has said so far.
@@ -1820,22 +2180,55 @@ struct PlayerState {
     now_playing: Option<String>,
     previous: Option<String>,
     last_transition: Option<TransitionInfo>,
+    auditioning: bool,
+    audition_from: Option<String>,
+    audition_to: Option<String>,
+}
+
+fn audition_display_title(path: &Path) -> String {
+    let tags = cached_tags_for(path);
+    session_metadata_for(Some(path), &tags).0
 }
 
 #[tauri::command]
 fn player_state() -> PlayerState {
-    let now = NOW.lock().unwrap();
+    // Never hold NOW and AUDITION_SESSION together; never hold either across
+    // the tag-probe I/O in `audition_display_title`.
+    let (now_playing, previous, last_transition) = {
+        let now = NOW.lock().unwrap();
+        (
+            now.now.clone(),
+            now.previous.clone(),
+            now.last_transition.as_ref().map(|t| TransitionInfo {
+                from: file_name_str(&t.from),
+                to: file_name_str(&t.to),
+                automatic: t.origin == Origin::Automatic,
+                seconds_ago: t.at.elapsed().as_secs_f64(),
+            }),
+        )
+    };
+    let pair = {
+        let session = AUDITION_SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        session.pair.clone()
+    };
+    let (audition_from, audition_to) = match pair.as_ref() {
+        Some((from, to)) => (
+            Some(audition_display_title(from)),
+            Some(audition_display_title(to)),
+        ),
+        None => (None, None),
+    };
     PlayerState {
         phase: get_phase().as_str(),
         paused: is_paused(),
-        now_playing: now.now.as_deref().map(file_name_str),
-        previous: now.previous.as_deref().map(file_name_str),
-        last_transition: now.last_transition.as_ref().map(|t| TransitionInfo {
-            from: file_name_str(&t.from),
-            to: file_name_str(&t.to),
-            automatic: t.origin == Origin::Automatic,
-            seconds_ago: t.at.elapsed().as_secs_f64(),
-        }),
+        now_playing: now_playing.as_deref().map(file_name_str),
+        previous: previous.as_deref().map(file_name_str),
+        last_transition,
+        auditioning: AUDITIONING.load(Ordering::Relaxed),
+        audition_from,
+        audition_to,
     }
 }
 
@@ -2871,6 +3264,9 @@ pub fn run() {
             skip_next,
             is_paused,
             player_state,
+            audition_transition,
+            resume_autodj,
+            audition_again,
             flag_last_transition,
             undo_last_flag,
             list_flagged_tracks,

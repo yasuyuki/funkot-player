@@ -244,6 +244,9 @@ pub struct FlagPartner {
     pub title: String,
     pub count: u32,
     pub missing: bool,
+    /// Absolute path when the partner is still in the library; API-only (not
+    /// persisted in `flags.json`).
+    pub path: Option<String>,
 }
 
 /// One aggregated row: a track in one role (outgoing or incoming).
@@ -390,13 +393,14 @@ pub fn aggregate_flags(
             let mut partners: Vec<FlagPartner> = partners_map
                 .into_iter()
                 .map(|(partner_hash, pcount)| {
-                    let (ptitle, _, _, _, pmissing, _, _, _, _, _, _, _) =
+                    let (ptitle, _, _, _, pmissing, ppath, _, _, _, _, _, _) =
                         resolve(&partner_hash);
                     FlagPartner {
                         track_hash: partner_hash,
                         title: ptitle,
                         count: pcount,
                         missing: pmissing,
+                        path: ppath,
                     }
                 })
                 .collect();
@@ -740,6 +744,10 @@ mod tests {
         assert!(rows[0].low_confidence); // outro
         assert_eq!(rows[0].partners.len(), 1);
         assert_eq!(rows[0].partners[0].track_hash, "bbb");
+        assert_eq!(
+            rows[0].partners[0].path.as_deref(),
+            Some("/music/Beta.flac")
+        );
         assert_eq!(rows[0].path.as_deref(), Some("/music/Alpha.flac"));
         assert!(rows[0].analyzed);
         assert_eq!(rows[0].intro_bars, Some(16));
@@ -870,6 +878,7 @@ mod tests {
         assert_eq!(out.partners[0].track_hash, "zzz");
         assert!(out.partners[0].missing);
         assert_eq!(out.partners[0].title, MISSING_TITLE);
+        assert_eq!(out.partners[0].path, None);
     }
 
     /// Dismissing one side of a pair hides only that row; flags stay intact.

@@ -41,6 +41,12 @@
   #toggle.st-playing { background: #2b6; color: #000; }
   #toggle.st-paused { background: #b83; color: #000; }
   #toggle.st-off, #go.st-off, #next.st-off, #flag.st-off { background: #444; color: #777; }
+  #audition-banner { margin: .4rem 0 .6rem; padding: .55rem .7rem; background: #332;
+                     border-radius: .3rem; font-size: .95rem; color: #fcc;
+                     display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  #audition-banner[hidden] { display: none; }
+  #audition-banner button { width: auto; font-size: .95rem; padding: .35rem .8rem;
+                            background: #b83; color: #000; }
   #flag-toast { margin: .4rem 0 0; font-size: .85rem; color: #ccc; min-height: 1.2em; }
   #flag-toast[hidden] { display: none; }
   #flag-toast button.undo-flag { width: auto; font-size: inherit; padding: 0;
@@ -119,6 +125,11 @@
 
 <div id="status" class="idle">idle</div>
 <div id="now"></div>
+<div id="audition-banner" hidden>
+  <span>自動再生を中断しました</span>
+  <span>｜</span>
+  <button type="button" id="audition-resume">〔再開〕</button>
+</div>
 <button id="go">▶ start</button>
 <div class="row">
   <button id="toggle">⏸ pause / play</button>
@@ -164,8 +175,13 @@
   const nextBtn = document.getElementById("next");
   const flagBtn = document.getElementById("flag");
   const flagToast = document.getElementById("flag-toast");
+  const auditionBanner = document.getElementById("audition-banner");
+  const auditionResumeBtn = document.getElementById("audition-resume");
   const scanBtn = document.getElementById("scan");
   let flagToastTimer = null;
+  // Last known audition pair / flag from player_state (for 「もう一度聴く」).
+  let auditionActive = false;
+  let auditionHasPair = false;
 
   function hideFlagToast() {
     if (flagToastTimer) {
@@ -374,7 +390,7 @@
           `<span class="flagged-role">${roleLabel}</span>` +
           `<span class="flagged-count">${r.count}</span>` +
           `</button>` +
-          `<button type="button" class="mini flagged-ok">〔問題なかった〕</button>`;
+          `<button type="button" class="mini flagged-ok">〔外す〕</button>`;
         row.querySelector(".flagged-ok").onclick = (ev) => {
           ev.stopPropagation();
           const b = ev.currentTarget;
@@ -405,6 +421,10 @@
     flaggedList.hidden = true;
     flaggedDetail.hidden = false;
     flaggedDetail.replaceChildren();
+
+    const baselineIntro = row.intro_bars;
+    const baselineOutro = row.outro_structure_bars;
+    let dirty = false;
 
     const back = document.createElement("button");
     back.type = "button";
@@ -467,6 +487,7 @@
             else args.outroStructureBars = value;
             const updated = await invoke("set_bars", args);
             applyFlaggedBarUpdate(row, updated);
+            dirty = true;
             mountChip();
             syncLibraryRow(updated);
             showUndoToast("変更しました", async () => {
@@ -488,21 +509,111 @@
     }
     mountChip();
 
-    const actions = document.createElement("div");
-    actions.className = "flagged-detail-actions";
-    for (const [label, cls] of [
-      ["〔直った〕", "flagged-fixed"],
-      ["〔問題なかった〕", "flagged-ok"],
-    ]) {
+    const listenHost = document.createElement("div");
+    listenHost.className = "flagged-detail-actions";
+    for (const partner of row.partners) {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = cls;
-      b.textContent = label;
-      b.onclick = () => withBusy(b, () => dismissAndReload(row.track_hash, row.role));
-      actions.appendChild(b);
+      const outgoing = row.role === "outgoing";
+      b.textContent = outgoing
+        ? `「${partner.title}」へのつなぎを聴く`
+        : `「${partner.title}」からのつなぎを聴く`;
+      const fromPath = outgoing ? row.path : partner.path;
+      const toPath = outgoing ? partner.path : row.path;
+      const disabled = !!(partner.missing || !partner.path || !row.path);
+      b.disabled = disabled;
+      if (!disabled) {
+        b.onclick = () => withBusy(b, async () => {
+          const dirs = await invoke("app_dirs");
+          await invoke("audition_transition", {
+            fromPath,
+            toPath,
+            musicDir: dirs.music_dir,
+            cacheDir: dirs.cache_dir,
+          });
+          await refreshPlayerState();
+        });
+      }
+      listenHost.appendChild(b);
     }
+    const againBtn = document.createElement("button");
+    againBtn.type = "button";
+    againBtn.className = "audition-again";
+    againBtn.textContent = "もう一度聴く";
+    againBtn.disabled = !(auditionActive || auditionHasPair);
+    againBtn.onclick = () => withBusy(againBtn, async () => {
+      const dirs = await invoke("app_dirs");
+      await invoke("audition_again", {
+        musicDir: dirs.music_dir,
+        cacheDir: dirs.cache_dir,
+      });
+      await refreshPlayerState();
+    });
+    listenHost.appendChild(againBtn);
+    flaggedDetail.appendChild(listenHost);
+
+    const actions = document.createElement("div");
+    actions.className = "flagged-detail-actions";
+
+    const confirmBtn = document.createElement("button");
+    confirmBtn.type = "button";
+    confirmBtn.className = "flagged-fixed";
+    confirmBtn.textContent = "〔確定〕";
+    confirmBtn.onclick = () => withBusy(confirmBtn, async () => {
+      if (!row.path) {
+        throw "no path for this track";
+      }
+      const args = {
+        path: row.path,
+        introBars: null,
+        outroStructureBars: null,
+      };
+      if (row.role === "outgoing") {
+        args.outroStructureBars = row.outro_structure_bars;
+      } else {
+        args.introBars = row.intro_bars;
+      }
+      const updated = await invoke("set_bars", args);
+      applyFlaggedBarUpdate(row, updated);
+      syncLibraryRow(updated);
+      await dismissAndReload(row.track_hash, row.role);
+    });
+    actions.appendChild(confirmBtn);
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "flagged-ok";
+    cancelBtn.textContent = "〔キャンセル〕";
+    cancelBtn.onclick = () => withBusy(cancelBtn, async () => {
+      // Drop chip undo toast so 「取消」cannot rewrite bars after baseline restore.
+      hideFlagToast();
+      if (dirty) {
+        if (!row.path) {
+          throw "no path for this track";
+        }
+        const args = {
+          path: row.path,
+          introBars: null,
+          outroStructureBars: null,
+        };
+        if (kind === "intro") args.introBars = baselineIntro;
+        else args.outroStructureBars = baselineOutro;
+        const restored = await invoke("set_bars", args);
+        applyFlaggedBarUpdate(row, restored);
+        syncLibraryRow(restored);
+      }
+      showFlaggedList();
+      renderFlaggedTracks(flaggedRows);
+    });
+    actions.appendChild(cancelBtn);
+
     flaggedDetail.appendChild(actions);
   }
+
+  auditionResumeBtn.onclick = () => withBusy(auditionResumeBtn, async () => {
+    await invoke("resume_autodj");
+    await refreshPlayerState();
+  });
 
   function applyFlaggedBarUpdate(row, updated) {
     Object.assign(row, {
@@ -554,8 +665,8 @@
   // Chip picker instead of cycling: every candidate is visible, including a
   // current value that is not in the default step set. The outro cell edits
   // the *structural boundary*; mix is derived and read-only.
-  const INTRO_STEPS = [8, 16, 32, 48, 64, 80, 96];
-  const OUTRO_STEPS = [8, 16, 32, 64];
+  const INTRO_STEPS = [16, 32, 48, 64, 80];
+  const OUTRO_STEPS = [16, 32, 48, 64, 80];
 
   function chipValues(steps, current) {
     const set = new Set(steps);
@@ -907,9 +1018,20 @@
       // enables when there is something to flag, and a toast appears right
       // after a press.
       nowEl.textContent = state.now_playing ?? "";
-      const flagEnabled = !!state.last_transition;
+      auditionActive = !!state.auditioning;
+      auditionHasPair = !!(state.audition_from && state.audition_to);
+      auditionBanner.hidden = !auditionActive;
+      const flagEnabled = !!state.last_transition && !auditionActive;
       flagBtn.disabled = !flagEnabled;
       flagBtn.classList.toggle("st-off", !flagEnabled);
+      if (auditionActive) {
+        nextBtn.disabled = true;
+        nextBtn.classList.add("st-off");
+      }
+      const againBtn = flaggedDetail.querySelector("button.audition-again");
+      if (againBtn) {
+        againBtn.disabled = !(auditionActive || auditionHasPair);
+      }
     } catch (e) {
       log.innerHTML = `<span class="err">${e}</span>`;
     }
