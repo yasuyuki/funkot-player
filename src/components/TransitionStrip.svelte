@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
   import { toast } from "../lib/toast.svelte";
+  import { ui } from "../lib/ui.svelte";
 
   // See Transport.svelte's comment on why this exists: every command
   // round-trips through the host, so a second tap before the first reply
@@ -80,9 +81,17 @@
       <div class="line">→ {toTitle}</div>
     {/if}
   </div>
-  <button type="button" class="flag" disabled={!flagEnabled || busy} onclick={onFlagClick}>
-    ⚑ このつなぎは不適切
-  </button>
+  <div class="flag-row">
+    <button type="button" class="flag" disabled={!flagEnabled || busy} onclick={onFlagClick}>
+      ⚑ このつなぎは不適切
+    </button>
+    <button
+      type="button"
+      class="mode-toggle"
+      aria-label={ui.mode === "play" ? "編集モードへ" : "再生モードへ"}
+      onclick={() => ui.setMode(ui.mode === "play" ? "edit" : "play")}
+    >{ui.mode === "play" ? "編集" : "再生"}</button>
+  </div>
 </div>
 
 <style>
@@ -116,15 +125,38 @@
   .ago {
     flex: none;
   }
+  .flag-row {
+    display: flex;
+    gap: var(--space-xs);
+  }
   /* Amber outline, not fill: see tokens.css's `--color-flag-amber` comment
      -- a filled amber would collide with Transport's paused/resume colour.
      No `transition`, same tap-must-be-instant reason as every button here. */
   .flag {
+    flex: 2;
+    width: auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-size: var(--font-size-md);
     padding: var(--space-md) var(--space-lg);
     min-height: var(--transport-btn-min-height);
     background: transparent;
     color: var(--color-flag-amber);
     border: 1px solid var(--color-flag-amber);
+  }
+  .mode-toggle {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: var(--font-size-md);
+    padding: var(--space-md) var(--space-lg);
+    min-height: var(--transport-btn-min-height);
+    background: var(--color-tab-bg);
+    color: var(--color-tab-text);
   }
 </style>

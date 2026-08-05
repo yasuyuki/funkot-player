@@ -11,7 +11,6 @@
   import Queue from "./components/Queue.svelte";
   import Library from "./components/Library.svelte";
   import MiniBar from "./components/MiniBar.svelte";
-  import ModeTabs from "./components/ModeTabs.svelte";
   import FlaggedList from "./components/edit/FlaggedList.svelte";
   import FlaggedDetail from "./components/edit/FlaggedDetail.svelte";
   import AllTracks from "./components/edit/AllTracks.svelte";
@@ -66,8 +65,6 @@
 <Toast />
 
 <LogView />
-
-<ModeTabs />
 
 {#if ui.mode === "play"}
   <Queue />
