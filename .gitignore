@@ -5,6 +5,10 @@
 # Node
 /node_modules/
 
+# Vite build output (frontendDist); legacy/index.html is the pre-Vite copy
+# kept for reference, not this.
+/dist/
+
 # Local music and analysis cache used for testing
 /testdata/
 

@@ -1,0 +1,101 @@
+/* Design tokens: CSS custom properties shared by every component.
+ * Names use the --color-* / --space-* / --radius-* / --font-* prefixes;
+ * the set gets tidied up in stage 5 once every screen exists. */
+:root {
+  /* Surface / text */
+  --color-bg: #111;
+  --color-text: #eee;
+  --color-text-dim: #999;
+  --color-text-dimmer: #777;
+  --color-border: #333;
+
+  /* Phase / status colours */
+  --color-status-idle: #777;
+  --color-status-starting: #fa6;
+  --color-status-paused: #fa6;
+  --color-status-stalled: #fa6;
+  --color-status-playing: #6c9;
+  --color-status-failed: #f66;
+  --color-status-disconnected: #f66;
+
+  /* Transport buttons */
+  --color-transport-primary-bg: #2b6;
+  --color-transport-primary-text: #000;
+  --color-transport-paused-bg: #b83;
+  --color-transport-paused-text: #000;
+  --color-transport-secondary-bg: #369;
+  --color-transport-secondary-text: #fff;
+  --color-transport-disabled-bg: #444;
+  --color-transport-disabled-text: #777;
+
+  /* Record operation (flag): outline, not fill -- filled amber would collide
+   * with the paused colour above (#b83). */
+  --color-flag-amber: #e6a417;
+
+  /* Overflow menu (⋮) */
+  --color-menu-bg: #222;
+  --color-menu-border: #444;
+
+  /* Inline text links (toast 取消, NowCard's ログを表示) */
+  --color-link: #6af;
+
+  /* Queue reserved row (next-up, not editable) */
+  --color-queue-reserved-bg: #1a2a1f;
+
+  /* Fixed mini bar (scroll-away transport replacement) */
+  --color-minibar-bg: #1a1a1a;
+  --minibar-height: 3.2rem;
+
+  /* Library / queue row heights — fixed so a virtual list can drop in later */
+  --library-row-height: 3.4rem;
+  --queue-row-height: 3.2rem;
+
+  /* Spacing */
+  --space-xs: 0.3rem;
+  --space-sm: 0.4rem;
+  --space-md: 0.6rem;
+  --space-lg: 0.8rem;
+  --space-xl: 1rem;
+
+  /* Radius */
+  --radius-sm: 0.3rem;
+  --radius-md: 0.4rem;
+
+  /* Font sizes */
+  --font-size-sm: 0.85rem;
+  --font-size-md: 0.95rem;
+  --font-size-lg: 1.2rem;
+}
+
+body {
+  font: 16px/1.5 system-ui, sans-serif;
+  margin: 0;
+  /* Tauri on Android draws edge-to-edge: without this the first control sits
+     under the status bar / cutout and the system eats the touch. */
+  padding: calc(var(--space-xl) + env(safe-area-inset-top, 3rem)) var(--space-xl)
+    calc(var(--space-xl) + env(safe-area-inset-bottom, 2rem));
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+button {
+  font-size: var(--font-size-lg);
+  padding: var(--space-lg) 1.6rem;
+  width: 100%;
+  background: var(--color-transport-primary-bg);
+  color: var(--color-transport-primary-text);
+  border: 0;
+  border-radius: var(--radius-md);
+  /* No transition: a tap must show up immediately, not after a fade. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(255, 255, 255, 0.25);
+}
+
+button:active {
+  filter: brightness(1.4);
+  transform: scale(0.98);
+}
+
+button[disabled] {
+  opacity: 0.45;
+}

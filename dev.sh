@@ -17,8 +17,25 @@
 # wireless debugging:
 #   ADB=1 ./dev.sh adb devices -l
 #
-# GUI=1 runs the desktop build on WSLg's display and sound card:
-#   ./dev.sh cargo build --manifest-path src-tauri/Cargo.toml --release
+# Hot reload on the device needs BOTH --host 127.0.0.1 and adb reverse. Without
+# --host the Tauri CLI rewrites devUrl to WSL2's NAT address, which the phone
+# cannot reach, and the window comes up blank; setting TAURI_DEV_HOST first does
+# not help because the CLI overwrites it. 1421 is the HMR socket:
+#   ADB=1 ./dev.sh bash -c '
+#     adb connect <ip>:<port>
+#     adb reverse tcp:1420 tcp:1420; adb reverse tcp:1421 tcp:1421
+#     npx tauri android dev --host 127.0.0.1'
+# Note that `android dev` holds the device for as long as it runs, so nothing
+# else can use adb meanwhile -- to drive the UI yourself, install a debug APK
+# instead.
+#
+# GUI=1 runs the desktop build on WSLg's display and sound card. --features
+# custom-protocol is what bakes dist/ into the binary; without it the build is a
+# dev build and the window only says it cannot reach the Vite server (see the
+# comment on that feature in src-tauri/Cargo.toml). Run `npm run build` first --
+# cargo does not rebuild when only dist/ changed:
+#   ./dev.sh npm run build
+#   ./dev.sh cargo build --manifest-path src-tauri/Cargo.toml --release --features custom-protocol
 #   GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
 #
 # /root/.android is a named volume on every run, not just for adb: the debug

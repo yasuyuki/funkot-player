@@ -61,7 +61,12 @@ struct AuditionSession {
     pair: Option<(PathBuf, PathBuf)>,
     parked_now: Option<PathBuf>,
     parked_previous: Option<PathBuf>,
-    parked_in_progress: Option<(PathBuf, PathBuf, Origin)>,
+    parked_in_progress: Option<(PathBuf, PathBuf, Origin, u64)>,
+    /// [`NowTracker::now_started_frames`] at park time. `MAIN_FRAMES` freezes
+    /// for the whole audition (it only advances for the main engine), so
+    /// restoring this on resume is what makes `position_secs` pick up again
+    /// from where the listener left off instead of jumping or going stale.
+    parked_now_started_frames: Option<u64>,
 }
 
 static AUDITION_SESSION: Mutex<AuditionSession> = Mutex::new(AuditionSession {
@@ -69,6 +74,7 @@ static AUDITION_SESSION: Mutex<AuditionSession> = Mutex::new(AuditionSession {
     parked_now: None,
     parked_previous: None,
     parked_in_progress: None,
+    parked_now_started_frames: None,
 });
 
 /// What the transport is doing, as the audio thread sees it. The webview polls
@@ -722,10 +728,19 @@ struct CompletedTransition {
 struct NowTracker {
     now: Option<PathBuf>,
     previous: Option<PathBuf>,
-    in_progress: Option<(PathBuf, PathBuf, Origin)>,
+    in_progress: Option<(PathBuf, PathBuf, Origin, u64)>,
     /// The last transition worth flagging — i.e. not a listener-triggered
     /// skip and not a same-track restart. See `on_transition_ended`.
     last_transition: Option<CompletedTransition>,
+    /// `MAIN_FRAMES` at the moment `now` most recently started being audible.
+    /// Read by `player_state` (together with the live `MAIN_FRAMES` value) to
+    /// derive `PlayerState::position_secs`.
+    ///
+    /// Invariant: every place that changes `now` changes this too, by the
+    /// same rule — see each method below. There is no path that moves `now`
+    /// without also moving this; a stale stamp here would silently misreport
+    /// how far into the track playback actually is.
+    now_started_frames: Option<u64>,
 }
 
 impl NowTracker {
@@ -735,6 +750,7 @@ impl NowTracker {
             previous: None,
             in_progress: None,
             last_transition: None,
+            now_started_frames: None,
         }
     }
 
@@ -758,12 +774,21 @@ impl NowTracker {
     /// The interrupted transition is not recorded as `last_transition`: the
     /// listener never heard it through to the end, so it is not a mixing
     /// decision worth flagging.
-    fn on_transition_started(&mut self, from: PathBuf, to: PathBuf, origin: Origin) {
-        if let Some((old_from, old_to, _)) = self.in_progress.take() {
+    ///
+    /// `at_frames` is `MAIN_FRAMES` at the moment this transition started —
+    /// the frame the incoming `to` began being mixed in. It only becomes
+    /// `now_started_frames` if this call folds an *interrupted* transition
+    /// into `now`/`previous` right here (whose own stamp, not `at_frames`,
+    /// is what applies — the interrupted one is what is actually playing);
+    /// `at_frames` itself is stashed in `in_progress` for `on_transition_ended`
+    /// (or a later interrupt) to use once *this* transition resolves.
+    fn on_transition_started(&mut self, from: PathBuf, to: PathBuf, origin: Origin, at_frames: u64) {
+        if let Some((old_from, old_to, _, stamp)) = self.in_progress.take() {
             self.previous = Some(old_from);
             self.now = Some(old_to);
+            self.now_started_frames = Some(stamp);
         }
-        self.in_progress = Some((from, to, origin));
+        self.in_progress = Some((from, to, origin, at_frames));
     }
 
     /// The engine pushes `TransitionStarted` then `TrackStarted` for the
@@ -771,10 +796,11 @@ impl NowTracker {
     /// a transition is in progress is that same entry announcing itself —
     /// not a new track playing solo. Only a `TrackStarted` with nothing in
     /// progress (the first track, or a track that started without a
-    /// transition) should move `now`.
-    fn on_track_started(&mut self, path: PathBuf) {
+    /// transition) should move `now` — and, in lockstep, `now_started_frames`.
+    fn on_track_started(&mut self, path: PathBuf, at_frames: u64) {
         if self.in_progress.is_none() {
             self.now = Some(path);
+            self.now_started_frames = Some(at_frames);
         }
     }
 
@@ -787,9 +813,10 @@ impl NowTracker {
     /// `in_progress`, if present, always describes the transition that is
     /// actually ending.
     fn on_transition_ended(&mut self) -> Option<(PathBuf, PathBuf, Origin)> {
-        let (from, to, origin) = self.in_progress.take()?;
+        let (from, to, origin, stamp) = self.in_progress.take()?;
         self.previous = Some(from.clone());
         self.now = Some(to.clone());
+        self.now_started_frames = Some(stamp);
         // A listener's own skip (Manual) and a same-track restart (from ==
         // to) both still switch the displayed title above, but neither is a
         // mixing decision worth flagging: the operator picked it themselves.
@@ -816,30 +843,33 @@ mod now_tracker_tests {
     #[test]
     fn first_track_started_sets_now_and_leaves_previous_none() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
+        t.on_track_started(p("a.wav"), 100);
         assert_eq!(t.now, Some(p("a.wav")));
         assert_eq!(t.previous, None);
+        assert_eq!(t.now_started_frames, Some(100), "now_started_frames must land on the stamp TrackStarted was reported at");
     }
 
     #[test]
     fn transition_started_alone_does_not_move_now_until_it_ends() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
-        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
+        t.on_track_started(p("a.wav"), 100);
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic, 200);
         assert_eq!(t.now, Some(p("a.wav")), "TransitionStarted alone must not switch now");
+        assert_eq!(t.now_started_frames, Some(100), "nor its stamp");
         t.on_transition_ended();
         assert_eq!(t.now, Some(p("b.wav")));
         assert_eq!(t.previous, Some(p("a.wav")));
+        assert_eq!(t.now_started_frames, Some(200), "TransitionEnded promotes now_started_frames to this transition's own stamp");
     }
 
     #[test]
     fn track_started_mid_transition_does_not_jump_ahead_of_transition_ended() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
-        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
+        t.on_track_started(p("a.wav"), 100);
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic, 200);
         // The engine announces the entry it just mixed in with its own
         // TrackStarted; that must not be mistaken for a standalone track.
-        t.on_track_started(p("b.wav"));
+        t.on_track_started(p("b.wav"), 250);
         assert_eq!(t.now, Some(p("a.wav")));
     }
 
@@ -852,11 +882,12 @@ mod now_tracker_tests {
     #[test]
     fn a_transition_started_while_one_is_in_progress_folds_the_interrupted_one_in() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
-        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
-        t.on_transition_started(p("b.wav"), p("c.wav"), Origin::Automatic);
+        t.on_track_started(p("a.wav"), 100);
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic, 200);
+        t.on_transition_started(p("b.wav"), p("c.wav"), Origin::Automatic, 300);
         assert_eq!(t.now, Some(p("b.wav")), "the interrupted transition's destination is what is actually playing");
         assert_eq!(t.previous, Some(p("a.wav")));
+        assert_eq!(t.now_started_frames, Some(200), "now_started_frames must promote to the interrupted transition's own stamp, not the one that interrupted it");
         // The listener never heard A→B through to the end, so it must not
         // become a ⚑ candidate.
         assert!(t.last_transition.is_none());
@@ -868,12 +899,13 @@ mod now_tracker_tests {
     #[test]
     fn the_transition_that_did_the_interrupting_is_recorded_normally_once_it_ends() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
-        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
-        t.on_transition_started(p("b.wav"), p("c.wav"), Origin::Automatic);
+        t.on_track_started(p("a.wav"), 100);
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic, 200);
+        t.on_transition_started(p("b.wav"), p("c.wav"), Origin::Automatic, 300);
         t.on_transition_ended();
         assert_eq!(t.now, Some(p("c.wav")));
         assert_eq!(t.previous, Some(p("b.wav")));
+        assert_eq!(t.now_started_frames, Some(300));
         let last = t.last_transition.as_ref().expect("B->C should be recorded");
         assert_eq!(last.from, p("b.wav"));
         assert_eq!(last.to, p("c.wav"));
@@ -882,8 +914,8 @@ mod now_tracker_tests {
     #[test]
     fn automatic_transition_is_recorded_as_the_last_completed_transition() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
-        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic);
+        t.on_track_started(p("a.wav"), 100);
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic, 200);
         t.on_transition_ended();
         let last = t.last_transition.as_ref().expect("automatic transition should be recorded");
         assert_eq!(last.from, p("a.wav"));
@@ -894,8 +926,8 @@ mod now_tracker_tests {
     #[test]
     fn manual_transition_is_not_recorded_as_the_last_automatic_transition() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
-        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Manual);
+        t.on_track_started(p("a.wav"), 100);
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Manual, 200);
         t.on_transition_ended();
         assert!(t.last_transition.is_none());
         // The title switch still happens; only the flag-worthy record does not.
@@ -905,8 +937,8 @@ mod now_tracker_tests {
     #[test]
     fn audition_transition_is_not_recorded_as_the_last_automatic_transition() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
-        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Audition);
+        t.on_track_started(p("a.wav"), 100);
+        t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Audition, 200);
         t.on_transition_ended();
         assert!(t.last_transition.is_none());
         assert_eq!(t.now, Some(p("b.wav")));
@@ -915,8 +947,8 @@ mod now_tracker_tests {
     #[test]
     fn restart_current_is_not_recorded_as_the_last_automatic_transition() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
-        t.on_transition_started(p("a.wav"), p("a.wav"), Origin::Automatic);
+        t.on_track_started(p("a.wav"), 100);
+        t.on_transition_started(p("a.wav"), p("a.wav"), Origin::Automatic, 200);
         t.on_transition_ended();
         assert!(t.last_transition.is_none());
         assert_eq!(t.now, Some(p("a.wav")));
@@ -925,7 +957,7 @@ mod now_tracker_tests {
     #[test]
     fn transition_ended_without_one_in_progress_is_a_no_op() {
         let mut t = NowTracker::new();
-        t.on_track_started(p("a.wav"));
+        t.on_track_started(p("a.wav"), 100);
         let before_now = t.now.clone();
         let before_previous = t.previous.clone();
         assert!(t.on_transition_ended().is_none());
@@ -956,6 +988,24 @@ static EVENTS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// (see `CallbackWatch`) to notice the one failure `StallWatch` cannot see
 /// from inside the callback: the callback not running at all any more.
 static CALLBACK_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Frames of the *main* engine rendered so far, bumped by one `fetch_add` in
+/// the cpal callback right after `render`, guarded so it only counts buffers
+/// the main engine produced (never the audition one). This — not the wall
+/// clock — is the only correct basis for "how far into the current track has
+/// playback gotten":
+///
+/// - paused buffers never reach the increment (the callback early-returns
+///   before it), so a pause freezes this exactly when it should;
+/// - while an audition `Engine` is installed the callback renders *it*
+///   instead of the main engine (the main playhead is meant to freeze during
+///   an audition — see `RenderState`), so this must not move either;
+/// - a lost/reopening output device stops the callback from being invoked at
+///   all, so this stays put through a disconnect too.
+///
+/// `player_state` reads this (via `events_thread`'s stamp, see
+/// `NowTracker::now_started_frames`) to derive `PlayerState::position_secs`.
+static MAIN_FRAMES: AtomicU64 = AtomicU64::new(0);
 
 /// Set by the cpal error callback; cleared by `audio_thread` when it drops a
 /// lost stream before reopen. Read by `CallbackWatch` to let a genuine stream
@@ -1330,6 +1380,13 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 } else {
                     resolve_nav_origin()
                 };
+                // Read `MAIN_FRAMES` here, on this thread, rather than
+                // stamping it in the cpal callback and carrying it over the
+                // channel: this keeps the callback's event payload and
+                // `EngineEvent` itself untouched, at the cost of up to one
+                // buffer + one channel hop (a few ms) of staleness. Position
+                // is displayed to the second, so that is not observable.
+                let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
                 // Only an interrupt fold moves `now`; a plain TransitionStarted
                 // leaves it alone, so sync only when the title would change.
                 let changed = {
@@ -1337,7 +1394,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                         continue;
                     };
                     let before = tracker.now.clone();
-                    tracker.on_transition_started(from, to, origin);
+                    tracker.on_transition_started(from, to, origin, at_frames);
                     tracker.now != before
                 };
                 if changed {
@@ -1348,12 +1405,15 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 event: EngineEvent::TrackStarted { path, .. },
                 audition,
             } => {
+                // See the `MAIN_FRAMES` comment on the TransitionStarted arm
+                // above — same reasoning applies here.
+                let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
                 let changed = {
                     let Some(mut tracker) = lock_now_unless_stale(audition) else {
                         continue;
                     };
                     let before = tracker.now.clone();
-                    tracker.on_track_started(path);
+                    tracker.on_track_started(path, at_frames);
                     tracker.now != before
                 };
                 if changed {
@@ -1484,6 +1544,12 @@ fn open_output_stream(
                     let written = frames * 2;
                     if written < out.len() {
                         out[written..].fill(0.0);
+                    }
+                    // Only the main engine advances the playhead `player_state`
+                    // reports as `position_secs` — see `MAIN_FRAMES`'s doc
+                    // comment for why this must not run in the audition branch.
+                    if !audition {
+                        MAIN_FRAMES.fetch_add(frames as u64, Ordering::Relaxed);
                     }
                     // The returned `Vec` drops here, on the audio thread, which
                     // frees it here too — not just allocates it here.
@@ -2050,6 +2116,7 @@ fn install_audition(engine: Engine) -> Result<(), String> {
         session.parked_now = now.now.clone();
         session.parked_previous = now.previous.clone();
         session.parked_in_progress = now.in_progress.clone();
+        session.parked_now_started_frames = now.now_started_frames;
         now.in_progress = None;
     }
     // Raise the flag before the engine goes in: the callback can run the moment
@@ -2178,6 +2245,7 @@ fn resume_autodj() -> Result<(), String> {
         now.now = session.parked_now.take();
         now.previous = session.parked_previous.take();
         now.in_progress = session.parked_in_progress.take();
+        now.now_started_frames = session.parked_now_started_frames.take();
     }
     service_sync_state();
     // Spec: resume returns to auto-DJ — including cold-start where main was
@@ -2273,6 +2341,22 @@ struct PlayerState {
     auditioning: bool,
     audition_from: Option<String>,
     audition_to: Option<String>,
+    /// Seconds the current track has been audible, from `MAIN_FRAMES`.
+    ///
+    /// This is *not* the position within the source file: the engine enters
+    /// the next track partway into its intro (the entry offset) and leaves
+    /// during its outro fade rather than at the very end, so this drifts
+    /// from a file-relative position by roughly that entry offset and never
+    /// reaches `duration_secs` at 100%. There is no seek in this app, so
+    /// second-level precision is enough and this approximation is judged
+    /// good enough to bar-chart.
+    position_secs: Option<f64>,
+    /// The current track's length *as played* — i.e. after the engine's
+    /// tempo stretch (see `played_duration_secs`), not the raw file length.
+    /// The raw (tag/analysis-cache) length would run 10-40% longer or
+    /// shorter than what is actually heard, at which point `position_secs`
+    /// would overtake it well before the track actually ends.
+    duration_secs: Option<f64>,
 }
 
 fn audition_display_title(path: &Path) -> String {
@@ -2280,11 +2364,141 @@ fn audition_display_title(path: &Path) -> String {
     session_metadata_for(Some(path), &tags).0
 }
 
+/// How long `analysis`'s track plays for after the engine's tempo stretch,
+/// mirroring the speed derivation in `funkot_core::engine::finish_prepare`
+/// (`finish_prepare` is private to that crate, so this is a from-scratch
+/// reimplementation of its formula, not a call into it — keep the two in
+/// sync by hand if that formula ever changes).
+///
+/// `None` when `analysis.sample_rate` is `0` (an incomplete/stripped cache
+/// entry — see `analyzed_cache_entry`), the only input that can make the
+/// division undefined.
+fn played_duration_secs(analysis: &funkot_core::TrackAnalysis) -> Option<f64> {
+    if analysis.sample_rate == 0 {
+        return None;
+    }
+    let source_secs = analysis.total_frames as f64 / analysis.sample_rate as f64;
+    // Same fallback `finish_prepare` uses: an unmeasured/invalid intro BPM
+    // stretches to the nominal tempo rather than dividing by something
+    // useless.
+    let intro_bpm = if analysis.intro_bpm.is_finite() && analysis.intro_bpm > 0.0 {
+        analysis.intro_bpm
+    } else {
+        funkot_core::NOMINAL_BPM
+    };
+    // `EngineOptions::default()` is correct here because `audio_thread` only
+    // ever overrides `output_sample_rate` and `cache_dir` from the default
+    // (see `audio_thread`), never `rate` — so `target_bpm()` always matches
+    // what the running engine actually stretches every track to. If a
+    // future change makes the engine's rate configurable, this must read
+    // that same value or `duration_secs` will silently drift from what is
+    // actually heard.
+    let speed = EngineOptions::default().target_bpm() / intro_bpm;
+    Some(source_secs / speed)
+}
+
+#[cfg(test)]
+mod played_duration_secs_tests {
+    use super::*;
+
+    fn analysis(sample_rate: u32, total_frames: u64, intro_bpm: f64) -> funkot_core::TrackAnalysis {
+        funkot_core::TrackAnalysis {
+            version: 0,
+            file_name: "t.wav".into(),
+            sample_rate,
+            total_frames,
+            intro_bpm,
+            outro_bpm: intro_bpm,
+            first_downbeat: 0,
+            outro_start: 0,
+            intro_bars: 0,
+            track_bars: 0,
+            outro_bars: 0,
+            outro_structure_bars: 0,
+            bars_estimated_low_confidence: false,
+            intro_bars_low_confidence: false,
+            outro_bars_low_confidence: false,
+            intro_bars_manual: false,
+            outro_bars_manual: false,
+            outro_structure_bars_manual: false,
+            needs_reanalysis: false,
+            rms_dbfs: -14.0,
+            gain_db: 0.0,
+        }
+    }
+
+    #[test]
+    fn sample_rate_zero_is_none() {
+        assert_eq!(played_duration_secs(&analysis(0, 48_000, 180.0)), None);
+    }
+
+    #[test]
+    fn scales_by_target_over_intro_bpm() {
+        // 200s of source at 48kHz, intro at nominal 180 BPM: target is
+        // 180 * 1.10 = 198, so speed = 198/180 = 1.1 and played length is
+        // 200 / 1.1 ≈ 181.818s.
+        let a = analysis(48_000, 48_000 * 200, 180.0);
+        let got = played_duration_secs(&a).unwrap();
+        assert!((got - 200.0 / 1.1).abs() < 1e-6, "got {got}");
+    }
+
+    #[test]
+    fn non_finite_intro_bpm_falls_back_to_nominal() {
+        let mut a = analysis(48_000, 48_000 * 200, f64::NAN);
+        let with_nan = played_duration_secs(&a).unwrap();
+        a.intro_bpm = funkot_core::NOMINAL_BPM;
+        let with_nominal = played_duration_secs(&a).unwrap();
+        assert_eq!(with_nan, with_nominal);
+    }
+
+    #[test]
+    fn non_positive_intro_bpm_falls_back_to_nominal() {
+        let mut a = analysis(48_000, 48_000 * 200, 0.0);
+        let with_zero = played_duration_secs(&a).unwrap();
+        a.intro_bpm = funkot_core::NOMINAL_BPM;
+        let with_nominal = played_duration_secs(&a).unwrap();
+        assert_eq!(with_zero, with_nominal);
+    }
+}
+
+/// Last computed played-duration, keyed by the track it belongs to.
+/// `player_state` is polled at 2 Hz and this costs a content hash (256 KiB of
+/// I/O) plus a cache JSON read, so it must not run per poll. A `None` result
+/// is memoised too — an unanalysed track would otherwise re-hash twice a
+/// second forever.
+static PLAYED_DURATION: Mutex<Option<(PathBuf, Option<f64>)>> = Mutex::new(None);
+
+/// `played_duration_secs` for `now` (its *full* path — `NOW` holds full
+/// paths, unlike `PlayerState::now_playing`, which is a file name; do not mix
+/// the two up here), memoised in `PLAYED_DURATION` so repeated polls of the
+/// same track cost nothing after the first. Only a track change pays for the
+/// content hash + cache read (and, on Android, the JNI round trip inside
+/// `resolve_dirs` that a per-poll call would otherwise incur).
+///
+/// Neither `PLAYED_DURATION` nor (per the caller) `NOW` is held across this
+/// function's own I/O.
+fn played_duration_for(app: &tauri::AppHandle, now: &Path) -> Option<f64> {
+    {
+        let memo = PLAYED_DURATION.lock().unwrap();
+        if let Some((path, secs)) = memo.as_ref() {
+            if path == now {
+                return *secs;
+            }
+        }
+    }
+    let dirs = resolve_dirs(app).ok()?;
+    let cache_dir = PathBuf::from(dirs.cache_dir);
+    let secs = analyzed_cache_entry(now, &cache_dir).and_then(|a| played_duration_secs(&a));
+    *PLAYED_DURATION.lock().unwrap() = Some((now.to_path_buf(), secs));
+    secs
+}
+
 #[tauri::command]
-fn player_state() -> PlayerState {
+fn player_state(app: tauri::AppHandle) -> PlayerState {
     // Never hold NOW and AUDITION_SESSION together; never hold either across
-    // the tag-probe I/O in `audition_display_title`.
-    let (now_playing, previous, last_transition) = {
+    // the tag-probe I/O in `audition_display_title` or the cache I/O in
+    // `played_duration_for`.
+    let (now_playing, previous, last_transition, now_started_frames) = {
         let now = NOW.lock().unwrap();
         (
             now.now.clone(),
@@ -2295,6 +2509,7 @@ fn player_state() -> PlayerState {
                 automatic: t.origin == Origin::Automatic,
                 seconds_ago: t.at.elapsed().as_secs_f64(),
             }),
+            now.now_started_frames,
         )
     };
     let pair = {
@@ -2310,16 +2525,42 @@ fn player_state() -> PlayerState {
         ),
         None => (None, None),
     };
+    let auditioning =
+        AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed);
+    // While auditioning, `NOW` is parked and `now_playing` below is the
+    // pre-audition main track — its position/duration would just be stale
+    // (frozen at park time) if shown here, so withhold both rather than
+    // paint a bar that looks live but is not moving for a reason the UI
+    // cannot explain.
+    let (position_secs, duration_secs) = if auditioning {
+        (None, None)
+    } else {
+        match (now_playing.as_ref(), now_started_frames) {
+            (Some(path), Some(started)) => {
+                let position = PLAYBACK.get().and_then(|p| {
+                    if p.sample_rate == 0 {
+                        return None;
+                    }
+                    let frames = MAIN_FRAMES.load(Ordering::Relaxed);
+                    Some(frames.saturating_sub(started) as f64 / p.sample_rate as f64)
+                });
+                let duration = played_duration_for(&app, path);
+                (position, duration)
+            }
+            _ => (None, None),
+        }
+    };
     PlayerState {
         phase: get_phase().as_str(),
         paused: is_paused(),
         now_playing: now_playing.as_deref().map(file_name_str),
         previous: previous.as_deref().map(file_name_str),
         last_transition,
-        auditioning: AUDITIONING.load(Ordering::Relaxed)
-            || AUDITION_PREPARING.load(Ordering::Relaxed),
+        auditioning,
         audition_from,
         audition_to,
+        position_secs,
+        duration_secs,
     }
 }
 

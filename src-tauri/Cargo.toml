@@ -12,6 +12,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# tauri's build script sets `dev = !custom-protocol`, and a dev build loads
+# `devUrl` (the Vite server) instead of the assets baked in from `frontendDist`.
+# `tauri build` / `tauri android build` pass this feature; `tauri dev` does not.
+# Without it every build is a dev build, so a plain `cargo build` produces a
+# binary that shows "Could not connect to localhost" with no dev server up.
+# DO NOT REMOVE.
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }

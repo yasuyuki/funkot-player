@@ -85,7 +85,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pulseaudio-utils \
     xdotool \
     imagemagick \
+    # The UI's text is Japanese. Android ships CJK fonts; this container did
+    # not, so every label came out as tofu and a desktop screenshot could not
+    # be read.
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
+
+# ImageMagick's Debian policy denies every coder except GIF/JPEG/PNG/WEBP, and
+# that includes the X coder `import` reads the screen through -- so capturing a
+# window fails with "error/import.c/ImportImageCommand". This is a throwaway
+# build container with nothing to protect, so point it at an empty policy.
+RUN mkdir -p /etc/imagemagick-permissive \
+ && printf '<policymap>\n</policymap>\n' > /etc/imagemagick-permissive/policy.xml
+ENV MAGICK_CONFIGURE_PATH=/etc/imagemagick-permissive
 
 # ALSA has no default device here, and cpal asks for "default". Without this the
 # desktop build fails to open a stream instead of reaching PulseAudio.
