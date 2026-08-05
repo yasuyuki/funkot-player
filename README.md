@@ -143,6 +143,21 @@ ADB=1 ./dev.sh adb logcat -s funkot
 The connect port differs from the pairing port; both are on the device's
 Wireless debugging screen.
 
+This project has two physical devices, each pinned to one role (debug and
+release are signed with different keys, so installing the wrong role over
+the other fails and forces a data-wiping `adb uninstall`). Use
+`scripts/install-apk.sh` instead of a raw `adb install` — the wireless
+debugging address changes every time it is re-enabled, but each device's
+`ro.serialno` does not, so the script connects to whatever address you give
+it and refuses to install unless the serial it finds there matches the role
+you asked for:
+
+```sh
+./scripts/install-apk.sh debug <ip>:<connect-port>
+./scripts/install-apk.sh release <ip>:<connect-port>
+# or: FUNKOT_ADB_ADDR=<ip>:<connect-port> ./scripts/install-apk.sh debug
+```
+
 ### Running the desktop build
 
 Android is the platform this player is developed against; the desktop build
