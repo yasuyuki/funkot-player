@@ -345,6 +345,61 @@ fn app_dirs(app: tauri::AppHandle) -> Result<AppDirs, String> {
     dirs
 }
 
+/// Outcome of [`share_feedback`]: Android opened a chooser, or desktop wrote a path.
+#[derive(serde::Serialize, Clone, Debug)]
+struct ShareFeedbackResult {
+    /// `"shared"` (Android chooser opened) or `"saved"` (desktop path written).
+    mode: String,
+    /// Absolute path of the staged ZIP.
+    path: String,
+}
+
+/// Stage `library.json` + `flags.json` into `funkot-feedback.zip` and share it.
+///
+/// Android: write under `getCacheDir()/funkot-export/` (FileProvider
+/// `<cache-path>`), then open `ACTION_SEND` via [`feedback_share`].
+/// Desktop: write under `cache_dir/funkot-export/` and return the path for a toast.
+///
+/// Does not move or delete anything under `data_dir`.
+#[tauri::command(async)]
+fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> {
+    let dirs = resolve_dirs(&app)?;
+
+    #[cfg(target_os = "android")]
+    let staging_root = android_cache_dir()?;
+    #[cfg(not(target_os = "android"))]
+    let staging_root = PathBuf::from(&dirs.cache_dir);
+
+    let staging_dir = staging_root.join("funkot-export");
+    let zip_path = staging_dir.join("funkot-feedback.zip");
+
+    {
+        let _saving = SAVE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        store::write_feedback_zip(Path::new(&dirs.data_dir), &zip_path)
+            .map_err(|e| format!("cannot write feedback zip: {e}"))?;
+    }
+
+    let path = zip_path.to_string_lossy().into_owned();
+
+    #[cfg(target_os = "android")]
+    {
+        feedback_share(&path)?;
+        Ok(ShareFeedbackResult {
+            mode: "shared".into(),
+            path,
+        })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(ShareFeedbackResult {
+            mode: "saved".into(),
+            path,
+        })
+    }
+}
+
 /// Serialises writes under `data_dir` (`queue.json` and `flags.json`).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
@@ -3488,6 +3543,95 @@ fn service_sync_state() {
     service_call("syncFrom");
 }
 
+/// `Context.getCacheDir()` absolute path (FileProvider `<cache-path>` root).
+///
+/// Distinct from [`AppDirs::cache_dir`] (`filesDir/funkot-cache`), which is
+/// outside the provider paths in `file_paths.xml`.
+#[cfg(target_os = "android")]
+fn android_cache_dir() -> Result<PathBuf, String> {
+    use jni::objects::{JObject, JString};
+    use jni::{Env, JavaVM};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    let raw_context = ctx.context() as jni::sys::jobject;
+
+    let path: String = vm
+        .attach_current_thread(|env: &mut Env<'_>| -> jni::errors::Result<String> {
+            let context = unsafe { JObject::from_raw(env, raw_context) };
+            let cache_file = env
+                .call_method(
+                    &context,
+                    jni::jni_str!("getCacheDir"),
+                    jni::jni_sig!("()Ljava/io/File;"),
+                    &[],
+                )?
+                .l()?;
+            if cache_file.is_null() {
+                return Err(jni::errors::Error::NullPtr("getCacheDir"));
+            }
+            let obj = env
+                .call_method(
+                    &cache_file,
+                    jni::jni_str!("getAbsolutePath"),
+                    jni::jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                )?
+                .l()?;
+            let s = unsafe { JString::from_raw(env, obj.into_raw()) };
+            // Bound to a local on purpose: the MUTF8Chars view borrows `s`, and
+            // returning the expression directly drops them in the wrong order
+            // (same as `platform_dirs` / `absolute_path`).
+            let path = String::from(s.mutf8_chars(env)?);
+            Ok(path)
+        })
+        .map_err(|e: jni::errors::Error| format!("cannot resolve getCacheDir: {e}"))?;
+    Ok(PathBuf::from(path))
+}
+
+/// Open the system share sheet for a staged ZIP via `FeedbackShare.shareFrom`.
+///
+/// Same classloader routing as [`service_call`]: this runs on Tauri's blocking
+/// pool, so the system classloader cannot see app classes.
+#[cfg(target_os = "android")]
+fn feedback_share(absolute_path: &str) -> Result<(), String> {
+    use jni::objects::{JClassLoader, JObject};
+    use jni::refs::LoaderContext;
+    use jni::strings::JNIString;
+    use jni::{errors::Result as JResult, Env, JavaVM};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    let raw_context = ctx.context() as jni::sys::jobject;
+
+    let result: JResult<()> = vm.attach_current_thread(|env: &mut Env<'_>| {
+        let context = unsafe { JObject::from_raw(env, raw_context) };
+        let loader = env
+            .call_method(
+                &context,
+                jni::jni_str!("getClassLoader"),
+                jni::jni_sig!("()Ljava/lang/ClassLoader;"),
+                &[],
+            )?
+            .l()?;
+        let loader = env.cast_local::<JClassLoader>(loader)?;
+        let class = LoaderContext::Loader(&loader).load_class(
+            env,
+            jni::jni_str!("jp.hatsuboshi.funkotplayer.FeedbackShare"),
+            true,
+        )?;
+        let path = env.new_string(absolute_path)?;
+        env.call_static_method(
+            &class,
+            JNIString::new("shareFrom"),
+            jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)V"),
+            &[(&context).into(), (&path).into()],
+        )?;
+        Ok(())
+    });
+    result.map_err(|e| format!("FeedbackShare.shareFrom: {e}"))
+}
+
 /// Outcome of the most recent notification ⚑ (`CONTROL_FLAG` = 3).
 #[cfg(target_os = "android")]
 static LAST_FLAG_OK: AtomicBool = AtomicBool::new(false);
@@ -3617,7 +3761,8 @@ pub fn run() {
             enqueue,
             reorder,
             dequeue,
-            queue_state
+            queue_state,
+            share_feedback
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

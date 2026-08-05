@@ -212,3 +212,17 @@ export function auditionAgain(musicDir: string, cacheDir: string): Promise<void>
 export function resumeAutodj(): Promise<void> {
   return invoke<void>("resume_autodj");
 }
+
+/// Matches `ShareFeedbackResult`.
+export interface ShareFeedbackResult {
+  /** `"shared"` (Android chooser) or `"saved"` (desktop path written). */
+  mode: string;
+  /** Absolute path of the staged ZIP. */
+  path: string;
+}
+
+/// Snapshot `library.json` / `flags.json` into a ZIP and share (Android) or
+/// return the staged path (desktop).
+export function shareFeedback(): Promise<ShareFeedbackResult> {
+  return invoke<ShareFeedbackResult>("share_feedback");
+}

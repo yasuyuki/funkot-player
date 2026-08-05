@@ -5,10 +5,12 @@
 {#if toast.message !== null}
   <div class="toast">
     <span class="message">{toast.message}</span>
-    <span class="sep">｜</span>
-    <button type="button" class="undo" disabled={toast.busy} onclick={() => toast.undo()}>
-      取消
-    </button>
+    {#if toast.undoable}
+      <span class="sep">｜</span>
+      <button type="button" class="undo" disabled={toast.busy} onclick={() => toast.undo()}>
+        取消
+      </button>
+    {/if}
   </div>
 {/if}
 

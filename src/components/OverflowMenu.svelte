@@ -1,8 +1,11 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
+  import { shareFeedback } from "../lib/tauri";
+  import { toast } from "../lib/toast.svelte";
   import { ui } from "../lib/ui.svelte";
 
   let scanBusy = $state(false);
+  let feedbackBusy = $state(false);
 
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
@@ -22,6 +25,22 @@
       await store.doRefreshLibrary();
     } finally {
       scanBusy = false;
+    }
+  }
+
+  async function onShareFeedback() {
+    if (feedbackBusy) return;
+    feedbackBusy = true;
+    ui.menuOpen = false;
+    try {
+      const result = await shareFeedback();
+      if (result.mode === "saved") {
+        toast.notify(result.path);
+      }
+    } catch (err) {
+      toast.notify(String(err));
+    } finally {
+      feedbackBusy = false;
     }
   }
 
@@ -49,6 +68,7 @@
     <div class="menu" onclick={(event) => event.stopPropagation()}>
       <button type="button" onclick={onRescan} disabled={scanBusy}>再スキャン</button>
       <button type="button" onclick={onShowLog}>ログを表示</button>
+      <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>意見を送る</button>
     </div>
   {/if}
 </div>

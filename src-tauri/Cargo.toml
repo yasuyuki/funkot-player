@@ -31,6 +31,8 @@ log = "0.4"
 symphonia = { version = "0.6", default-features = false, features = [
     "mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "alac", "id3v2",
 ] }
+# Feedback ZIP (`share_feedback`): Stored only, no extra codecs.
+zip = { version = "8", default-features = false }
 
 # Path dependency on purpose: the two repos are kept separate to stop sources
 # mixing, not to make this one build in isolation. ./dev.sh mounts the sibling

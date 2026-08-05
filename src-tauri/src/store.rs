@@ -34,7 +34,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const QUEUE_FILE: &str = "queue.json";
@@ -181,6 +181,56 @@ pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(flags)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(FLAGS_FILE), json)
+}
+
+const EMPTY_JSON_OBJECT: &[u8] = b"{}";
+
+/// Read a JSON file's raw bytes, or `{}` when missing / unreadable.
+fn read_json_or_empty_object(path: &Path) -> Vec<u8> {
+    match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => EMPTY_JSON_OBJECT.to_vec(),
+    }
+}
+
+fn stored_zip_options() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+}
+
+/// Write `library.json` and `flags.json` entries into `dest` (Stored).
+///
+/// Callers that need a consistent snapshot with concurrent saves should hold
+/// `SAVE_LOCK` around [`write_feedback_zip`].
+pub fn write_feedback_zip_bytes(
+    library_json: &[u8],
+    flags_json: &[u8],
+    dest: &Path,
+) -> io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::File::create(dest)?;
+    let mut zip = zip::ZipWriter::new(file);
+    zip.start_file(LIBRARY_FILE, stored_zip_options())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    zip.write_all(library_json)?;
+    zip.start_file(FLAGS_FILE, stored_zip_options())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    zip.write_all(flags_json)?;
+    zip.finish()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    Ok(())
+}
+
+/// Snapshot `library.json` / `flags.json` from `data_dir` into a ZIP at `dest`.
+///
+/// Missing or unreadable sources become an `{}` entry. Does not touch
+/// `dismissed.json` / `queue.json`, and never moves or deletes the originals.
+pub fn write_feedback_zip(data_dir: &Path, dest: &Path) -> io::Result<()> {
+    let library = read_json_or_empty_object(&data_dir.join(LIBRARY_FILE));
+    let flags = read_json_or_empty_object(&data_dir.join(FLAGS_FILE));
+    write_feedback_zip_bytes(&library, &flags, dest)
 }
 
 /// Keys of track×role rows the listener dismissed from the edit list.
@@ -973,5 +1023,39 @@ mod tests {
         let flags = Flags::new();
         let meta_map = BTreeMap::new();
         assert!(aggregate_flags(&flags, &meta_map, &Dismissed::new()).is_empty());
+    }
+
+    fn read_zip_entry(path: &Path, name: &str) -> Vec<u8> {
+        let file = fs::File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name(name).unwrap();
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut buf).unwrap();
+        buf
+    }
+
+    /// Present files are stored under exact entry names; missing ones become `{}`.
+    #[test]
+    fn feedback_zip_stores_files_and_empty_object_fallback() {
+        let dir = TempDir::new("feedback-zip");
+        let library = br#"{"aaa":{"intro_bars":16}}"#;
+        fs::write(dir.0.join(LIBRARY_FILE), library).unwrap();
+        // flags.json deliberately absent → `{}`
+
+        let dest = dir.0.join("out").join("funkot-feedback.zip");
+        write_feedback_zip(&dir.0, &dest).unwrap();
+
+        {
+            let file = fs::File::open(&dest).unwrap();
+            let archive = zip::ZipArchive::new(file).unwrap();
+            assert_eq!(archive.len(), 2);
+        }
+        assert_eq!(read_zip_entry(&dest, LIBRARY_FILE), library);
+        assert_eq!(read_zip_entry(&dest, FLAGS_FILE), b"{}");
+        // Originals stay put (flags was never created).
+        assert_eq!(fs::read(dir.0.join(LIBRARY_FILE)).unwrap(), library);
+        assert!(!dir.0.join(FLAGS_FILE).exists());
+        assert!(!dir.0.join(QUEUE_FILE).exists());
+        assert!(!dir.0.join(DISMISSED_FILE).exists());
     }
 }

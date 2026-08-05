@@ -11,6 +11,8 @@ class ToastStore {
   /// Disabled while an undo is in flight, same reasoning as Transport's
   /// busy guard: every command round-trips through the host.
   busy = $state(false);
+  /// When false, the toast is notify-only (no 取消).
+  undoable = $state(false);
 
   #onUndo: (() => Promise<boolean>) | null = null;
   #timer: ReturnType<typeof setTimeout> | null = null;
@@ -25,6 +27,18 @@ class ToastStore {
     this.#generation += 1;
     this.message = message;
     this.#onUndo = onUndo;
+    this.undoable = true;
+    this.busy = false;
+    this.#timer = setTimeout(() => this.dismiss(), AUTO_DISMISS_MS);
+  }
+
+  /// Notify-only toast: no 取消, auto-dismisses like `show`.
+  notify(message: string): void {
+    this.#clearTimer();
+    this.#generation += 1;
+    this.message = message;
+    this.#onUndo = null;
+    this.undoable = false;
     this.busy = false;
     this.#timer = setTimeout(() => this.dismiss(), AUTO_DISMISS_MS);
   }
@@ -33,6 +47,7 @@ class ToastStore {
     this.#clearTimer();
     this.message = null;
     this.#onUndo = null;
+    this.undoable = false;
     this.busy = false;
   }
 
