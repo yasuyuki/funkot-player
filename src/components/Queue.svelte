@@ -9,6 +9,10 @@
   let reserved = $derived(store.queue?.reserved ?? null);
   let pending = $derived(store.queue?.pending ?? []);
   let reservedSwappable = $derived(store.queue?.reserved_swappable ?? false);
+  // `?? true`, not `?? false`: before the first poll lands (`store.queue` is
+  // still null), `reserved` is also null so the badge doesn't render at all —
+  // this default only matters for not flashing "準備中" in that instant.
+  let reservedPrepared = $derived(store.queue?.reserved_prepared ?? true);
   let transitionInSecs = $derived(store.queue?.transition_in_secs ?? null);
   /// The list actually shown: `reserved` (if any) folded into the front, so
   /// every row shares the same look and the same ↑↓✕ (src-tauri/src/queue.rs
@@ -111,11 +115,16 @@
                    Still gets the same ↑↓✕ as every other row
                    (src-tauri/src/queue.rs `edit_displayed`) — only the badge
                    is special, and only the buttons that would touch this
-                   slot get disabled once it is too late to swap. -->
-              <span class="badge">
-                {reservedSwappable && transitionInSecs !== null
-                  ? transitionBadge(transitionInSecs)
-                  : "準備済み"}
+                   slot get disabled once it is too late to swap. Badge has
+                   3 states: not yet prepared (still decoding/time-stretching),
+                   prepared with a known runway (countdown), or prepared
+                   otherwise. -->
+              <span class="badge" class:preparing={!reservedPrepared}>
+                {!reservedPrepared
+                  ? "準備中"
+                  : reservedSwappable && transitionInSecs !== null
+                    ? transitionBadge(transitionInSecs)
+                    : "準備済み"}
               </span>
             {/if}
             <div class="acts">
@@ -233,6 +242,10 @@
     flex: 0 0 auto;
     font-size: var(--font-size-sm);
     color: var(--color-status-playing);
+  }
+
+  .badge.preparing {
+    color: var(--color-text-dim);
   }
 
   .acts {

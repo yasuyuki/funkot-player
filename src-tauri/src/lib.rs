@@ -2954,6 +2954,22 @@ struct QueueSnapshot {
     /// would land moments later as an unwanted substitute); or
     /// `transition_in_secs` has dropped to or below `SWAP_DEADLINE_SECS`.
     reserved_swappable: bool,
+    /// Whether the engine has actually finished preparing `reserved` for
+    /// playback. `false` right after a transition or right after `reserved`
+    /// is replaced (decode/time-stretch is still running) — the UI shows
+    /// "準備中" during that window.
+    ///
+    /// Distinct from `reserved_swappable`: that one is "would an edit be
+    /// accepted right now", which also folds in the swap deadline. This one
+    /// is only about preparation having completed.
+    ///
+    /// Also distinct in how it behaves during audition/pause: `NEXT_PREPARED`
+    /// (see its doc comment) freezes at whatever it last held while auditioning
+    /// or paused, since the branch that updates it does not run then. Reporting
+    /// that frozen value verbatim here would leave "準備中" stuck on screen for
+    /// the whole audition/pause, so this field reads as prepared (`true`) in
+    /// both states instead.
+    reserved_prepared: bool,
     /// Seconds until the active track's automatic transition may begin, or
     /// `null` when unknown: stopped, auditioning/preparing an audition, or no
     /// active deck yet.
@@ -3130,6 +3146,16 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
         && !auditioning
         && NEXT_PREPARED.load(Ordering::Relaxed)
         && transition_in_secs.is_some_and(|s| s > SWAP_DEADLINE_SECS);
+    // Not `reserved_swappable`-derived on purpose: that flag is deliberately
+    // `false` during an audition (edits must not reach into `reserved` then),
+    // but `reserved_prepared` reads as prepared during an audition/pause so
+    // the "準備中" badge does not stay stuck on screen for their whole
+    // duration — see the field's doc comment.
+    let paused = PLAYBACK
+        .get()
+        .is_some_and(|p| p.paused.load(Ordering::Relaxed));
+    let reserved_prepared = reserved.is_some()
+        && (auditioning || paused || NEXT_PREPARED.load(Ordering::Relaxed));
     Ok(QueueSnapshot {
         reserved: reserved.map(|p| p.to_string_lossy().into_owned()),
         pending: pending
@@ -3137,6 +3163,7 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
         reserved_swappable,
+        reserved_prepared,
         transition_in_secs,
     })
 }

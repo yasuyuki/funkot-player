@@ -90,6 +90,12 @@ export interface QueueSnapshot {
   /// Whether `reorder`/`dequeue` would currently accept an edit that reaches
   /// into the `reserved` slot (displayed index 0, or `Move { to: 0 }`).
   reserved_swappable: boolean;
+  /// Whether the engine has actually finished preparing `reserved`, as
+  /// opposed to still decoding/time-stretching it. Reads as prepared
+  /// (`true`) during an audition or while paused even though preparation
+  /// state is frozen then — see `QueueSnapshot::reserved_prepared` in
+  /// `src-tauri/src/lib.rs`.
+  reserved_prepared: boolean;
   /// Seconds until the engine's automatic transition may begin, or `null`
   /// when unknown (stopped, auditioning, or no active deck).
   transition_in_secs: number | null;
