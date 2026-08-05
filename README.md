@@ -1,27 +1,74 @@
 # funkot-player
 
-Auto-DJ music player for Funkot. Point it at a folder of tracks, build a queue,
-and it plays them back-to-back with DJ-style transitions — no beatmatching, no
-decks, no crossfader. All the analysis and mixing comes from
-[funkot-autodj](https://github.com/yasuyuki/funkot-autodj)'s `funkot-core`;
-this repo is the player around it.
+Auto-DJ music player for Funkot. Point it at a folder of tracks and it plays
+them back-to-back with DJ-style transitions — no beatmatching, no decks, no
+crossfader.
 
-Target platforms, in priority order: **Android**, iOS, Windows, macOS. Linux is
-not actively supported but is not deliberately broken either.
+Primary platform today: **Android**. iOS, Windows, and macOS are planned.
+Linux is not actively supported but is not deliberately broken either.
 
-## Status
+## What it does
 
-Usable as a folder player. On Android, drop tracks into the app's Music folder
-over MTP, press start, and it mixes the whole folder on a loop with DJ
-transitions — including with the screen off, with transport controls in the
-notification shade and on the lock screen. Scanning the library analyses any
-new tracks in the background, showing progress as it goes. Tracks can be
-queued, reordered and dropped, and the queue survives a restart. Tapping an
-intro or outro bar count corrects it, and the correction is re-applied after
-every fresh analysis. Verified on a Pixel 8 Pro, including an hour of
-uninterrupted playback backgrounded with the screen off.
+- Mixes every track in its Music folder on a loop with DJ transitions
+- Keeps playing with the screen off; transport controls appear in the
+  notification shade and on the lock screen
+- Scans new tracks in the background and shows progress
+- Lets you queue, reorder, and drop tracks; the queue survives a restart
+- Lets you correct intro / outro bar counts; corrections stick across
+  re-analysis
+- Lets you share feedback (`library.json` / `flags.json`) via the system
+  share sheet
 
-## Layout
+Verified on a Pixel 8 Pro, including an hour of uninterrupted playback with
+the screen off.
+
+## Adding tracks (USB)
+
+The app plays from its own Music folder. On a Pixel / stock Android device:
+
+```
+phone → Android → data → jp.hatsuboshi.funkotplayer → files → Music
+```
+
+(full path:
+`/storage/emulated/0/Android/data/jp.hatsuboshi.funkotplayer/files/Music/`)
+
+1. **Open the app once.** That creates the Music folder. Do not create it
+   yourself from the PC — the app will not be able to read it.
+2. **Connect the phone over USB** and choose file transfer (MTP), not
+   charging-only.
+3. **Open the Music folder** above in the PC's file manager.
+4. **Copy track files into that folder.** Flat layout is fine; subfolders
+   are not required.
+5. **In the app**, press **開始** the first time, or **⋮ → 再スキャン** after
+   adding more tracks.
+
+Only the music shows up over MTP. Queue, analysis cache, and your bar-count
+corrections stay on the phone.
+
+## Using the app
+
+- **開始 / 一時停止 / 次の曲** — main transport. Playback continues in the
+  background; use the notification or lock-screen controls when the app is
+  not on screen.
+- **Queue** — reorder with ↑↓, drop with ✕, and set the next track. Near a
+  transition, some edits lock for a short window.
+- **編集** — fix intro / outro bar counts on a transition that sounded wrong.
+  Corrections are kept and re-applied after a fresh analysis.
+- **⋮ → 再スキャン** — pick up tracks added since the last scan.
+- **⋮ → 意見を送る** — share a small ZIP of your corrections via LINE, email,
+  Drive, etc. (no USB or adb needed).
+- **⋮ → ログを表示** — diagnostic log for troubleshooting.
+
+---
+
+## For developers
+
+Analysis and mixing come from
+[funkot-autodj](https://github.com/yasuyuki/funkot-autodj)'s `funkot-core`.
+This repo is the player around it.
+
+### Layout
 
 ```
 src-tauri/src/lib.rs   audio thread (cpal) + Tauri commands + JNI_OnLoad
@@ -43,7 +90,7 @@ so a branch switch on the engine side would silently change this build. Anything
 `funkot-player` needs from `funkot-core` — a branch, a fix, a pull — is done in
 `funkot-autodj-for-ui`; the engine's own checkout is left alone.
 
-## Build
+### Build
 
 Everything runs in the container, so the host needs only Docker.
 
@@ -66,7 +113,7 @@ ADB=1 ./dev.sh adb logcat -s funkot
 The connect port differs from the pairing port; both are on the device's
 Wireless debugging screen.
 
-## Running the desktop build
+### Running the desktop build
 
 Android is the platform this player is developed against; the desktop build
 exists so a transition can be compared against what `funkot-autodj --render`
@@ -96,7 +143,7 @@ GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
   those code points. Not an app bug; a real desktop has the glyphs.
 - This is the Linux path. **Windows and macOS builds are still untried.**
 
-## Working with a device
+### Working with a device
 
 The adb key and the debug keystore both live in the `funkot-player-android-home`
 Docker volume. Deleting it means re-pairing *and* a new signing key, which turns
@@ -146,7 +193,7 @@ the next `adb install -r` into `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
   `./dev.sh cargo run -p funkot-core --example gen_synth --features testutil
   --release -- testdata/spike-synth`.
 
-## Android notes
+### Android notes
 
 These were all found the hard way on a real device. Each one is commented at the
 place it matters, but they are easy to undo by accident:
