@@ -25,8 +25,13 @@
 //!
 //! # Lock ordering
 //!
-//! The fixed order across this codebase is **`SAVE_LOCK` → queue → render**,
-//! never the reverse. Two of those nestings are real, not hypothetical:
+//! The fixed order across this codebase is **`SAVE_LOCK` → `SESSION` → queue
+//! → render**, never the reverse. `SESSION` (`src-tauri/src/lib.rs`) is the
+//! restart-persistence counterpart to this module's queue; it only ever
+//! nests under `SAVE_LOCK` inside `persist_session`, and never nests with
+//! this module's queue lock at all — the two are independent saves that
+//! happen to share `SAVE_LOCK`'s ordering slot, not a real dependency.
+//! The other nestings here are real, not hypothetical:
 //! [`edit_displayed`] takes the engine's `RenderState` lock (`render` in
 //! `src-tauri/src/lib.rs`) via its `revoke` closure while already holding this
 //! module's queue lock, and both `persist_queue` and the

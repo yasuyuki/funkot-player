@@ -43,6 +43,19 @@ struct Playback {
 
 static PLAYBACK: OnceLock<Playback> = OnceLock::new();
 
+/// The data dir `resolve_dirs` resolved, for the handful of save paths that
+/// have no `tauri::AppHandle` to resolve it themselves: `flip_paused`
+/// (shared with the Android notification's JNI callback), `events_thread`,
+/// and the loader's `on_reserved` observer inside `audio_thread`. Everything
+/// else still calls `resolve_dirs(app)` directly and ignores this.
+///
+/// Set from `start_impl` right after it resolves `data`, and again from
+/// `run()`'s `setup` (before `start_impl` ever runs, for the startup
+/// preload) — `OnceLock` makes the second `set` a harmless no-op. A command
+/// that runs before either has (there should be none, but nothing enforces
+/// it) finds this empty and just skips saving; see `persist_session`.
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
 /// True while an audition `Engine` is installed in [`RenderState::audition`].
 /// `events_thread` uses this only to drop stale audition-tagged events after
 /// resume; origin itself comes from the event payload's `audition` flag.
@@ -156,12 +169,23 @@ fn get_phase() -> Phase {
 /// catches that within a few seconds and sets `Phase::Disconnected` (then
 /// retries reopen). Writing `Playing` here would assert something nobody has
 /// confirmed yet.
+///
+/// Also records the new state into `SESSION` and persists it — this is the
+/// one place both `toggle_pause` (in-app) and the notification's JNI
+/// callback flip pause, so it is the one place that needs to.
 fn flip_paused(paused: &AtomicBool) -> bool {
     // fetch_xor(true) returns the *previous* value; the new state is its negation.
     let now_paused = !paused.fetch_xor(true, Ordering::Relaxed);
     if now_paused && get_phase() != Phase::Disconnected {
         set_phase(Phase::Paused);
     }
+    {
+        let mut session = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        session.paused = now_paused;
+    }
+    persist_session();
     now_paused
 }
 
@@ -415,7 +439,8 @@ fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> 
     }
 }
 
-/// Serialises writes under `data_dir` (`queue.json` and `flags.json`).
+/// Serialises writes under `data_dir` (`queue.json`, `flags.json`, and
+/// `session.json`).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
 /// really do overlap — tapping ✕ on one row and ↑ on another in quick
@@ -426,6 +451,10 @@ fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> 
 ///
 /// Process-wide (not on `AppState`) so Android notification JNI can share the
 /// same lock without a Tauri handle.
+///
+/// Lock order (fixed, never reversed): `SAVE_LOCK` → [`SESSION`] → queue
+/// (`src-tauri/src/queue.rs`) → render. `persist_session` is the only place
+/// `SAVE_LOCK` and `SESSION` nest; see its doc comment.
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Key last written by `flag_last_transition`, for a single-shot undo.
@@ -433,6 +462,41 @@ static LAST_FLAG_UNDO: Mutex<Option<String>> = Mutex::new(None);
 
 /// Dismiss key last written by `dismiss_flags`, for a single-shot undo.
 static LAST_DISMISS_UNDO: Mutex<Option<String>> = Mutex::new(None);
+
+/// What the next launch will restore (see `store::Session`). Mutated by its
+/// three save sites directly (each takes only this mutex, the same pattern
+/// `reorder`/`dequeue` use for `queue` — see `persist_queue`), then handed to
+/// `persist_session` to write out. Touch it under `SAVE_LOCK` only from
+/// inside `persist_session` itself; nothing else may nest the two, in either
+/// order (see `SAVE_LOCK`'s doc comment).
+static SESSION: Mutex<store::Session> = Mutex::new(store::Session::new());
+
+/// Save `SESSION`'s current value under [`DATA_DIR`]. Best-effort: no
+/// `DATA_DIR` yet (nothing has resolved it this launch) or a write failure
+/// is `log::warn!`-only, never propagated — the caller's command or event
+/// must not fail or block on this.
+///
+/// Read `SESSION` fresh under `SAVE_LOCK` rather than taking a value from the
+/// caller, for the same reason `persist_queue` re-reads `queue` instead of
+/// trusting a captured snapshot: two save sites can race (e.g. `flip_paused`
+/// racing an `on_reserved` push), and re-reading under the lock means
+/// whichever finishes last always writes the true latest state.
+fn persist_session() {
+    let Some(dir) = DATA_DIR.get() else {
+        log::warn!("persist_session: DATA_DIR not resolved yet");
+        return;
+    };
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let session = SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Err(e) = store::save_session(dir, &session) {
+        log::warn!("save_session({}): {e}", dir.display());
+    }
+}
 
 /// Where the audio thread reports back to the UI. `cpal::Stream` is not `Send`
 /// on every platform, so it never leaves the thread that created it.
@@ -1466,6 +1530,43 @@ fn lock_now_unless_stale(audition: bool) -> Option<std::sync::MutexGuard<'static
     Some(now)
 }
 
+/// Drops everything in `SESSION.in_flight` before `now` and persists the
+/// result. `now` is `NowTracker::now` right after a change — i.e. what just
+/// became the actively-playing track — so this is "forget everything that
+/// finished playing before it", leaving `now` itself (still playing, or at
+/// least still owed to the listener if this is a reserved-but-not-started
+/// entry) and anything reserved after it in place.
+///
+/// A no-op, on purpose, when `now` is `None` or is not found in `in_flight`:
+/// `None` means nothing changed worth retiring over, and "not found" can
+/// happen (the very first `TrackStarted` of a run races `on_reserved`'s own
+/// push over the loader thread and the events thread — either can land
+/// first) without meaning anything is wrong, so guessing at a retirement
+/// here would risk dropping an entry that is still genuinely in flight.
+///
+/// Must never be called for an audition event (`audition == true`): an
+/// audition's `now` is a title swapped into the same [`NOW`] tracker for the
+/// audition's own two tracks (see `install_audition`/`resume_autodj`), not
+/// anything that ever went through `HostSource`/`in_flight` — retiring
+/// against it would either no-op (the common case) or, on an unlucky path
+/// collision, discard real main-queue session state for a track the
+/// audition never actually played to completion.
+fn retire_in_flight_up_to(now: Option<&Path>) {
+    let Some(now) = now else {
+        return;
+    };
+    {
+        let mut session = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(pos) = session.in_flight.iter().position(|p| p.as_path() == now) else {
+            return;
+        };
+        session.in_flight.drain(..pos);
+    }
+    persist_session();
+}
+
 fn events_thread(rx: Receiver<PlaybackEvent>) {
     for ev in rx {
         match ev {
@@ -1489,16 +1590,20 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
                 // Only an interrupt fold moves `now`; a plain TransitionStarted
                 // leaves it alone, so sync only when the title would change.
-                let changed = {
+                let (changed, now_path) = {
                     let Some(mut tracker) = lock_now_unless_stale(audition) else {
                         continue;
                     };
                     let before = tracker.now.clone();
                     tracker.on_transition_started(from, to, origin, at_frames);
-                    tracker.now != before
+                    (tracker.now != before, tracker.now.clone())
                 };
                 if changed {
                     service_sync_state();
+                }
+                // Never for an audition event — see `retire_in_flight_up_to`.
+                if changed && !audition {
+                    retire_in_flight_up_to(now_path.as_deref());
                 }
             }
             PlaybackEvent::Engine {
@@ -1508,16 +1613,19 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 // See the `MAIN_FRAMES` comment on the TransitionStarted arm
                 // above — same reasoning applies here.
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
-                let changed = {
+                let (changed, now_path) = {
                     let Some(mut tracker) = lock_now_unless_stale(audition) else {
                         continue;
                     };
                     let before = tracker.now.clone();
                     tracker.on_track_started(path, at_frames);
-                    tracker.now != before
+                    (tracker.now != before, tracker.now.clone())
                 };
                 if changed {
                     service_sync_state();
+                }
+                if changed && !audition {
+                    retire_in_flight_up_to(now_path.as_deref());
                 }
             }
             PlaybackEvent::Engine {
@@ -1533,14 +1641,14 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 log::info!("engine reports finished");
             }
             PlaybackEvent::TransitionEnded { audition } => {
-                let (completed, changed) = {
+                let (completed, changed, now_path) = {
                     let Some(mut tracker) = lock_now_unless_stale(audition) else {
                         continue;
                     };
                     let before = tracker.now.clone();
                     let completed = tracker.on_transition_ended();
                     let changed = tracker.now != before;
-                    (completed, changed)
+                    (completed, changed, tracker.now.clone())
                 };
                 if let Some((from, to, origin)) = completed {
                     log::info!(
@@ -1552,6 +1660,9 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
                 if changed {
                     service_sync_state();
+                }
+                if changed && !audition {
+                    retire_in_flight_up_to(now_path.as_deref());
                 }
             }
         }
@@ -1736,6 +1847,11 @@ fn audio_thread(
     log: Sender<String>,
     queue: SharedQueue,
     initial_paused: bool,
+    // Where `DrainPolicy::ContinueFolder` resumes folder cycling — see
+    // `store::restored_folder_pos`. Computed by `start_impl` (before `paths`
+    // moves in here) rather than here, since the restored session's
+    // `in_flight` it depends on lives there.
+    folder_pos: usize,
 ) {
     macro_rules! say {
         ($($a:tt)*) => {{ let m = format!($($a)*); log::info!("{m}"); let _ = log.send(m); }};
@@ -1805,7 +1921,13 @@ fn audio_thread(
     // `on_pending_consumed` closure needs its own handle so it can re-read
     // the queue under `SAVE_LOCK` (see the closure body).
     let queue_for_save = Arc::clone(&queue);
-    let source = HostSource::new(queue, DrainPolicy::ContinueFolder { tracks: paths, pos: 0 })
+    let source = HostSource::new(
+        queue,
+        DrainPolicy::ContinueFolder {
+            tracks: paths,
+            pos: folder_pos,
+        },
+    )
         .on_pending_consumed(Box::new(move |_pending| {
             // Ignore the slice this observer is handed — it is a snapshot
             // `HostSource::next` took *after releasing the queue lock*
@@ -1850,6 +1972,21 @@ fn audio_thread(
                 "missing"
             };
             log::info!("loader: preparing {name} (analysis: {analysis})");
+            // Record this as in-flight the moment it leaves `pending` (or
+            // the folder-drain fallback), so a process death before it ever
+            // finishes playing does not lose it — see `store::Session` and
+            // `store::restored_pending`. Uses `DATA_DIR` (not `queue_dir`,
+            // moved into the `on_pending_consumed` closure above and no
+            // longer available here) — `start_impl` sets it before spawning
+            // this thread, so it is always populated by the time the loader
+            // makes its first call.
+            {
+                let mut session = SESSION
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                session.in_flight.push(path.to_path_buf());
+            }
+            persist_session();
         }));
     let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
@@ -2086,19 +2223,30 @@ const ALREADY_STARTED: &str = "already started";
 /// PLAYBACK is published paused so the main engine never becomes audible
 /// before an audition engine is installed.
 ///
-/// `load_persisted_queue`: UI ▶ loads `queue.json`; cold-start audition leaves
-/// pending empty. Folder `ContinueFolder` supply does not write `queue.json`
-/// (`on_pending_consumed` only runs when something was taken from pending), so
-/// an empty cold start keeps the file untouched. Do **not** `load_queue` /
-/// `replace_pending` later in `resume_autodj` either — the loader may already
-/// have taken folder tracks, and injecting pending then would reorder them.
+/// Restores both `pending` and `SESSION` from the previous run every time
+/// this is called — including on a cold-start audition. That used to be
+/// gated behind a `load_persisted_queue` argument, to keep cold-start
+/// audition's pending queue empty while the loader served folder tracks
+/// (`on_pending_consumed` only runs when something was actually taken from
+/// `pending`, so leaving it empty kept `queue.json` untouched). That gate is
+/// gone now: `store::restored_pending` folds `session.in_flight` in ahead of
+/// `queue.json`'s own contents, so whatever the loader pops — pending or
+/// folder-drain alike — is recorded via `on_reserved` and survives a crash
+/// either way, and there is no longer a reason to suppress the restore.
+/// Injection still happens exactly once, here, before the loader thread
+/// starts pulling — not later from `resume_autodj`, which would still reorder
+/// whatever the loader had already taken from the folder.
+///
+/// Idempotent by construction: `replace_pending` overwrites rather than
+/// appends, so a caller that runs this twice back-to-back (the startup
+/// preload in `run()`'s `setup`, then this same restore again) just
+/// re-applies the same restored list, not a duplicate of it.
 fn start_impl(
     music_dir: &str,
     cache_dir: &str,
     app: &tauri::AppHandle,
     state: &AppState,
     initial_paused: bool,
-    load_persisted_queue: bool,
 ) -> Result<String, String> {
     let mut started = state.started.lock().unwrap();
     if *started {
@@ -2127,18 +2275,64 @@ fn start_impl(
     // music and cache paths because it displays them, but the data dir is
     // internal and it has no business naming it.
     let data = PathBuf::from(resolve_dirs(app)?.data_dir);
+    // Published for the save paths that have no `AppHandle` of their own —
+    // see `DATA_DIR`'s doc comment. Also set from `run()`'s `setup`, but that
+    // runs first only when it succeeds (best-effort; Android's JNI context
+    // may not be ready that early), so this is not redundant.
+    let _ = DATA_DIR.set(data.clone());
 
-    // Restore whatever was still pending from a previous run before the
-    // engine starts pulling from the queue. Replaces rather than appends:
-    // anything queued in this process since launch was already mirrored into
-    // queue.json by the command that queued it, so appending would duplicate
-    // every entry queued before start was pressed.
-    if load_persisted_queue {
-        match store::load_queue(&data) {
-            Ok(saved) => queue::replace_pending(&state.queue, saved),
-            Err(e) => log::warn!("load_queue({}): {e}", data.display()),
-        }
+    // Restore whatever was still mid-flight or pending from a previous run
+    // before the engine starts pulling from the queue. `in_flight` (tracks
+    // `HostSource::next` had already popped but not finished playing) goes
+    // first, then `queue.json`'s own contents — see `store::restored_pending`
+    // for why order and de-duplication both matter here. `replace_pending`
+    // overwrites rather than appends: anything queued in this process since
+    // launch was already mirrored into `queue.json` by the command that
+    // queued it, so appending would duplicate every entry queued before
+    // start was pressed.
+    let session = store::load_session(&data);
+    let saved = store::load_queue(&data).unwrap_or_else(|e| {
+        log::warn!("load_queue({}): {e}", data.display());
+        Vec::new()
+    });
+    let restored = store::restored_pending(&session.in_flight, &saved, |p| p.exists());
+    queue::replace_pending(&state.queue, restored);
+    // Mirror the restored queue to `queue.json` *before* clearing
+    // `SESSION.in_flight` below, not after: from here until that clear,
+    // `queue.json` still doesn't list the tracks that were `in_flight` (they
+    // only exist in memory now), while `session.json` still does. No save
+    // site can currently race in and `persist_session()` during this window —
+    // every path that reaches `flip_paused` (`toggle_pause`, the JNI
+    // callback) requires `PLAYBACK.get()` to be `Some`, and `PLAYBACK.set` only
+    // happens inside `audio_thread`, which is spawned after this function's
+    // restore runs and while `state.started`'s guard is still held — but
+    // fixing the order this way costs nothing either way, and it is the
+    // difference between "no known window" and "silently reintroduced" the
+    // next time a save site is added here. Writing `queue.json` first means
+    // every track restored this run is always findable on disk in at least
+    // one of the two files, however the process dies; on the next restore,
+    // `restored_pending`'s own de-duplication absorbs a track landing in
+    // both.
+    persist_queue(app, state);
+    // `in_flight` has now been folded back into `pending` above, so the
+    // in-memory session starts this run with none still outstanding;
+    // `on_reserved` repopulates it as the loader takes tracks back out.
+    // `paused` carries over as-is — a restart should not silently start
+    // playing if the listener left it paused.
+    {
+        let mut s = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        s.in_flight = Vec::new();
+        s.paused = session.paused;
     }
+    persist_session();
+    // Where `DrainPolicy::ContinueFolder` resumes folder cycling — see
+    // `store::restored_folder_pos`. Computed here, before `paths` moves into
+    // `audio_thread` below, from `in_flight`'s *last* entry (the most
+    // recently reserved track, whichever queue it came from).
+    let folder_pos =
+        store::restored_folder_pos(&paths, session.in_flight.last().map(PathBuf::as_path));
     let queue = Arc::clone(&state.queue);
 
     // Before `analyze_missing`, not after: the worker holds off while the
@@ -2150,9 +2344,13 @@ fn start_impl(
     // run a synchronous analysis mid-playback (see `analyze_missing`).
     analyze_missing(app, &paths, &cache, &data);
 
+    // `session.paused` folds into `initial_paused` (never the other way
+    // round): cold-start audition's own `true` must never be undone by a
+    // restored `paused == false`.
+    let initial_paused = initial_paused || session.paused;
     if let Err(e) = std::thread::Builder::new()
         .name("funkot-audio".into())
-        .spawn(move || audio_thread(paths, cache, data, tx, queue, initial_paused))
+        .spawn(move || audio_thread(paths, cache, data, tx, queue, initial_paused, folder_pos))
     {
         set_phase(Phase::Idle);
         return Err(format!("spawn audio thread: {e}"));
@@ -2171,7 +2369,7 @@ fn start(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<String, String> {
-    start_impl(&music_dir, &cache_dir, &app, &state, false, true)
+    start_impl(&music_dir, &cache_dir, &app, &state, false)
 }
 
 /// How long cold-start audition waits for the audio thread to publish PLAYBACK.
@@ -2300,16 +2498,18 @@ fn audition_transition(
 
     let cold_start = PLAYBACK.get().is_none();
     if cold_start {
-        // Cold audition: paused main engine, empty pending (no load_queue).
-        // Another start can win the race — the ▶ button, or a second audition
-        // press — because PLAYBACK is published only after the engine is
-        // built, so `is_none()` stays true for seconds after `start`. Waiting
-        // for that thread is right; failing here would leave the button dead
-        // with no explanation. Pause the main engine as soon as PLAYBACK is
-        // up, before `build_audition_engine` (which can take seconds); otherwise
-        // a winning ▶ leaves `paused=false` and queue audio leaks until
-        // `install_audition`.
-        match start_impl(&music_dir, &cache_dir, &app, &state, true, false) {
+        // Cold audition: paused main engine, restored pending/session same as
+        // a normal `start` — `start_impl` no longer special-cases this (see
+        // its doc comment for why suppressing the restore is not needed any
+        // more). Another start can win the race — the ▶ button, or a second
+        // audition press — because PLAYBACK is published only after the
+        // engine is built, so `is_none()` stays true for seconds after
+        // `start`. Waiting for that thread is right; failing here would leave
+        // the button dead with no explanation. Pause the main engine as soon
+        // as PLAYBACK is up, before `build_audition_engine` (which can take
+        // seconds); otherwise a winning ▶ leaves `paused=false` and queue
+        // audio leaks until `install_audition`.
+        match start_impl(&music_dir, &cache_dir, &app, &state, true) {
             Ok(_) => {}
             Err(e) if e == ALREADY_STARTED => {}
             Err(e) => return Err(e),
@@ -2387,9 +2587,26 @@ fn resume_autodj() -> Result<(), String> {
     }
     service_sync_state();
     // Spec: resume returns to auto-DJ — including cold-start where main was
-    // only ever paused under audition. Cold start left pending empty on
-    // purpose; do not load_queue / replace_pending here (folder loader order).
+    // only ever paused under audition. `start_impl` already restored pending
+    // and `SESSION` once, before the loader started pulling from either; do
+    // not `load_queue` / `replace_pending` again here — the loader may
+    // already have taken folder tracks in the meantime, and injecting pending
+    // now would reorder them (same reasoning as `start_impl`'s doc comment).
     playback.paused.store(false, Ordering::Relaxed);
+    // Unlike `install_audition`'s unmute or `audition_transition`'s
+    // prepare-time mute/failure-unmute, this is the one place a `paused`
+    // write here reflects the *listener's* intent: the main transport is
+    // actually returning to playing, not just being muted/unmuted around a
+    // volatile (never-persisted) `AUDITION_SESSION`. Mirror it into
+    // `SESSION` so a restart does not come back paused just because the
+    // listener last left via an audition.
+    {
+        let mut session = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        session.paused = false;
+    }
+    persist_session();
     Ok(())
 }
 
@@ -3098,13 +3315,32 @@ fn reorder(
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
     }
+    // `revoke_reserved`'s return value, captured here so it can be applied to
+    // `SESSION.in_flight` after `edit_displayed` returns and both the queue
+    // and render locks it was called under are released — see
+    // `store::retire_revoked`'s doc comment for why this matters (otherwise a
+    // restart brings the reordered-away track right back).
+    let mut revoked: Option<PathBuf> = None;
     queue::edit_displayed(
         &state.queue,
         QueueEdit::Move { from, to },
         Path::new(&expect),
-        revoke_reserved,
+        || {
+            let path = revoke_reserved();
+            revoked = path.clone();
+            path
+        },
     )
     .map_err(|e| e.as_str().to_string())?;
+    if let Some(path) = revoked {
+        {
+            let mut session = SESSION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            store::retire_revoked(&mut session.in_flight, &path);
+        }
+        persist_session();
+    }
     persist_queue(&app, &state);
     Ok(())
 }
@@ -3126,13 +3362,30 @@ fn dequeue(
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
     }
+    // See `reorder`'s matching comment: `revoke_reserved`'s result is applied
+    // to `SESSION.in_flight` only after `edit_displayed` returns, once the
+    // queue/render locks it ran under are released.
+    let mut revoked: Option<PathBuf> = None;
     queue::edit_displayed(
         &state.queue,
         QueueEdit::Remove { index },
         Path::new(&expect),
-        revoke_reserved,
+        || {
+            let path = revoke_reserved();
+            revoked = path.clone();
+            path
+        },
     )
     .map_err(|e| e.as_str().to_string())?;
+    if let Some(path) = revoked {
+        {
+            let mut session = SESSION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            store::retire_revoked(&mut session.in_flight, &path);
+        }
+        persist_session();
+    }
     persist_queue(&app, &state);
     Ok(expect)
 }
@@ -4148,6 +4401,43 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            // Preload the queue tab before ▶ is pressed: `start_impl` is
+            // otherwise the only place `queue.json` / `session.json` get
+            // read, so without this the queue screen shows nothing until
+            // the listener starts playback at least once. Whatever this
+            // restores here, `start_impl` restores again — identically,
+            // and idempotently (see its doc comment) — so this is a pure
+            // head start, not a second source of truth.
+            //
+            // Best-effort end to end: on Android, the JNI context
+            // `platform_dirs` needs may not be ready this early in the
+            // app's lifecycle. Any failure here is `log::warn!`-only; this
+            // must never stop the app from launching, and `start_impl`
+            // still does the same restore later regardless, so nothing
+            // about playback depends on this succeeding.
+            use tauri::Manager;
+            let handle = app.handle().clone();
+            match resolve_dirs(&handle) {
+                Ok(dirs) => {
+                    let data = PathBuf::from(dirs.data_dir);
+                    let _ = DATA_DIR.set(data.clone());
+                    let session = store::load_session(&data);
+                    let saved = store::load_queue(&data).unwrap_or_else(|e| {
+                        log::warn!("setup: load_queue({}): {e}", data.display());
+                        Vec::new()
+                    });
+                    let restored =
+                        store::restored_pending(&session.in_flight, &saved, |p| p.exists());
+                    let state = app.state::<AppState>();
+                    queue::replace_pending(&state.queue, restored);
+                }
+                Err(e) => {
+                    log::warn!("setup: cannot resolve dirs, queue preload skipped: {e}");
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_dirs,
             start,

@@ -42,6 +42,7 @@ const LIBRARY_FILE: &str = "library.json";
 const FLAGS_FILE: &str = "flags.json";
 const DISMISSED_FILE: &str = "dismissed.json";
 const META_FILE: &str = "meta.json";
+const SESSION_FILE: &str = "session.json";
 
 /// Metadata bundled with a feedback ZIP (`share_feedback`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -146,6 +147,148 @@ pub fn save_queue(dir: &Path, queue: &VecDeque<PathBuf>) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(&paths)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(QUEUE_FILE), json)
+}
+
+/// Playback state restored across a restart: which tracks were already
+/// mid-flight (out of `pending` but not yet finished playing) and whether
+/// the transport was paused.
+///
+/// Deliberately does not include a position within `in_flight[0]` — a
+/// restart always resumes that track from the top. `session.json` is not in
+/// [`migrate_from`]'s file list: unlike `queue.json`/`library.json`/
+/// `flags.json`, it never existed at the old cache-dir location this app
+/// once used, so there is nothing to rescue.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Session {
+    /// Tracks `HostSource::next` (`src-tauri/src/queue.rs`) has already
+    /// popped from `pending` but that had not finished playing as of the
+    /// last save. Index `0` is the engine's active track; anything after it
+    /// is reserved ahead of it. These never appear in `queue.json` (that
+    /// file mirrors `pending` only), which is exactly why a plain restart
+    /// used to lose the first two tracks — see [`restored_pending`].
+    #[serde(default)]
+    pub in_flight: Vec<PathBuf>,
+    #[serde(default)]
+    pub paused: bool,
+}
+
+impl Session {
+    pub const fn new() -> Self {
+        Self {
+            in_flight: Vec::new(),
+            paused: false,
+        }
+    }
+}
+
+/// Load the session previously saved under `dir`.
+///
+/// Missing or corrupt → [`Session::new`] (same policy as [`load_flags`] /
+/// [`load_dismissed`]): losing a restart's worth of "what was playing" is
+/// recoverable, refusing to launch is not.
+pub fn load_session(dir: &Path) -> Session {
+    let bytes = match fs::read(dir.join(SESSION_FILE)) {
+        Ok(b) => b,
+        Err(_) => return Session::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(session) => session,
+        Err(e) => {
+            log::warn!("{SESSION_FILE} is unreadable, starting fresh: {e}");
+            Session::new()
+        }
+    }
+}
+
+/// Persist `session` under `dir`, overwriting any previous save.
+pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(session)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(SESSION_FILE), json)
+}
+
+/// Build the pending queue to restore after a restart: `in_flight` first (the
+/// engine's active track, then anything already reserved ahead of it), then
+/// whatever `queue.json` still had. `exists` drops paths the library no
+/// longer has (moved/deleted while the app was closed).
+///
+/// Paths repeated across the two inputs keep only their first occurrence.
+/// That is not a defensive nicety: `HostSource::next` (`src-tauri/src/
+/// queue.rs`) pops from `pending`, then calls `on_pending_consumed` (which
+/// rewrites `queue.json` without that entry) and *then* `on_reserved` (which
+/// appends it to `in_flight`), in that order. A process death between those
+/// two calls leaves the same path in both `queue.json` and `in_flight` — or,
+/// symmetrically, in neither — and it is the double-listed case this
+/// dedupes. The dropped-from-both case is not something this function can
+/// fix; its window is microsecond-scale, and losing at most one track to it
+/// is accepted.
+pub fn restored_pending(
+    in_flight: &[PathBuf],
+    saved_queue: &[PathBuf],
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    in_flight
+        .iter()
+        .chain(saved_queue.iter())
+        .filter(|p| exists(p))
+        .filter(|p| seen.insert((*p).clone()))
+        .cloned()
+        .collect()
+}
+
+/// Removes `revoked` from `in_flight` after `queue::edit_displayed`'s
+/// `revoke` closure pulled it back out of the engine (`reorder`/`dequeue` in
+/// `src-tauri/src/lib.rs`) and returned it to `pending`. `in_flight` no
+/// longer reflects reality for that entry once that happens, and leaving it
+/// there would resurrect a track the listener just reordered or removed the
+/// next time `restored_pending` runs.
+///
+/// Removes the *last* matching entry, not the first. `in_flight` can
+/// legitimately hold the same path twice — e.g. the same track queued twice
+/// gives `in_flight = [X (now playing), X (reserved)]` — and a revoke always
+/// undoes whichever instance was reserved *most recently*: the engine's
+/// active track (`in_flight[0]`) is never what a revoke hands back, only
+/// something reserved after it. Removing the first match instead could evict
+/// the still-playing entry and lose the session's record of what is actually
+/// on the speakers.
+///
+/// A no-op if `revoked` is not found in `in_flight` (should not happen if
+/// `in_flight` and the engine's reserved slot stay in sync, but this
+/// function is not the place to assert that).
+pub fn retire_revoked(in_flight: &mut Vec<PathBuf>, revoked: &Path) {
+    if let Some(pos) = in_flight.iter().rposition(|p| p.as_path() == revoked) {
+        in_flight.remove(pos);
+    }
+}
+
+/// Where to resume folder cycling (`DrainPolicy::ContinueFolder`,
+/// `src-tauri/src/queue.rs`) after a restart. `tracks` must be sorted the
+/// same way `start_impl` builds it.
+///
+/// Finds `last_reserved` in `tracks` and resumes right after it — wrapping to
+/// `0` if it was the last entry, exactly like `HostSource::next`'s own
+/// `(pos + 1) % tracks.len()` step, so a restart mid-cycle does not repeat or
+/// skip a track. Returns `0` if `last_reserved` is `None` (nothing was ever
+/// reserved) or not found in `tracks` (a library edit removed it since).
+///
+/// `last_reserved` is meant to be `in_flight`'s *last* entry, not its first
+/// (the active track): by the time this runs the folder-drain and pending
+/// origins of `in_flight`'s entries can no longer be told apart (both are
+/// recorded the same way, via `on_reserved`), so this cannot resume exactly
+/// where the folder cycle left off in every case. But "continue after
+/// whatever was reserved most recently" is still correct whenever the
+/// restart really was mid-folder-cycle, and even when it was not (the last
+/// reservation came from `pending`) it is strictly better than the old
+/// `pos: 0`, which silently rewound to the folder's start every single time.
+pub fn restored_folder_pos(tracks: &[PathBuf], last_reserved: Option<&Path>) -> usize {
+    let Some(last_reserved) = last_reserved else {
+        return 0;
+    };
+    match tracks.iter().position(|p| p.as_path() == last_reserved) {
+        Some(idx) => (idx + 1) % tracks.len(),
+        None => 0,
+    }
 }
 
 /// Bar counts the user corrected by hand for one track.
@@ -1153,5 +1296,169 @@ mod tests {
             feedback_filename_stamp("2026-08-05T13:37:00Z"),
             "20260805T133700Z"
         );
+    }
+
+    #[test]
+    fn session_round_trips() {
+        let dir = TempDir::new("session-roundtrip");
+        let session = Session {
+            in_flight: vec![
+                PathBuf::from("/music/active.flac"),
+                PathBuf::from("/music/reserved.flac"),
+            ],
+            paused: true,
+        };
+        save_session(&dir.0, &session).unwrap();
+        assert_eq!(load_session(&dir.0), session);
+    }
+
+    #[test]
+    fn missing_session_file_is_default() {
+        let dir = TempDir::new("session-missing");
+        assert_eq!(load_session(&dir.0), Session::new());
+    }
+
+    #[test]
+    fn corrupt_session_file_is_default_not_a_panic() {
+        let dir = TempDir::new("session-corrupt");
+        fs::write(dir.0.join(SESSION_FILE), b"{not json").unwrap();
+        assert_eq!(load_session(&dir.0), Session::new());
+    }
+
+    #[test]
+    fn restored_pending_puts_in_flight_before_saved_queue() {
+        let in_flight = vec![PathBuf::from("/music/active.flac")];
+        let saved = vec![PathBuf::from("/music/next.flac")];
+        let restored = restored_pending(&in_flight, &saved, |_| true);
+        assert_eq!(
+            restored,
+            vec![
+                PathBuf::from("/music/active.flac"),
+                PathBuf::from("/music/next.flac"),
+            ]
+        );
+    }
+
+    /// A path saved on both sides (the `on_pending_consumed` /
+    /// `on_reserved` ordering race) must only appear once, at the
+    /// `in_flight` position.
+    #[test]
+    fn restored_pending_dedupes_keeping_first_occurrence() {
+        let in_flight = vec![PathBuf::from("/music/a.flac")];
+        let saved = vec![
+            PathBuf::from("/music/a.flac"),
+            PathBuf::from("/music/b.flac"),
+        ];
+        let restored = restored_pending(&in_flight, &saved, |_| true);
+        assert_eq!(
+            restored,
+            vec![
+                PathBuf::from("/music/a.flac"),
+                PathBuf::from("/music/b.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn restored_pending_drops_paths_that_no_longer_exist() {
+        let in_flight = vec![
+            PathBuf::from("/music/gone.flac"),
+            PathBuf::from("/music/still-here.flac"),
+        ];
+        let saved = vec![PathBuf::from("/music/also-gone.flac")];
+        let restored = restored_pending(&in_flight, &saved, |p| {
+            p == Path::new("/music/still-here.flac")
+        });
+        assert_eq!(restored, vec![PathBuf::from("/music/still-here.flac")]);
+    }
+
+    #[test]
+    fn restored_pending_both_empty_is_empty() {
+        assert!(restored_pending(&[], &[], |_| true).is_empty());
+    }
+
+    #[test]
+    fn restored_folder_pos_finds_the_next_track() {
+        let tracks = vec![
+            PathBuf::from("/music/a.flac"),
+            PathBuf::from("/music/b.flac"),
+            PathBuf::from("/music/c.flac"),
+        ];
+        assert_eq!(
+            restored_folder_pos(&tracks, Some(Path::new("/music/a.flac"))),
+            1
+        );
+    }
+
+    /// Resuming after the last track in the folder wraps back to the start,
+    /// same as `HostSource::next`'s own wrap-around.
+    #[test]
+    fn restored_folder_pos_wraps_after_the_last_track() {
+        let tracks = vec![
+            PathBuf::from("/music/a.flac"),
+            PathBuf::from("/music/b.flac"),
+            PathBuf::from("/music/c.flac"),
+        ];
+        assert_eq!(
+            restored_folder_pos(&tracks, Some(Path::new("/music/c.flac"))),
+            0
+        );
+    }
+
+    #[test]
+    fn restored_folder_pos_falls_back_to_zero_when_not_found() {
+        let tracks = vec![
+            PathBuf::from("/music/a.flac"),
+            PathBuf::from("/music/b.flac"),
+        ];
+        assert_eq!(
+            restored_folder_pos(&tracks, Some(Path::new("/music/removed.flac"))),
+            0
+        );
+    }
+
+    #[test]
+    fn restored_folder_pos_falls_back_to_zero_when_none() {
+        let tracks = vec![PathBuf::from("/music/a.flac")];
+        assert_eq!(restored_folder_pos(&tracks, None), 0);
+    }
+
+    /// The duplicate case `retire_revoked` exists for: the actively-playing
+    /// entry at index `0` must survive, only the later reservation goes.
+    #[test]
+    fn retire_revoked_removes_the_last_match_not_the_first() {
+        let mut in_flight = vec![
+            PathBuf::from("/music/x.flac"),
+            PathBuf::from("/music/x.flac"),
+        ];
+        retire_revoked(&mut in_flight, Path::new("/music/x.flac"));
+        assert_eq!(in_flight, vec![PathBuf::from("/music/x.flac")]);
+    }
+
+    #[test]
+    fn retire_revoked_with_no_match_leaves_in_flight_unchanged() {
+        let mut in_flight = vec![
+            PathBuf::from("/music/a.flac"),
+            PathBuf::from("/music/b.flac"),
+        ];
+        retire_revoked(&mut in_flight, Path::new("/music/c.flac"));
+        assert_eq!(
+            in_flight,
+            vec![PathBuf::from("/music/a.flac"), PathBuf::from("/music/b.flac")]
+        );
+    }
+
+    #[test]
+    fn retire_revoked_on_empty_in_flight_is_a_noop() {
+        let mut in_flight: Vec<PathBuf> = Vec::new();
+        retire_revoked(&mut in_flight, Path::new("/music/a.flac"));
+        assert!(in_flight.is_empty());
+    }
+
+    #[test]
+    fn retire_revoked_with_one_matching_element_empties_it() {
+        let mut in_flight = vec![PathBuf::from("/music/a.flac")];
+        retire_revoked(&mut in_flight, Path::new("/music/a.flac"));
+        assert!(in_flight.is_empty());
     }
 }
