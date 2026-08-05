@@ -46,6 +46,20 @@
   --color-minibar-bg: #1a1a1a;
   --minibar-height: 3.2rem;
 
+  /* Mode / edit tabs */
+  --color-tab-bg: #333;
+  --color-tab-text: #aaa;
+  --color-tab-active-bg: #369;
+  --color-tab-active-text: #fff;
+
+  /* Audition banner (takes NowCard's slot while auditioning) */
+  --color-audition-banner-bg: #332;
+
+  /* Chip / flagged edit accents */
+  --color-chip-current-bg: #369;
+  --color-chip-current-text: #fff;
+  --color-flagged-warn: #fa6;
+
   /* Library / queue row heights — fixed so a virtual list can drop in later */
   --library-row-height: 3.4rem;
   --queue-row-height: 3.2rem;

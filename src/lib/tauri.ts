@@ -139,3 +139,76 @@ export function undoLastFlag(): Promise<void> {
 export function pollLog(): Promise<string[]> {
   return invoke<string[]>("poll_log");
 }
+
+/// Matches `store::FlagPartner`.
+export interface FlagPartner {
+  track_hash: string;
+  title: string;
+  count: number;
+  missing: boolean;
+  path: string | null;
+}
+
+/// Matches `store::FlaggedTrackRow`. `role` is `"outgoing"` | `"incoming"`.
+export interface FlaggedTrackRow {
+  track_hash: string;
+  role: string;
+  title: string;
+  artist: string;
+  count: number;
+  low_confidence: boolean;
+  missing: boolean;
+  partners: FlagPartner[];
+  path: string | null;
+  intro_bars: number | null;
+  outro_structure_bars: number | null;
+  outro_bars: number | null;
+  intro_manual: boolean;
+  outro_manual: boolean;
+  analyzed: boolean;
+}
+
+export function listFlaggedTracks(): Promise<FlaggedTrackRow[]> {
+  return invoke<FlaggedTrackRow[]>("list_flagged_tracks");
+}
+
+/// Hides one track×role from the flagged list. Returns `1` when a new dismiss
+/// key was recorded (undo armed); `0` when already dismissed / bad role.
+export function dismissFlags(trackHash: string, role: string): Promise<number> {
+  return invoke<number>("dismiss_flags", { trackHash, role });
+}
+
+export function undoLastDismiss(): Promise<void> {
+  return invoke<void>("undo_last_dismiss");
+}
+
+/// Writes intro and/or outro structure bars. A side left as `null` is untouched.
+export function setBars(
+  path: string,
+  introBars: number | null,
+  outroStructureBars: number | null,
+): Promise<TrackRow> {
+  return invoke<TrackRow>("set_bars", { path, introBars, outroStructureBars });
+}
+
+export function auditionTransition(
+  fromPath: string,
+  toPath: string,
+  musicDir: string,
+  cacheDir: string,
+): Promise<void> {
+  return invoke<void>("audition_transition", {
+    fromPath,
+    toPath,
+    musicDir,
+    cacheDir,
+  });
+}
+
+export function auditionAgain(musicDir: string, cacheDir: string): Promise<void> {
+  return invoke<void>("audition_again", { musicDir, cacheDir });
+}
+
+export function resumeAutodj(): Promise<void> {
+  return invoke<void>("resume_autodj");
+}

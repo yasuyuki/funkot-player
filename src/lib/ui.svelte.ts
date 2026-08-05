@@ -39,10 +39,38 @@ class UiStore {
   logOpen = $state(false);
   /// Whether TransitionStrip renders above Transport. See file header.
   stripFirst = $state(loadStripFirst());
+  /// Play / edit mode segment. Pure UI: flipping this never invokes transport.
+  mode = $state<"play" | "edit">("play");
+  /// Edit-panel subtab. `flags` = 直すべきつなぎ, `all` = すべての曲.
+  editSub = $state<"flags" | "all">("flags");
+  /// Open flagged-detail identity, or `null` while the list is showing.
+  /// Bars edits mutate the store row in place so reopening the same key keeps
+  /// dirty values (legacy closes over the same row object).
+  flaggedDetailKey = $state<{ trackHash: string; role: string } | null>(null);
 
   toggleStripFirst(): void {
     this.stripFirst = !this.stripFirst;
     saveStripFirst(this.stripFirst);
+  }
+
+  setMode(mode: "play" | "edit"): void {
+    this.mode = mode;
+    if (mode === "play") {
+      this.flaggedDetailKey = null;
+    }
+  }
+
+  setEditSub(sub: "flags" | "all"): void {
+    this.editSub = sub;
+    this.flaggedDetailKey = null;
+  }
+
+  openFlaggedDetail(trackHash: string, role: string): void {
+    this.flaggedDetailKey = { trackHash, role };
+  }
+
+  closeFlaggedDetail(): void {
+    this.flaggedDetailKey = null;
   }
 }
 

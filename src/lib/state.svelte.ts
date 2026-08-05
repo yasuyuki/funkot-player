@@ -18,10 +18,18 @@ import {
   enqueue as enqueueCmd,
   dequeue as dequeueCmd,
   reorder as reorderCmd,
+  listFlaggedTracks as listFlaggedTracksCmd,
+  dismissFlags as dismissFlagsCmd,
+  undoLastDismiss as undoLastDismissCmd,
+  setBars as setBarsCmd,
+  auditionTransition as auditionTransitionCmd,
+  auditionAgain as auditionAgainCmd,
+  resumeAutodj as resumeAutodjCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
   AppDirs,
+  FlaggedTrackRow,
   FlagResult,
   PlayerState,
   QueueSnapshot,
@@ -51,6 +59,8 @@ class PlayerStore {
   /// Last invoke failure, from either the poll loop or a transport action.
   /// Polling keeps running after one of these; it is not fatal.
   lastError = $state<string | null>(null);
+  /// Edit-tab flagged list (`list_flagged_tracks`). Empty until first load.
+  flaggedRows = $state<FlaggedTrackRow[]>([]);
 
   /// Wall-clock time (`Date.now()`) the current `player.position_secs` was
   /// read at, so `elapsed` can add "how long ago was that" on top of it
@@ -69,6 +79,8 @@ class PlayerStore {
   /// Poll / refresh responses whose captured gen no longer matches are
   /// discarded so a slow poll cannot overwrite a fresher post-mutation snapshot.
   #queueGen = 0;
+  /// Generation guard for `loadFlaggedTracks` (legacy `flaggedLoadGen`).
+  #flaggedGen = 0;
 
   constructor() {
     void this.#init();
@@ -359,6 +371,139 @@ class PlayerStore {
       this.lastError = String(e);
     } finally {
       this.#libraryBusy = false;
+    }
+  }
+
+  /// Edit-tab flagged list. Generation-guarded so a slow reply cannot
+  /// overwrite a newer load (legacy `flaggedLoadGen`).
+  async loadFlaggedTracks(): Promise<void> {
+    const gen = ++this.#flaggedGen;
+    try {
+      const rows = await listFlaggedTracksCmd();
+      if (gen !== this.#flaggedGen) return;
+      this.flaggedRows = rows;
+    } catch (e) {
+      if (gen !== this.#flaggedGen) return;
+      this.lastError = String(e);
+    }
+  }
+
+  /// Apply bar fields from a `set_bars` result onto every flagged row that
+  /// shares the track path. Mutates row objects in place so an open detail
+  /// view that closed over the same object keeps seeing the new values
+  /// (legacy `applyFlaggedBarUpdate`).
+  #applyFlaggedBarUpdate(updated: TrackRow): void {
+    let touched = false;
+    for (const row of this.flaggedRows) {
+      if (row.path !== updated.path) continue;
+      row.intro_bars = updated.intro_bars;
+      row.outro_structure_bars = updated.outro_structure_bars;
+      row.outro_bars = updated.outro_bars;
+      row.intro_manual = updated.intro_manual;
+      row.outro_manual = updated.outro_manual;
+      row.analyzed = updated.analyzed;
+      touched = true;
+    }
+    if (touched) this.flaggedRows = [...this.flaggedRows];
+  }
+
+  /// Writes intro and/or outro structure bars, then syncs library + flagged.
+  /// A side left as `null` is untouched. Returns the updated row, or `null`
+  /// on failure.
+  async doSetBars(
+    path: string,
+    introBars: number | null,
+    outroStructureBars: number | null,
+  ): Promise<TrackRow | null> {
+    try {
+      const updated = await setBarsCmd(path, introBars, outroStructureBars);
+      this.#replaceLibraryRow(updated);
+      this.#applyFlaggedBarUpdate(updated);
+      return updated;
+    } catch (e) {
+      this.lastError = String(e);
+      return null;
+    }
+  }
+
+  /// Dismiss one track×role and reload the flagged list. Returns the
+  /// dismiss count (`1`/`0`), or `null` on invoke failure.
+  async doDismissFlags(trackHash: string, role: string): Promise<number | null> {
+    try {
+      const n = await dismissFlagsCmd(trackHash, role);
+      await this.loadFlaggedTracks();
+      return n;
+    } catch (e) {
+      this.lastError = String(e);
+      return null;
+    }
+  }
+
+  async doUndoLastDismiss(): Promise<boolean> {
+    try {
+      await undoLastDismissCmd();
+      await this.loadFlaggedTracks();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /// Pull `player_state` immediately after an audition/resume mutate so the
+  /// banner does not wait for the next poll tick (legacy `refreshPlayerState`).
+  async #refreshPlayerNow(): Promise<void> {
+    try {
+      this.player = await playerState();
+      this.#polledAt = Date.now();
+    } catch (e) {
+      this.lastError = String(e);
+    }
+  }
+
+  async doAuditionTransition(fromPath: string, toPath: string): Promise<boolean> {
+    if (!this.dirs) {
+      this.lastError = "app directories are not resolved yet";
+      return false;
+    }
+    try {
+      await auditionTransitionCmd(
+        fromPath,
+        toPath,
+        this.dirs.music_dir,
+        this.dirs.cache_dir,
+      );
+      await this.#refreshPlayerNow();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  async doAuditionAgain(): Promise<boolean> {
+    if (!this.dirs) {
+      this.lastError = "app directories are not resolved yet";
+      return false;
+    }
+    try {
+      await auditionAgainCmd(this.dirs.music_dir, this.dirs.cache_dir);
+      await this.#refreshPlayerNow();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  async doResumeAutodj(): Promise<boolean> {
+    try {
+      await resumeAutodjCmd();
+      await this.#refreshPlayerNow();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
     }
   }
 }
