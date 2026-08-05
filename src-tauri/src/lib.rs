@@ -25,7 +25,7 @@ use funkot_core::engine::{
 };
 use funkot_core::EngineOptions;
 
-use queue::{DrainPolicy, HostSource, SharedQueue};
+use queue::{DrainPolicy, HostSource, QueueEdit, SharedQueue};
 
 /// Global handle to the running engine's playback controls.
 ///
@@ -1062,6 +1062,36 @@ static CALLBACK_TICKS: AtomicU64 = AtomicU64::new(0);
 /// `NowTracker::now_started_frames`) to derive `PlayerState::position_secs`.
 static MAIN_FRAMES: AtomicU64 = AtomicU64::new(0);
 
+/// Mirrors `Engine::next_track_path().is_some()` for the *main* engine,
+/// published from the same `if !audition` branch as `MAIN_FRAMES` above (and
+/// for the same reason: this must reflect the main engine, not whichever
+/// engine an audition happens to be rendering). `reorder`/`dequeue` read this
+/// to decide whether the reserved slot has anything to revoke before
+/// bothering to take the render lock, and `queue_state` reads it for
+/// `QueueSnapshot::reserved_swappable`.
+///
+/// Freezes at whatever value it last held while an audition engine is
+/// installed, since the branch that updates it does not run then — that is
+/// fine here, because both readers already gate on `AUDITIONING` /
+/// `AUDITION_PREPARING` separately and must not trust this value in that
+/// window anyway.
+///
+/// Published with a plain atomic, not behind `render`'s `Mutex`: nothing in
+/// the cpal callback may take a lock (see `render.try_lock()` above), so this
+/// has to be readable by other threads without the callback ever blocking on
+/// them, and writable by the callback without it ever blocking on a reader.
+/// `player_state`'s 2 Hz poll landing on a lock the callback also wants is
+/// exactly the failure mode this avoids — see the module-level warning on
+/// `RenderState` and `open_output_stream`'s `try_lock`.
+static NEXT_PREPARED: AtomicBool = AtomicBool::new(false);
+
+/// Mirrors `Engine::frames_until_transition()` for the main engine, same
+/// publish site and same audition-freezes caveat as `NEXT_PREPARED` above.
+/// `u64::MAX` is the sentinel for "unknown" (covers both `Engine`'s own
+/// `None` — no active deck — and the period before the callback has run even
+/// once): readers must treat it as "no answer", not as a real frame count.
+static FRAMES_UNTIL_TRANSITION: AtomicU64 = AtomicU64::new(u64::MAX);
+
 /// Set by the cpal error callback; cleared by `audio_thread` when it drops a
 /// lost stream before reopen. Read by `CallbackWatch` to let a genuine stream
 /// error shorten how long a stall has to run before it is reported — see its
@@ -1605,6 +1635,14 @@ fn open_output_stream(
                     // comment for why this must not run in the audition branch.
                     if !audition {
                         MAIN_FRAMES.fetch_add(frames as u64, Ordering::Relaxed);
+                        // See `NEXT_PREPARED` / `FRAMES_UNTIL_TRANSITION`'s
+                        // doc comments: atomic publish only, no lock, since
+                        // this callback must never block on one.
+                        NEXT_PREPARED.store(engine.next_track_path().is_some(), Ordering::Relaxed);
+                        FRAMES_UNTIL_TRANSITION.store(
+                            engine.frames_until_transition().unwrap_or(u64::MAX),
+                            Ordering::Relaxed,
+                        );
                     }
                     // The returned `Vec` drops here, on the audio thread, which
                     // frees it here too — not just allocates it here.
@@ -1748,9 +1786,39 @@ fn audio_thread(
     // command only runs while the webview is polling, and the whole point of
     // this app is to keep playing with the screen off.
     let queue_dir = data_dir;
+    // Cloned before `queue` moves into `HostSource::new` below: the
+    // `on_pending_consumed` closure needs its own handle so it can re-read
+    // the queue under `SAVE_LOCK` (see the closure body).
+    let queue_for_save = Arc::clone(&queue);
     let source = HostSource::new(queue, DrainPolicy::ContinueFolder { tracks: paths, pos: 0 })
-        .on_pending_consumed(Box::new(move |pending| {
-            let pending: VecDeque<PathBuf> = pending.iter().cloned().collect();
+        .on_pending_consumed(Box::new(move |_pending| {
+            // Ignore the slice this observer is handed — it is a snapshot
+            // `HostSource::next` took *after releasing the queue lock*
+            // (see its own doc comment), so by the time this closure runs
+            // it can already be stale. This observer only needs the fact
+            // that a pop happened; it re-reads the queue itself, under
+            // `SAVE_LOCK`, so the value it writes is exactly as fresh as
+            // what a command's `persist_queue` would write, not whatever
+            // `pending` happened to look like at pop time.
+            //
+            // That staleness is not hypothetical: `reorder`/`dequeue` can
+            // now revoke `reserved` and hand it back to `pending` (see
+            // `queue::edit_displayed`), which frees the loader permit this
+            // very `next()` call was waiting on. So a command can run,
+            // read+write the queue, and finish *before* this closure gets
+            // around to taking `SAVE_LOCK` with the older slice it captured
+            // at pop time — e.g. loader pops leaving `[b, c]`, the listener
+            // deletes `b` (command writes `[c]`), and only then does this
+            // closure take `SAVE_LOCK` and (if it still wrote `[b, c]`)
+            // resurrect the just-deleted `b`. Re-reading under the lock
+            // instead of trusting the captured slice is what rules that
+            // out: whichever of this closure or a command's `persist_queue`
+            // takes `SAVE_LOCK` second simply re-reads the queue fresh and
+            // overwrites the file with the (correct) latest state.
+            let _saving = SAVE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let pending: VecDeque<PathBuf> = queue::snapshot(&queue_for_save).into_iter().collect();
             if let Err(e) = store::save_queue(&queue_dir, &pending) {
                 log::warn!("save_queue({}): {e}", queue_dir.display());
             }
@@ -2851,14 +2919,45 @@ fn undo_last_flag(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// The minimum time-until-transition (`QueueSnapshot::transition_in_secs`)
+/// `reorder`/`dequeue` accept an edit that revokes `reserved` for. Below
+/// this, `QueueSnapshot::reserved_swappable` is `false` and the UI disables
+/// the operation rather than let the listener hit a doomed `"too_late"`.
+///
+/// Revoking `reserved` makes the loader decode and time-stretch its
+/// replacement from scratch; measured at ~8s for a full stretch on a Pixel 8
+/// Pro debug APK (`[profile.dev.package."*"] opt-level = 2`; see
+/// `funkot-autodj-for-ui`'s AGENTS.md, "モバイル (Android) ビルド" section).
+/// 30s leaves headroom for a longer track. Erring low just costs some
+/// editable seconds — `edit_displayed` still refuses the edit safely if the
+/// deadline is missed. Erring high is worse: the engine can reach its outro
+/// with nothing prepared, and the resulting wait for the replacement can
+/// leave the mix without the next track's intro to layer under it (a
+/// listener hears the outro run out solo).
+const SWAP_DEADLINE_SECS: f64 = 30.0;
+
 /// Snapshot of the playback queue, for the UI.
 #[derive(serde::Serialize, Clone)]
 struct QueueSnapshot {
-    /// Reserved = already handed to the engine to play next; the host can no
-    /// longer take it back.
+    /// Reserved = already handed to the engine to play next.
     reserved: Option<String>,
     /// Waiting queue; its head is "reserved's successor".
     pending: Vec<String>,
+    /// Whether `reorder`/`dequeue` would currently accept an edit that
+    /// reaches into the `reserved` slot (`Move`/`Remove` at displayed index
+    /// `0`, or `Move { to: 0, .. }`). `false` while: nothing is reserved; an
+    /// audition is running or still preparing (the main engine's runway is
+    /// frozen then — see `NEXT_PREPARED`/`FRAMES_UNTIL_TRANSITION`); the
+    /// loader hasn't finished preparing `reserved`'s eventual replacement yet
+    /// (`NEXT_PREPARED` false right after a transition — revoking now would
+    /// have nothing to give back, and whatever the loader is mid-preparing
+    /// would land moments later as an unwanted substitute); or
+    /// `transition_in_secs` has dropped to or below `SWAP_DEADLINE_SECS`.
+    reserved_swappable: bool,
+    /// Seconds until the active track's automatic transition may begin, or
+    /// `null` when unknown: stopped, auditioning/preparing an audition, or no
+    /// active deck yet.
+    transition_in_secs: Option<f64>,
 }
 
 /// Save the queue's current pending contents to `queue.json`. Failure is
@@ -2896,37 +2995,149 @@ fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -
     Ok(len)
 }
 
-/// Move a pending item from one position to another.
+/// `queue::edit_displayed`'s `revoke` argument for the main engine: hands
+/// back `Engine::next_track_path`'s track, or `None` if there is nothing left
+/// to take back.
+///
+/// Holds `playback.render`'s lock only long enough to call
+/// `Engine::revoke_next` — a few microseconds. The discarded
+/// `PreparedTrack`'s actual teardown happens on a separate thread
+/// (`retire_prepared`, funkot-core `engine.rs`), specifically so this call
+/// does not have to wait on it. This is the same lock the cpal callback
+/// takes with `try_lock` (`open_output_stream`), so — exactly as with
+/// `install_audition`/`resume_autodj` swapping the audition engine in and
+/// out — it is possible, if unlikely, for one audio buffer to lose that race
+/// and render silence.
+///
+/// Returns `None` (which `edit_displayed` turns into `EditError::TooLate`)
+/// if the main engine has not started yet, or if an audition engine is
+/// currently installed: `RenderState::audition` is what the callback is
+/// actually rendering then, so the main engine's `next_track` cannot
+/// meaningfully be revoked out from under it.
+///
+/// Re-checks `AUDITIONING`/`AUDITION_PREPARING` here, after taking the render
+/// lock, rather than trusting `reorder`/`dequeue`'s own entry check: those
+/// flags and `RenderState::audition` do not flip atomically together.
+/// `install_audition` sets `AUDITIONING` *before* it takes the render lock to
+/// install the engine, so a caller that got past the entry check could still
+/// find `state.audition` empty here and revoke anyway — a harmless but
+/// unintended extra re-decode. The reverse order is also possible in
+/// principle (an audition engine landing in `RenderState` a moment before
+/// its flag is set), so both the flags and `state.audition.is_some()` are
+/// checked, and either one alone is enough to refuse.
+fn revoke_reserved() -> Option<PathBuf> {
+    let playback = PLAYBACK.get()?;
+    let mut state = playback
+        .render
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.audition.is_some()
+        || AUDITIONING.load(Ordering::Relaxed)
+        || AUDITION_PREPARING.load(Ordering::Relaxed)
+    {
+        return None;
+    }
+    let path = state.engine.revoke_next();
+    if path.is_some() {
+        NEXT_PREPARED.store(false, Ordering::Relaxed);
+    }
+    path
+}
+
+/// Move an item within the *displayed* queue list (`[reserved?] ++ pending`;
+/// index `0` is `reserved` when present — matches `QueueSnapshot` and
+/// `queue::QueueEdit`'s doc comment). `expect` must be the path currently
+/// shown at `from`, so a caller acting on a stale view is rejected instead of
+/// moving whatever now happens to be there.
+///
+/// Errors are one of `queue::EditError::as_str`'s codes (`"too_late"` /
+/// `"stale"` / `"out_of_range"`), or `"auditioning"` while an audition is
+/// running or still preparing. `src/lib/tauri.ts` and `src/lib/state.svelte.ts`
+/// match on these exact strings to choose a Japanese toast message — keep
+/// this contract in sync on both sides; changing one without the other fails
+/// silently (an unrecognised code just falls through to a generic message).
 #[tauri::command(async)]
 fn reorder(
     from: usize,
     to: usize,
+    expect: String,
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    queue::reorder(&state.queue, from, to)?;
+    if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
+        return Err("auditioning".into());
+    }
+    queue::edit_displayed(
+        &state.queue,
+        QueueEdit::Move { from, to },
+        Path::new(&expect),
+        revoke_reserved,
+    )
+    .map_err(|e| e.as_str().to_string())?;
     persist_queue(&app, &state);
     Ok(())
 }
 
-/// Remove the item at `index` from the pending queue, returning its path.
+/// Remove the item at displayed index `index` (see `reorder`'s doc comment
+/// for what "displayed" means and the error-code contract with the
+/// frontend). `expect` must be the path currently shown there.
+///
+/// Returns the removed path on success — `edit_displayed` only succeeds once
+/// it has confirmed the path at `index` equals `expect`, so `expect` itself
+/// is that path.
 #[tauri::command(async)]
-fn dequeue(index: usize, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<String, String> {
-    let path = queue::dequeue(&state.queue, index)?;
+fn dequeue(
+    index: usize,
+    expect: String,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
+    if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
+        return Err("auditioning".into());
+    }
+    queue::edit_displayed(
+        &state.queue,
+        QueueEdit::Remove { index },
+        Path::new(&expect),
+        revoke_reserved,
+    )
+    .map_err(|e| e.as_str().to_string())?;
     persist_queue(&app, &state);
-    Ok(path.to_string_lossy().into_owned())
+    Ok(expect)
 }
 
 /// Current queue contents, for the UI to render.
 #[tauri::command]
 fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
     let (reserved, pending) = queue::state_snapshot(&state.queue);
+    let auditioning =
+        AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed);
+    let frames = FRAMES_UNTIL_TRANSITION.load(Ordering::Relaxed);
+    let transition_in_secs = if auditioning || frames == u64::MAX {
+        None
+    } else {
+        // Same guard as `played_duration_secs`: a `0` sample rate would turn
+        // this into `inf`, which `reserved_swappable`'s `> SWAP_DEADLINE_SECS`
+        // check below would then read as "plenty of runway".
+        PLAYBACK.get().and_then(|p| {
+            if p.sample_rate == 0 {
+                return None;
+            }
+            Some(frames as f64 / p.sample_rate as f64)
+        })
+    };
+    let reserved_swappable = reserved.is_some()
+        && !auditioning
+        && NEXT_PREPARED.load(Ordering::Relaxed)
+        && transition_in_secs.is_some_and(|s| s > SWAP_DEADLINE_SECS);
     Ok(QueueSnapshot {
         reserved: reserved.map(|p| p.to_string_lossy().into_owned()),
         pending: pending
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
+        reserved_swappable,
+        transition_in_secs,
     })
 }
 

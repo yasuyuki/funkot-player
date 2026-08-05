@@ -22,6 +22,23 @@
 //! all — see [`DrainPolicy`] for what it falls back to once the host-managed
 //! queue drains. `next` only returns `None` when both the queue and the
 //! fallback source are exhausted.
+//!
+//! # Lock ordering
+//!
+//! The fixed order across this codebase is **`SAVE_LOCK` → queue → render**,
+//! never the reverse. Two of those nestings are real, not hypothetical:
+//! [`edit_displayed`] takes the engine's `RenderState` lock (`render` in
+//! `src-tauri/src/lib.rs`) via its `revoke` closure while already holding this
+//! module's queue lock, and both `persist_queue` and the
+//! [`HostSource::on_pending_consumed`] observer read the queue while already holding
+//! `SAVE_LOCK` (`src-tauri/src/lib.rs`).
+//!
+//! Nothing takes them the other way round, which is what keeps this
+//! acyclic: the loader thread (`next`, above) only ever takes the queue lock,
+//! and the cpal audio callback only ever takes the render lock (with
+//! `try_lock`, so it cannot block on this module at all). Keep it that way —
+//! taking the queue lock and then reaching for `SAVE_LOCK`, or taking `render`
+//! and then reaching for the queue lock, is what would close the cycle.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -72,37 +89,204 @@ pub fn replace_pending(queue: &SharedQueue, paths: Vec<PathBuf>) {
     q.pending = paths.into();
 }
 
-/// Move the item at `from` to `to` (both 0-based positions in the pending
-/// queue as it stands right now). Does not touch `reserved`: once
-/// `HostSource::next` has taken an item out of the pending queue for
-/// preparation, it moves to `reserved` and is no longer reachable here.
-///
-/// Errors (queue left unchanged) if either index is out of range.
-pub fn reorder(queue: &SharedQueue, from: usize, to: usize) -> Result<(), String> {
-    let mut q = queue.lock().unwrap();
-    let len = q.pending.len();
-    if from >= len || to >= len {
-        return Err(format!(
-            "reorder index out of range: len={len}, from={from}, to={to}"
-        ));
-    }
-    if from == to {
-        return Ok(());
-    }
-    let item = q.pending.remove(from).expect("from checked above");
-    q.pending.insert(to, item);
-    Ok(())
+/// An edit to the list the UI actually displays: `reserved` (if any) followed
+/// by `pending`, as one 0-based sequence. Index `0` is `reserved` when it is
+/// present; otherwise the list is just `pending` and indices line up with it
+/// directly. This mirrors what `queue_state`'s `QueueSnapshot`
+/// (`src-tauri/src/lib.rs`) hands the frontend, so a UI index can be passed
+/// straight through to [`edit_displayed`] with no translation of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueEdit {
+    /// Move the item at `from` to `to` (both displayed-list indices).
+    Move { from: usize, to: usize },
+    /// Remove the item at `index` (a displayed-list index).
+    Remove { index: usize },
 }
 
-/// Remove and return the item at `index` from the pending queue.
+/// Why [`edit_displayed`] refused an edit. Machine-readable so the frontend
+/// can pick a message without parsing prose; kept in sync with the
+/// `reorder`/`dequeue` Tauri commands (`src-tauri/src/lib.rs`), which return
+/// [`EditError::as_str`] verbatim as their error string, and with
+/// `src/lib/tauri.ts`, which matches on those same strings. Changing the
+/// strings on one side without the other breaks that contract silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditError {
+    /// The edit reached into the reserved slot, but `revoke` reported
+    /// nothing to take back — the engine already consumed it into a
+    /// transition, or (per the caller's `revoke`) an audition engine is
+    /// currently loaded. The queue is left exactly as it was.
+    TooLate,
+    /// The path at the edit's subject index (`Move::from` / `Remove::index`)
+    /// no longer matches `expect`: the caller's view of the list is older
+    /// than what is here now. The queue is left exactly as it was.
+    Stale,
+    /// An index in the edit is outside the displayed list's current bounds.
+    /// The queue is left exactly as it was.
+    OutOfRange,
+}
+
+impl EditError {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EditError::TooLate => "too_late",
+            EditError::Stale => "stale",
+            EditError::OutOfRange => "out_of_range",
+        }
+    }
+}
+
+impl std::fmt::Display for EditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Apply `edit` to the displayed list (`[reserved?] ++ pending`), swapping
+/// the reserved slot back into `pending` first if the edit reaches into it.
 ///
-/// Errors if `index` is out of range (including an empty queue).
-pub fn dequeue(queue: &SharedQueue, index: usize) -> Result<PathBuf, String> {
+/// # Why this takes `queue.lock()` once and never lets go
+///
+/// `revoke` (the caller passes `Engine::revoke_next`, wrapped) frees a loader
+/// permit the moment it succeeds, and the loader thread is parked waiting on
+/// exactly that permit inside [`HostSource::next`] — which takes this same
+/// `SharedQueue`'s lock. If this function released the lock between calling
+/// `revoke` and pushing the revoked path back onto `pending`, the loader
+/// could win the race, `pop_front` the queue's current head (the very item
+/// this edit is about to move or remove), and reserve it again before the
+/// edit below ever runs. That is not a rare interleaving to guard against —
+/// on a single-core-scheduled or just unlucky run it is the *likely* outcome
+/// for any edit that touches `reserved`, since revoking is exactly what
+/// unblocks the loader. So every step — the `expect` check, the reserved
+/// hand-back, and the index-shifted `pending` mutation — happens under one
+/// `MutexGuard` that is held for the whole call.
+///
+/// # Why `expect` is checked before `revoke` runs
+///
+/// A stale tap (the UI's last-known list is older than the one on screen
+/// right now) must not discard a track the engine has already buffered for
+/// nothing: `revoke_next` (`funkot-core/src/engine.rs`) permanently gives up
+/// the prepared track's engine-side state, and there is no way to hand it
+/// back other than re-queuing the path and letting the loader redo the work
+/// from scratch. Checking staleness first means a stale tap costs nothing.
+///
+/// # What counts as "touches reserved"
+///
+/// `reserved.is_some()` and the edit's `from`, `to`, or `index` is `0` —
+/// including `Move { to: 0, .. }`: moving some other item to the front
+/// displaces `reserved` from that slot just as surely as moving `reserved`
+/// itself would, so it needs the exact same hand-back.
+///
+/// # Errors
+///
+/// Returns [`EditError::OutOfRange`] if any index in `edit` is outside the
+/// displayed list, [`EditError::Stale`] if the path at the edit's subject
+/// index does not match `expect`, or [`EditError::TooLate`] if the edit
+/// touches `reserved` and `revoke` returns `None`. In every error case the
+/// queue (`reserved` and `pending` both) is left completely unchanged.
+pub fn edit_displayed(
+    queue: &SharedQueue,
+    edit: QueueEdit,
+    expect: &Path,
+    revoke: impl FnOnce() -> Option<PathBuf>,
+) -> Result<(), EditError> {
     let mut q = queue.lock().unwrap();
-    let len = q.pending.len();
-    q.pending
-        .remove(index)
-        .ok_or_else(|| format!("dequeue index out of range: len={len}, index={index}"))
+
+    let has_reserved = q.reserved.is_some();
+    let len = q.pending.len() + usize::from(has_reserved);
+
+    // The edit's "subject" is the index whose path must match `expect`:
+    // `Move::from` (where the item is coming *from*) or `Remove::index`.
+    // `Move::to` has no path of its own to check — it is just a destination
+    // — but still has to be in bounds.
+    let subject = match edit {
+        QueueEdit::Move { from, to } => {
+            if from >= len || to >= len {
+                return Err(EditError::OutOfRange);
+            }
+            from
+        }
+        QueueEdit::Remove { index } => {
+            if index >= len {
+                return Err(EditError::OutOfRange);
+            }
+            index
+        }
+    };
+
+    let subject_path: Option<&Path> = if has_reserved {
+        if subject == 0 {
+            q.reserved.as_deref()
+        } else {
+            q.pending.get(subject - 1).map(PathBuf::as_path)
+        }
+    } else {
+        q.pending.get(subject).map(PathBuf::as_path)
+    };
+    if subject_path != Some(expect) {
+        return Err(EditError::Stale);
+    }
+
+    // A `Move` to its own position changes nothing. Bail out before the
+    // `touches_reserved` check below so a no-op `from == to` (e.g. a UI tap
+    // that already landed, or `to == 0` on a track already at the front)
+    // cannot trigger a `revoke`: that would discard the engine's prepared
+    // track for a rearrangement that was never going to happen.
+    if let QueueEdit::Move { from, to } = edit {
+        if from == to {
+            return Ok(());
+        }
+    }
+
+    let touches_reserved = has_reserved
+        && match edit {
+            QueueEdit::Move { from, to } => from == 0 || to == 0,
+            QueueEdit::Remove { index } => index == 0,
+        };
+
+    if touches_reserved {
+        match revoke() {
+            Some(path) => {
+                // The engine's next-track slot and this module's `reserved`
+                // are supposed to mirror each other, so this should always
+                // match; if it doesn't, trust what the engine actually had
+                // and just note the mismatch rather than losing the track.
+                if q.reserved.as_deref() != Some(path.as_path()) {
+                    log::warn!(
+                        "edit_displayed: revoke returned {}, but reserved was {:?}",
+                        path.display(),
+                        q.reserved,
+                    );
+                }
+                q.reserved = None;
+                q.pending.push_front(path);
+            }
+            None => return Err(EditError::TooLate),
+        }
+    }
+
+    // Once `reserved` has been folded into `pending` above (or was never
+    // there), the displayed list and `pending` are the exact same sequence,
+    // so the edit's indices apply to `pending` unshifted. The one case left
+    // needing a shift is an edit that never touched `reserved`: `pending`
+    // still excludes it, so a displayed index one past `reserved` is
+    // `pending`'s index `0`.
+    let pending_index = |i: usize| if has_reserved && !touches_reserved { i - 1 } else { i };
+    match edit {
+        QueueEdit::Move { from, to } => {
+            let from = pending_index(from);
+            let to = pending_index(to);
+            if from != to {
+                let item = q.pending.remove(from).expect("from checked above");
+                q.pending.insert(to, item);
+            }
+        }
+        QueueEdit::Remove { index } => {
+            let index = pending_index(index);
+            q.pending.remove(index);
+        }
+    }
+
+    Ok(())
 }
 
 /// Snapshot of the pending queue's current contents, for `state()`.
@@ -169,9 +353,18 @@ impl HostSource {
     /// next start.
     ///
     /// The observer runs on the engine's loader thread with the queue's lock
-    /// released, so it may block (the loader already decodes whole tracks);
-    /// it must not lock the queue itself, and the slice it is given is a
-    /// snapshot that a concurrent command may already have moved past.
+    /// released, so it may block (the loader already decodes whole tracks)
+    /// and may take the queue lock itself. The slice it is handed is only a
+    /// snapshot from pop time, which a concurrent command may already have
+    /// moved past — the host's observer therefore treats it as a signal that
+    /// a pop happened and re-reads `pending` itself rather than persisting
+    /// the captured value (see `audio_thread` in `src-tauri/src/lib.rs`).
+    ///
+    /// An observer that does take the queue lock must not already hold a lock
+    /// that anything else takes *after* the queue lock, or the two orders can
+    /// deadlock. The host's `SAVE_LOCK` is fine: the fixed order there is
+    /// `SAVE_LOCK` → queue → render, and nothing takes the queue lock and
+    /// then reaches for `SAVE_LOCK`.
     ///
     /// Not called when the queue was empty and [`DrainPolicy`] supplied the
     /// track: nothing was consumed, so there is nothing new to report.
@@ -309,70 +502,88 @@ mod tests {
         assert_eq!(snapshot(&q), vec![p("b")]);
     }
 
+    /// A `revoke` that panics if it runs. Used by tests below whose whole
+    /// point is that a particular edit must *not* reach into `reserved` --
+    /// with this, a wrongly-touched slot fails loudly instead of the test
+    /// just happening to still pass.
+    fn panic_revoke() -> Option<PathBuf> {
+        panic!("revoke should not run: this edit does not touch reserved")
+    }
+
     #[test]
-    fn reorder_moves_item_forward_and_backward() {
+    fn edit_displayed_moves_an_item_forward_and_backward_without_reserved() {
         let q = new_shared_queue();
         for name in ["a", "b", "c", "d"] {
             enqueue(&q, p(name));
         }
         // Move "a" (index 0) to the end.
-        reorder(&q, 0, 3).unwrap();
+        edit_displayed(&q, QueueEdit::Move { from: 0, to: 3 }, &p("a"), panic_revoke).unwrap();
         assert_eq!(snapshot(&q), vec![p("b"), p("c"), p("d"), p("a")]);
         // Move it back to the front.
-        reorder(&q, 3, 0).unwrap();
+        edit_displayed(&q, QueueEdit::Move { from: 3, to: 0 }, &p("a"), panic_revoke).unwrap();
         assert_eq!(snapshot(&q), vec![p("a"), p("b"), p("c"), p("d")]);
     }
 
     #[test]
-    fn reorder_same_index_is_a_noop() {
+    fn edit_displayed_move_out_of_range_without_reserved_leaves_queue_untouched() {
         let q = new_shared_queue();
         for name in ["a", "b"] {
             enqueue(&q, p(name));
         }
-        reorder(&q, 1, 1).unwrap();
+        assert_eq!(
+            edit_displayed(&q, QueueEdit::Move { from: 0, to: 2 }, &p("a"), panic_revoke),
+            Err(EditError::OutOfRange)
+        );
+        assert_eq!(
+            edit_displayed(&q, QueueEdit::Move { from: 2, to: 0 }, &p("a"), panic_revoke),
+            Err(EditError::OutOfRange)
+        );
         assert_eq!(snapshot(&q), vec![p("a"), p("b")]);
     }
 
     #[test]
-    fn reorder_out_of_range_errors_and_leaves_queue_untouched() {
-        let q = new_shared_queue();
-        for name in ["a", "b"] {
-            enqueue(&q, p(name));
-        }
-        assert!(reorder(&q, 0, 2).is_err());
-        assert!(reorder(&q, 2, 0).is_err());
-        assert_eq!(snapshot(&q), vec![p("a"), p("b")]);
-    }
-
-    #[test]
-    fn reorder_on_empty_queue_errors() {
-        let q = new_shared_queue();
-        assert!(reorder(&q, 0, 0).is_err());
-    }
-
-    #[test]
-    fn dequeue_removes_the_right_item() {
-        let q = new_shared_queue();
-        for name in ["a", "b", "c"] {
-            enqueue(&q, p(name));
-        }
-        assert_eq!(dequeue(&q, 1).unwrap(), p("b"));
-        assert_eq!(snapshot(&q), vec![p("a"), p("c")]);
-    }
-
-    #[test]
-    fn dequeue_out_of_range_errors_and_leaves_queue_untouched() {
+    fn edit_displayed_dequeue_out_of_range_without_reserved_leaves_queue_untouched() {
         let q = new_shared_queue();
         enqueue(&q, p("a"));
-        assert!(dequeue(&q, 1).is_err());
-        assert!(dequeue(&q, 99).is_err());
+        assert_eq!(
+            edit_displayed(&q, QueueEdit::Remove { index: 1 }, &p("a"), panic_revoke),
+            Err(EditError::OutOfRange)
+        );
+        assert_eq!(
+            edit_displayed(&q, QueueEdit::Remove { index: 99 }, &p("a"), panic_revoke),
+            Err(EditError::OutOfRange)
+        );
         assert_eq!(snapshot(&q), vec![p("a")]);
     }
 
     #[test]
-    fn dequeue_on_empty_queue_errors() {
+    fn edit_displayed_on_an_empty_queue_is_out_of_range() {
         let q = new_shared_queue();
-        assert!(dequeue(&q, 0).is_err());
+        // `expect` is irrelevant here -- both edits fail the bounds check
+        // (len 0) before any path is ever compared against it.
+        assert_eq!(
+            edit_displayed(&q, QueueEdit::Move { from: 0, to: 0 }, &p("x"), panic_revoke),
+            Err(EditError::OutOfRange)
+        );
+        assert_eq!(
+            edit_displayed(&q, QueueEdit::Remove { index: 0 }, &p("x"), panic_revoke),
+            Err(EditError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn edit_displayed_does_not_require_a_running_source() {
+        // Sanity check that `edit_displayed` works with no reserved track and
+        // no `HostSource` involved at all, matching how the Tauri commands
+        // use it (a `SharedQueue` handed around independently of the
+        // engine) before anything has been reserved yet.
+        let q = new_shared_queue();
+        enqueue(&q, p("a"));
+        enqueue(&q, p("b"));
+        enqueue(&q, p("c"));
+        edit_displayed(&q, QueueEdit::Move { from: 2, to: 0 }, &p("c"), panic_revoke).unwrap();
+        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &p("a"), panic_revoke).unwrap();
+        assert_eq!(snapshot(&q), vec![p("c"), p("b")]);
     }
 
     #[test]
@@ -402,20 +613,6 @@ mod tests {
         assert_eq!(source.next(), None);
         enqueue(&q, p("late"));
         assert_eq!(source.next(), Some((0, p("late"))));
-    }
-
-    #[test]
-    fn reorder_and_dequeue_do_not_require_a_running_source() {
-        // Sanity check that the plain queue functions work with no
-        // `HostSource` involved at all, matching how Tauri commands would use
-        // them (a `SharedQueue` handed around independently of the engine).
-        let q = new_shared_queue();
-        enqueue(&q, p("a"));
-        enqueue(&q, p("b"));
-        enqueue(&q, p("c"));
-        reorder(&q, 2, 0).unwrap();
-        assert_eq!(dequeue(&q, 1).unwrap(), p("a"));
-        assert_eq!(snapshot(&q), vec![p("c"), p("b")]);
     }
 
     #[test]
@@ -460,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_queue_mutations_do_not_affect_reserved() {
+    fn edits_that_do_not_touch_reserved_do_not_revoke_it() {
         let q = new_shared_queue();
         enqueue(&q, p("a"));
         let mut source = HostSource::new(Arc::clone(&q), empty_policy());
@@ -469,11 +666,17 @@ mod tests {
 
         enqueue(&q, p("b"));
         enqueue(&q, p("c"));
-        reorder(&q, 0, 1).unwrap();
-        dequeue(&q, 0).unwrap();
+        // Displayed list is [a(reserved), b, c]; neither edit's `from`/`to`/
+        // `index` is 0, so per `edit_displayed`'s "touches reserved" rule
+        // neither should revoke `reserved` -- this is the design's central
+        // invariant. `panic_revoke` makes that assertion load-bearing: if
+        // either edit wrongly reached into the reserved slot, the test
+        // panics instead of quietly passing.
+        edit_displayed(&q, QueueEdit::Move { from: 1, to: 2 }, &p("b"), panic_revoke).unwrap();
+        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &p("c"), panic_revoke).unwrap();
 
         assert_eq!(reserved(&q), Some(p("a")));
-        assert_eq!(state_snapshot(&q).0, Some(p("a")));
+        assert_eq!(state_snapshot(&q), (Some(p("a")), vec![p("b")]));
     }
 
     /// Collects what the observer is handed, standing in for `queue.json`.
@@ -599,5 +802,158 @@ mod tests {
         assert_eq!(reserved(&q), Some(p("a")));
         assert_eq!(source.next(), None);
         assert_eq!(reserved(&q), None);
+    }
+
+    /// Builds a queue with `reserved` and `pending` already set, bypassing
+    /// `HostSource` entirely — `edit_displayed`'s tests only care about the
+    /// displayed-list arithmetic, not how a track came to be reserved.
+    fn queue_with(reserved: Option<&str>, pending: &[&str]) -> SharedQueue {
+        Arc::new(Mutex::new(QueueState {
+            pending: pending.iter().map(|n| p(n)).collect(),
+            reserved: reserved.map(p),
+        }))
+    }
+
+    /// A `revoke` closure that records whether it ran and always returns
+    /// `answer`.
+    fn revoke_stub(answer: Option<PathBuf>) -> (std::rc::Rc<std::cell::Cell<bool>>, impl FnOnce() -> Option<PathBuf>) {
+        let called = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = std::rc::Rc::clone(&called);
+        (called, move || {
+            flag.set(true);
+            answer
+        })
+    }
+
+    #[test]
+    fn edit_displayed_remove_reserved_slot_revokes_and_clears_reserved() {
+        let q = queue_with(Some("r"), &["a", "b"]);
+        let (called, revoke) = revoke_stub(Some(p("r")));
+
+        edit_displayed(&q, QueueEdit::Remove { index: 0 }, &p("r"), revoke).unwrap();
+
+        assert!(called.get());
+        assert_eq!(state_snapshot(&q), (None, vec![p("a"), p("b")]));
+    }
+
+    #[test]
+    fn edit_displayed_remove_reserved_with_empty_pending_leaves_an_empty_queue() {
+        let q = queue_with(Some("r"), &[]);
+        let (called, revoke) = revoke_stub(Some(p("r")));
+
+        edit_displayed(&q, QueueEdit::Remove { index: 0 }, &p("r"), revoke).unwrap();
+
+        assert!(called.get());
+        assert_eq!(state_snapshot(&q), (None, Vec::<PathBuf>::new()));
+    }
+
+    #[test]
+    fn edit_displayed_move_reserved_to_itself_is_a_noop_and_does_not_revoke() {
+        let q = queue_with(Some("r"), &["a", "b"]);
+        let (called, revoke) = revoke_stub(Some(p("r")));
+
+        edit_displayed(&q, QueueEdit::Move { from: 0, to: 0 }, &p("r"), revoke).unwrap();
+
+        assert!(!called.get());
+        assert_eq!(state_snapshot(&q), (Some(p("r")), vec![p("a"), p("b")]));
+    }
+
+    #[test]
+    fn edit_displayed_move_reserved_to_middle_revokes_then_reinserts_at_destination() {
+        let q = queue_with(Some("r"), &["a", "b", "c"]);
+        let (called, revoke) = revoke_stub(Some(p("r")));
+
+        // Displayed list is [r, a, b, c]; moving index 0 to index 2 means the
+        // revoked track is folded back to the front, then moved to slot 2.
+        edit_displayed(&q, QueueEdit::Move { from: 0, to: 2 }, &p("r"), revoke).unwrap();
+
+        assert!(called.get());
+        assert_eq!(
+            state_snapshot(&q),
+            (None, vec![p("a"), p("b"), p("r"), p("c")])
+        );
+    }
+
+    #[test]
+    fn edit_displayed_move_into_reserved_slot_revokes_and_promotes_the_source_track() {
+        let q = queue_with(Some("r"), &["a", "b", "c"]);
+        let (called, revoke) = revoke_stub(Some(p("r")));
+
+        // Displayed list is [r, a, b, c]; index 3 is "c". Moving it to 0
+        // displaces reserved, which must be revoked and folded back in.
+        edit_displayed(&q, QueueEdit::Move { from: 3, to: 0 }, &p("c"), revoke).unwrap();
+
+        assert!(called.get());
+        assert_eq!(
+            state_snapshot(&q),
+            (None, vec![p("c"), p("r"), p("a"), p("b")])
+        );
+    }
+
+    #[test]
+    fn edit_displayed_move_within_pending_does_not_revoke_reserved() {
+        let q = queue_with(Some("r"), &["a", "b", "c"]);
+        let (called, revoke) = revoke_stub(Some(p("r")));
+
+        // Displayed indices 1, 2 are "a", "b" — neither is the reserved slot.
+        edit_displayed(&q, QueueEdit::Move { from: 1, to: 2 }, &p("a"), revoke).unwrap();
+
+        assert!(!called.get());
+        assert_eq!(
+            state_snapshot(&q),
+            (Some(p("r")), vec![p("b"), p("a"), p("c")])
+        );
+    }
+
+    #[test]
+    fn edit_displayed_too_late_when_revoke_returns_none_and_leaves_queue_untouched() {
+        let q = queue_with(Some("r"), &["a", "b"]);
+        let (called, revoke) = revoke_stub(None);
+
+        let err = edit_displayed(&q, QueueEdit::Remove { index: 0 }, &p("r"), revoke).unwrap_err();
+
+        assert_eq!(err, EditError::TooLate);
+        assert!(called.get());
+        assert_eq!(state_snapshot(&q), (Some(p("r")), vec![p("a"), p("b")]));
+    }
+
+    #[test]
+    fn edit_displayed_stale_expect_does_not_revoke_and_leaves_queue_untouched() {
+        let q = queue_with(Some("r"), &["a", "b"]);
+        let (called, revoke) = revoke_stub(Some(p("r")));
+
+        let err =
+            edit_displayed(&q, QueueEdit::Remove { index: 0 }, &p("stale"), revoke).unwrap_err();
+
+        assert_eq!(err, EditError::Stale);
+        assert!(!called.get());
+        assert_eq!(state_snapshot(&q), (Some(p("r")), vec![p("a"), p("b")]));
+    }
+
+    #[test]
+    fn edit_displayed_out_of_range_leaves_queue_untouched() {
+        let q = queue_with(Some("r"), &["a", "b"]);
+        // len is 3 (r, a, b): index 3 and to=3 are both one past the end.
+        let (_, revoke) = revoke_stub(Some(p("r")));
+        let err = edit_displayed(&q, QueueEdit::Remove { index: 3 }, &p("r"), revoke).unwrap_err();
+        assert_eq!(err, EditError::OutOfRange);
+
+        let (_, revoke) = revoke_stub(Some(p("r")));
+        let err =
+            edit_displayed(&q, QueueEdit::Move { from: 0, to: 3 }, &p("r"), revoke).unwrap_err();
+        assert_eq!(err, EditError::OutOfRange);
+
+        assert_eq!(state_snapshot(&q), (Some(p("r")), vec![p("a"), p("b")]));
+    }
+
+    #[test]
+    fn edit_displayed_without_reserved_indexes_pending_directly() {
+        let q = queue_with(None, &["a", "b", "c"]);
+        let (called, revoke) = revoke_stub(Some(p("unused")));
+
+        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &p("b"), revoke).unwrap();
+
+        assert!(!called.get());
+        assert_eq!(state_snapshot(&q), (None, vec![p("a"), p("c")]));
     }
 }

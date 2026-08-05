@@ -87,6 +87,12 @@ export function refreshLibrary(): Promise<TrackRow[]> {
 export interface QueueSnapshot {
   reserved: string | null;
   pending: string[];
+  /// Whether `reorder`/`dequeue` would currently accept an edit that reaches
+  /// into the `reserved` slot (displayed index 0, or `Move { to: 0 }`).
+  reserved_swappable: boolean;
+  /// Seconds until the engine's automatic transition may begin, or `null`
+  /// when unknown (stopped, auditioning, or no active deck).
+  transition_in_secs: number | null;
 }
 
 /// Matches `AnalysisProgress`. Emitted as `analysis-progress`; `row` is the
@@ -106,12 +112,22 @@ export function enqueue(path: string): Promise<number> {
   return invoke<number>("enqueue", { path });
 }
 
-export function dequeue(index: number): Promise<string> {
-  return invoke<string>("dequeue", { index });
+// `index`/`from`/`to` below are indices into the *displayed* queue list
+// (`[reserved?] ++ pending` — index 0 is `reserved` when present, matching
+// `QueueSnapshot`), not just `pending`. `expect` is the path currently shown
+// at the edited position; a stale caller gets `"stale"` back rather than
+// silently acting on the wrong track.
+//
+// Rejects with one of `"too_late"` / `"stale"` / `"out_of_range"` /
+// `"auditioning"` (see `queue::EditError` and `reorder`'s doc comment in
+// `src-tauri/src/lib.rs`) — this file and that one must keep the exact
+// strings in sync.
+export function dequeue(index: number, expect: string): Promise<string> {
+  return invoke<string>("dequeue", { index, expect });
 }
 
-export function reorder(from: number, to: number): Promise<void> {
-  return invoke<void>("reorder", { from, to });
+export function reorder(from: number, to: number, expect: string): Promise<void> {
+  return invoke<void>("reorder", { from, to, expect });
 }
 
 /// Matches `FlagResult`.

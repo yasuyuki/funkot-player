@@ -342,21 +342,40 @@ class PlayerStore {
     }
   }
 
-  async doDequeue(index: number): Promise<void> {
+  /// `index` is a displayed-list index (see `dequeue`'s doc comment in
+  /// `src/lib/tauri.ts`); `expect` is the path shown there. Returns the
+  /// error code (`"too_late"` / `"stale"` / `"out_of_range"` /
+  /// `"auditioning"`, or the generic invoke failure string) on failure,
+  /// `null` on success, so the caller can pick a toast message without
+  /// re-parsing `lastError`. Refreshes the queue either way: a `"stale"` (or
+  /// any other) rejection means what's on screen may already not match the
+  /// host, so the caller's next render should show the current truth rather
+  /// than the guess that just failed.
+  async doDequeue(index: number, expect: string): Promise<string | null> {
     try {
-      await dequeueCmd(index);
+      await dequeueCmd(index, expect);
       await this.#refreshQueueNow();
+      return null;
     } catch (e) {
-      this.lastError = String(e);
+      const message = String(e);
+      this.lastError = message;
+      await this.#refreshQueueNow();
+      return message;
     }
   }
 
-  async doReorder(from: number, to: number): Promise<void> {
+  /// As `doDequeue`, for `Move`. `from`/`to` are displayed-list indices;
+  /// `expect` is the path shown at `from`.
+  async doReorder(from: number, to: number, expect: string): Promise<string | null> {
     try {
-      await reorderCmd(from, to);
+      await reorderCmd(from, to, expect);
       await this.#refreshQueueNow();
+      return null;
     } catch (e) {
-      this.lastError = String(e);
+      const message = String(e);
+      this.lastError = message;
+      await this.#refreshQueueNow();
+      return message;
     }
   }
 
