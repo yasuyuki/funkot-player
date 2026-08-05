@@ -87,6 +87,8 @@
   --font-size-sm: 0.85rem;
   --font-size-md: 0.95rem;
   --font-size-lg: 1.2rem;
+
+  --transport-btn-min-height: 2.8rem;
 }
 
 body {

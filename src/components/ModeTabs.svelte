@@ -34,7 +34,7 @@
   .tabs {
     display: flex;
     gap: var(--space-xs);
-    margin-top: var(--space-xl);
+    margin-top: var(--space-md);
   }
 
   .tab {

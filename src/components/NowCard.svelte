@@ -71,7 +71,7 @@
 
 <style>
   .now-card {
-    margin-bottom: var(--space-lg);
+    margin-bottom: var(--space-md);
   }
 
   .badge {

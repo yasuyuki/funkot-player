@@ -68,13 +68,11 @@
     <span>直前の自動つなぎ</span>
     {#if agoLabel}<span class="ago">{agoLabel}</span>{/if}
   </div>
-  <!-- One title per line, each clipped to its own line, and two lines'
-       worth of height reserved unconditionally: the pair lands a poll cycle
-       after the transition happens (same reason as NowCard's title-block),
-       and a two-title single line would both wrap -- jumping the flag
-       button down -- and ellipsis away the second title, which is half of
-       what the button is about to record. -->
-  <div class="body">
+  <!-- One title per line, each clipped to its own line. When a pair is
+       shown, two lines' worth of height is reserved so the second title
+       does not jump the flag button down after a poll cycle (same reason
+       as NowCard's title-block). Placeholder states use one line only. -->
+  <div class="body" class:one-line={placeholder !== null}>
     {#if placeholder !== null}
       <span class="placeholder">{placeholder}</span>
     {:else if transition}
@@ -99,11 +97,13 @@
     margin-bottom: var(--space-xs);
   }
   .body {
-    /* Two lines, always -- see the comment in the markup. */
     min-height: calc(var(--font-size-md) * 1.5 * 2);
     font-size: var(--font-size-md);
     color: var(--color-text);
-    margin-bottom: var(--space-sm);
+    margin-bottom: var(--space-xs);
+  }
+  .body.one-line {
+    min-height: calc(var(--font-size-md) * 1.5);
   }
   .line {
     white-space: nowrap;
@@ -120,6 +120,9 @@
      -- a filled amber would collide with Transport's paused/resume colour.
      No `transition`, same tap-must-be-instant reason as every button here. */
   .flag {
+    font-size: var(--font-size-md);
+    padding: var(--space-md) var(--space-lg);
+    min-height: var(--transport-btn-min-height);
     background: transparent;
     color: var(--color-flag-amber);
     border: 1px solid var(--color-flag-amber);

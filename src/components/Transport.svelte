@@ -98,14 +98,29 @@
 <style>
   .transport {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     gap: var(--space-md);
+    align-items: stretch;
   }
 
   /* No transition on either button: a tap must show up immediately, not
      after a fade -- see the equivalent comment on the base `button` rule in
      tokens.css, which this deliberately does not override. */
+  .primary,
+  .secondary {
+    /* Override global `button { width: 100% }` so flex: 2/1 can share the row. */
+    width: auto;
+    padding: var(--space-md) var(--space-lg);
+    font-size: var(--font-size-md);
+    min-height: var(--transport-btn-min-height);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .primary {
+    flex: 2;
+    min-width: 0;
     background: var(--color-transport-primary-bg);
     color: var(--color-transport-primary-text);
   }
@@ -114,6 +129,8 @@
     color: var(--color-transport-paused-text);
   }
   .secondary {
+    flex: 1;
+    min-width: 0;
     background: var(--color-transport-secondary-bg);
     color: var(--color-transport-secondary-text);
   }
