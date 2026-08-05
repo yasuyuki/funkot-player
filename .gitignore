@@ -23,3 +23,6 @@ Thumbs.db
 
 # Desktop run data (GUI=1 ./dev.sh): music dropped in by hand + analysis cache
 /.desktop-data/
+
+# Release signing keys (host-only, never commit)
+/.secrets/

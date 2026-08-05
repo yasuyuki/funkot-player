@@ -16,11 +16,23 @@ Linux is not actively supported but is not deliberately broken either.
 - Lets you queue, reorder, and drop tracks; the queue survives a restart
 - Lets you correct intro / outro bar counts; corrections stick across
   re-analysis
-- Lets you share feedback (`library.json` / `flags.json`) via the system
-  share sheet
+- Lets you share feedback (`library.json` / `flags.json` / `meta.json`) via
+  the system share sheet
 
 Verified on a Pixel 8 Pro, including an hour of uninterrupted playback with
 the screen off.
+
+## Get the app (Android)
+
+APKs live on this repo's
+[GitHub Releases](https://github.com/yasuyuki/funkot-player/releases).
+Download the latest `.apk`, open it on the phone, and allow installing from
+that source when Android asks (Settings → Apps → Special app access → Install
+unknown apps, or the prompt shown at install time).
+
+What to listen for: transitions that feel early/late or wrong, and anything
+you fix on the edit screen. Use **⋮ → 意見を送る** to share a small ZIP back
+(LINE, email, Drive, etc.).
 
 ## Adding tracks (USB)
 
@@ -99,6 +111,24 @@ Everything runs in the container, so the host needs only Docker.
 ./dev.sh npx tauri android init                       # once
 ./dev.sh npx tauri android build --debug --target aarch64
 ```
+
+Release (signed; needs `src-tauri/gen/android/keystore.properties` +
+`.secrets/upload-keystore.jks`, both gitignored):
+
+```sh
+./dev.sh npx tauri android build --target aarch64
+# → src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+```
+
+### Shipping a GitHub Release
+
+Manual for now (no CI upload):
+
+1. Tag the `funkot-autodj-for-ui` commit baked into the APK (path dep does not
+   pin it in `Cargo.lock`).
+2. `./dev.sh npx tauri android build --target aarch64`
+3. Tag this repo (e.g. `v0.1.0`) and attach the release APK:
+   `gh release create v0.1.0 <path-to-apk> --title "v0.1.0" --notes "..."`
 
 Install and run on a device over wireless debugging:
 

@@ -354,7 +354,7 @@ struct ShareFeedbackResult {
     path: String,
 }
 
-/// Stage `library.json` + `flags.json` into `funkot-feedback.zip` and share it.
+/// Stage `library.json` + `flags.json` + `meta.json` into a dated feedback ZIP and share it.
 ///
 /// Android: write under `getCacheDir()/funkot-export/` (FileProvider
 /// `<cache-path>`), then open `ACTION_SEND` via [`feedback_share`].
@@ -371,13 +371,28 @@ fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> 
     let staging_root = PathBuf::from(&dirs.cache_dir);
 
     let staging_dir = staging_root.join("funkot-export");
-    let zip_path = staging_dir.join("funkot-feedback.zip");
+    let sent_at = store::utc_rfc3339_now();
+    let filename_stamp = store::feedback_filename_stamp(&sent_at);
+    let zip_path = staging_dir.join(format!("funkot-feedback-{filename_stamp}.zip"));
+
+    #[cfg(target_os = "android")]
+    let device_model = android_device_model();
+    #[cfg(not(target_os = "android"))]
+    let device_model = "desktop".to_string();
+
+    let meta = store::FeedbackMeta {
+        version_name: env!("FUNKOT_VERSION_NAME").into(),
+        version_code: env!("FUNKOT_VERSION_CODE").parse().unwrap_or(1),
+        funkot_core_git: env!("FUNKOT_CORE_GIT").into(),
+        device_model,
+        sent_at,
+    };
 
     {
         let _saving = SAVE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        store::write_feedback_zip(Path::new(&dirs.data_dir), &zip_path)
+        store::write_feedback_zip(Path::new(&dirs.data_dir), &zip_path, &meta)
             .map_err(|e| format!("cannot write feedback zip: {e}"))?;
     }
 
@@ -3779,6 +3794,36 @@ fn service_set_running(running: bool) {
 /// until something else touches it.
 fn service_sync_state() {
     service_call("syncFrom");
+}
+
+/// `android.os.Build.MODEL` (device marketing name).
+#[cfg(target_os = "android")]
+fn android_device_model() -> String {
+    use jni::objects::JString;
+    use jni::{Env, JavaVM};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+
+    vm.attach_current_thread(|env: &mut Env<'_>| -> jni::errors::Result<String> {
+        let model_obj = env
+            .get_static_field(
+                jni::jni_str!("android/os/Build"),
+                jni::jni_str!("MODEL"),
+                jni::jni_sig!("Ljava/lang/String;"),
+            )?
+            .l()?;
+        if model_obj.is_null() {
+            return Err(jni::errors::Error::NullPtr("Build.MODEL"));
+        }
+        let s = unsafe { JString::from_raw(env, model_obj.into_raw()) };
+        // Bound to a local on purpose: the MUTF8Chars view borrows `s`, and
+        // returning the expression directly drops them in the wrong order
+        // (same as `android_cache_dir` / `platform_dirs`).
+        let model = String::from(s.mutf8_chars(env)?);
+        Ok(model)
+    })
+    .unwrap_or_else(|_| "android".into())
 }
 
 /// `Context.getCacheDir()` absolute path (FileProvider `<cache-path>` root).

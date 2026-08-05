@@ -41,6 +41,58 @@ const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
 const FLAGS_FILE: &str = "flags.json";
 const DISMISSED_FILE: &str = "dismissed.json";
+const META_FILE: &str = "meta.json";
+
+/// Metadata bundled with a feedback ZIP (`share_feedback`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FeedbackMeta {
+    pub version_name: String,
+    pub version_code: u32,
+    pub funkot_core_git: String,
+    pub device_model: String,
+    pub sent_at: String,
+}
+
+/// Seconds since UNIX epoch → `YYYY-MM-DDTHH:MM:SSZ` (UTC; leap seconds ignored).
+pub fn utc_rfc3339_from_unix_secs(secs: u64) -> String {
+    const SECONDS_PER_DAY: u64 = 86_400;
+    let days = secs / SECONDS_PER_DAY;
+    let rem = secs % SECONDS_PER_DAY;
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let second = rem % 60;
+    let (year, month, day) = civil_from_days(days as i64);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Current UTC time as RFC3339 with second precision.
+pub fn utc_rfc3339_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    utc_rfc3339_from_unix_secs(secs)
+}
+
+/// `2026-08-05T13:37:00Z` → `20260805T133700Z` for feedback ZIP filenames.
+pub fn feedback_filename_stamp(sent_at: &str) -> String {
+    sent_at.replace('-', "").replace(':', "")
+}
+
+/// Days since 1970-01-01 (UTC) → `(year, month, day)`.
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year as i32, m as u32, d as u32)
+}
 
 /// Move persisted files from a previous location into `dir`, if they are
 /// still there. Safe to call on every launch; a no-op once nothing is left
@@ -198,13 +250,14 @@ fn stored_zip_options() -> zip::write::SimpleFileOptions {
         .compression_method(zip::CompressionMethod::Stored)
 }
 
-/// Write `library.json` and `flags.json` entries into `dest` (Stored).
+/// Write `library.json`, `flags.json`, and `meta.json` entries into `dest` (Stored).
 ///
 /// Callers that need a consistent snapshot with concurrent saves should hold
 /// `SAVE_LOCK` around [`write_feedback_zip`].
 pub fn write_feedback_zip_bytes(
     library_json: &[u8],
     flags_json: &[u8],
+    meta_json: &[u8],
     dest: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
@@ -218,6 +271,9 @@ pub fn write_feedback_zip_bytes(
     zip.start_file(FLAGS_FILE, stored_zip_options())
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     zip.write_all(flags_json)?;
+    zip.start_file(META_FILE, stored_zip_options())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    zip.write_all(meta_json)?;
     zip.finish()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     Ok(())
@@ -227,10 +283,12 @@ pub fn write_feedback_zip_bytes(
 ///
 /// Missing or unreadable sources become an `{}` entry. Does not touch
 /// `dismissed.json` / `queue.json`, and never moves or deletes the originals.
-pub fn write_feedback_zip(data_dir: &Path, dest: &Path) -> io::Result<()> {
+pub fn write_feedback_zip(data_dir: &Path, dest: &Path, meta: &FeedbackMeta) -> io::Result<()> {
     let library = read_json_or_empty_object(&data_dir.join(LIBRARY_FILE));
     let flags = read_json_or_empty_object(&data_dir.join(FLAGS_FILE));
-    write_feedback_zip_bytes(&library, &flags, dest)
+    let meta_json = serde_json::to_vec_pretty(meta)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    write_feedback_zip_bytes(&library, &flags, &meta_json, dest)
 }
 
 /// Keys of track×role rows the listener dismissed from the edit list.
@@ -1042,20 +1100,58 @@ mod tests {
         fs::write(dir.0.join(LIBRARY_FILE), library).unwrap();
         // flags.json deliberately absent → `{}`
 
+        let meta = FeedbackMeta {
+            version_name: "0.1.0".into(),
+            version_code: 1000,
+            funkot_core_git: "abc123def456".into(),
+            device_model: "test-device".into(),
+            sent_at: "2026-08-05T13:37:00Z".into(),
+        };
+
         let dest = dir.0.join("out").join("funkot-feedback.zip");
-        write_feedback_zip(&dir.0, &dest).unwrap();
+        write_feedback_zip(&dir.0, &dest, &meta).unwrap();
 
         {
             let file = fs::File::open(&dest).unwrap();
             let archive = zip::ZipArchive::new(file).unwrap();
-            assert_eq!(archive.len(), 2);
+            assert_eq!(archive.len(), 3);
         }
         assert_eq!(read_zip_entry(&dest, LIBRARY_FILE), library);
         assert_eq!(read_zip_entry(&dest, FLAGS_FILE), b"{}");
+        let parsed_meta: FeedbackMeta =
+            serde_json::from_slice(&read_zip_entry(&dest, META_FILE)).unwrap();
+        assert_eq!(parsed_meta, meta);
+        assert!(!read_zip_entry(&dest, META_FILE)
+            .windows(b"nickname".len())
+            .any(|w| w == b"nickname"));
         // Originals stay put (flags was never created).
         assert_eq!(fs::read(dir.0.join(LIBRARY_FILE)).unwrap(), library);
         assert!(!dir.0.join(FLAGS_FILE).exists());
         assert!(!dir.0.join(QUEUE_FILE).exists());
         assert!(!dir.0.join(DISMISSED_FILE).exists());
+    }
+
+    #[test]
+    fn utc_rfc3339_from_unix_secs_formats_epoch() {
+        assert_eq!(
+            utc_rfc3339_from_unix_secs(0),
+            "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            utc_rfc3339_from_unix_secs(86_400),
+            "1970-01-02T00:00:00Z"
+        );
+        assert_eq!(
+            utc_rfc3339_from_unix_secs(1_785_937_020),
+            "2026-08-05T13:37:00Z"
+        );
+    }
+
+    #[test]
+    fn feedback_filename_stamp_strips_separators() {
+        assert_eq!(
+            feedback_filename_stamp("2026-08-05T13:37:00Z"),
+            "20260805T133700Z"
+        );
     }
 }

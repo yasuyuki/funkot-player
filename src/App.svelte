@@ -40,7 +40,7 @@
 </script>
 
 <div class="header">
-  <h1 class="app-title">funkot-player</h1>
+  <h1 class="app-title">Funkot</h1>
   <OverflowMenu />
 </div>
 

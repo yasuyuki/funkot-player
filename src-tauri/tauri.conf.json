@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "funkot-player",
+  "productName": "Funkot",
   "version": "0.1.0",
   "identifier": "jp.hatsuboshi.funkotplayer",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "title": "funkot-player",
+        "title": "Funkot",
         "width": 420,
         "height": 760
       }
