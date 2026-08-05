@@ -3378,6 +3378,78 @@ mod cache_state_tests {
         let dir = TempDir::new("missing-file");
         assert!(analyzed_cache_entry(&dir.0.join("nope.wav"), &dir.0).is_none());
     }
+
+    /// Cancel/undo with `mark_manual = false` must clear the touched side's
+    /// manual flag and drop its `library.json` override (the bug where `*`
+    /// survived after values reverted).
+    #[test]
+    fn set_bars_mark_manual_false_clears_flag_and_override() {
+        let cache = TempDir::new("set-bars-cache");
+        let data = TempDir::new("set-bars-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        assert!(!analysis.intro_bars_manual);
+        store_for(&track, &cache.0, &analysis);
+        let baseline = analysis.intro_bars;
+
+        let pinned = set_bars_impl(
+            &cache.0,
+            &data.0,
+            &track,
+            Some(baseline + 8),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(pinned.intro_manual);
+        assert_eq!(pinned.intro_bars, Some(baseline + 8));
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let overrides = store::load_overrides(&data.0);
+        assert_eq!(
+            overrides.get(&hash).and_then(|e| e.intro_bars),
+            Some(baseline + 8)
+        );
+
+        let restored = set_bars_impl(
+            &cache.0,
+            &data.0,
+            &track,
+            Some(baseline),
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(!restored.intro_manual);
+        assert_eq!(restored.intro_bars, Some(baseline));
+        let overrides = store::load_overrides(&data.0);
+        assert!(!overrides.contains_key(&hash));
+    }
+
+    /// Confirm / normal chip edit keeps pinning manual and writing library.json.
+    #[test]
+    fn set_bars_mark_manual_true_keeps_override() {
+        let cache = TempDir::new("set-bars-keep-cache");
+        let data = TempDir::new("set-bars-keep-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        let row = set_bars_impl(
+            &cache.0,
+            &data.0,
+            &track,
+            Some(analysis.intro_bars + 4),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(row.intro_manual);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        assert_eq!(
+            store::load_overrides(&data.0)
+                .get(&hash)
+                .and_then(|e| e.intro_bars),
+            Some(analysis.intro_bars + 4)
+        );
+    }
 }
 
 /// Kick off a background analysis worker for whatever in `paths` the cache
@@ -3480,18 +3552,42 @@ fn apply_override(
 /// begins; pinning the trigger directly would break that relation.
 ///
 /// Sides left as `null` are not touched, so the UI can send one cell at a time.
+///
+/// `mark_manual` defaults to `true` (confirm / normal chip edit). Pass `false`
+/// when reverting a cancel/undo so the `*_manual` flags and `library.json`
+/// overrides for the touched side are cleared instead of re-pinned.
 #[tauri::command(async)]
 fn set_bars(
     app: tauri::AppHandle,
     path: String,
     intro_bars: Option<u32>,
     outro_structure_bars: Option<u32>,
+    mark_manual: Option<bool>,
 ) -> Result<TrackRow, String> {
     let dirs = resolve_dirs(&app)?;
     let cache_dir = PathBuf::from(&dirs.cache_dir);
     let data_dir = PathBuf::from(&dirs.data_dir);
-    let track = PathBuf::from(&path);
-    let hash = funkot_core::cache::content_hash(&track)
+    set_bars_impl(
+        &cache_dir,
+        &data_dir,
+        Path::new(&path),
+        intro_bars,
+        outro_structure_bars,
+        mark_manual.unwrap_or(true),
+    )
+}
+
+/// Core of [`set_bars`], split out so unit tests can drive cache + library.json
+/// without an `AppHandle`.
+fn set_bars_impl(
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    track: &std::path::Path,
+    intro_bars: Option<u32>,
+    outro_structure_bars: Option<u32>,
+    mark_manual: bool,
+) -> Result<TrackRow, String> {
+    let hash = funkot_core::cache::content_hash(track)
         .map_err(|e| format!("cannot hash {}: {e}", track.display()))?;
 
     let edit = store::BarOverride {
@@ -3501,24 +3597,53 @@ fn set_bars(
     // The cache write comes first: if the track has no analysis yet there is
     // nothing to edit, and storing the override anyway would leave the app
     // claiming a correction the user cannot see taking effect.
-    apply_override(&cache_dir, &hash, &edit)?;
+    apply_override(cache_dir, &hash, &edit)?;
 
-    let mut overrides = store::load_overrides(&data_dir);
-    let entry = overrides.entry(hash).or_default();
-    if let Some(n) = intro_bars {
-        entry.intro_bars = Some(n);
+    if !mark_manual {
+        // `set_manual_*` always pins `*_manual = true`. For cancel/undo we still
+        // want its value/derive logic, then clear the touched side's flag.
+        let mut analysis = funkot_core::cache::load(cache_dir, &hash)
+            .ok_or_else(|| format!("no cache entry after override for hash '{hash}'"))?;
+        if intro_bars.is_some() {
+            analysis.intro_bars_manual = false;
+        }
+        if outro_structure_bars.is_some() {
+            analysis.outro_structure_bars_manual = false;
+        }
+        funkot_core::cache::store(cache_dir, &hash, &analysis)
+            .map_err(|e| format!("cannot clear manual flags: {e}"))?;
     }
-    if let Some(n) = outro_structure_bars {
-        entry.outro_structure_bars = Some(n);
+
+    let mut overrides = store::load_overrides(data_dir);
+    if mark_manual {
+        let entry = overrides.entry(hash.clone()).or_default();
+        if let Some(n) = intro_bars {
+            entry.intro_bars = Some(n);
+        }
+        if let Some(n) = outro_structure_bars {
+            entry.outro_structure_bars = Some(n);
+        }
+    } else if let Some(entry) = overrides.get_mut(&hash) {
+        // Revert: drop the touched side's override; remove the hash entry when
+        // both sides are empty. No entry → nothing to do.
+        if intro_bars.is_some() {
+            entry.intro_bars = None;
+        }
+        if outro_structure_bars.is_some() {
+            entry.outro_structure_bars = None;
+        }
+        if entry.intro_bars.is_none() && entry.outro_structure_bars.is_none() {
+            overrides.remove(&hash);
+        }
     }
     // Warn-only, as with the queue: the edit already took effect for playback,
     // so failing the command here would misreport what happened. What is lost
     // is only the ability to re-apply it after a future reanalysis.
-    if let Err(e) = store::save_overrides(&data_dir, &overrides) {
+    if let Err(e) = store::save_overrides(data_dir, &overrides) {
         log::warn!("cannot persist manual bars: {e}");
     }
 
-    Ok(track_row(&track, &cache_dir))
+    Ok(track_row(track, cache_dir))
 }
 
 /// Progress payload for the `analysis-progress` event.

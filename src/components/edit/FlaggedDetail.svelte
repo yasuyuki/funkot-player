@@ -18,11 +18,14 @@
     );
   });
 
-  // Baseline captured when the detail opens — cancel restores these values.
+  // Baseline captured when the detail opens — cancel restores these values
+  // and the corresponding manual flags (so auto-analysed tracks lose `*`).
   // Re-open after 「← 一覧へ」 re-captures from the (already edited) row,
   // matching legacy `showFlaggedDetail`.
   let baselineIntro = $state<number | null>(null);
   let baselineOutro = $state<number | null>(null);
+  let baselineIntroManual = $state(false);
+  let baselineOutroManual = $state(false);
   let dirty = $state(false);
   let openedKey = $state<string | null>(null);
 
@@ -35,6 +38,8 @@
     openedKey = id;
     baselineIntro = r.intro_bars;
     baselineOutro = r.outro_structure_bars;
+    baselineIntroManual = r.intro_manual;
+    baselineOutroManual = r.outro_manual;
     dirty = false;
   });
 
@@ -73,6 +78,8 @@
     }
     const prevIntro = r.intro_bars;
     const prevOutro = r.outro_structure_bars;
+    const prevManual =
+      kind === "intro" ? r.intro_manual : r.outro_manual;
     const introBars = kind === "intro" ? value : null;
     const outroStructureBars = kind === "outro" ? value : null;
     const updated = await store.doSetBars(r.path, introBars, outroStructureBars);
@@ -84,6 +91,7 @@
         path,
         kind === "intro" ? prevIntro : null,
         kind === "outro" ? prevOutro : null,
+        prevManual,
       );
       return restored !== null;
     });
@@ -152,10 +160,13 @@
         }
         const introBars = kind === "intro" ? baselineIntro : null;
         const outroStructureBars = kind === "outro" ? baselineOutro : null;
+        const markManual =
+          kind === "intro" ? baselineIntroManual : baselineOutroManual;
         const restored = await store.doSetBars(
           r.path,
           introBars,
           outroStructureBars,
+          markManual,
         );
         // Legacy stays on detail when baseline restore throws.
         if (!restored) return;

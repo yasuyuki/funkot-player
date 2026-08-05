@@ -205,12 +205,20 @@ export function undoLastDismiss(): Promise<void> {
 }
 
 /// Writes intro and/or outro structure bars. A side left as `null` is untouched.
+/// `markManual` defaults to `true` (confirm / normal chip). Pass `false` to
+/// revert cancel/undo without leaving `*` or a library.json override.
 export function setBars(
   path: string,
   introBars: number | null,
   outroStructureBars: number | null,
+  markManual?: boolean,
 ): Promise<TrackRow> {
-  return invoke<TrackRow>("set_bars", { path, introBars, outroStructureBars });
+  return invoke<TrackRow>("set_bars", {
+    path,
+    introBars,
+    outroStructureBars,
+    markManual,
+  });
 }
 
 export function auditionTransition(

@@ -42,6 +42,8 @@
     if (!row) return;
     const prevIntro = row.intro_bars;
     const prevOutro = row.outro_structure_bars;
+    const prevManual =
+      kind === "intro" ? row.intro_manual : row.outro_manual;
     const updated = await store.doSetBars(
       path,
       kind === "intro" ? value : null,
@@ -55,6 +57,7 @@
         path,
         kind === "intro" ? prevIntro : null,
         kind === "outro" ? prevOutro : null,
+        prevManual,
       );
       return restored !== null;
     });

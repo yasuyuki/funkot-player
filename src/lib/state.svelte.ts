@@ -427,15 +427,22 @@ class PlayerStore {
   }
 
   /// Writes intro and/or outro structure bars, then syncs library + flagged.
-  /// A side left as `null` is untouched. Returns the updated row, or `null`
+  /// A side left as `null` is untouched. `markManual` defaults to `true`;
+  /// pass `false` for cancel/undo revert. Returns the updated row, or `null`
   /// on failure.
   async doSetBars(
     path: string,
     introBars: number | null,
     outroStructureBars: number | null,
+    markManual?: boolean,
   ): Promise<TrackRow | null> {
     try {
-      const updated = await setBarsCmd(path, introBars, outroStructureBars);
+      const updated = await setBarsCmd(
+        path,
+        introBars,
+        outroStructureBars,
+        markManual,
+      );
       this.#replaceLibraryRow(updated);
       this.#applyFlaggedBarUpdate(updated);
       return updated;
