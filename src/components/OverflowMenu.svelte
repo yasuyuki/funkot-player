@@ -14,11 +14,6 @@
     ui.menuOpen = false;
   }
 
-  function onToggleLayout() {
-    ui.toggleStripFirst();
-    ui.menuOpen = false;
-  }
-
   async function onRescan() {
     if (scanBusy) return;
     scanBusy = true;
@@ -54,13 +49,6 @@
     <div class="menu" onclick={(event) => event.stopPropagation()}>
       <button type="button" onclick={onRescan} disabled={scanBusy}>再スキャン</button>
       <button type="button" onclick={onShowLog}>ログを表示</button>
-      <!-- Stage 3b (plan section 3b): temporary layout-order comparison
-           toggle. Delete this item, `ui.stripFirst`, and its localStorage
-           key once the strip/transport order is decided -- see
-           ui.svelte.ts's file header. -->
-      <button type="button" onclick={onToggleLayout}>
-        {ui.stripFirst ? "つなぎを下へ" : "つなぎを上へ"}
-      </button>
     </div>
   {/if}
 </div>

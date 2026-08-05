@@ -108,7 +108,7 @@
     white-space: pre-wrap;
     word-break: break-all;
     font-size: var(--font-size-sm);
-    background: #000;
+    background: var(--color-log-bg);
     padding: var(--space-md);
     border-radius: var(--radius-sm);
     margin-top: var(--space-md);

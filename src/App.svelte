@@ -51,19 +51,15 @@
   <NowCard />
 {/if}
 
-<!-- TransitionStrip and Transport are independent of each other (plan
-     section 3b), so the only thing deciding which comes first is each
-     block's CSS `order` below -- flipping `ui.stripFirst` never touches
-     this markup. -->
 <div class="playback-blocks">
-  <div class="strip-block" style={`order: ${ui.stripFirst ? 0 : 1}`}>
-    <TransitionStrip />
-  </div>
-  <div class="transport-block" style={`order: ${ui.stripFirst ? 1 : 0}`}>
+  <div class="transport-block">
     <Transport />
-    <!-- Tied to Transport, not the whole playback-blocks: when strip is below
-         transport, scrolling transport away must still reveal MiniBar. -->
+    <!-- Tied to Transport, not the whole playback-blocks: scrolling transport
+         away must still reveal MiniBar even when TransitionStrip follows. -->
     <div class="minibar-sentinel" bind:this={sentinelEl} aria-hidden="true"></div>
+  </div>
+  <div class="strip-block">
+    <TransitionStrip />
   </div>
 </div>
 
@@ -123,9 +119,6 @@
     margin: 0;
   }
 
-  /* The gap lives here, not as a margin on either block: whichever of the
-     two ends up second (ui.stripFirst) still needs the same separation, and
-     a margin on one of them only works for one of the two orders. */
   .playback-blocks {
     display: flex;
     flex-direction: column;

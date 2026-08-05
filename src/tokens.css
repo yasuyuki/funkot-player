@@ -1,6 +1,7 @@
 /* Design tokens: CSS custom properties shared by every component.
- * Names use the --color-* / --space-* / --radius-* / --font-* prefixes;
- * the set gets tidied up in stage 5 once every screen exists. */
+ * Names use the --color-* / --space-* / --radius-* / --font-* prefixes.
+ * Shared accent (#369) is defined once as --color-accent-* and referenced
+ * by transport secondary, active tabs, and current chips. */
 :root {
   /* Surface / text */
   --color-bg: #111;
@@ -8,6 +9,10 @@
   --color-text-dim: #999;
   --color-text-dimmer: #777;
   --color-border: #333;
+
+  /* Shared accent (transport secondary / active tab / current chip) */
+  --color-accent-bg: #369;
+  --color-accent-text: #fff;
 
   /* Phase / status colours */
   --color-status-idle: #777;
@@ -23,8 +28,8 @@
   --color-transport-primary-text: #000;
   --color-transport-paused-bg: #b83;
   --color-transport-paused-text: #000;
-  --color-transport-secondary-bg: #369;
-  --color-transport-secondary-text: #fff;
+  --color-transport-secondary-bg: var(--color-accent-bg);
+  --color-transport-secondary-text: var(--color-accent-text);
   --color-transport-disabled-bg: #444;
   --color-transport-disabled-text: #777;
 
@@ -49,16 +54,19 @@
   /* Mode / edit tabs */
   --color-tab-bg: #333;
   --color-tab-text: #aaa;
-  --color-tab-active-bg: #369;
-  --color-tab-active-text: #fff;
+  --color-tab-active-bg: var(--color-accent-bg);
+  --color-tab-active-text: var(--color-accent-text);
 
   /* Audition banner (takes NowCard's slot while auditioning) */
   --color-audition-banner-bg: #332;
 
   /* Chip / flagged edit accents */
-  --color-chip-current-bg: #369;
-  --color-chip-current-text: #fff;
+  --color-chip-current-bg: var(--color-accent-bg);
+  --color-chip-current-text: var(--color-accent-text);
   --color-flagged-warn: #fa6;
+
+  /* Log panel */
+  --color-log-bg: #000;
 
   /* Library / queue row heights — fixed so a virtual list can drop in later */
   --library-row-height: 3.4rem;
