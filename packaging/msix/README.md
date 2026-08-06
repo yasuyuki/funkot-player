@@ -27,8 +27,9 @@ They are already produced by `tauri icon`. If missing, regenerate icons from
 
 ## Build → pack → submit
 
-1. Align `Package.appxmanifest` **Identity Name** and **Publisher** with
-   Partner Center (placeholders today: `Funkot` / `CN=Funkot`).
+1. Align `Package.appxmanifest` **Identity Name**, **Publisher**, and
+   **PublisherDisplayName** with Partner Center (current Store values are in
+   the manifest; see `docs/store-submission.md`).
 2. From the repo root in PowerShell:
 
    ```powershell

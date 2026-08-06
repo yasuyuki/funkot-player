@@ -2,12 +2,10 @@
 <!--
   MSIX package manifest for Funkot (desktop full-trust / Tauri).
 
-  Placeholders to replace after Partner Center reservation:
-  - Identity Name: currently "Funkot" (temporary). Replace with the reserved
-    Store identity name (often PublisherPrefix.AppName).
-  - Identity Publisher: currently "CN=Funkot" (temporary). Replace with the
-    Publisher ID / certificate subject from Partner Center
-    (e.g. CN=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX).
+  Identity values from Partner Center (do not invent replacements):
+  - Package/Identity/Name
+  - Package/Identity/Publisher
+  - Package/Properties/PublisherDisplayName
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -15,17 +13,15 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap rescap">
 
-  <!-- Name: Partner Center で予約した Identity Name に差し替え -->
-  <!-- Publisher: Partner Center の Publisher ID（証明書の CN=…）に置換 -->
   <Identity
-    Name="Funkot"
-    Publisher="CN=Funkot"
+    Name="hatsuboshi.jp.Funkotplayer"
+    Publisher="CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64"
     Version="0.1.1.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Funkot</DisplayName>
-    <PublisherDisplayName>Funkot</PublisherDisplayName>
+    <PublisherDisplayName>hatsuboshi.jp</PublisherDisplayName>
     <Description>Auto-DJ music player for Funkot</Description>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
