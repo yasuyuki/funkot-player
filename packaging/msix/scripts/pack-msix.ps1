@@ -100,8 +100,7 @@ try {
         "StoreLogo.png",
         "Square44x44Logo.png",
         "Square71x71Logo.png",
-        "Square150x150Logo.png",
-        "Square310x310Logo.png"
+        "Square150x150Logo.png"
     )
     foreach ($name in $logoFiles) {
         $src = Join-Path $IconsDir $name

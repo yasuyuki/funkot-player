@@ -18,7 +18,6 @@ Release installer.
 - `Square44x44Logo.png`
 - `Square71x71Logo.png`
 - `Square150x150Logo.png`
-- `Square310x310Logo.png`
 
 They are already produced by `tauri icon`. If missing, regenerate icons from
 `src-tauri/app-icon.png`.
