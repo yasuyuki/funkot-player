@@ -50,7 +50,7 @@ Windows の本配布は **MSIX + Partner Center**。署名は提出後に Micros
   - 予備（gist）: https://gist.github.com/yasuyuki/2bcd2f2737dd02e1622b2e593c258ade
   - リポジトリは **public**（Pages 用に公開済み）
 - [x] E. Identity 反映後の未署名 MSIX 再生成（CI run `31077160621`、artifact `funkot-player-windows-msix`）
-- [ ] F. 提出セット（年齢・スクショ・説明・連絡先・パッケージ）
+- [ ] F. Partner Center 提出（節 F のクリック順。**スクショ撮影は Windows 実機が必要**）
 - [ ] G. 認証通過後の実機確認（Store インストール → Music → 再生）
 
 ---
@@ -210,6 +210,25 @@ https://yasuyuki.github.io/funkot-player/privacy.html
 1. GitHub → Settings → Pages → Source が **GitHub Actions** であること。
 2. Actions → **Docs Pages** → **Run workflow**、または `docs/**` を push。
 
+### 将来のポリシー変更（可能・推奨）
+
+**変更自体は可能で、Store ポリシー上も最新化が求められる**
+（[Store Policies 10.5.1](https://learn.microsoft.com/windows/apps/publish/store-policies#105-personal-information): 機能追加に合わせて privacy policy を up-to-date に保つこと）。
+
+| 変えたいもの | 手続き | Partner Center 再提出 |
+|---|---|---|
+| **同じ URL の文面だけ**（誤記修正・説明の明確化・最終更新日） | `docs/privacy.md` + `privacy.html` を編集 → `main` push（Pages 反映） | **不要**（掲載 URL はそのまま）。データ取り扱いが変わらない場合 |
+| **公開 URL 自体を変更** | 新 URL を用意 → 提出の Properties で Privacy policy URL を差し替え | **要**（更新提出） |
+| **実際のデータ取り扱いが変わる**（収集開始、外部送信、同意フロー変更など） | ① ポリシー文面を実態に合わせて更新 ② アプリ側の同意・オプトアウト等を Store Policies 10.5 に合わせる ③ 必要なら Properties の「個人情報を扱うか」宣言も見直し ④ パッケージ／提出を更新 | **要**（認証に回る） |
+
+制約・注意:
+
+- URL は常に **一般公開の HTTPS** で到達可能であること（404・ログイン必須は不可）。
+- 文面は「何を取得・送信・保存するか／使い方／共有先／ユーザーの制御」を実態どおり書くこと。虚偽や過少記載は認証失敗・削除の対象になりうる。
+- Microsoft はデフォルトのプライバシーポリシーを提供しない。**法的義務は開発者側**（適用される個人情報保護法など）。
+- Desktop / full-trust 系は個人情報へのアクセス可能性から、**ポリシー維持が事実上必須**になりやすい。
+- 収集を増やさない軽い文言修正なら Pages 更新だけで足りる。収集を始める・外部送信を足すなら「文面だけ」では足りず、アプリと提出の両方が対象。
+
 ---
 
 ## E. 未署名 MSIX を取得する
@@ -249,27 +268,87 @@ Store 提出物とは別に、自己署名してローカルインストール�
 
 ---
 
-## F. Partner Center へ提出
+## F. Partner Center へ提出（クリック順・記入値）
 
-ダッシュボードで予約済みアプリを開き、提出（サブミッション）を作成する。画面ラベルは Microsoft の UI 更新で多少変わる。足りない項目はバリデーションで指摘される。
+エージェントは Partner Center にログインできない。**ここから先はブラウザ操作**。  
+提出物の準備は済み: 未署名 MSIX・privacy URL・説明文・認証メモ。
 
-### 必須に近いもの
+入口: https://aka.ms/submitwindowsapp → 製品 **Funkot**（予約済み）を開く。
 
-| 項目 | 内容の目安 |
+### F-0. 提出ドラフトを開く
+
+1. アプリ概要で **Start submission / 申請の開始**（または既存ドラフトの **Resume / 続行**）。
+2. チェックリストの各項目が揃うまで埋め、最後に **Submit for certification / 認証のために提出**。
+
+### F-1. Packages（パッケージ）
+
+1. **Packages** を開く。
+2. 次のいずれかの **未署名** `.msix` をアップロードする（自己署名しない）:
+   - CI artifact: Actions run [31077160621](https://github.com/yasuyuki/funkot-player/actions/runs/31077160621) → `funkot-player-windows-msix`
+   - ローカルコピー（gitignore）: `packaging/msix/out/Funkot_0.1.1.0_x64.msix`
+3. 検証エラーが無いか確認。Identity は次と一致していること:
+   - Name=`hatsuboshi.jp.Funkotplayer`
+   - Publisher=`CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64`
+
+### F-2. Properties（プロパティ）
+
+| 項目 | 記入値 |
 |---|---|
-| パッケージ | 節 E の **未署名** `.msix` |
-| プライバシーポリシー URL | 節 D で確認した URL |
-| 年齢レーティング | アンケートに正直に回答（音楽プレイヤー・ユーザー提供コンテンツ） |
-| 価格 | 無料可 |
-| マーケット | 公開したい国・地域 |
-| 説明文 | 日本語だけで可。英語は任意 |
-| スクリーンショット | **4 枚以上推奨**（再生画面・メニュー・Music 配置のイメージなど） |
-| サポート連絡先 | メールまたは Issues URL など Partner Center が要求する形式 |
-| カテゴリ | 音楽／プレイヤー系 |
+| Category | **Music & videos**（音楽とビデオ）／プレイヤー寄りのサブがあれば選択 |
+| Privacy policy URL | `https://yasuyuki.github.io/funkot-player/privacy.html` |
+| 個人情報を扱うか | ローカル再生中心。解析キャッシュ・意見 ZIP は端末内。**Yes を求められたら Yes** し、上記 URL を必須入力（full-trust は Yes 扱いになることが多い） |
+| Website（任意） | `https://github.com/yasuyuki/funkot-player` |
+| Support | `https://github.com/yasuyuki/funkot-player/issues` または常用メール |
 
-### Notes for certification（認証メモ）例
+### F-3. Age ratings（年齢）
 
-審査担当向けに英語で短く書いてよい:
+アンケートに**実態どおり**回答。Funkot の目安:
+
+- アカウント／SNS／チャット／ユーザー間通信: **なし**
+- アプリ内課金・ギャンブル・暴力・性的表現: **なし**
+- ユーザーが自分の音源を置く: **ユーザー提供コンテンツあり**（他者公開の掲示板ではない）
+- 広告・位置情報追跡: **なし**
+
+生成されたレーティングを確認して保存。
+
+### F-4. Pricing and availability
+
+| 項目 | 目安 |
+|---|---|
+| 価格 | **無料** |
+| マーケット | まず **日本**、または公開したい国すべて |
+| 公開タイミング | 認証後すぐ／手動公開は好みで |
+
+### F-5. Store listings（一覧）
+
+言語は最低 **日本語**（英語は任意）。必須は説明文＋スクショ 1 枚以上（**4 枚推奨**）。
+
+**説明（コピー用）:**
+
+```text
+Funkot は、端末内の Music フォルダにある曲をつないで再生する Auto-DJ プレイヤーです。アカウント不要。曲の追加はアプリのメニュー「Musicフォルダを開く」からフォルダを開き、ファイルを置いて再スキャンしてください。
+```
+
+**機能・短い箇条書き（任意）:**
+
+```text
+- 端末内の曲をつないで連続再生
+- ⋮ → Musicフォルダを開く で配置先を表示
+- アカウント不要・ローカル再生
+```
+
+**スクリーンショット（Desktop）:**
+
+- PNG、**1366×768 以上**（4K 可）、1 ファイル 50 MB 以下
+- 最低 1、推奨 4。ロゴや宣伝ステッカーを重ねない
+- Windows 実機でアプリを起動して撮影（開発用 NSIS／自己署名 MSIX／`tauri` 実行いずれでも可）
+- 推奨カット: (1) 再生中 (2) ライブラリ (3) ⋮ メニュー (4) Music フォルダを開いた直後の Explorer でも可だが、アプリ UI 主体が無難
+
+スクショが無いと提出できない。**未撮影ならここで Windows 側で撮ってから続ける。**
+
+### F-6. Submission options（認証メモ）
+
+**Notes for certification** に貼る:
 
 ```text
 - Music files are added by the user. In the app, open ⋮ → Musicフォルダを開く
@@ -277,13 +356,21 @@ Store 提出物とは別に、自己署名してローカルインストール�
 - Local playback only; no account. Feedback ZIP stays on device until the user shares it.
 - Desktop full-trust (runFullTrust) for audio and file access.
 - WebView2 Evergreen Runtime is expected on the PC (not bundled in the MSIX).
+- Privacy policy: https://yasuyuki.github.io/funkot-player/privacy.html
 ```
+
+### F-7. 提出
+
+1. チェックリストがすべて完了マークになること。
+2. **Submit for certification**。
+3. パッケージ検証・認証の結果をメール／ダッシュボードで待つ。
+4. 公開後に節 G。
 
 ### 提出後
 
-1. パッケージ検証エラーが出たら、Identity 不一致・版数・必須アセットを見直す。
-2. 認証（Certification）に回ったら結果メール／ダッシュボードを待つ。
-3. 公開（Release）まで進めたら、別 PC またはクリーンユーザーで節 G を実施する。
+1. パッケージ検証エラー → Identity・版数・必須アセットを見直す。
+2. 認証失敗 → レポートの指摘を直し再提出。
+3. 公開（Release）まで進めたら節 G。
 
 ---
 
