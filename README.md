@@ -62,8 +62,7 @@ Under MSIX the resolved path may differ; always use the menu. Copy files
 there, then press **開始** or **⋮ → 再スキャン**.
 
 Privacy policy (Store): [docs/privacy.md](docs/privacy.md) /
-https://gist.github.com/yasuyuki/2bcd2f2737dd02e1622b2e593c258ade
-（正本は repo。Pages は private のため未使用）。
+https://yasuyuki.github.io/funkot-player/privacy.html
 Store publishing checklist: [docs/store-submission.md](docs/store-submission.md).
 
 To send feedback, use **⋮ → 意見を送る** — on Windows this saves a ZIP and
