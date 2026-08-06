@@ -88,7 +88,8 @@ try {
     New-Item -ItemType Directory -Path $AssetsDir -Force | Out-Null
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
-    Copy-Item -Path $ManifestSrc -Destination (Join-Path $StagingDir "Package.appxmanifest")
+    # makeappx requires the footprint name AppxManifest.xml inside the package root.
+    Copy-Item -Path $ManifestSrc -Destination (Join-Path $StagingDir "AppxManifest.xml")
     Copy-Item -Path $ExePath -Destination (Join-Path $StagingDir $ExeName)
 
     # Optional sidecars (usually none with crt-static; WebView2Loader.dll if present).
