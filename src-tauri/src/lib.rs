@@ -1335,9 +1335,9 @@ fn resolve_nav_origin() -> Origin {
     nav_origin(marked, now_ms())
 }
 
-/// Display name only, for the `TrackRow::name` field and as the title
-/// fallback in [`session_metadata_for`]. Not used for anything that needs to
-/// identify a track uniquely — use [`path_str`] for that.
+/// Basename only: title fallback in [`session_metadata_for`] when tags are
+/// missing. Not used for anything that needs to identify a track uniquely —
+/// use [`path_str`] for that.
 fn file_name_str(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -2007,17 +2007,15 @@ fn audio_thread(
             }
         }))
         .on_reserved(Box::new(move |path| {
-            let name = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?")
-                .to_string();
             let analysis = if analyzed_cache_entry(path, &cache_dir_for_log).is_some() {
                 "cached"
             } else {
                 "missing"
             };
-            log::info!("loader: preparing {name} (analysis: {analysis})");
+            log::info!(
+                "loader: preparing {} (analysis: {analysis})",
+                path.display()
+            );
             // Record this as in-flight the moment it leaves `pending` (or
             // the folder-drain fallback), so a process death before it ever
             // finishes playing does not lose it — see `store::Session` and
@@ -3545,8 +3543,6 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
 struct TrackRow {
     /// Absolute path. Used as the UI's key.
     path: String,
-    /// Display name (file name). Edit tab uses this.
-    name: String,
     /// Tag TITLE, or file name when absent (same resolution as session metadata).
     title: String,
     /// Tag ARTIST, or `""` when absent.
@@ -3594,13 +3590,11 @@ fn analyzed_cache_entry(
 
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `path`.
 fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
-    let name = file_name_str(path);
     let tags = cached_tags_for(path);
     let (title, artist) = session_metadata_for(Some(path), &tags);
     match analyzed_cache_entry(path, cache_dir) {
         Some(a) => TrackRow {
             path: path.to_string_lossy().into_owned(),
-            name,
             title,
             artist,
             duration_secs: if a.sample_rate == 0 {
@@ -3619,7 +3613,6 @@ fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
         },
         None => TrackRow {
             path: path.to_string_lossy().into_owned(),
-            name,
             title,
             artist,
             duration_secs: None,
@@ -3703,7 +3696,7 @@ mod cache_state_tests {
         assert_eq!(row.intro_bars, Some(analysis.intro_bars));
         // Tagless fixture: title falls back to file name, artist empty;
         // duration comes from provisional frames / sample_rate (200s).
-        assert_eq!(row.title, row.name);
+        assert_eq!(row.title, file_name_str(&track));
         assert_eq!(row.artist, "");
         assert_eq!(row.duration_secs, Some(200));
     }
@@ -4246,11 +4239,7 @@ fn spawn_analysis_worker(
 
             let total = paths.len();
             for (i, path) in paths.iter().enumerate() {
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("?")
-                    .to_string();
+                let name = file_name_str(path);
 
                 // Re-checked here, not just when the list was built: the
                 // engine's loader analyses whatever it prepares, so by the
@@ -4259,7 +4248,10 @@ fn spawn_analysis_worker(
                 // after a full decode — and it is the decode, tens of MB and
                 // seconds of CPU, that is worth not repeating on a phone.
                 if analyzed_cache_entry(path, &cache_dir).is_some() {
-                    log::info!("analysis: {name} was done elsewhere, skipping");
+                    log::info!(
+                        "analysis: {} was done elsewhere, skipping",
+                        path.display()
+                    );
                     let _ = app.emit(
                         "analysis-progress",
                         AnalysisProgress {

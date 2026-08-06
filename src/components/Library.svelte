@@ -71,7 +71,7 @@
   </div>
 
   {#if analysis}
-    <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
+    <p class="progress">解析中 {analysis.done}/{analysis.total}: {store.relName(analysis.row.path)}</p>
   {/if}
 
   <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->

@@ -42,14 +42,10 @@ export interface PlayerState {
   duration_secs: number | null;
 }
 
-/// Matches `TrackRow`. `name` (the bare file name) is no longer used
-/// directly for UI display -- basenames can collide across subdirectories
-/// now that scanning is recursive, so `path` is the identity the UI keys on.
-/// Every field is still declared so later stages do not have to touch this
-/// file.
+/// Matches `TrackRow`. `path` is the identity the UI keys on (basenames can
+/// collide across subdirectories now that scanning is recursive).
 export interface TrackRow {
   path: string;
-  name: string;
   title: string;
   artist: string;
   duration_secs: number | null;
