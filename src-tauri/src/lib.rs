@@ -369,6 +369,45 @@ fn app_dirs(app: tauri::AppHandle) -> Result<AppDirs, String> {
     dirs
 }
 
+/// Resolve (and create) the Music folder, open it on desktop, and return its
+/// absolute path. Android cannot reliably open an app-private folder in a
+/// file manager Intent, so it returns the path only for a UI toast.
+#[tauri::command(async)]
+fn open_music_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let dirs = resolve_dirs(&app)?;
+    let music = PathBuf::from(&dirs.music_dir);
+    std::fs::create_dir_all(&music)
+        .map_err(|e| format!("cannot create {}: {e}", music.display()))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&music)
+            .spawn()
+            .map_err(|e| format!("cannot open Music folder: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&music)
+            .spawn()
+            .map_err(|e| format!("cannot open Music folder: {e}"))?;
+    }
+    #[cfg(all(
+        not(target_os = "windows"),
+        not(target_os = "android"),
+        not(target_os = "macos")
+    ))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&music)
+            .spawn()
+            .map_err(|e| format!("cannot open Music folder (xdg-open): {e}"))?;
+    }
+
+    Ok(dirs.music_dir)
+}
+
 /// Outcome of [`share_feedback`]: Android opened a chooser, or desktop wrote a path.
 #[derive(serde::Serialize, Clone, Debug)]
 struct ShareFeedbackResult {
@@ -4447,6 +4486,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_dirs,
+            open_music_dir,
             start,
             poll_log,
             toggle_pause,

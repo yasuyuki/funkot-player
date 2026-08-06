@@ -1,0 +1,70 @@
+name: Windows MSIX
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine_ref:
+        description: funkot-autodj ref to build against
+        required: true
+        default: player/v0.1.1
+        type: string
+      skip_build:
+        description: If true, fail unless a prior artifact path exists (unused; always builds)
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  ENGINE_REF: ${{ github.event.inputs.engine_ref || vars.FUNKOT_ENGINE_REF || 'player/v0.1.1' }}
+
+defaults:
+  run:
+    working-directory: funkot-player
+    shell: pwsh
+
+jobs:
+  msix:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout funkot-player
+        uses: actions/checkout@v4
+        with:
+          path: funkot-player
+
+      - name: Checkout funkot-autodj (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: yasuyuki/funkot-autodj
+          ref: ${{ env.ENGINE_REF }}
+          path: funkot-autodj-for-ui
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: funkot-player/package-lock.json
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: funkot-player/src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build and pack unsigned MSIX
+        run: .\packaging\msix\scripts\pack-msix.ps1
+
+      - name: Upload MSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: funkot-player-windows-msix
+          path: funkot-player/packaging/msix/out/*.msix
+          if-no-files-found: error

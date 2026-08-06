@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX package manifest for Funkot (desktop full-trust / Tauri).
+
+  Placeholders to replace after Partner Center reservation:
+  - Identity Name: currently "Funkot" (temporary). Replace with the reserved
+    Store identity name (often PublisherPrefix.AppName).
+  - Identity Publisher: currently "CN=Funkot" (temporary). Replace with the
+    Publisher ID / certificate subject from Partner Center
+    (e.g. CN=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <!-- Name: Partner Center で予約した Identity Name に差し替え -->
+  <!-- Publisher: Partner Center の Publisher ID（証明書の CN=…）に置換 -->
+  <Identity
+    Name="Funkot"
+    Publisher="CN=Funkot"
+    Version="0.1.1.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Funkot</DisplayName>
+    <PublisherDisplayName>Funkot</PublisherDisplayName>
+    <Description>Auto-DJ music player for Funkot</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+    <Resource Language="ja-jp" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.17763.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Applications>
+    <!--
+      Executable: cargo package name is funkot-player; tauri.conf.json has no
+      mainBinaryName, so `tauri build` leaves the cargo binary as funkot-player.exe
+      (productName "Funkot" is display / installer branding only).
+    -->
+    <Application
+      Id="Funkot"
+      Executable="funkot-player.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Funkot"
+        Description="Auto-DJ music player for Funkot"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+</Package>

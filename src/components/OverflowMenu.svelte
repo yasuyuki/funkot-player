@@ -1,10 +1,11 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
-  import { shareFeedback } from "../lib/tauri";
+  import { openMusicDir, shareFeedback } from "../lib/tauri";
   import { toast } from "../lib/toast.svelte";
   import { ui } from "../lib/ui.svelte";
 
   let scanBusy = $state(false);
+  let openMusicBusy = $state(false);
   let feedbackBusy = $state(false);
 
   function toggleMenu(event: MouseEvent) {
@@ -25,6 +26,23 @@
       await store.doRefreshLibrary();
     } finally {
       scanBusy = false;
+    }
+  }
+
+  async function onOpenMusicDir() {
+    if (openMusicBusy) return;
+    openMusicBusy = true;
+    ui.menuOpen = false;
+    try {
+      const path = await openMusicDir();
+      // Android cannot open the folder; the path toast is the UX. Desktop
+      // already opened Explorer / the file manager — still show the path so
+      // Windows Store users can confirm where files go.
+      toast.notify(path);
+    } catch (err) {
+      toast.notify(String(err));
+    } finally {
+      openMusicBusy = false;
     }
   }
 
@@ -67,6 +85,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu" onclick={(event) => event.stopPropagation()}>
       <button type="button" onclick={onRescan} disabled={scanBusy}>再スキャン</button>
+      <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
       <button type="button" onclick={onShowLog}>ログを表示</button>
       <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>意見を送る</button>
     </div>

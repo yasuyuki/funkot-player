@@ -24,5 +24,9 @@ Thumbs.db
 # Desktop run data (GUI=1 ./dev.sh): music dropped in by hand + analysis cache
 /.desktop-data/
 
+# MSIX pack intermediates / output
+/packaging/msix/out/
+/packaging/msix/staging/
+
 # Release signing keys (host-only, never commit)
 /.secrets/

@@ -4,9 +4,9 @@ Auto-DJ music player for Funkot. Point it at a folder of tracks and it plays
 them back-to-back with DJ-style transitions — no beatmatching, no decks, no
 crossfader.
 
-Primary platforms today: **Android** and **Windows** (GitHub Releases). iOS and
-macOS are planned. Linux is not actively supported but is not deliberately
-broken either.
+Primary platforms today: **Android** (GitHub Releases) and **Windows**
+(Microsoft Store / MSIX; see below). iOS and macOS are planned. Linux is not
+actively supported but is not deliberately broken either.
 
 ## What it does
 
@@ -25,8 +25,11 @@ the screen off.
 
 ## Get the app
 
-Releases live on this repo's
+Android builds live on this repo's
 [GitHub Releases](https://github.com/yasuyuki/funkot-player/releases).
+Windows is distributed via the **Microsoft Store** (MSIX; Microsoft re-signs
+the package). Packaging notes: [packaging/msix/README.md](packaging/msix/README.md),
+submission checklist: [docs/store-submission.md](docs/store-submission.md).
 
 ### Android
 
@@ -43,23 +46,23 @@ Transport controls in the notification shade and on the lock screen are
 
 ### Windows
 
-Download the latest NSIS installer (`*-setup.exe`) from the same Releases page
-and run it. The build is **not code-signed**, so SmartScreen may warn about an
-unknown publisher — choose **More info → Run anyway** to proceed.
+Install **Funkot** from the Microsoft Store (when published). Unsigned NSIS
+installers on GitHub Releases are **not** the recommended path — Smart App
+Control / SmartScreen often blocks them.
 
-If launch fails with **MSVCP140.dll not found**, install the
-[Visual C++ Redistributable (x64)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-(`VC_redist.x64.exe`) once, then start Funkot again. Newer Windows builds
-link the MSVC runtime statically so a fresh install should not need this;
-older `*-setup.exe` files from the same release may still require it.
-
-Tracks go in the app's Music folder, created on first launch:
+Tracks go in the app's Music folder, created on first launch. In the app,
+choose **⋮ → Musicフォルダを開く** to open it in Explorer (and show the path).
+Under a classic (non-Store) install the folder is usually:
 
 ```
 %APPDATA%\jp.hatsuboshi.funkotplayer\Music
 ```
 
-Copy files there, then press **開始** or **⋮ → 再スキャン** in the app.
+Under MSIX the resolved path may differ; always use the menu. Copy files
+there, then press **開始** or **⋮ → 再スキャン**.
+
+Privacy policy (Store): [docs/privacy.md](docs/privacy.md) /
+`https://yasuyuki.github.io/funkot-player/privacy.html` (after Pages is enabled).
 
 To send feedback, use **⋮ → 意見を送る** — on Windows this saves a ZIP and
 shows its path (there is no system share sheet). Attach that file in email or
@@ -77,7 +80,8 @@ phone → Android → data → jp.hatsuboshi.funkotplayer → files → Music
 `/storage/emulated/0/Android/data/jp.hatsuboshi.funkotplayer/files/Music/`)
 
 1. **Open the app once.** That creates the Music folder. Do not create it
-   yourself from the PC — the app will not be able to read it.
+   yourself from the PC — the app will not be able to read it. (**⋮ →
+   Musicフォルダを開く** shows the path as a toast if you need to confirm it.)
 2. **Connect the phone over USB** and choose file transfer (MTP), not
    charging-only.
 3. **Open the Music folder** above in the PC's file manager.
@@ -99,6 +103,8 @@ corrections stay on the phone.
 - **編集** — fix intro / outro bar counts on a transition that sounded wrong.
   Corrections are kept and re-applied after a fresh analysis.
 - **⋮ → 再スキャン** — pick up tracks added since the last scan.
+- **⋮ → Musicフォルダを開く** — open the Music folder (Windows / desktop) or
+  show its path (Android toast) so you can copy tracks in.
 - **⋮ → 意見を送る** — share a small ZIP of your corrections. Android opens
   the system share sheet; Windows saves the ZIP and shows its path.
 - **⋮ → ログを表示** — diagnostic log for troubleshooting.
@@ -153,26 +159,28 @@ Release (signed; needs `src-tauri/gen/android/keystore.properties` +
 
 ### Shipping a GitHub Release
 
-**Windows (CI).** Push a tag `vX.Y.Z` on this repo. The
-[Windows Release workflow](.github/workflows/windows-release.yml) builds an x64
-NSIS installer on `windows-latest` and uploads it to a **draft** GitHub Release
-for that tag (creating the draft if needed). Which `funkot-autodj` commit is
-built is chosen by, in order: the `engine_ref` input (dispatch only), the
-repository variable `FUNKOT_ENGINE_REF`, or the default `player/v0.1.1`.
-
-**Android (manual).** Build the signed APK locally, then attach it to the same
-draft release before publishing:
+**Android (manual).** Build the signed APK locally, then attach it to a draft
+Release for the tag before publishing:
 
 1. Check out the `funkot-autodj-for-ui` commit you intend to ship (path dep does
    not pin it in `Cargo.lock`).
 2. `./dev.sh npx tauri android build --target aarch64`
 3. Upload `app-universal-release.apk` to the draft release for the tag.
 
-Review both assets on the draft, then **Publish release**.
+**Windows (Microsoft Store / MSIX).** Preferred path — see
+[docs/store-submission.md](docs/store-submission.md) and
+[packaging/msix/README.md](packaging/msix/README.md). CI:
+[Windows MSIX](.github/workflows/windows-msix.yml) (`workflow_dispatch`) uploads
+an **unsigned** `.msix` artifact for Partner Center.
 
-**Try builds without a tag.** In Actions, run **Windows Release** via
-`workflow_dispatch` (set `engine_ref` if needed). This uploads the NSIS as a
-workflow artifact only — it does not create or update a Release.
+**Windows NSIS (optional / not recommended for end users).** Tag push still
+runs [Windows Release](.github/workflows/windows-release.yml) and can attach an
+NSIS installer to a draft Release. Engine ref: `engine_ref` input,
+`FUNKOT_ENGINE_REF`, or default `player/v0.1.1`. Unsigned NSIS is often blocked
+by Smart App Control.
+
+Review assets on the draft, then **Publish release** (Android). Submit MSIX via
+Partner Center separately.
 
 Install and run on a device over wireless debugging:
 
