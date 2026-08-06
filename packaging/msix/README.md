@@ -63,20 +63,69 @@ extra Visual C++ redistributable DLLs are generally unnecessary. WebView2 is
 expected to be present on the system (Evergreen Runtime); it is not bundled in
 this MSIX.
 
-## Optional: local self-sign (sideload only)
+## Fastest local run (no install, no signing)
 
-For machine-local testing only (not for Store upload):
+MSIX は zip。中の exe を直接起動すればよい（Store 提出・自己署名は不要）:
 
 ```powershell
-# Create a self-signed cert once (example)
-New-SelfSignedCertificate -Type Custom -Subject "CN=Funkot" `
-  -KeyUsage DigitalSignature -FriendlyName "Funkot Dev" `
+# Explorer で開く例（WSL パス）
+explorer.exe \\wsl.localhost\Ubuntu\home\yasuyuki\Projects\funkot-player\packaging\msix\out\run
+# → funkot-player.exe をダブルクリック
+```
+
+またはリポジトリ内で一度解凍:
+
+```sh
+mkdir -p packaging/msix/out/run
+unzip -o packaging/msix/out/Funkot_0.1.1.0_x64.msix -d packaging/msix/out/run
+```
+
+Smart App Control が未署名 exe を止める場合だけ、NSIS Release や自己署名 MSIX
+（下節）に切り替える。
+
+## Optional: local self-sign (sideload only)
+
+**Store 提出用の `.msix` は未署名のまま。** ダブルクリックインストールが
+「publisher certificate could not be verified」になるのは正常。
+
+ローカル試験だけ、**コピーを自己署名**する。証明書の **Subject は
+`Package.appxmanifest` の `Identity Publisher` と一字一句一致**させる
+（現状: `CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64`）。`CN=Funkot` など別値だと
+署名後に Publisher mismatch で落ちる。
+
+Windows PowerShell（管理者で後半の Import を実行）:
+
+```powershell
+$msixSrc = "\\wsl.localhost\Ubuntu\home\yasuyuki\Projects\funkot-player\packaging\msix\out\Funkot_0.1.1.0_x64.msix"
+# または Windows 側にコピーしたパス
+$dir = Split-Path $msixSrc
+$msix = Join-Path $dir "Funkot_0.1.1.0_x64.sideload.msix"
+Copy-Item $msixSrc $msix -Force
+
+$publisher = "CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64"
+$cert = New-SelfSignedCertificate -Type Custom -Subject $publisher `
+  -KeyUsage DigitalSignature -FriendlyName "Funkot Sideload" `
   -CertStoreLocation "Cert:\CurrentUser\My" `
   -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3","2.5.29.19={text}")
 
-# Sign with signtool from Windows SDK (thumbprint from the cert above)
-signtool sign /fd SHA256 /a /f <path-or-store> packaging\msix\out\Funkot_0.1.1.0_x64.msix
+$cer = Join-Path $dir "Funkot-sideload.cer"
+Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+
+# SignTool: Windows SDK のパスは環境に合わせて調整
+$signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+if (-not (Test-Path $signtool)) {
+  $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+    Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+}
+& $signtool sign /fd SHA256 /a /sha1 $cert.Thumbprint $msix
+
+# 管理者 PowerShell で証明書をマシンの Trusted People へ（User ストアでは App Installer が信用しない）
+Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+
+# インストール
+Add-AppxPackage -Path $msix
+# または署名済み .sideload.msix をダブルクリック
 ```
 
-Install the cert as Trusted People / root on that machine before sideloading.
-Store packages should remain **unsigned** when uploading to Partner Center.
+Partner Center には **未署名の元ファイル**（`Funkot_0.1.1.0_x64.msix`）を上げる。
+`.sideload.msix` は提出に使わない。

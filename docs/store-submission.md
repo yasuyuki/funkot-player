@@ -264,7 +264,14 @@ npm ci
 
 ### （任意）提出前のサイドロード試験
 
-Store 提出物とは別に、自己署名してローカルインストールしてよい（手順は `packaging/msix/README.md` の Optional）。確認項目は節 G と同じ（Music フォルダを開く → 配置 → 再スキャン → 再生）。
+Store 提出物（未署名）をそのままダブルクリックすると、App Installer が
+「publisher certificate could not be verified」で止まる。**これは正常。**
+
+ローカルで動かす手順は [`packaging/msix/README.md`](../packaging/msix/README.md) の
+**Optional: local self-sign**（Publisher CN 一致の自己署名＋Trusted People）。
+確認項目は節 G と同じ（Music フォルダを開く → 配置 → 再スキャン → 再生）。
+スクショ撮影も自己署名インストール後か、**MSIX から出した exe 直実行**
+（`packaging/msix/README.md` の Fastest local run）／NSIS で撮ってよい。
 
 ---
 
@@ -394,17 +401,82 @@ Smart App Control に阻まれないことと、Music 配置 UX を確認する�
 
 ---
 
-## 説明文ドラフト（コピー用・任意）
+## 説明文ドラフト（コピー用）
 
-Partner Center の説明欄用。必要に応じて短くする。
+Partner Center の Store 一覧用。日本語だけで提出可。英語は任意。
 
-**日本語（短文）:**
+### 短い説明（サブタイトル／短い説明欄がある場合・約1〜2文）
 
-> Funkot は、端末内の Music フォルダにある曲をつないで再生する Auto-DJ プレイヤーです。アカウント不要。曲の追加はアプリのメニュー「Musicフォルダを開く」からフォルダを開き、ファイルを置いて再スキャンしてください。
+```text
+端末内の曲をつないで再生する Auto-DJ プレイヤー。アカウント不要。
+```
 
-**English (short):**
+### 説明（本文）
 
-> Funkot is an on-device Auto-DJ music player. No account. Add tracks via ⋮ → Open Music folder, then rescan.
+```text
+Funkot は、端末の Music フォルダにある曲を、DJ 風のつなぎで連続再生するプレイヤーです。デッキ操作やビートマッチは不要。フォルダを用意すれば、あとは再生するだけです。
+
+■ はじめかた
+1. ⋮ メニューから「Musicフォルダを開く」
+2. 音声ファイルをそのフォルダにコピー
+3. 「再スキャン」または再生開始
+
+■ できること
+・Music フォルダ内の曲をループでつなぎ再生
+・キューの追加・並び替え・削除（再開後も維持）
+・つなぎ位置（intro / outro）の手直し
+・「このつなぎは不適切」でフィードバックを残せる
+・意見データは ZIP として端末に保存（自動アップロードなし）
+
+■ 注意
+・アカウント登録やクラウド同期はありません。再生は端末内のみです。
+・曲の追加はアプリ内の Music フォルダ経由で行ってください（エクスプローラーで開きます）。
+・再生には WebView2（通常は Windows に付属）が必要です。
+
+つなぎの感覚について意見を集め、より自然な連続再生にしていくためのアプリです。気になるつなぎがあれば「このつなぎは不適切」から教えてください。
+```
+
+### アプリの機能（Features・1行ずつ・最大あたり Partner Center の件数に合わせて削る）
+
+```text
+端末内 Music フォルダの曲をつないで連続再生
+アカウント不要・ローカル再生のみ
+⋮ → Musicフォルダを開く で配置先を表示
+キューの編集とセッション維持
+intro / outro の手直し
+不適切なつなぎのフラグと意見 ZIP
+```
+
+### このバージョンの新機能（任意・初回は空でも可）
+
+```text
+Microsoft Store 向け初回公開（0.1.1）。Music フォルダを開く導線と、ローカルでのつなぎ再生に対応しています。
+```
+
+### English（任意）
+
+**Short:**
+```text
+On-device Auto-DJ player. No account. Drop tracks in Music and play.
+```
+
+**Description:**
+```text
+Funkot plays the tracks in your on-device Music folder back-to-back with DJ-style transitions. No decks, no beatmatching — prepare a folder and hit play.
+
+Getting started
+1. Open ⋮ → Musicフォルダを開く (Open Music folder)
+2. Copy audio files into that folder
+3. Rescan or start playback
+
+Highlights
+• Continuous transitions across your library
+• Queue edit and session restore
+• Correct intro/outro bar counts
+• Flag bad transitions; feedback ZIP stays on device until you share it
+
+Local playback only. No account and no automatic upload. WebView2 (usually already on Windows) is required.
+```
 
 ---
 
