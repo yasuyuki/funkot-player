@@ -4,8 +4,9 @@ Auto-DJ music player for Funkot. Point it at a folder of tracks and it plays
 them back-to-back with DJ-style transitions — no beatmatching, no decks, no
 crossfader.
 
-Primary platform today: **Android**. iOS, Windows, and macOS are planned.
-Linux is not actively supported but is not deliberately broken either.
+Primary platforms today: **Android** and **Windows** (GitHub Releases). iOS and
+macOS are planned. Linux is not actively supported but is not deliberately
+broken either.
 
 ## What it does
 
@@ -22,10 +23,13 @@ Linux is not actively supported but is not deliberately broken either.
 Verified on a Pixel 8 Pro, including an hour of uninterrupted playback with
 the screen off.
 
-## Get the app (Android)
+## Get the app
 
-APKs live on this repo's
+Releases live on this repo's
 [GitHub Releases](https://github.com/yasuyuki/funkot-player/releases).
+
+### Android
+
 Download the latest `.apk`, open it on the phone, and allow installing from
 that source when Android asks (Settings → Apps → Special app access → Install
 unknown apps, or the prompt shown at install time).
@@ -33,6 +37,27 @@ unknown apps, or the prompt shown at install time).
 What to listen for: transitions that feel early/late or wrong, and anything
 you fix on the edit screen. Use **⋮ → 意見を送る** to share a small ZIP back
 (LINE, email, Drive, etc.).
+
+Transport controls in the notification shade and on the lock screen are
+**Android only**.
+
+### Windows
+
+Download the latest NSIS installer (`*-setup.exe`) from the same Releases page
+and run it. The build is **not code-signed**, so SmartScreen may warn about an
+unknown publisher — choose **More info → Run anyway** to proceed.
+
+Tracks go in the app's Music folder, created on first launch:
+
+```
+%APPDATA%\jp.hatsuboshi.funkotplayer\Music
+```
+
+Copy files there, then press **開始** or **⋮ → 再スキャン** in the app.
+
+To send feedback, use **⋮ → 意見を送る** — on Windows this saves a ZIP and
+shows its path (there is no system share sheet). Attach that file in email or
+chat.
 
 ## Adding tracks (USB)
 
@@ -61,15 +86,15 @@ corrections stay on the phone.
 ## Using the app
 
 - **開始 / 一時停止 / 次の曲** — main transport. Playback continues in the
-  background; use the notification or lock-screen controls when the app is
-  not on screen.
+  background. On Android, use the notification or lock-screen controls when
+  the app is not on screen (Windows has in-app transport only).
 - **Queue** — reorder with ↑↓, drop with ✕, and set the next track. Near a
   transition, some edits lock for a short window.
 - **編集** — fix intro / outro bar counts on a transition that sounded wrong.
   Corrections are kept and re-applied after a fresh analysis.
 - **⋮ → 再スキャン** — pick up tracks added since the last scan.
-- **⋮ → 意見を送る** — share a small ZIP of your corrections via LINE, email,
-  Drive, etc. (no USB or adb needed).
+- **⋮ → 意見を送る** — share a small ZIP of your corrections. Android opens
+  the system share sheet; Windows saves the ZIP and shows its path.
 - **⋮ → ログを表示** — diagnostic log for troubleshooting.
 
 ---
@@ -122,13 +147,26 @@ Release (signed; needs `src-tauri/gen/android/keystore.properties` +
 
 ### Shipping a GitHub Release
 
-Manual for now (no CI upload):
+**Windows (CI).** Push a tag `vX.Y.Z` on this repo. The
+[Windows Release workflow](.github/workflows/windows-release.yml) builds an x64
+NSIS installer on `windows-latest` and uploads it to a **draft** GitHub Release
+for that tag (creating the draft if needed). Which `funkot-autodj` commit is
+built is chosen by, in order: the `engine_ref` input (dispatch only), the
+repository variable `FUNKOT_ENGINE_REF`, or the default `player/v0.1.0`.
 
-1. Tag the `funkot-autodj-for-ui` commit baked into the APK (path dep does not
-   pin it in `Cargo.lock`).
+**Android (manual).** Build the signed APK locally, then attach it to the same
+draft release before publishing:
+
+1. Check out the `funkot-autodj-for-ui` commit you intend to ship (path dep does
+   not pin it in `Cargo.lock`).
 2. `./dev.sh npx tauri android build --target aarch64`
-3. Tag this repo (e.g. `v0.1.0`) and attach the release APK:
-   `gh release create v0.1.0 <path-to-apk> --title "v0.1.0" --notes "..."`
+3. Upload `app-universal-release.apk` to the draft release for the tag.
+
+Review both assets on the draft, then **Publish release**.
+
+**Try builds without a tag.** In Actions, run **Windows Release** via
+`workflow_dispatch` (set `engine_ref` if needed). This uploads the NSIS as a
+workflow artifact only — it does not create or update a Release.
 
 Install and run on a device over wireless debugging:
 
@@ -186,7 +224,8 @@ GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
   the frame, so `mousemove --window` is what lands on the button.
 - `⏸` and `⏭` come out as tofu in the container — it ships no font covering
   those code points. Not an app bug; a real desktop has the glyphs.
-- This is the Linux path. **Windows and macOS builds are still untried.**
+- This is the Linux path. **Windows installers are built in CI** (see Shipping a
+  GitHub Release). **macOS builds are still untried.**
 
 ### Working with a device
 
