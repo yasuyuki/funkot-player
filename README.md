@@ -152,7 +152,7 @@ Release (signed; needs `src-tauri/gen/android/keystore.properties` +
 NSIS installer on `windows-latest` and uploads it to a **draft** GitHub Release
 for that tag (creating the draft if needed). Which `funkot-autodj` commit is
 built is chosen by, in order: the `engine_ref` input (dispatch only), the
-repository variable `FUNKOT_ENGINE_REF`, or the default `player/v0.1.0`.
+repository variable `FUNKOT_ENGINE_REF`, or the default `player/v0.1.1`.
 
 **Android (manual).** Build the signed APK locally, then attach it to the same
 draft release before publishing:

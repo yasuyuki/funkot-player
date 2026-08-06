@@ -9,14 +9,14 @@ on:
       engine_ref:
         description: funkot-autodj ref to build against
         required: true
-        default: player/v0.1.0
+        default: player/v0.1.1
         type: string
 
 permissions:
   contents: write
 
 env:
-  ENGINE_REF: ${{ github.event.inputs.engine_ref || vars.FUNKOT_ENGINE_REF || 'player/v0.1.0' }}
+  ENGINE_REF: ${{ github.event.inputs.engine_ref || vars.FUNKOT_ENGINE_REF || 'player/v0.1.1' }}
 
 defaults:
   run:

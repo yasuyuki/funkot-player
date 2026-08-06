@@ -1519,9 +1519,9 @@ fn is_stale_audition_event(audition: bool, auditioning: bool) -> bool {
 /// Lock [`NOW`], unless this event is a stale audition event.
 ///
 /// The [`AUDITIONING`] read has to happen *under* the `NOW` lock rather than
-/// before it: `resume_autodj` clears the flag and only then restores the
-/// parked titles, so a check made outside can pass, block on the lock, and
-/// write the audition's titles over the restored ones.
+/// before it: `resume_autodj` clears the flag and restores parked titles while
+/// holding this same lock, so a check made outside can pass, block on the
+/// lock, and write the audition's titles over the restored ones.
 fn lock_now_unless_stale(audition: bool) -> Option<std::sync::MutexGuard<'static, NowTracker>> {
     let now = NOW.lock().unwrap();
     if is_stale_audition_event(audition, AUDITIONING.load(Ordering::Relaxed)) {
@@ -2561,6 +2561,25 @@ fn resume_autodj() -> Result<(), String> {
         return Err("audition still preparing".into());
     }
     let playback = PLAYBACK.get().ok_or("not playing")?;
+    // Pause before teardown: `install_audition` leaves main unmuted, so taking
+    // audition first lets main render TrackStarted into NOW; cold-start then
+    // overwrites with None parked_now. Brief mute of audition audio is OK.
+    playback.paused.store(true, Ordering::Relaxed);
+    // Clear AUDITIONING and restore parked under the NOW lock together so a
+    // queued audition TrackStarted cannot rewrite titles after restore
+    // (`lock_now_unless_stale` re-checks the flag while holding NOW). Do this
+    // before audition.take(). Lock order: NOW before AUDITION_SESSION.
+    {
+        let mut now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        AUDITIONING.store(false, Ordering::Relaxed);
+        let mut session = AUDITION_SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        now.now = session.parked_now.take();
+        now.previous = session.parked_previous.take();
+        now.in_progress = session.parked_in_progress.take();
+        now.now_started_frames = session.parked_now_started_frames.take();
+    }
     // Take the audition engine under the render lock; drop it after unlock.
     let previous = {
         let mut state = playback
@@ -2573,18 +2592,6 @@ fn resume_autodj() -> Result<(), String> {
         previous
     };
     drop(previous);
-    AUDITIONING.store(false, Ordering::Relaxed);
-    // Lock order: NOW before AUDITION_SESSION (never reverse).
-    {
-        let mut now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut session = AUDITION_SESSION
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        now.now = session.parked_now.take();
-        now.previous = session.parked_previous.take();
-        now.in_progress = session.parked_in_progress.take();
-        now.now_started_frames = session.parked_now_started_frames.take();
-    }
     service_sync_state();
     // Spec: resume returns to auto-DJ — including cold-start where main was
     // only ever paused under audition. `start_impl` already restored pending
