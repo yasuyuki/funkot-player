@@ -27,6 +27,9 @@
     "targets": "all",
     "android": {
       "minSdkVersion": 26
+    },
+    "windows": {
+      "bundleVCRuntime": true
     }
   }
 }

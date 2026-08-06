@@ -47,6 +47,12 @@ Download the latest NSIS installer (`*-setup.exe`) from the same Releases page
 and run it. The build is **not code-signed**, so SmartScreen may warn about an
 unknown publisher — choose **More info → Run anyway** to proceed.
 
+If launch fails with **MSVCP140.dll not found**, install the
+[Visual C++ Redistributable (x64)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+(`VC_redist.x64.exe`) once, then start Funkot again. Current installers also
+bundle those runtime DLLs (`bundleVCRuntime`); older builds may still need the
+redistributable.
+
 Tracks go in the app's Music folder, created on first launch:
 
 ```
