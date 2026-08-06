@@ -2,7 +2,7 @@
 #
 # Prerequisites (Windows):
 #   - Node.js + npm deps (`npm ci` in repo root)
-#   - Rust toolchain able to `npm run tauri -- build`
+#   - Rust toolchain able to `npm run tauri -- build --no-bundle`
 #   - Windows 10 SDK (makeappx.exe under "Windows Kits\10\bin")
 #
 # Usage (from repo root, PowerShell):
@@ -13,6 +13,8 @@
 #   packaging\msix\out\Funkot_0.1.1.0_x64.msix
 #
 # Notes:
+#   - Build uses --no-bundle so WiX/NSIS icons are not required; MSIX is packed
+#     separately with makeappx.
 #   - Release builds use crt-static (src-tauri/.cargo/config.toml); extra VC++
 #     runtime DLLs are generally not required beside the exe.
 #   - WebView2 is a system dependency (Evergreen Runtime). Do not ship the
@@ -59,8 +61,8 @@ function Find-MakeAppx {
 Push-Location $RepoRoot
 try {
     if (-not $SkipBuild) {
-        Write-Host "Building release (npm run tauri -- build)..."
-        npm run tauri -- build
+        Write-Host "Building release exe (npm run tauri -- build --no-bundle)..."
+        npm run tauri -- build --no-bundle
         if ($LASTEXITCODE -ne 0) {
             throw "tauri build failed with exit code $LASTEXITCODE"
         }

@@ -30,11 +30,11 @@ They are already produced by `tauri icon`. If missing, regenerate icons from
 2. From the repo root in PowerShell:
 
    ```powershell
-   npm run tauri -- build
+   npm run tauri -- build --no-bundle
    .\packaging\msix\scripts\pack-msix.ps1 -SkipBuild
    ```
 
-   Or let the script build:
+   Or let the script build the exe (no NSIS/MSI bundle) then pack:
 
    ```powershell
    .\packaging\msix\scripts\pack-msix.ps1
