@@ -3,6 +3,9 @@
 Unsigned MSIX for Partner Center upload. Not a substitute for the NSIS GitHub
 Release installer.
 
+**Human submission steps** (Partner Center, privacy URL, upload, device check):
+[`docs/store-submission.md`](../../docs/store-submission.md).
+
 ## Prerequisites
 
 - Windows machine with Node, Rust, and a working `npm run tauri -- build`

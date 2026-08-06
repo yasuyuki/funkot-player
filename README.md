@@ -63,6 +63,7 @@ there, then press **開始** or **⋮ → 再スキャン**.
 
 Privacy policy (Store): [docs/privacy.md](docs/privacy.md) /
 `https://yasuyuki.github.io/funkot-player/privacy.html` (after Pages is enabled).
+Store publishing checklist: [docs/store-submission.md](docs/store-submission.md).
 
 To send feedback, use **⋮ → 意見を送る** — on Windows this saves a ZIP and
 shows its path (there is no system share sheet). Attach that file in email or
@@ -167,8 +168,9 @@ Release for the tag before publishing:
 2. `./dev.sh npx tauri android build --target aarch64`
 3. Upload `app-universal-release.apk` to the draft release for the tag.
 
-**Windows (Microsoft Store / MSIX).** Preferred path — see
-[docs/store-submission.md](docs/store-submission.md) and
+**Windows (Microsoft Store / MSIX).** Preferred path. Human steps (Partner
+Center, Pages, submit, device check):
+[docs/store-submission.md](docs/store-submission.md). Packing details:
 [packaging/msix/README.md](packaging/msix/README.md). CI:
 [Windows MSIX](.github/workflows/windows-msix.yml) (`workflow_dispatch`) uploads
 an **unsigned** `.msix` artifact for Partner Center.
