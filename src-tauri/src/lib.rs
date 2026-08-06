@@ -3789,10 +3789,14 @@ fn analyze_these(
 }
 
 /// Scan `music_dir` (top-level only) for supported tracks and report what the
-/// analysis cache already knows about each. Kicks off a background analysis
-/// worker (one thread, one track at a time) if anything is unanalyzed.
+/// analysis cache already knows about each.
+///
+/// When `kick_analysis` is true, starts a background analysis worker for any
+/// unanalyzed tracks (startup / manual 再スキャン). When false, returns the
+/// listing only — used after `analysis-done` so permanent analysis failures
+/// (e.g. silent files) cannot re-queue forever via refresh → analyze → done.
 #[tauri::command(async)]
-fn refresh_library(app: tauri::AppHandle) -> Result<Vec<TrackRow>, String> {
+fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<TrackRow>, String> {
     let dirs = resolve_dirs(&app)?;
     let music_dir = PathBuf::from(&dirs.music_dir);
     let cache_dir = PathBuf::from(&dirs.cache_dir);
@@ -3807,16 +3811,18 @@ fn refresh_library(app: tauri::AppHandle) -> Result<Vec<TrackRow>, String> {
 
     let rows: Vec<TrackRow> = paths.iter().map(|p| track_row(p, &cache_dir)).collect();
 
-    // Reuse what `track_row` already worked out rather than calling
-    // `analyze_missing`, which would hash every file a second time: `analyzed`
-    // is exactly `analyzed_cache_entry(...).is_some()`.
-    let pending: Vec<PathBuf> = paths
-        .iter()
-        .zip(&rows)
-        .filter(|(_, row)| !row.analyzed)
-        .map(|(path, _)| path.clone())
-        .collect();
-    analyze_these(&app, pending, &cache_dir, &data_dir);
+    if kick_analysis {
+        // Reuse what `track_row` already worked out rather than calling
+        // `analyze_missing`, which would hash every file a second time: `analyzed`
+        // is exactly `analyzed_cache_entry(...).is_some()`.
+        let pending: Vec<PathBuf> = paths
+            .iter()
+            .zip(&rows)
+            .filter(|(_, row)| !row.analyzed)
+            .map(|(path, _)| path.clone())
+            .collect();
+        analyze_these(&app, pending, &cache_dir, &data_dir);
+    }
 
     Ok(rows)
 }

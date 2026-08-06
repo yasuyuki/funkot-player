@@ -95,20 +95,20 @@ class PlayerStore {
     // The old UI only fetched the library when ⟳ was pressed; this fetches it
     // at startup because the now-playing title/artist are resolved against it
     // (a `TrackRow` lookup by file name), so there is nothing to show without
-    // it. The side effect is that `refresh_library` also kicks off analysis of
-    // anything unanalysed — which is wanted here: the engine's loader would
-    // have to analyse those tracks mid-playback otherwise, and that is what
-    // the `stalled` phase is.
+    // it. The side effect is that `refresh_library(true)` also kicks off
+    // analysis of anything unanalysed — which is wanted here: the engine's
+    // loader would have to analyse those tracks mid-playback otherwise, and
+    // that is what the `stalled` phase is.
     try {
-      const rows = await refreshLibrary();
+      const rows = await refreshLibrary(true);
       this.library = new Map(rows.map((r) => [r.name, r]));
     } catch (e) {
       this.lastError = String(e);
     }
 
     // Analysis events land here only. Progress carries the finished row so
-    // we splice by path (no full folder walk per track); done does one last
-    // `refresh_library` for anything the splice could miss — same as legacy.
+    // we splice by path (no full folder walk per track); done reloads the
+    // listing without re-kicking analysis (failures must not loop forever).
     try {
       await listen<AnalysisProgress>("analysis-progress", (event) => {
         const { done, total, name, row } = event.payload;
@@ -157,7 +157,8 @@ class PlayerStore {
     if (this.#libraryBusy) return;
     this.#libraryBusy = true;
     try {
-      const rows = await refreshLibrary();
+      // List only — do not re-queue analysis (would loop on permanent failures).
+      const rows = await refreshLibrary(false);
       this.library = new Map(rows.map((r) => [r.name, r]));
     } catch (e) {
       // Ignore on analysis-done the same way legacy did: a stray error here

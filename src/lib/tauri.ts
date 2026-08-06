@@ -84,8 +84,8 @@ export function skipNext(): Promise<void> {
   return invoke<void>("skip_next");
 }
 
-export function refreshLibrary(): Promise<TrackRow[]> {
-  return invoke<TrackRow[]>("refresh_library");
+export function refreshLibrary(kickAnalysis = true): Promise<TrackRow[]> {
+  return invoke<TrackRow[]>("refresh_library", { kickAnalysis });
 }
 
 /// Matches `QueueSnapshot`. `reserved` / `pending` are absolute paths (see
