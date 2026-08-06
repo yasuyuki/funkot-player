@@ -1,0 +1,5 @@
+# Windows MSVC: link the C runtime statically so the NSIS build does not
+# depend on MSVCP140.dll / VCRUNTIME140.dll on the target machine.
+# (Tauri's bundleVCRuntime config is not in @tauri-apps/cli 2.11.x yet.)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
