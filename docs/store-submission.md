@@ -41,12 +41,15 @@ Windows の本配布は **MSIX + Partner Center**。署名は提出後に Micros
 
 - [x] A. Partner Center 個人開発者登録
 - [x] B. アプリ名予約（**MSIX アプリ**）
-- [x] C. `Package.appxmanifest` の Identity 差し替え（反映済み・コミット待ち可）
+- [x] C. `Package.appxmanifest` の Identity 差し替え（反映済み）
   - Name=`hatsuboshi.jp.Funkotplayer`
   - Publisher=`CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64`
   - PublisherDisplayName=`hatsuboshi.jp`
-- [ ] D. プライバシーポリシーの一般公開 URL
-- [ ] E. Identity 反映後の未署名 MSIX 再生成
+- [x] D. プライバシーポリシーの一般公開 URL
+  - **提出用（公開）:** https://gist.github.com/yasuyuki/2bcd2f2737dd02e1622b2e593c258ade
+  - HTML 直リンク: https://gist.githubusercontent.com/yasuyuki/2bcd2f2737dd02e1622b2e593c258ade/raw/privacy.html
+  - GitHub Pages 想定 URL は private リポジトリのため未公開（Settings で Pages 有効化すれば併用可）
+- [x] E. Identity 反映後の未署名 MSIX 再生成（CI run `31077160621`、artifact `funkot-player-windows-msix`）
 - [ ] F. 提出セット（年齢・スクショ・説明・連絡先・パッケージ）
 - [ ] G. 認証通過後の実機確認（Store インストール → Music → 再生）
 
@@ -191,30 +194,22 @@ Partner Center のトップ（`partner.microsoft.com/dashboard`）は **商用�
 
 提出フォームに **HTTPS で誰でも開ける URL** が必要。正本はリポジトリの `docs/privacy.md`（HTML は `docs/privacy.html`）。
 
-### 推奨: GitHub Pages
+### 現在の提出用 URL（済み）
 
-リポジトリが **private** でも Pages を公開できる場合があるが、組織・プラン制限で非公開のままになることがある。届かないときは後述の代替へ。
+リポジトリが **private** のため GitHub Pages CI は有効化できず（`Resource not accessible by integration`）。公開 gist を使う:
+
+**Partner Center に貼る URL:**
+
+https://gist.github.com/yasuyuki/2bcd2f2737dd02e1622b2e593c258ade
+
+（中身は `privacy.md` + `privacy.html`。文面を変えたら gist も更新し、正本 `docs/privacy.md` と同期する。）
+
+### （任意）あとで GitHub Pages に移す場合
 
 1. GitHub → リポジトリ `yasuyuki/funkot-player` → **Settings** → **Pages**。
-2. **Build and deployment** → Source を **GitHub Actions** にする。
-3. まだデプロイしていない場合:
-   - Actions → workflow **Docs Pages**（`.github/workflows/pages-docs.yml`）→ **Run workflow**、または
-   - `docs/` か workflow を触って `main` に push。
-4. デプロイ成功後、次をブラウザのシークレットウィンドウ等で開けるか確認する:
-
-   `https://yasuyuki.github.io/funkot-player/privacy.html`
-
-5. Partner Center のプライバシーポリシー欄に **この URL** を貼る。
-
-### 代替（Pages が一般公開できない場合）
-
-同じ文面を次のいずれかに置き、その URL を提出に使う:
-
-- 公開 gist（`privacy.md` 相当を HTML または raw で読める形）
-- 既存の個人サイトの静的ページ
-- 一時的な公開リポジトリに `privacy.html` だけ置く
-
-文面を変えたら **正本 `docs/privacy.md` も同期**し、公開先を更新する。
+2. Source を **GitHub Actions** にする（プランで private Pages が使える場合のみ）。
+3. workflow **Docs Pages** を再実行し、`https://yasuyuki.github.io/funkot-player/privacy.html` を確認。
+4. 問題なければ Partner Center の URL を差し替え。
 
 ---
 
@@ -222,7 +217,12 @@ Partner Center のトップ（`partner.microsoft.com/dashboard`）は **商用�
 
 **Identity 差し替え後**に実施する。差し替え前の artifact は提出に使わない。
 
-### 方法 1: CI（推奨）
+### 方法 1: CI（推奨）— Identity 反映後は再実行済み
+
+最新の成功例: Actions run [31077160621](https://github.com/yasuyuki/funkot-player/actions/runs/31077160621)  
+artifact **`funkot-player-windows-msix`**（Identity = Partner Center 値）。
+
+追加で焼くとき:
 
 1. GitHub → Actions → **Windows MSIX**（`.github/workflows/windows-msix.yml`）。
 2. **Run workflow**:

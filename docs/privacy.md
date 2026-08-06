@@ -23,7 +23,9 @@ Funkot stores music, analysis cache, queue, and your bar corrections on-device o
 
 ---
 
-このファイルの HTML 版は GitHub Pages 公開を想定:
-`https://yasuyuki.github.io/funkot-player/privacy.html`
-（リポジトリ Settings → Pages → Source: GitHub Actions。private の場合は
-一般公開できる URL に同じ文面を置くこと。）
+このファイルの HTML 版は `docs/privacy.html`。
+
+**Store 提出用の公開 URL（現行）:**
+https://gist.github.com/yasuyuki/2bcd2f2737dd02e1622b2e593c258ade
+
+（リポジトリが private のため GitHub Pages は使っていない。文面変更時は gist も更新。）
