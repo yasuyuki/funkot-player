@@ -25,6 +25,8 @@ import {
   auditionTransition as auditionTransitionCmd,
   auditionAgain as auditionAgainCmd,
   resumeAutodj as resumeAutodjCmd,
+  setMusicDir as setMusicDirCmd,
+  resetMusicDir as resetMusicDirCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -92,6 +94,9 @@ class PlayerStore {
   async #init() {
     try {
       this.dirs = await appDirs();
+      if (this.dirs.music_dir_unavailable) {
+        this.lastError = `指定した音楽フォルダを開けません: ${this.dirs.music_dir_custom}（既定のフォルダを使います）`;
+      }
     } catch (e) {
       this.lastError = String(e);
     }
@@ -525,6 +530,42 @@ class PlayerStore {
     } catch (e) {
       this.lastError = String(e);
       return false;
+    }
+  }
+
+  /// Opens the native folder picker (⋮ 音楽フォルダを変更) and applies the
+  /// result. `changed: false` covers a cancelled dialog. Reuses
+  /// `doRefreshLibrary` for the post-change rescan rather than starting a
+  /// second, parallel library walk.
+  async doSetMusicDir(): Promise<
+    { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
+  > {
+    try {
+      const result = await setMusicDirCmd();
+      this.dirs = result.dirs;
+      if (result.changed) await this.doRefreshLibrary();
+      return { ok: true, changed: result.changed, restartRequired: result.restart_required };
+    } catch (e) {
+      const message = String(e);
+      this.lastError = message;
+      return { ok: false, error: message };
+    }
+  }
+
+  /// Clears whatever folder `doSetMusicDir` configured (⋮ 音楽フォルダを既定に
+  /// 戻す), reverting to the default Music folder.
+  async doResetMusicDir(): Promise<
+    { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
+  > {
+    try {
+      const result = await resetMusicDirCmd();
+      this.dirs = result.dirs;
+      if (result.changed) await this.doRefreshLibrary();
+      return { ok: true, changed: result.changed, restartRequired: result.restart_required };
+    } catch (e) {
+      const message = String(e);
+      this.lastError = message;
+      return { ok: false, error: message };
     }
   }
 }

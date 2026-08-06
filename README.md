@@ -61,6 +61,15 @@ Under a classic (non-Store) install the folder is usually:
 Under MSIX the resolved path may differ; always use the menu. Copy files
 there, then press **開始** or **⋮ → 再スキャン**.
 
+**⋮ → 音楽フォルダを変更** で別のフォルダを指定できる（Windows/Mac/Linux のみ。
+Android は不可）。変更してもファイルは移動されない。解析結果と手動補正は内容
+ハッシュ管理なので同じファイルなら引き継がれる。自動選曲への反映は再起動後。
+
+Linux: 音楽フォルダの選択には xdg-desktop-portal と対応バックエンド
+（xdg-desktop-portal-gtk など）が要る。Flatpak/snap では自動的に揃う。無い環境
+では選択ダイアログが開かず「変更しませんでした」とだけ表示される（zenity が
+あればそれが代わりに使われる）。
+
 Privacy policy (Store): [docs/privacy.md](docs/privacy.md) /
 https://yasuyuki.github.io/funkot-player/privacy.html
 Store publishing checklist: [docs/store-submission.md](docs/store-submission.md).
@@ -106,6 +115,11 @@ corrections stay on the phone.
 - **⋮ → 再スキャン** — pick up tracks added since the last scan.
 - **⋮ → Musicフォルダを開く** — open the Music folder (Windows / desktop) or
   show its path (Android toast) so you can copy tracks in.
+- **⋮ → 音楽フォルダを変更** — pick a different folder to play from
+  (Windows/Mac/Linux only). Files are not moved; analysis and manual
+  corrections carry over for files that also exist under the new folder.
+- **⋮ → 音楽フォルダを既定に戻す** — revert to the default Music folder
+  (shown only after a custom folder is set).
 - **⋮ → 意見を送る** — share a small ZIP of your corrections. Android opens
   the system share sheet; Windows saves the ZIP and shows its path.
 - **⋮ → ログを表示** — diagnostic log for troubleshooting.
