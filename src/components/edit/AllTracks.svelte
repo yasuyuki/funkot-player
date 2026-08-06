@@ -88,7 +88,7 @@
     <tbody>
       {#each rows as row (row.path)}
         <tr>
-          <td class="name">{row.name}</td>
+          <td class="name">{store.relName(row.path)}</td>
           <td>
             {#if row.intro_bars === null}
               -

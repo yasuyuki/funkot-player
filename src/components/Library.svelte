@@ -19,7 +19,7 @@
 
   function matches(row: TrackRow, q: string): boolean {
     if (!q) return true;
-    const hay = `${row.title}\n${row.artist}\n${row.name}`.toLowerCase();
+    const hay = `${row.title}\n${row.artist}\n${store.relName(row.path)}`.toLowerCase();
     return hay.includes(q);
   }
 

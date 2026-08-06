@@ -15,7 +15,10 @@ export interface AppDirs {
   data_dir: string;
 }
 
-/// Matches `TransitionInfo`.
+/// Matches `TransitionInfo`. `from` / `to` are absolute paths, matching
+/// `TrackRow.path`'s format (tracks can share a basename across
+/// subdirectories now that scanning is recursive, so a bare file name is not
+/// enough to identify one).
 export interface TransitionInfo {
   from: string;
   to: string;
@@ -23,7 +26,9 @@ export interface TransitionInfo {
   seconds_ago: number;
 }
 
-/// Matches `PlayerState`.
+/// Matches `PlayerState`. `now_playing` / `previous` are absolute paths,
+/// matching `TrackRow.path`'s format (see `TransitionInfo`'s doc comment for
+/// why a bare file name would not be enough).
 export interface PlayerState {
   phase: string;
   paused: boolean;
@@ -37,8 +42,11 @@ export interface PlayerState {
   duration_secs: number | null;
 }
 
-/// Matches `TrackRow`. Stage 1 only reads `name` / `title` / `artist`, but
-/// every field is declared so later stages do not have to touch this file.
+/// Matches `TrackRow`. `name` (the bare file name) is no longer used
+/// directly for UI display -- basenames can collide across subdirectories
+/// now that scanning is recursive, so `path` is the identity the UI keys on.
+/// Every field is still declared so later stages do not have to touch this
+/// file.
 export interface TrackRow {
   path: string;
   name: string;

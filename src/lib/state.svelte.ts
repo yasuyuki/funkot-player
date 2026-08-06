@@ -49,9 +49,12 @@ class PlayerStore {
   dirs = $state<AppDirs | null>(null);
   player = $state<PlayerState | null>(null);
   queue = $state<QueueSnapshot | null>(null);
-  /// Keyed by file name (`TrackRow.name`), matching `PlayerState.now_playing`.
-  /// Insertion order follows the last `refresh_library` response so
-  /// `libraryList` stays stable for the play-tab list.
+  /// Keyed by absolute path (`TrackRow.path`), matching
+  /// `PlayerState.now_playing` / `.previous` and `TransitionInfo.from` /
+  /// `.to`. Basenames can collide across subdirectories now that scanning is
+  /// recursive, so path is the only safe key. Insertion order follows the
+  /// last `refresh_library` response so `libraryList` stays stable for the
+  /// play-tab list.
   library = $state<Map<string, TrackRow>>(new Map());
   /// Non-null while a background analysis run is in flight. Cleared on
   /// `analysis-done` (or overwritten by the next progress event).
@@ -101,7 +104,7 @@ class PlayerStore {
     // that is what the `stalled` phase is.
     try {
       const rows = await refreshLibrary(true);
-      this.library = new Map(rows.map((r) => [r.name, r]));
+      this.library = new Map(rows.map((r) => [r.path, r]));
     } catch (e) {
       this.lastError = String(e);
     }
@@ -159,7 +162,7 @@ class PlayerStore {
     try {
       // List only — do not re-queue analysis (would loop on permanent failures).
       const rows = await refreshLibrary(false);
-      this.library = new Map(rows.map((r) => [r.name, r]));
+      this.library = new Map(rows.map((r) => [r.path, r]));
     } catch (e) {
       // Ignore on analysis-done the same way legacy did: a stray error here
       // shouldn't disrupt the UI after the worker itself has finished.
@@ -169,17 +172,11 @@ class PlayerStore {
     }
   }
 
-  /// Swap one library row in place by `path`, keeping the name-keyed Map in
-  /// sync (and preserving insertion order for every other entry).
+  /// Swap one library row in place by `path` (preserving insertion order for
+  /// every other entry).
   #replaceLibraryRow(row: TrackRow): void {
     const next = new Map(this.library);
-    for (const [name, existing] of next) {
-      if (existing.path === row.path) {
-        if (name !== row.name) next.delete(name);
-        break;
-      }
-    }
-    next.set(row.name, row);
+    next.set(row.path, row);
     this.library = next;
   }
 
@@ -210,21 +207,28 @@ class PlayerStore {
   }
 
   pathBasename(path: string): string {
-    const i = path.lastIndexOf("/");
+    const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
     return i >= 0 ? path.slice(i + 1) : path;
   }
 
-  /// Resolves an absolute path (as found in `QueueSnapshot`) against the
-  /// library. Tries the basename key first (usual case: `TrackRow.name` is
-  /// the file name), then falls back to a path scan.
+  /// Path relative to `music_dir`, for display (e.g. `AlbumA/01.mp3`).
+  /// `music_dir` (from `app_dirs`) is the exact prefix every scanned path is
+  /// `join`ed onto, so a plain string prefix check is enough -- no path
+  /// normalisation needed. Falls back to the basename whenever that
+  /// assumption does not hold (`dirs` not loaded yet, `path` outside
+  /// `music_dir`, or `path === music_dir` itself) rather than surface a
+  /// malformed string.
+  relName(path: string): string {
+    const musicDir = this.dirs?.music_dir;
+    if (!musicDir || !path.startsWith(musicDir)) return this.pathBasename(path);
+    const rest = path.slice(musicDir.length).replace(/^[/\\]+/, "");
+    if (!rest) return this.pathBasename(path);
+    return rest.replace(/\\/g, "/");
+  }
+
+  /// Looks up a library row by its absolute path (the library `Map`'s key).
   trackForPath(path: string): TrackRow | undefined {
-    const base = this.pathBasename(path);
-    const byName = this.library.get(base);
-    if (byName?.path === path) return byName;
-    for (const row of this.library.values()) {
-      if (row.path === path) return row;
-    }
-    return undefined;
+    return this.library.get(path);
   }
 
   titleForPath(path: string): string {
@@ -235,31 +239,21 @@ class PlayerStore {
     return this.trackForPath(path)?.artist ?? "";
   }
 
-  /// Resolves a file name (as found in `PlayerState.now_playing` or
-  /// `TransitionInfo.from`/`.to`) to a library title, falling back to the
-  /// file name itself when the library has not resolved it (or does not
-  /// have it) yet. `null` in, `""` out -- matches `TrackRow.artist`'s own
-  /// "nothing to show" convention rather than returning `null`, since every
-  /// caller just interpolates this into a string.
-  titleFor(name: string | null): string {
-    if (!name) return "";
-    return this.library.get(name)?.title ?? name;
-  }
-
-  /// `now_playing` resolved via `titleFor`, kept nullable (unlike `titleFor`
-  /// itself) so `NowCard` can tell "no track" apart from "unresolved title".
+  /// `now_playing` resolved via `titleForPath`, kept nullable (unlike
+  /// `titleForPath` itself) so `NowCard` can tell "no track" apart from
+  /// "unresolved title".
   get nowTitle(): string | null {
-    const name = this.player?.now_playing;
-    if (!name) return null;
-    return this.titleFor(name);
+    const path = this.player?.now_playing;
+    if (!path) return null;
+    return this.titleForPath(path);
   }
 
   /// As `nowTitle`, for the artist. Empty string (not null) when unresolved,
   /// matching `TrackRow.artist`'s own "no artist tag" convention.
   get nowArtist(): string {
-    const name = this.player?.now_playing;
-    if (!name) return "";
-    return this.library.get(name)?.artist ?? "";
+    const path = this.player?.now_playing;
+    if (!path) return "";
+    return this.artistForPath(path);
   }
 
   /// idle → start. Requires `dirs` to already have resolved; the only caller
@@ -386,7 +380,7 @@ class PlayerStore {
     this.#libraryBusy = true;
     try {
       const rows = await refreshLibrary();
-      this.library = new Map(rows.map((r) => [r.name, r]));
+      this.library = new Map(rows.map((r) => [r.path, r]));
     } catch (e) {
       this.lastError = String(e);
     } finally {

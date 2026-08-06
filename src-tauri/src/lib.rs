@@ -1335,14 +1335,21 @@ fn resolve_nav_origin() -> Origin {
     nav_origin(marked, now_ms())
 }
 
-/// Display name only — paths themselves stay in `NowTracker`, because the ⚑
-/// flag work (S5) needs to match on the path. MediaSession title/artist are
-/// resolved separately from embedded tags ([`session_metadata_for`]).
+/// Display name only, for the `TrackRow::name` field and as the title
+/// fallback in [`session_metadata_for`]. Not used for anything that needs to
+/// identify a track uniquely — use [`path_str`] for that.
 fn file_name_str(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("?")
         .to_string()
+}
+
+/// UI-facing key for a track. Must stay in sync with `TrackRow::path` /
+/// `QueueSnapshot`'s `to_string_lossy().into_owned()`, since the frontend
+/// treats the two as the same map key.
+fn path_str(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// Raw embedded tags cached per path (probe once; sync/pause must not reopen).
@@ -2253,6 +2260,62 @@ fn is_supported_track(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Recursively walk `dir` for supported track files, sorted.
+///
+/// Symlinks (file or directory) are never followed — `DirEntry::file_type()`
+/// reports the link itself rather than its target, so this is a plain
+/// membership check rather than a stat of whatever the link points at. That
+/// sidesteps having to detect symlink cycles, at the cost of not following
+/// tracks or subfolders reached only via a link.
+///
+/// Dot-prefixed names (files and directories alike) are skipped, since
+/// Android's MTP / thumbnail bookkeeping directories can end up inside the
+/// Music folder.
+///
+/// The top-level `dir` itself must be readable, or this fails outright. A
+/// subdirectory discovered during the walk that fails to read is instead
+/// logged and skipped, so one broken subfolder cannot take the whole library
+/// down with it.
+fn scan_tracks(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    scan_tracks_into(entries, &mut paths);
+    paths.sort();
+    Ok(paths)
+}
+
+/// Walk one already-opened directory's entries into `paths`, recursing into
+/// subdirectories. Read failures on a subdirectory are logged and skipped
+/// rather than propagated — see [`scan_tracks`].
+fn scan_tracks_into(entries: std::fs::ReadDir, paths: &mut Vec<PathBuf>) {
+    for entry in entries.filter_map(|e| e.ok()) {
+        let is_dotted = entry
+            .file_name()
+            .to_str()
+            .map(|s| s.starts_with('.'))
+            .unwrap_or(false);
+        if is_dotted {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            match std::fs::read_dir(&path) {
+                Ok(sub_entries) => scan_tracks_into(sub_entries, paths),
+                Err(e) => log::warn!("cannot read {}: {e}", path.display()),
+            }
+        } else if file_type.is_file() && is_supported_track(&path) {
+            paths.push(path);
+        }
+    }
+}
+
 /// `start_impl`'s "the audio thread is already up" error. Named because
 /// `audition_transition` singles it out to fall through on, so it must not be
 /// spelled out at both ends.
@@ -2293,12 +2356,7 @@ fn start_impl(
     }
 
     let dir = PathBuf::from(music_dir);
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| is_supported_track(p))
-        .collect();
-    paths.sort();
+    let paths: Vec<PathBuf> = scan_tracks(&dir)?;
 
     if paths.len() < 2 {
         // Early error: nothing has been set up yet, so the phase is left at
@@ -2725,7 +2783,9 @@ fn is_paused() -> bool {
 /// for why this is only ever the last *automatic* one.
 #[derive(serde::Serialize, Clone)]
 struct TransitionInfo {
+    /// Absolute path, same format as `TrackRow::path`.
     from: String,
+    /// Absolute path, same format as `TrackRow::path`.
     to: String,
     automatic: bool,
     seconds_ago: f64,
@@ -2736,7 +2796,9 @@ struct TransitionInfo {
 struct PlayerState {
     phase: &'static str,
     paused: bool,
+    /// Absolute path, same format as `TrackRow::path`.
     now_playing: Option<String>,
+    /// Absolute path, same format as `TrackRow::path`.
     previous: Option<String>,
     last_transition: Option<TransitionInfo>,
     auditioning: bool,
@@ -2870,8 +2932,8 @@ mod played_duration_secs_tests {
 static PLAYED_DURATION: Mutex<Option<(PathBuf, Option<f64>)>> = Mutex::new(None);
 
 /// `played_duration_secs` for `now` (its *full* path — `NOW` holds full
-/// paths, unlike `PlayerState::now_playing`, which is a file name; do not mix
-/// the two up here), memoised in `PLAYED_DURATION` so repeated polls of the
+/// paths, and `PlayerState::now_playing` is now a full path too), memoised
+/// in `PLAYED_DURATION` so repeated polls of the
 /// same track cost nothing after the first. Only a track change pays for the
 /// content hash + cache read (and, on Android, the JNI round trip inside
 /// `resolve_dirs` that a per-poll call would otherwise incur).
@@ -2905,8 +2967,8 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
             now.now.clone(),
             now.previous.clone(),
             now.last_transition.as_ref().map(|t| TransitionInfo {
-                from: file_name_str(&t.from),
-                to: file_name_str(&t.to),
+                from: path_str(&t.from),
+                to: path_str(&t.to),
                 automatic: t.origin == Origin::Automatic,
                 seconds_ago: t.at.elapsed().as_secs_f64(),
             }),
@@ -2954,8 +3016,8 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
     PlayerState {
         phase: get_phase().as_str(),
         paused: is_paused(),
-        now_playing: now_playing.as_deref().map(file_name_str),
-        previous: previous.as_deref().map(file_name_str),
+        now_playing: now_playing.as_deref().map(path_str),
+        previous: previous.as_deref().map(path_str),
         last_transition,
         auditioning,
         audition_from,
@@ -3066,12 +3128,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
         (store::load_flags(&data_dir), store::load_dismissed(&data_dir))
     };
 
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&music_dir)
-        .map_err(|e| format!("cannot read {}: {e}", music_dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| is_supported_track(p))
-        .collect();
-    paths.sort();
+    let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
 
     let mut meta_by_hash = std::collections::BTreeMap::new();
     for path in &paths {
@@ -3749,6 +3806,156 @@ mod cache_state_tests {
             Some(analysis.intro_bars + 4)
         );
     }
+
+    /// `path_str` is what `PlayerState` now uses to identify a track; it must
+    /// agree with `TrackRow::path` or the frontend's map-key lookups break.
+    #[test]
+    fn path_str_matches_track_row_path() {
+        let cache = TempDir::new("path-str-cache");
+        let (track, _) = track_with_analysis(&cache.0);
+        assert_eq!(path_str(&track), track_row(&track, &cache.0).path);
+    }
+}
+
+#[cfg(test)]
+mod scan_tracks_tests {
+    use super::*;
+
+    /// Fresh temp dir per test, cleaned up on drop. Same shape as the one in
+    /// `cache_state_tests`; not shared for the same reason given there.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "funkot-player-scan-tracks-test-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn finds_tracks_in_nested_subdirectories() {
+        let dir = TempDir::new("nested");
+        touch(&dir.0.join("top.wav"));
+        touch(&dir.0.join("a").join("mid.mp3"));
+        touch(&dir.0.join("a").join("b").join("deep.flac"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(
+            found,
+            vec![
+                dir.0.join("a").join("b").join("deep.flac"),
+                dir.0.join("a").join("mid.mp3"),
+                dir.0.join("top.wav"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_dot_prefixed_directories() {
+        let dir = TempDir::new("dot-dir");
+        touch(&dir.0.join(".hidden").join("track.wav"));
+        touch(&dir.0.join("visible.wav"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(found, vec![dir.0.join("visible.wav")]);
+    }
+
+    #[test]
+    fn ignores_dot_prefixed_files() {
+        let dir = TempDir::new("dot-file");
+        touch(&dir.0.join(".track.wav"));
+        touch(&dir.0.join("track.wav"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(found, vec![dir.0.join("track.wav")]);
+    }
+
+    #[test]
+    fn ignores_unsupported_extensions() {
+        let dir = TempDir::new("unsupported");
+        touch(&dir.0.join("notes.txt"));
+        touch(&dir.0.join("track.wav"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(found, vec![dir.0.join("track.wav")]);
+    }
+
+    #[test]
+    fn result_is_sorted() {
+        let dir = TempDir::new("sorted");
+        touch(&dir.0.join("z.wav"));
+        touch(&dir.0.join("m.wav"));
+        touch(&dir.0.join("a.wav"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        let mut expected = found.clone();
+        expected.sort();
+        assert_eq!(found, expected);
+        assert_eq!(
+            found,
+            vec![
+                dir.0.join("a.wav"),
+                dir.0.join("m.wav"),
+                dir.0.join("z.wav"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_follow_symlinked_directories() {
+        let dir = TempDir::new("symlink");
+        let real = TempDir::new("symlink-target");
+        touch(&real.0.join("outside.wav"));
+        touch(&dir.0.join("inside.wav"));
+
+        std::os::unix::fs::symlink(&real.0, dir.0.join("linked")).unwrap();
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(found, vec![dir.0.join("inside.wav")]);
+    }
+
+    /// Recursive scanning can surface the same file name in different
+    /// subfolders; both must survive as distinct entries, and only their
+    /// full paths (not `file_name_str`) tell them apart — this is the
+    /// reasoning behind keying `PlayerState` on `path_str` rather than the
+    /// file name.
+    #[test]
+    fn same_basename_in_different_subdirs_both_survive() {
+        let dir = TempDir::new("same-basename");
+        touch(&dir.0.join("a").join("01.mp3"));
+        touch(&dir.0.join("b").join("01.mp3"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(
+            found,
+            vec![dir.0.join("a").join("01.mp3"), dir.0.join("b").join("01.mp3"),]
+        );
+        assert_eq!(
+            file_name_str(&found[0]),
+            file_name_str(&found[1]),
+            "file names collide, which is exactly why PlayerState must key on path_str instead"
+        );
+    }
 }
 
 /// Kick off a background analysis worker for whatever in `paths` the cache
@@ -3788,8 +3995,8 @@ fn analyze_these(
     spawn_analysis_worker(app.clone(), pending, cache_dir.to_path_buf(), overrides);
 }
 
-/// Scan `music_dir` (top-level only) for supported tracks and report what the
-/// analysis cache already knows about each.
+/// Scan `music_dir` (recursively, subfolders included) for supported tracks
+/// and report what the analysis cache already knows about each.
 ///
 /// When `kick_analysis` is true, starts a background analysis worker for any
 /// unanalyzed tracks (startup / manual 再スキャン). When false, returns the
@@ -3802,12 +4009,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let cache_dir = PathBuf::from(&dirs.cache_dir);
     let data_dir = PathBuf::from(&dirs.data_dir);
 
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&music_dir)
-        .map_err(|e| format!("cannot read {}: {e}", music_dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| is_supported_track(p))
-        .collect();
-    paths.sort();
+    let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
 
     let rows: Vec<TrackRow> = paths.iter().map(|p| track_row(p, &cache_dir)).collect();
 
