@@ -8,12 +8,13 @@ Windows の本配布は **MSIX + Partner Center**。署名は提出後に Micros
 - [x] `⋮ → Musicフォルダを開く`（配置 UX）
 - [x] `docs/privacy.md`
 - [x] `packaging/msix/`（manifest + `pack-msix.ps1`）
+- [x] CI `windows-msix` で未署名 MSIX 生成（artifact `funkot-player-windows-msix` / `Funkot_0.1.1.0_x64.msix`）
 - [ ] Partner Center 個人開発者登録
 - [ ] アプリ名予約（**MSIX アプリ**）
 - [ ] `Package.appxmanifest` の Identity **Name** / **Publisher** を予約値に置換
 - [ ] プライバシーポリシーを **一般公開 URL** にする（下節）
 - [ ] スクリーンショット 4 枚以上、説明文、年齢レーティング
-- [ ] 未署名 MSIX をアップロードして認証
+- [ ] 未署名 MSIX をアップロードして認証（ローカル／Store 実機で Music 配置〜再生）
 
 ## Partner Center
 
