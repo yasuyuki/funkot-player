@@ -43,9 +43,6 @@ const FLAGS_FILE: &str = "flags.json";
 const DISMISSED_FILE: &str = "dismissed.json";
 const META_FILE: &str = "meta.json";
 const SESSION_FILE: &str = "session.json";
-// Only referenced by `load_settings`/`save_settings`, which Android never
-// calls — see their doc comments for why the whole chain needs the attribute.
-#[cfg_attr(target_os = "android", allow(dead_code))]
 const SETTINGS_FILE: &str = "settings.json";
 
 /// Metadata bundled with a feedback ZIP (`share_feedback`).
@@ -211,20 +208,23 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
     fs::write(dir.join(SESSION_FILE), json)
 }
 
-/// User-configurable app settings (desktop only). `music_dir`, when set, is
-/// the folder the listener picked via `set_music_dir`; `None` means "use the
-/// default `Music` folder under `data_dir`" — deliberately distinct from an
-/// invalid path, which `resolve_music_dir` falls back on without touching
-/// this file.
+/// User-configurable app settings (`settings.json`).
 ///
-/// `store` is a private module (`mod store;`, not `pub mod`), so these `pub`
-/// items are not part of the crate's public API and Android — which never
-/// calls any of them — would otherwise flag all four as dead code.
+/// `music_dir`, when set, is the folder the listener picked via
+/// `set_music_dir` (desktop only); `None` means "use the default `Music`
+/// folder under `data_dir`" — deliberately distinct from an invalid path,
+/// which `resolve_music_dir` falls back on without touching this file.
+///
+/// `allow_non_funkot` is read/written on every platform (library enqueue and
+/// folder-drain gate).
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(target_os = "android", allow(dead_code))]
 pub struct Settings {
     #[serde(default)]
     pub music_dir: Option<PathBuf>,
+    /// When `false` (default), analysed non-Funkot tracks cannot be enqueued
+    /// and are skipped by folder drain. Greying in the library is independent.
+    #[serde(default)]
+    pub allow_non_funkot: bool,
 }
 
 /// Load settings previously saved under `dir`.
@@ -233,7 +233,6 @@ pub struct Settings {
 /// [`load_session`] / [`load_flags`]): losing a folder choice is
 /// recoverable, refusing to launch is not. A missing file is expected on
 /// every first run and stays silent; a corrupt one logs a warning.
-#[cfg_attr(target_os = "android", allow(dead_code))]
 pub fn load_settings(dir: &Path) -> Settings {
     let bytes = match fs::read(dir.join(SETTINGS_FILE)) {
         Ok(b) => b,
@@ -249,7 +248,6 @@ pub fn load_settings(dir: &Path) -> Settings {
 }
 
 /// Persist `settings` under `dir`, overwriting any previous save.
-#[cfg_attr(target_os = "android", allow(dead_code))]
 pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(settings)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -355,6 +353,15 @@ pub struct BarOverride {
     /// `funkot_core::cache::set_manual_structure_bars`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outro_structure_bars: Option<u32>,
+    /// Manual Funkot / non-Funkot override. `None` follows analysis
+    /// `is_funkot`. Not written by the current UI (data model only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funkot: Option<bool>,
+}
+
+/// Effective Funkot flag: `override.funkot` when set, else analysis.
+pub fn effective_is_funkot(analysis_is_funkot: bool, override_funkot: Option<bool>) -> bool {
+    override_funkot.unwrap_or(analysis_is_funkot)
 }
 
 /// Hand-corrected bars for the whole library, keyed by content hash.
@@ -827,14 +834,14 @@ mod tests {
             "aaa".into(),
             BarOverride {
                 intro_bars: Some(32),
-                outro_structure_bars: None,
+                ..Default::default()
             },
         );
         o.insert(
             "bbb".into(),
             BarOverride {
-                intro_bars: None,
                 outro_structure_bars: Some(16),
+                ..Default::default()
             },
         );
 
@@ -869,7 +876,13 @@ mod tests {
         queue.push_back(PathBuf::from("/music/a.flac"));
         save_queue(&old.0, &queue).unwrap();
         let mut o = Overrides::new();
-        o.insert("aaa".into(), BarOverride { intro_bars: Some(32), outro_structure_bars: None });
+        o.insert(
+            "aaa".into(),
+            BarOverride {
+                intro_bars: Some(32),
+                ..Default::default()
+            },
+        );
         save_overrides(&old.0, &o).unwrap();
         let mut flags = Flags::new();
         flags.insert(
@@ -1385,9 +1398,38 @@ mod tests {
         let dir = TempDir::new("settings-roundtrip");
         let settings = Settings {
             music_dir: Some(PathBuf::from("/somewhere/Music")),
+            ..Default::default()
         };
         save_settings(&dir.0, &settings).unwrap();
         assert_eq!(load_settings(&dir.0), settings);
+    }
+
+    #[test]
+    fn settings_round_trip_allow_non_funkot() {
+        let dir = TempDir::new("settings-allow-non-funkot");
+        let settings = Settings {
+            allow_non_funkot: true,
+            ..Default::default()
+        };
+        save_settings(&dir.0, &settings).unwrap();
+        assert_eq!(load_settings(&dir.0), settings);
+        assert!(!Settings::default().allow_non_funkot);
+    }
+
+    #[test]
+    fn settings_old_json_without_allow_non_funkot_defaults_false() {
+        let dir = TempDir::new("settings-legacy");
+        fs::write(
+            dir.0.join(SETTINGS_FILE),
+            br#"{"music_dir":"/somewhere/Music"}"#,
+        )
+        .unwrap();
+        let loaded = load_settings(&dir.0);
+        assert_eq!(
+            loaded.music_dir.as_deref(),
+            Some(Path::new("/somewhere/Music"))
+        );
+        assert!(!loaded.allow_non_funkot);
     }
 
     #[test]
@@ -1395,6 +1437,27 @@ mod tests {
         let dir = TempDir::new("settings-corrupt");
         fs::write(dir.0.join(SETTINGS_FILE), b"{not json").unwrap();
         assert_eq!(load_settings(&dir.0), Settings::default());
+    }
+
+    #[test]
+    fn bar_override_funkot_round_trip() {
+        let dir = TempDir::new("override-funkot");
+        let mut o = Overrides::new();
+        o.insert(
+            "hash".into(),
+            BarOverride {
+                funkot: Some(false),
+                ..Default::default()
+            },
+        );
+        save_overrides(&dir.0, &o).unwrap();
+        let loaded = load_overrides(&dir.0);
+        assert_eq!(loaded["hash"].funkot, Some(false));
+        assert_eq!(
+            effective_is_funkot(true, loaded["hash"].funkot),
+            false
+        );
+        assert!(effective_is_funkot(true, None));
     }
 
     #[test]

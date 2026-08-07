@@ -56,6 +56,10 @@ static PLAYBACK: OnceLock<Playback> = OnceLock::new();
 /// it) finds this empty and just skips saving; see `persist_session`.
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// Live copy of `settings.json`'s `allow_non_funkot`. Folder drain reads this
+/// on the loader thread; `set_allow_non_funkot` updates it without restart.
+static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(false);
+
 /// True while an audition `Engine` is installed in [`RenderState::audition`].
 /// `events_thread` uses this only to drop stale audition-tagged events after
 /// resume; origin itself comes from the event payload's `audition` flag.
@@ -2272,7 +2276,9 @@ fn audio_thread(
     // than from `queue_state` is what makes it survive backgrounding: that
     // command only runs while the webview is polling, and the whole point of
     // this app is to keep playing with the screen off.
-    let queue_dir = data_dir;
+    let queue_dir = data_dir.clone();
+    let cache_dir_for_skip = cache_dir_for_log.clone();
+    let data_dir_for_skip = data_dir;
     // Cloned before `queue` moves into `HostSource::new` below: the
     // `on_pending_consumed` closure needs its own handle so it can re-read
     // the queue under `SAVE_LOCK` (see the closure body).
@@ -2284,6 +2290,12 @@ fn audio_thread(
             pos: folder_pos,
         },
     )
+        .skip_folder_entry(Box::new(move |path| {
+            if ALLOW_NON_FUNKOT.load(Ordering::Relaxed) {
+                return false;
+            }
+            gated_non_funkot(path, &cache_dir_for_skip, &data_dir_for_skip)
+        }))
         .on_pending_consumed(Box::new(move |_pending| {
             // Ignore the slice this observer is handed — it is a snapshot
             // `HostSource::next` took *after releasing the queue lock*
@@ -2685,6 +2697,10 @@ fn start_impl(
     // runs first only when it succeeds (best-effort; Android's JNI context
     // may not be ready that early), so this is not redundant.
     let _ = DATA_DIR.set(data.clone());
+    {
+        let settings = store::load_settings(&data);
+        ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
+    }
 
     // Restore whatever was still mid-flight or pending from a previous run
     // before the engine starts pulling from the queue. `in_flight` (tracks
@@ -3193,6 +3209,7 @@ mod played_duration_secs_tests {
             outro_bars_manual: false,
             outro_structure_bars_manual: false,
             needs_reanalysis: false,
+            is_funkot: true,
             rms_dbfs: -14.0,
             gain_db: 0.0,
         }
@@ -3437,6 +3454,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
     };
 
     let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
+    let overrides = store::load_overrides(&data_dir);
 
     let mut meta_by_hash = std::collections::BTreeMap::new();
     for path in &paths {
@@ -3444,7 +3462,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
             continue;
         };
         // Same path/bars/manual/analyzed sources as the library table.
-        let row = track_row(path, &cache_dir);
+        let row = track_row(path, &cache_dir, &overrides);
         meta_by_hash.insert(
             hash,
             store::FlagTrackMeta {
@@ -3647,11 +3665,48 @@ fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
 
 /// Append `path` to the tail of the pending queue. Returns the pending
 /// queue's length after the insert.
+///
+/// Rejects with `"non_funkot"` when the track is analysed, effectively
+/// non-Funkot, and `allow_non_funkot` is false. Unanalysed tracks always
+/// pass. Tracks already in the queue are never removed by this gate.
 #[tauri::command(async)]
 fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
-    let len = queue::enqueue(&state.queue, PathBuf::from(path));
+    let dirs = resolve_dirs(&app)?;
+    let path_buf = PathBuf::from(&path);
+    if !ALLOW_NON_FUNKOT.load(Ordering::Relaxed)
+        && gated_non_funkot(
+            &path_buf,
+            Path::new(&dirs.cache_dir),
+            Path::new(&dirs.data_dir),
+        )
+    {
+        return Err("non_funkot".into());
+    }
+    let len = queue::enqueue(&state.queue, path_buf);
     persist_queue(&app, &state);
     Ok(len)
+}
+
+/// Current `allow_non_funkot` setting (also mirrors [`ALLOW_NON_FUNKOT`]).
+#[tauri::command(async)]
+fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
+    let dirs = resolve_dirs(&app)?;
+    let allow = store::load_settings(Path::new(&dirs.data_dir)).allow_non_funkot;
+    ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
+    Ok(allow)
+}
+
+/// Persist `allow_non_funkot` and update the live atomic used by folder drain.
+#[tauri::command(async)]
+fn set_allow_non_funkot(app: tauri::AppHandle, allow: bool) -> Result<bool, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data = Path::new(&dirs.data_dir);
+    let mut settings = store::load_settings(data);
+    settings.allow_non_funkot = allow;
+    store::save_settings(data, &settings)
+        .map_err(|e| format!("cannot save settings: {e}"))?;
+    ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
+    Ok(allow)
 }
 
 /// `queue::edit_displayed`'s `revoke` argument for the main engine: hands
@@ -3861,6 +3916,10 @@ struct TrackRow {
     duration_secs: Option<u32>,
     /// Whether a cached analysis exists. If false, the bar fields are null.
     analyzed: bool,
+    /// Effective Funkot flag (`override.funkot` ?? analysis). Unanalysed rows
+    /// are `true` so the library does not grey them; the enqueue gate still
+    /// lets unanalysed tracks through separately.
+    is_funkot: bool,
     intro_bars: Option<u32>,
     /// The structural outro boundary — where the track collapses. This is the
     /// number the UI shows and edits.
@@ -3898,35 +3957,63 @@ fn analyzed_cache_entry(
         .filter(|a| !a.needs_reanalysis)
 }
 
+/// `true` when the track is analysed and effectively non-Funkot — the gate
+/// condition shared by enqueue reject and folder-drain skip. Unanalysed
+/// tracks are never gated. Does not consult `allow_non_funkot` (caller does).
+fn gated_non_funkot(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> bool {
+    let Some(a) = analyzed_cache_entry(path, cache_dir) else {
+        return false;
+    };
+    let override_funkot = funkot_core::cache::content_hash(path)
+        .ok()
+        .and_then(|h| store::load_overrides(data_dir).get(&h).and_then(|o| o.funkot));
+    !store::effective_is_funkot(a.is_funkot, override_funkot)
+}
+
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `path`.
-fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
+fn track_row(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    overrides: &store::Overrides,
+) -> TrackRow {
     let tags = cached_tags_for(path);
     let (title, artist) = session_metadata_for(Some(path), &tags);
     match analyzed_cache_entry(path, cache_dir) {
-        Some(a) => TrackRow {
-            path: path.to_string_lossy().into_owned(),
-            title,
-            artist,
-            duration_secs: if a.sample_rate == 0 {
-                None
-            } else {
-                Some(((a.total_frames as f64) / (a.sample_rate as f64)).round() as u32)
-            },
-            analyzed: true,
-            intro_bars: Some(a.intro_bars),
-            outro_structure_bars: Some(a.outro_structure_bars),
-            outro_bars: Some(a.outro_bars),
-            intro_manual: a.intro_bars_manual,
-            outro_manual: a.outro_structure_bars_manual || a.outro_bars_manual,
-            intro_low_confidence: a.intro_bars_low_confidence,
-            outro_low_confidence: a.outro_bars_low_confidence,
-        },
+        Some(a) => {
+            let override_funkot = funkot_core::cache::content_hash(path)
+                .ok()
+                .and_then(|h| overrides.get(&h).and_then(|o| o.funkot));
+            TrackRow {
+                path: path.to_string_lossy().into_owned(),
+                title,
+                artist,
+                duration_secs: if a.sample_rate == 0 {
+                    None
+                } else {
+                    Some(((a.total_frames as f64) / (a.sample_rate as f64)).round() as u32)
+                },
+                analyzed: true,
+                is_funkot: store::effective_is_funkot(a.is_funkot, override_funkot),
+                intro_bars: Some(a.intro_bars),
+                outro_structure_bars: Some(a.outro_structure_bars),
+                outro_bars: Some(a.outro_bars),
+                intro_manual: a.intro_bars_manual,
+                outro_manual: a.outro_structure_bars_manual || a.outro_bars_manual,
+                intro_low_confidence: a.intro_bars_low_confidence,
+                outro_low_confidence: a.outro_bars_low_confidence,
+            }
+        }
         None => TrackRow {
             path: path.to_string_lossy().into_owned(),
             title,
             artist,
             duration_secs: None,
             analyzed: false,
+            is_funkot: true,
             intro_bars: None,
             outro_structure_bars: None,
             outro_bars: None,
@@ -3991,7 +4078,7 @@ mod cache_state_tests {
         let dir = TempDir::new("none");
         let (track, _) = track_with_analysis(&dir.0);
         assert!(analyzed_cache_entry(&track, &dir.0).is_none());
-        assert!(!track_row(&track, &dir.0).analyzed);
+        assert!(!track_row(&track, &dir.0, &store::Overrides::new()).analyzed);
     }
 
     #[test]
@@ -4001,7 +4088,7 @@ mod cache_state_tests {
         store_for(&track, &dir.0, &analysis);
 
         assert!(analyzed_cache_entry(&track, &dir.0).is_some());
-        let row = track_row(&track, &dir.0);
+        let row = track_row(&track, &dir.0, &store::Overrides::new());
         assert!(row.analyzed);
         assert_eq!(row.intro_bars, Some(analysis.intro_bars));
         // Tagless fixture: title falls back to file name, artist empty;
@@ -4009,6 +4096,7 @@ mod cache_state_tests {
         assert_eq!(row.title, file_name_str(&track));
         assert_eq!(row.artist, "");
         assert_eq!(row.duration_secs, Some(200));
+        assert_eq!(row.is_funkot, analysis.is_funkot);
     }
 
     /// The regression this whole change turns on. An entry that loads but has
@@ -4024,18 +4112,47 @@ mod cache_state_tests {
         store_for(&track, &dir.0, &analysis);
 
         assert!(analyzed_cache_entry(&track, &dir.0).is_none());
-        let row = track_row(&track, &dir.0);
+        let row = track_row(&track, &dir.0, &store::Overrides::new());
         assert!(!row.analyzed);
         // And the numbers are withheld too: showing bars the engine is about
         // to recompute invites hand-correcting a value that is on its way out.
         assert_eq!(row.intro_bars, None);
         assert_eq!(row.outro_structure_bars, None);
+        assert!(row.is_funkot);
     }
 
     #[test]
     fn an_unreadable_file_reads_as_unanalyzed_rather_than_erroring() {
         let dir = TempDir::new("missing-file");
         assert!(analyzed_cache_entry(&dir.0.join("nope.wav"), &dir.0).is_none());
+    }
+
+    #[test]
+    fn gated_non_funkot_skips_only_analysed_non_funkot() {
+        let cache = TempDir::new("gate-cache");
+        let data = TempDir::new("gate-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+
+        assert!(gated_non_funkot(&track, &cache.0, &data.0));
+        assert!(!gated_non_funkot(
+            &cache.0.join("missing.wav"),
+            &cache.0,
+            &data.0
+        ));
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash,
+            store::BarOverride {
+                funkot: Some(true),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+        assert!(!gated_non_funkot(&track, &cache.0, &data.0));
     }
 
     /// Cancel/undo with `mark_manual = false` must clear the touched side's
@@ -4116,7 +4233,7 @@ mod cache_state_tests {
     fn path_str_matches_track_row_path() {
         let cache = TempDir::new("path-str-cache");
         let (track, _) = track_with_analysis(&cache.0);
-        assert_eq!(path_str(&track), track_row(&track, &cache.0).path);
+        assert_eq!(path_str(&track), track_row(&track, &cache.0, &store::Overrides::new()).path);
     }
 }
 
@@ -4313,8 +4430,12 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let data_dir = PathBuf::from(&dirs.data_dir);
 
     let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
+    let overrides = store::load_overrides(&data_dir);
 
-    let rows: Vec<TrackRow> = paths.iter().map(|p| track_row(p, &cache_dir)).collect();
+    let rows: Vec<TrackRow> = paths
+        .iter()
+        .map(|p| track_row(p, &cache_dir, &overrides))
+        .collect();
 
     if kick_analysis {
         // Reuse what `track_row` already worked out rather than calling
@@ -4403,6 +4524,7 @@ fn set_bars_impl(
     let edit = store::BarOverride {
         intro_bars,
         outro_structure_bars,
+        funkot: None,
     };
     // The cache write comes first: if the track has no analysis yet there is
     // nothing to edit, and storing the override anyway would leave the app
@@ -4442,7 +4564,10 @@ fn set_bars_impl(
         if outro_structure_bars.is_some() {
             entry.outro_structure_bars = None;
         }
-        if entry.intro_bars.is_none() && entry.outro_structure_bars.is_none() {
+        if entry.intro_bars.is_none()
+            && entry.outro_structure_bars.is_none()
+            && entry.funkot.is_none()
+        {
             overrides.remove(&hash);
         }
     }
@@ -4453,7 +4578,7 @@ fn set_bars_impl(
         log::warn!("cannot persist manual bars: {e}");
     }
 
-    Ok(track_row(track, cache_dir))
+    Ok(track_row(track, cache_dir, &overrides))
 }
 
 /// Progress payload for the `analysis-progress` event.
@@ -4568,7 +4693,7 @@ fn spawn_analysis_worker(
                             done: i + 1,
                             total,
                             name,
-                            row: track_row(path, &cache_dir),
+                            row: track_row(path, &cache_dir, &overrides),
                         },
                     );
                     continue;
@@ -4592,7 +4717,7 @@ fn spawn_analysis_worker(
 
                 // Built after `reapply_overrides` so a successful run's row
                 // reflects the corrected numbers, not the analyzer's raw ones.
-                let row = track_row(path, &cache_dir);
+                let row = track_row(path, &cache_dir, &overrides);
                 let _ = app.emit(
                     "analysis-progress",
                     AnalysisProgress {
@@ -4986,6 +5111,8 @@ pub fn run() {
                     let data = PathBuf::from(dirs.data_dir);
                     let _ = DATA_DIR.set(data.clone());
                     let session = store::load_session(&data);
+                    let settings = store::load_settings(&data);
+                    ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
                     let saved = store::load_queue(&data).unwrap_or_else(|e| {
                         log::warn!("setup: load_queue({}): {e}", data.display());
                         Vec::new()
@@ -5026,6 +5153,8 @@ pub fn run() {
             reorder,
             dequeue,
             queue_state,
+            get_allow_non_funkot,
+            set_allow_non_funkot,
             share_feedback
         ])
         .run(tauri::generate_context!())

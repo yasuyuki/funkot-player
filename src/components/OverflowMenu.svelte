@@ -9,6 +9,7 @@
   let feedbackBusy = $state(false);
   let musicDirBusy = $state(false);
   let musicDirResetBusy = $state(false);
+  let allowNonFunkotBusy = $state(false);
 
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
@@ -114,6 +115,22 @@
     }
   }
 
+  async function onToggleAllowNonFunkot() {
+    if (allowNonFunkotBusy) return;
+    allowNonFunkotBusy = true;
+    ui.menuOpen = false;
+    try {
+      await store.doSetAllowNonFunkot(!store.allowNonFunkot);
+      toast.notify(
+        store.allowNonFunkot
+          ? "非Funkotも追加・自動選曲できます"
+          : "非Funkotは追加・自動選曲から除外します",
+      );
+    } finally {
+      allowNonFunkotBusy = false;
+    }
+  }
+
   async function onShareFeedback() {
     if (feedbackBusy) return;
     feedbackBusy = true;
@@ -160,6 +177,9 @@
       {#if store.dirs?.music_dir_configurable && store.dirs?.music_dir_custom}
         <button type="button" onclick={onResetMusicDir} disabled={musicDirResetBusy}>音楽フォルダを既定に戻す</button>
       {/if}
+      <button type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
+        非Funkotも再生: {store.allowNonFunkot ? "ON" : "OFF"}
+      </button>
       <button type="button" onclick={onShowLog}>ログを表示</button>
       <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>意見を送る</button>
     </div>

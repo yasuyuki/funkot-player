@@ -51,6 +51,14 @@
       busy = next;
     }
   }
+
+  function isNonFunkot(row: TrackRow): boolean {
+    return row.analyzed && !row.is_funkot;
+  }
+
+  function addDisabled(row: TrackRow): boolean {
+    return !!busy[row.path] || (isNonFunkot(row) && !store.allowNonFunkot);
+  }
 </script>
 
 <section class="library">
@@ -77,7 +85,7 @@
   <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->
   <ul class="list">
     {#each rows as row (row.path)}
-      <li class="row">
+      <li class="row" class:non-funkot={isNonFunkot(row)}>
         <div class="text">
           <div class="title">{row.title}</div>
           <div class="sub">
@@ -89,7 +97,7 @@
         <button
           type="button"
           class="add"
-          disabled={!!busy[row.path]}
+          disabled={addDisabled(row)}
           onclick={() => onAdd(row.path)}
           aria-label={`${row.title} をキューに追加`}
         >+</button>
@@ -160,6 +168,11 @@
     gap: var(--space-md);
     height: var(--library-row-height);
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .row.non-funkot {
+    opacity: 0.45;
+    color: var(--color-text-dim);
   }
 
   .text {

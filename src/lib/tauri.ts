@@ -61,6 +61,9 @@ export interface TrackRow {
   artist: string;
   duration_secs: number | null;
   analyzed: boolean;
+  /// Effective Funkot flag. Unanalysed rows are `true` (not greyed); grey
+  /// with `analyzed && !is_funkot`.
+  is_funkot: boolean;
   intro_bars: number | null;
   outro_structure_bars: number | null;
   outro_bars: number | null;
@@ -163,6 +166,16 @@ export function queueState(): Promise<QueueSnapshot> {
 
 export function enqueue(path: string): Promise<number> {
   return invoke<number>("enqueue", { path });
+}
+
+/// Current `settings.json` `allow_non_funkot` (also drives the live gate).
+export function getAllowNonFunkot(): Promise<boolean> {
+  return invoke<boolean>("get_allow_non_funkot");
+}
+
+/// Persist and apply `allow_non_funkot`. Returns the saved value.
+export function setAllowNonFunkot(allow: boolean): Promise<boolean> {
+  return invoke<boolean>("set_allow_non_funkot", { allow });
 }
 
 // `index`/`from`/`to` below are indices into the *displayed* queue list

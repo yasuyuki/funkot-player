@@ -27,6 +27,8 @@ import {
   resumeAutodj as resumeAutodjCmd,
   setMusicDir as setMusicDirCmd,
   resetMusicDir as resetMusicDirCmd,
+  getAllowNonFunkot as getAllowNonFunkotCmd,
+  setAllowNonFunkot as setAllowNonFunkotCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -66,6 +68,8 @@ class PlayerStore {
   lastError = $state<string | null>(null);
   /// Edit-tab flagged list (`list_flagged_tracks`). Empty until first load.
   flaggedRows = $state<FlaggedTrackRow[]>([]);
+  /// `settings.json` `allow_non_funkot`. Grey styling is independent of this.
+  allowNonFunkot = $state(false);
 
   /// Wall-clock time (`Date.now()`) the current `player.position_secs` was
   /// read at, so `elapsed` can add "how long ago was that" on top of it
@@ -97,6 +101,11 @@ class PlayerStore {
       if (this.dirs.music_dir_unavailable) {
         this.lastError = `指定した音楽フォルダを開けません: ${this.dirs.music_dir_custom}（既定のフォルダを使います）`;
       }
+    } catch (e) {
+      this.lastError = String(e);
+    }
+    try {
+      this.allowNonFunkot = await getAllowNonFunkotCmd();
     } catch (e) {
       this.lastError = String(e);
     }
@@ -337,6 +346,14 @@ class PlayerStore {
     try {
       await enqueueCmd(path);
       await this.#refreshQueueNow();
+    } catch (e) {
+      this.lastError = String(e);
+    }
+  }
+
+  async doSetAllowNonFunkot(allow: boolean): Promise<void> {
+    try {
+      this.allowNonFunkot = await setAllowNonFunkotCmd(allow);
     } catch (e) {
       this.lastError = String(e);
     }

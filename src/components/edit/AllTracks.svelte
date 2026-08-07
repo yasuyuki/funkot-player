@@ -72,6 +72,14 @@
       busy = false;
     }
   }
+
+  function isNonFunkot(row: TrackRow): boolean {
+    return row.analyzed && !row.is_funkot;
+  }
+
+  function addDisabled(row: TrackRow): boolean {
+    return busy || (isNonFunkot(row) && !store.allowNonFunkot);
+  }
 </script>
 
 <div class="wrap">
@@ -87,7 +95,7 @@
     </thead>
     <tbody>
       {#each rows as row (row.path)}
-        <tr>
+        <tr class:non-funkot={isNonFunkot(row)}>
           <td class="name">{store.relName(row.path)}</td>
           <td>
             {#if row.intro_bars === null}
@@ -118,7 +126,7 @@
             <button
               type="button"
               class="add"
-              disabled={busy}
+              disabled={addDisabled(row)}
               onclick={() => onAdd(row.path)}
             >+</button>
           </td>
@@ -167,6 +175,11 @@
   th {
     color: var(--color-text-dim);
     font-weight: 600;
+  }
+
+  tr.non-funkot {
+    opacity: 0.45;
+    color: var(--color-text-dim);
   }
 
   .name {

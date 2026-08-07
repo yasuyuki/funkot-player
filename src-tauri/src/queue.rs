@@ -323,6 +323,10 @@ pub type PendingObserver = Box<dyn FnMut(&[PathBuf]) + Send>;
 /// queue or the folder-drain fallback. See [`HostSource::on_reserved`].
 pub type ReservedObserver = Box<dyn FnMut(&Path) + Send>;
 
+/// Called for each folder-drain candidate; return `true` to skip that path
+/// and try the next. See [`HostSource::skip_folder_entry`].
+pub type FolderSkip = Box<dyn FnMut(&Path) -> bool + Send>;
+
 /// `TrackSource` backed by a [`SharedQueue`] instead of a fixed playlist, so a
 /// host can append/reorder/remove tracks while the engine is already running.
 ///
@@ -336,6 +340,7 @@ pub struct HostSource {
     calls: usize,
     on_pending_consumed: Option<PendingObserver>,
     on_reserved: Option<ReservedObserver>,
+    folder_skip: Option<FolderSkip>,
 }
 
 impl HostSource {
@@ -346,7 +351,17 @@ impl HostSource {
             calls: 0,
             on_pending_consumed: None,
             on_reserved: None,
+            folder_skip: None,
         }
+    }
+
+    /// Skip folder-drain candidates for which `skip` returns `true` (e.g.
+    /// analysed non-Funkot while the gate is on). Pending-queue entries are
+    /// never filtered. If every folder entry is skipped in one full cycle,
+    /// [`TrackSource::next`] returns `None` (exhausted).
+    pub fn skip_folder_entry(mut self, skip: FolderSkip) -> Self {
+        self.folder_skip = Some(skip);
+        self
     }
 
     /// Run `observer` whenever `next` removes an entry from the pending queue,
@@ -399,37 +414,46 @@ impl HostSource {
 
 impl TrackSource for HostSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
-        let mut q = self.queue.lock().unwrap();
-        let mut consumed_pending = true;
-        let path = match q.pending.pop_front() {
-            Some(path) => path,
-            None => match &mut self.policy {
-                DrainPolicy::ContinueFolder { tracks, pos } => {
-                    consumed_pending = false;
-                    if tracks.is_empty() {
-                        q.reserved = None;
-                        return None;
-                    }
-                    // Wrap before indexing, not just after: `pos` is a public
-                    // field, so a caller can hand us one that is already past
-                    // the end. Panicking here would kill the loader thread and
-                    // stop playback with no way back (see the module docs on
-                    // the `loader_exhausted` latch).
-                    if *pos >= tracks.len() {
-                        *pos = 0;
-                    }
-                    let path = tracks[*pos].clone();
-                    *pos = (*pos + 1) % tracks.len();
-                    path
+        // Take the skip callback out so `pick_folder_track` can borrow
+        // `self.policy` and the callback at the same time.
+        let mut folder_skip = self.folder_skip.take();
+        let result = self.next_with_skip(&mut folder_skip);
+        self.folder_skip = folder_skip;
+        result
+    }
+}
+
+impl HostSource {
+    fn next_with_skip(
+        &mut self,
+        folder_skip: &mut Option<FolderSkip>,
+    ) -> Option<(usize, PathBuf)> {
+        let (path, remaining) = {
+            let mut q = self.queue.lock().unwrap();
+            match q.pending.pop_front() {
+                Some(path) => {
+                    q.reserved = Some(path.clone());
+                    let remaining = Some(q.pending.iter().cloned().collect::<Vec<_>>());
+                    (path, remaining)
                 }
-            },
+                None => {
+                    // Release before folder-skip I/O (cache / overrides): those
+                    // can take milliseconds and must not stall enqueue/reorder.
+                    drop(q);
+                    let path = match Self::pick_folder_track(&mut self.policy, folder_skip) {
+                        Some(path) => path,
+                        None => {
+                            let mut q = self.queue.lock().unwrap();
+                            q.reserved = None;
+                            return None;
+                        }
+                    };
+                    let mut q = self.queue.lock().unwrap();
+                    q.reserved = Some(path.clone());
+                    (path, None)
+                }
+            }
         };
-        q.reserved = Some(path.clone());
-        // Snapshot under the lock, notify without it: the observer writes to
-        // disk, and the queue's mutex is also taken by Tauri commands.
-        let remaining: Option<Vec<PathBuf>> =
-            consumed_pending.then(|| q.pending.iter().cloned().collect());
-        drop(q);
         if let (Some(remaining), Some(observer)) =
             (remaining, self.on_pending_consumed.as_mut())
         {
@@ -441,6 +465,42 @@ impl TrackSource for HostSource {
         let index = self.calls;
         self.calls += 1;
         Some((index, path))
+    }
+
+    /// Next folder-drain path that `folder_skip` does not reject, advancing
+    /// `pos` for every considered entry (skipped or not). `None` when the
+    /// folder list is empty or every entry is skipped in one full cycle.
+    fn pick_folder_track(
+        policy: &mut DrainPolicy,
+        folder_skip: &mut Option<FolderSkip>,
+    ) -> Option<PathBuf> {
+        let DrainPolicy::ContinueFolder { tracks, pos } = policy;
+        if tracks.is_empty() {
+            return None;
+        }
+        // Wrap before indexing, not just after: `pos` is a public
+        // field, so a caller can hand us one that is already past
+        // the end. Panicking here would kill the loader thread and
+        // stop playback with no way back (see the module docs on
+        // the `loader_exhausted` latch).
+        if *pos >= tracks.len() {
+            *pos = 0;
+        }
+        let start = *pos;
+        loop {
+            let path = tracks[*pos].clone();
+            *pos = (*pos + 1) % tracks.len();
+            let skip = folder_skip
+                .as_mut()
+                .map(|f| f(path.as_path()))
+                .unwrap_or(false);
+            if !skip {
+                return Some(path);
+            }
+            if *pos == start {
+                return None;
+            }
+        }
     }
 }
 
@@ -637,6 +697,37 @@ mod tests {
         assert_eq!(source.next(), Some((1, p("f2"))));
         assert_eq!(source.next(), Some((2, p("f1"))));
         assert_eq!(source.next(), Some((3, p("f2"))));
+    }
+
+    #[test]
+    fn host_source_skips_folder_entries_matching_predicate() {
+        let q = new_shared_queue();
+        let mut source = HostSource::new(q, folder_policy(&["f1", "skip", "f3"])).skip_folder_entry(
+            Box::new(|path| path.file_name().and_then(|n| n.to_str()) == Some("skip")),
+        );
+        assert_eq!(source.next(), Some((0, p("f1"))));
+        assert_eq!(source.next(), Some((1, p("f3"))));
+        assert_eq!(source.next(), Some((2, p("f1"))));
+    }
+
+    #[test]
+    fn host_source_folder_exhausts_when_all_entries_skipped() {
+        let q = new_shared_queue();
+        let mut source = HostSource::new(Arc::clone(&q), folder_policy(&["a", "b"]))
+            .skip_folder_entry(Box::new(|_| true));
+        assert_eq!(source.next(), None);
+        assert_eq!(reserved(&q), None);
+    }
+
+    #[test]
+    fn host_source_folder_skip_does_not_filter_pending() {
+        let q = new_shared_queue();
+        enqueue(&q, p("pending-non-funkot"));
+        let mut source = HostSource::new(Arc::clone(&q), folder_policy(&["f1"]))
+            .skip_folder_entry(Box::new(|_| true));
+        assert_eq!(source.next(), Some((0, p("pending-non-funkot"))));
+        // Folder has only skippable entries left → exhausted.
+        assert_eq!(source.next(), None);
     }
 
     #[test]
