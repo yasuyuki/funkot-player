@@ -268,9 +268,13 @@ GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
   Wayland the window cannot be driven or captured from a second container;
   on X11 `xdotool` and `import` both work, and both are in the image:
   ```sh
-  ./dev.sh sh -c 'w=$(xdotool search --name "^funkot-player$" | tail -1);
-      xdotool mousemove --window $w 210 40 click 1'   # window-relative
+  GUI=1 ./dev.sh sh -c 'w=$(xdotool search --onlyvisible --name "^Funkot$" | tail -1);
+      xdotool windowactivate --sync "$w";
+      xdotool mousemove --sync --window "$w" 137 197 click 1'   # 「開始」@420x760
   ```
+  Search by `productName` (`Funkot`) or `--class funkot-player` — not the
+  binary name as `--name`. Use XTEST (`click` / `mousedown` without
+  `--window`); `click --window ID` is XSendEvent and GTK/WebKit ignore it.
   Screen-absolute coordinates are the wrong tool: the window manager offsets
   the frame, so `mousemove --window` is what lands on the button.
 - `⏸` and `⏭` come out as tofu in the container — it ships no font covering
