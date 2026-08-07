@@ -78,9 +78,29 @@ To send feedback, use **⋮ → 意見を送る** — on Windows this saves a ZI
 shows its path (there is no system share sheet). Attach that file in email or
 chat.
 
-## Adding tracks (USB)
+## Adding tracks (Android)
 
-The app plays from its own Music folder. On a Pixel / stock Android device:
+### Share them to the app (no cable)
+
+Share the track files to **Funkot** from anywhere on the phone — a file
+manager, Google Drive, LINE, or a Quick Share transfer that just arrived from
+a PC. The app copies them into its Music folder and rescans on its own; there
+is no folder to find and nothing to press afterwards.
+
+This is how to get tracks across from a PC without a cable: send them to the
+phone by whatever you already use (Quick Share for Windows, Drive, email),
+then share them from the phone's Downloads into Funkot. Multi-select works.
+
+The share sheet offers Funkot for anything the system calls `audio/*`, which
+is wider than what the engine can decode — only `.wav` / `.mp3` / `.flac` /
+`.m4a` / `.ogg` are taken, and the app says so when it drops the rest. Some
+apps send audio as `application/octet-stream`; Funkot does not appear in the
+share sheet for those.
+
+### Or copy over USB
+
+The app also plays whatever is dropped straight into its Music folder. On a
+Pixel / stock Android device:
 
 ```
 phone → Android → data → jp.hatsuboshi.funkotplayer → files → Music
@@ -100,8 +120,9 @@ phone → Android → data → jp.hatsuboshi.funkotplayer → files → Music
 5. **In the app**, press **開始** the first time, or **⋮ → 再スキャン** after
    adding more tracks.
 
-Only the music shows up over MTP. Queue, analysis cache, and your bar-count
-corrections stay on the phone.
+Some devices hide `Android/data` from MTP entirely; on those, sharing is the
+only route. Only the music shows up over MTP either way — queue, analysis
+cache, and your bar-count corrections stay on the phone.
 
 ## Using the app
 
@@ -356,6 +377,38 @@ place it matters, but they are easy to undo by accident:
   leaving playback itself working, so it is easy to miss.
 - The Tauri CLI must be a **project-local** npm install. A global one makes the
   generated Gradle task run `node tauri` and fail to resolve it.
+- **Share-sheet import keeps no in-process queue.** `Import.kt` stages a file
+  as `<name>.part` and renames it once the copy finishes; the staging
+  directory's own contents are what `take_pending_import` walks. An in-memory
+  list of "what was staged" looks simpler and is wrong twice over: it drops a
+  file that finishes copying between a status check and the read, and it
+  strands one permanently if the process dies before the read — the list does
+  not survive a restart, but the file on disk does.
+- **`Import.hasInFlight()` must be read *before* that walk, never after.**
+  Read after, a copy that lands between the walk and the read reports
+  `in_flight: false`, so the frontend never looks again — and post-cold-start
+  the `visibilitychange` path does not fire either, so the share is lost.
+- **`MainActivity.onCreate` guards on `savedInstanceState == null`.** A
+  configuration change this Activity does not declare in `android:configChanges`
+  (a system font-size change is enough) re-runs `onCreate` with the same
+  `ACTION_SEND` intent, and without the guard the file is imported twice.
+- **A hand-fired `ACTION_SEND` needs the URI in `-d` as well as in the extra.**
+  `ActivityManager` only grants read access to URIs it finds in the intent's
+  data and `ClipData`; one that exists solely in `EXTRA_STREAM` gets no grant,
+  and `openInputStream` then fails with `SecurityException` — the app opens and
+  silently imports nothing. Real senders avoid this because `startActivity`
+  runs `Intent.migrateExtraStreamToClipData()` in the *sending* process. So a
+  test intent has to name the URI twice:
+
+  ```
+  adb shell am start -a android.intent.action.SEND -t audio/mpeg \
+    -n jp.hatsuboshi.funkotplayer/.MainActivity --grant-read-uri-permission \
+    -d content://media/external/audio/media/<id> \
+    --eu android.intent.extra.STREAM content://media/external/audio/media/<id>
+  ```
+
+  `am` has no option that builds an `ArrayList<Uri>`, so `ACTION_SEND_MULTIPLE`
+  cannot be fired this way at all — it has to come from a real share sheet.
 
 ## Licence
 

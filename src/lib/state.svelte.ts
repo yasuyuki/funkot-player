@@ -29,17 +29,20 @@ import {
   resetMusicDir as resetMusicDirCmd,
   getAllowNonFunkot as getAllowNonFunkotCmd,
   setAllowNonFunkot as setAllowNonFunkotCmd,
+  takePendingImport as takePendingImportCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
   AppDirs,
   FlaggedTrackRow,
   FlagResult,
+  ImportResult,
   LibraryScanProgress,
   PlayerState,
   QueueSnapshot,
   TrackRow,
 } from "./tauri";
+import { toast } from "./toast.svelte";
 
 /// How often `player_state` / `queue_state` are polled. A self-rescheduling
 /// `setTimeout`, not `setInterval`: an `invoke` that is slow to answer (or a
@@ -49,6 +52,13 @@ const POLL_INTERVAL_MS = 500;
 
 /// How often the client-side elapsed-time interpolation between polls ticks.
 const INTERPOLATION_TICK_MS = 250;
+
+/// How long `doTakePendingImport` waits before retrying while
+/// `ImportResult.in_flight` is `true` (`Import.kt`'s copy thread has not
+/// finished yet). Not folded into `POLL_INTERVAL_MS`'s `#poll` loop -- that
+/// would hit the JNI drain on every tick instead of only while a share-sheet
+/// copy is actually in progress.
+const IMPORT_RETRY_MS = 1500;
 
 class PlayerStore {
   dirs = $state<AppDirs | null>(null);
@@ -88,6 +98,23 @@ class PlayerStore {
   /// Shared with `#reloadLibraryQuiet` so analysis-done cannot start a second
   /// `refresh_library` on top of an in-flight rescan (or vice versa).
   #libraryBusy = false;
+  /// Guards `doTakePendingImport` against overlapping calls -- same role as
+  /// `#libraryBusy`. The cold-start call in `#init` and the
+  /// `visibilitychange` listener can otherwise race (e.g. backgrounding the
+  /// app again immediately after launch).
+  #importBusy = false;
+  /// Set when a `doTakePendingImport` call is bounced by `#importBusy`
+  /// instead of silently dropped: the in-flight call's `finally` re-runs it
+  /// exactly once after finishing, so a share that lands while the previous
+  /// drain is still running is not lost until the next unrelated trigger
+  /// (`visibilitychange`, the `in_flight` retry, …).
+  #importPending = false;
+  /// Set when `doTakePendingImport` imported something but the follow-up
+  /// `doRefreshLibrary()` was bounced by `#libraryBusy` (typically the
+  /// startup walk still running) -- the newly-copied file may have appeared
+  /// too late for that walk to see it, so a refresh is still owed even once
+  /// a later `doTakePendingImport` call finds nothing new left to import.
+  #importRefreshOwed = false;
   /// Bumped on every immediate queue refresh after enqueue/dequeue/reorder.
   /// Poll / refresh responses whose captured gen no longer matches are
   /// discarded so a slow poll cannot overwrite a fresher post-mutation snapshot.
@@ -108,6 +135,11 @@ class PlayerStore {
     } catch (e) {
       this.lastError = String(e);
     }
+    // Cold-start share-sheet import (Android only; a no-op elsewhere -- see
+    // `take_pending_import`'s doc comment). Awaited so a track shared in
+    // before launch is already on disk for the startup `refreshLibrary` walk
+    // below, rather than waiting for the next rescan.
+    await this.doTakePendingImport();
     try {
       this.allowNonFunkot = await getAllowNonFunkotCmd();
     } catch (e) {
@@ -135,6 +167,17 @@ class PlayerStore {
     } catch (e) {
       this.lastError = String(e);
     }
+
+    // Already-running share-sheet import (Android only): the app comes back
+    // to the foreground rather than restarting, so `#init` never runs again
+    // -- this is the only other point files staged by `Import.kt` get drained.
+    // Deliberately not folded into `#poll` (500ms): that would hit the JNI
+    // drain on every tick instead of only when the app was just backgrounded.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        void this.doTakePendingImport();
+      }
+    });
 
     // The old UI only fetched the library when ⟳ was pressed; this fetches it
     // at startup because the now-playing title/artist are resolved against it
@@ -431,6 +474,76 @@ class PlayerStore {
     } finally {
       this.libraryScan = null;
       this.#libraryBusy = false;
+    }
+  }
+
+  /// Drains files staged by the Android share sheet (`Import.kt`) into
+  /// `music_dir` and, if any landed, rescans and toasts a summary. Always a
+  /// silent no-op on desktop (`take_pending_import` returns zeros there).
+  /// Called from `#init` (cold start), the `visibilitychange` listener
+  /// (already running), and itself (see the `finally` block below for the
+  /// three reasons it reschedules itself).
+  ///
+  /// Sharing nothing usable (e.g. a lone `.opus`, which the share sheet's
+  /// `audio/*` filter happily matches even though the engine cannot decode
+  /// it) still gets a toast -- silently deleting the staged file and saying
+  /// nothing would look like the app ignored the share entirely.
+  async doTakePendingImport(): Promise<void> {
+    if (this.#importBusy) {
+      // Do not drop this call on the floor: whatever triggered it (another
+      // `visibilitychange`, a fresh share) may not fire again. The call
+      // that is currently running re-runs this once more after it finishes
+      // -- see the `finally` block below.
+      this.#importPending = true;
+      return;
+    }
+    this.#importBusy = true;
+    let result: ImportResult | null = null;
+    try {
+      result = await takePendingImportCmd();
+      if (result.tracks > 0) {
+        const notes: string[] = [];
+        if (result.skipped > 0) notes.push(`非対応${result.skipped}件`);
+        if (result.failed > 0) notes.push(`失敗${result.failed}件`);
+        const suffix = notes.length > 0 ? `（${notes.join("・")}）` : "";
+        toast.notify(`${result.tracks}曲を取り込みました${suffix}`);
+      } else if (result.skipped > 0 || result.failed > 0) {
+        const notes: string[] = [];
+        if (result.skipped > 0) {
+          notes.push(`対応していない形式のため${result.skipped}件を取り込めませんでした`);
+        }
+        if (result.failed > 0) {
+          notes.push(`${result.failed}件の取り込みに失敗しました`);
+        }
+        toast.notify(notes.join("、"));
+      }
+      // Only worth attempting when something actually landed this call, or
+      // an earlier call's attempt was itself bounced (`#importRefreshOwed`)
+      // -- otherwise there is nothing new for a walk to find.
+      if (result.tracks > 0 || this.#importRefreshOwed) {
+        const refreshed = await this.doRefreshLibrary();
+        this.#importRefreshOwed = !refreshed.ok && "busy" in refreshed;
+      }
+    } catch (e) {
+      this.lastError = String(e);
+    } finally {
+      // Released before either retry path below, on purpose: both call
+      // `doTakePendingImport` again, which would otherwise find
+      // `#importBusy` still true and bounce off itself.
+      this.#importBusy = false;
+      if (this.#importPending) {
+        // A call landed while this one was running -- run it once more
+        // immediately, not on `IMPORT_RETRY_MS`: unlike the two cases
+        // below, that caller is not waiting on a timer of its own.
+        this.#importPending = false;
+        void this.doTakePendingImport();
+      } else if (result?.in_flight || this.#importRefreshOwed) {
+        // `in_flight`: `Import.kt`'s copy thread had not finished yet (see
+        // `ImportResult.in_flight` in `tauri.ts`). `#importRefreshOwed`: the
+        // library walk that would have shown an already-imported track was
+        // busy; see its own doc comment.
+        setTimeout(() => void this.doTakePendingImport(), IMPORT_RETRY_MS);
+      }
     }
   }
 

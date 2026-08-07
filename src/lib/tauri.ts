@@ -324,3 +324,26 @@ export interface ShareFeedbackResult {
 export function shareFeedback(): Promise<ShareFeedbackResult> {
   return invoke<ShareFeedbackResult>("share_feedback");
 }
+
+/// Matches `ImportResult`.
+export interface ImportResult {
+  /** Files copied into `music_dir`. */
+  tracks: number;
+  /** Staged files whose extension is not one the engine can decode. */
+  skipped: number;
+  /** Staged files that passed the extension check but whose copy failed. */
+  failed: number;
+  /**
+   * `true` when `Import.kt` is still copying a share-sheet file into the
+   * staging dir. The caller should retry shortly rather than treat this
+   * drain as final — see `doTakePendingImport` in `state.svelte.ts`.
+   */
+  in_flight: boolean;
+}
+
+/// Drains files staged by the Android share sheet (`Import.kt`) into
+/// `music_dir`. Always `{ tracks: 0, skipped: 0, failed: 0, in_flight: false }`
+/// on desktop, since nothing ever stages anything there.
+export function takePendingImport(): Promise<ImportResult> {
+  return invoke<ImportResult>("take_pending_import");
+}

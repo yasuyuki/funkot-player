@@ -792,6 +792,122 @@ fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> 
     }
 }
 
+/// Outcome of [`take_pending_import`].
+#[derive(serde::Serialize, Clone, Debug, Default)]
+struct ImportResult {
+    /// Files copied into `music_dir`.
+    tracks: u32,
+    /// Staged files whose extension `is_supported_track` does not recognise.
+    skipped: u32,
+    /// Staged files that passed `classify_import` but whose copy into
+    /// `music_dir` failed (`copy_atomic`).
+    failed: u32,
+    /// `true` when `Import.kt` is still copying a file into the staging
+    /// dir. `Import.onIntent`'s copy runs on a background thread and this
+    /// command can easily win the race against it — a multi-MB share is
+    /// still copying by the time the cold-start `take_pending_import` call
+    /// runs. Without this, that call sees an empty (or partial) staging dir
+    /// and never retries: the app is already foregrounded by then, so the
+    /// `visibilitychange` path never fires again either, and the share is
+    /// silently lost. The frontend polls again shortly while this is `true`
+    /// (see `doTakePendingImport` in `state.svelte.ts`). Always `false` on
+    /// desktop.
+    in_flight: bool,
+}
+
+/// The receiving half of [`share_feedback`]'s ZIP-out path: walks files
+/// `Import.kt` staged from the system share sheet (`getCacheDir()/
+/// funkot-import/`, filled by `Import.onIntent` — see `AndroidManifest.xml`'s
+/// `ACTION_SEND` / `ACTION_SEND_MULTIPLE` intent filters) into `music_dir`.
+///
+/// Desktop is always a no-op: nothing ever stages anything there, since
+/// those intent filters only exist on Android.
+///
+/// The staging directory's actual contents are the source of truth here —
+/// there is deliberately no separate in-process queue of what was staged
+/// (an earlier version of this command had one; it could both drop a file
+/// that finished copying in the gap between a status check and the drain,
+/// and permanently strand one if the process died between the copy
+/// finishing and the next drain, since the queue does not survive a
+/// restart but the file on disk does).
+///
+/// Every staged file this walk actually looks at (i.e. not a `.part` still
+/// being written) is removed regardless of outcome — copied, skipped for an
+/// unsupported extension, or a failed copy — so `funkot-import/` never
+/// accumulates leftovers across calls.
+#[tauri::command(async)]
+fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = &app;
+        Ok(ImportResult::default())
+    }
+    #[cfg(target_os = "android")]
+    {
+        let dirs = resolve_dirs(&app)?;
+        let music_dir = Path::new(&dirs.music_dir);
+
+        // Read before the walk below, never after: `Import.kt` only ever
+        // creates a `<name>.part` file while a copy thread owns it, and
+        // renames it to its final name once the copy finishes. If a copy
+        // finishes *after* this read but the `<name>.part` -> `<name>` rename
+        // still lands inside the `read_dir` snapshot below, this being read
+        // first means it is still `true`, so the frontend retries and picks
+        // the file up on the next call. Reading it after the walk instead
+        // would let that same file slip through as `in_flight: false` with
+        // nothing telling the frontend to look again.
+        let in_flight = android_import_has_in_flight()?;
+
+        let staging_dir = android_cache_dir()?.join("funkot-import");
+        let mut result = ImportResult {
+            in_flight,
+            ..ImportResult::default()
+        };
+        let entries = match std::fs::read_dir(&staging_dir) {
+            Ok(entries) => entries,
+            // Nothing has ever been shared yet — not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+            Err(e) => return Err(format!("cannot read {}: {e}", staging_dir.display())),
+        };
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("part") {
+                // A `.part` file only exists while `Import.onIntent`'s copy
+                // thread owns it (see `copy_atomic`'s Kotlin counterpart).
+                // `in_flight` was read above, before this snapshot, so `false`
+                // here means no such thread was running even before this walk
+                // started -- this one was abandoned (most likely the process
+                // died mid-copy) and will never be finished or claimed.
+                if !in_flight {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            match classify_import(&path, music_dir, |p| p.exists()) {
+                ImportDecision::Skip => result.skipped += 1,
+                ImportDecision::CopyTo(dest) => match copy_atomic(&path, &dest) {
+                    Ok(()) => result.tracks += 1,
+                    Err(e) => {
+                        result.failed += 1;
+                        log::warn!(
+                            "cannot import {} to {}: {e}",
+                            path.display(),
+                            dest.display()
+                        );
+                    }
+                },
+            }
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("cannot remove staged import {}: {e}", path.display());
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
 /// Serialises writes under `data_dir` (`queue.json`, `flags.json`, and
 /// `session.json`).
 ///
@@ -2578,6 +2694,294 @@ fn is_supported_track(path: &std::path::Path) -> bool {
         .map(|e| matches!(e.to_ascii_lowercase().as_str(),
             "wav" | "mp3" | "flac" | "m4a" | "ogg"))
         .unwrap_or(false)
+}
+
+/// What `take_pending_import` should do with one candidate path found in the
+/// staging dir (`getCacheDir()/funkot-import/`).
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+enum ImportDecision {
+    /// `is_supported_track` does not recognise the extension — count towards
+    /// `ImportResult::skipped`, do not copy.
+    Skip,
+    /// Copy the candidate to this path under `music_dir` (already resolved
+    /// past any name collision).
+    CopyTo(PathBuf),
+}
+
+/// Decides what to do with one path found in the staging dir, without
+/// touching the filesystem beyond the injected `exists` check (same pattern
+/// as `resolve_music_dir`'s `readable`).
+///
+/// Only `candidate`'s file name is used to build the destination — even if it
+/// carries directory separators or `..` segments (defense in depth:
+/// `Import.kt` already sanitises the display name it copies into the
+/// cache-staged file, but this must not trust that unconditionally) — so the
+/// result can never leave `music_dir`. A `candidate` with no file name at all
+/// (e.g. `..` or `/`) is treated as unsupported.
+///
+/// Strips any leading dots from the stem before building the destination
+/// name: `scan_tracks_into` skips dot-prefixed entries unconditionally, but
+/// `is_supported_track` does not reject a dot-prefixed name (`.hidden.mp3`
+/// still has a recognised `mp3` extension) — without this, such a file would
+/// report as imported (`ImportResult::tracks`) and then never appear in the
+/// library. If stripping leaves nothing before the extension, the candidate
+/// is treated as unsupported.
+///
+/// On a name collision, appends a `" (2)"`, `" (3)"`, … suffix before the
+/// extension, same convention as most desktop file managers, and never
+/// overwrites an existing file.
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn classify_import(
+    candidate: &Path,
+    music_dir: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> ImportDecision {
+    if !is_supported_track(candidate) {
+        return ImportDecision::Skip;
+    }
+    let Some(file_name) = candidate.file_name().and_then(|n| n.to_str()) else {
+        return ImportDecision::Skip;
+    };
+    // Both `unwrap_or_default` fallbacks are unreachable in practice:
+    // `is_supported_track` above only returns `true` once `Path::extension`
+    // already did, and `Path::file_stem` returns `None` under the exact same
+    // condition `extension` does (a name that is only a leading dot, e.g.
+    // `.mp3`) — so once `is_supported_track` holds, both are `Some`. Kept as
+    // fallbacks rather than an `unwrap`/`expect` purely to avoid a panic if
+    // that invariant is ever wrong.
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    let visible_stem = stem.trim_start_matches('.');
+    if visible_stem.is_empty() {
+        return ImportDecision::Skip;
+    }
+    let mut n: u32 = 1;
+    loop {
+        let name = if n == 1 {
+            format!("{visible_stem}.{ext}")
+        } else {
+            format!("{visible_stem} ({n}).{ext}")
+        };
+        let dest = music_dir.join(&name);
+        if !exists(&dest) {
+            return ImportDecision::CopyTo(dest);
+        }
+        n += 1;
+    }
+}
+
+/// Copies `src` into `music_dir` at `dest` atomically, through injected
+/// `copy` / `rename` / `remove_tmp` operations so the failure path (the temp
+/// file cleaned up, not left behind) is testable without touching the
+/// filesystem — same pattern as `classify_import`'s `exists`. The real
+/// [`copy_atomic`] is this wired to `std::fs`.
+///
+/// The temp file lives in `dest`'s own parent (i.e. inside `music_dir`), not
+/// the staging dir: `fs::rename` is only atomic within one filesystem, and
+/// `music_dir` (external storage) and the staging dir (`getCacheDir()`,
+/// internal storage) are different mounts on Android.
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn copy_atomic_with(
+    src: &Path,
+    dest: &Path,
+    copy: impl FnOnce(&Path, &Path) -> std::io::Result<u64>,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    remove_tmp: impl FnOnce(&Path),
+) -> std::io::Result<()> {
+    let Some(parent) = dest.parent() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "dest has no parent",
+        ));
+    };
+    let tmp = parent.join(".funkot-import.part");
+    let result = copy(src, &tmp).and_then(|_bytes| rename(&tmp, dest));
+    if result.is_err() {
+        remove_tmp(&tmp);
+    }
+    result
+}
+
+/// Copies `src` into `music_dir` at `dest`. See [`copy_atomic_with`] for why
+/// this goes through a temp file rather than `fs::copy` straight to `dest`:
+/// a `fs::copy` that fails partway (or a concurrent `refresh_library` walk)
+/// must never see a truncated file directly at `dest`, which
+/// `scan_tracks_into` would otherwise pick up as a broken track to analyse,
+/// or the library-list dedup keys off half-written bytes.
+#[cfg(target_os = "android")]
+fn copy_atomic(src: &Path, dest: &Path) -> std::io::Result<()> {
+    // Wrapped in closures rather than passed as `std::fs::copy` /
+    // `std::fs::rename` directly: a bare generic fn item only monomorphizes
+    // to one concrete lifetime, which fails `copy_atomic_with`'s `for<'a>
+    // FnOnce(&'a Path, ...)` bound ("implementation of `FnOnce` is not
+    // general enough"); a closure lets inference produce the higher-ranked
+    // signature instead.
+    copy_atomic_with(
+        src,
+        dest,
+        |from, to| std::fs::copy(from, to),
+        |from, to| std::fs::rename(from, to),
+        |tmp| {
+            let _ = std::fs::remove_file(tmp);
+        },
+    )
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn classify_import_skips_an_unsupported_extension() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/photo.jpg"), music_dir, |_| false);
+        assert_eq!(decision, ImportDecision::Skip);
+    }
+
+    #[test]
+    fn classify_import_avoids_overwriting_an_existing_file() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/song.mp3"), music_dir, |p| {
+            p == Path::new("/music/song.mp3")
+        });
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/song (2).mp3"))
+        );
+    }
+
+    /// A second collision (both the plain name and the first `(2)` suffix
+    /// already taken) must keep counting up rather than overwrite either.
+    #[test]
+    fn classify_import_keeps_counting_up_past_the_first_collision() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/song.mp3"), music_dir, |p| {
+            p == Path::new("/music/song.mp3") || p == Path::new("/music/song (2).mp3")
+        });
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/song (3).mp3"))
+        );
+    }
+
+    /// The destination must never leave `music_dir`, even if the candidate
+    /// path carries directory separators or `..` segments — only the file
+    /// name is ever used to build it.
+    #[test]
+    fn classify_import_keeps_the_destination_inside_music_dir() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("../../etc/song.mp3"), music_dir, |_| false);
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/song.mp3"))
+        );
+    }
+
+    /// `.hidden.mp3` must lose its leading dot in `music_dir`, or
+    /// `scan_tracks_into` would silently hide the "imported" file forever.
+    #[test]
+    fn classify_import_strips_a_leading_dot() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/.hidden.mp3"), music_dir, |_| false);
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/hidden.mp3"))
+        );
+    }
+
+    /// Extension matching is case-insensitive (`is_supported_track`), and the
+    /// destination keeps the candidate's original casing.
+    #[test]
+    fn classify_import_accepts_an_uppercase_extension() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/SONG.MP3"), music_dir, |_| false);
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/SONG.MP3"))
+        );
+    }
+
+    /// `.mp3` alone is a dotfile with no extension by `Path::extension`'s own
+    /// rule (a name that is only a leading dot never has one) — must not be
+    /// mistaken for a bare "mp3" file.
+    #[test]
+    fn classify_import_skips_a_bare_dotfile_extension() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/.mp3"), music_dir, |_| false);
+        assert_eq!(decision, ImportDecision::Skip);
+    }
+
+    /// Paths with no file name at all must not panic and must be treated as
+    /// unsupported.
+    #[test]
+    fn classify_import_skips_paths_with_no_file_name() {
+        let music_dir = Path::new("/music");
+        assert_eq!(
+            classify_import(Path::new("/"), music_dir, |_| false),
+            ImportDecision::Skip
+        );
+        assert_eq!(
+            classify_import(Path::new(".."), music_dir, |_| false),
+            ImportDecision::Skip
+        );
+    }
+
+    #[test]
+    fn copy_atomic_with_removes_the_temp_file_on_copy_failure() {
+        let removed = std::cell::Cell::new(None);
+        let result = copy_atomic_with(
+            Path::new("/staging/song.mp3"),
+            Path::new("/music/song.mp3"),
+            |_from, _to| {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
+            },
+            |_from, _to| Ok(()),
+            |tmp| removed.set(Some(tmp.to_path_buf())),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            removed.into_inner(),
+            Some(PathBuf::from("/music/.funkot-import.part"))
+        );
+    }
+
+    #[test]
+    fn copy_atomic_with_removes_the_temp_file_on_rename_failure() {
+        let removed = std::cell::Cell::new(None);
+        let result = copy_atomic_with(
+            Path::new("/staging/song.mp3"),
+            Path::new("/music/song.mp3"),
+            |_from, _to| Ok(0),
+            |_from, _to| Err(std::io::Error::new(std::io::ErrorKind::Other, "boom")),
+            |tmp| removed.set(Some(tmp.to_path_buf())),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            removed.into_inner(),
+            Some(PathBuf::from("/music/.funkot-import.part"))
+        );
+    }
+
+    #[test]
+    fn copy_atomic_with_leaves_the_temp_file_alone_on_success() {
+        let removed = std::cell::Cell::new(false);
+        let result = copy_atomic_with(
+            Path::new("/staging/song.mp3"),
+            Path::new("/music/song.mp3"),
+            |_from, _to| Ok(0),
+            |_from, _to| Ok(()),
+            |_tmp| removed.set(true),
+        );
+        assert!(result.is_ok());
+        assert!(!removed.get());
+    }
 }
 
 /// Recursively walk `dir` for supported track files, sorted.
@@ -5017,6 +5421,52 @@ fn feedback_share(absolute_path: &str) -> Result<(), String> {
     result.map_err(|e| format!("FeedbackShare.shareFrom: {e}"))
 }
 
+/// `Import.hasInFlight()` — whether an `Import.onIntent` copy thread is still
+/// running. See [`ImportResult::in_flight`]'s doc comment for why
+/// `take_pending_import` needs this at all, and its own call site for why the
+/// order relative to its staging-dir walk matters.
+///
+/// Same classloader routing as [`feedback_share`] / [`service_call`]: this
+/// runs on Tauri's blocking pool, so the system classloader cannot see app
+/// classes.
+#[cfg(target_os = "android")]
+fn android_import_has_in_flight() -> Result<bool, String> {
+    use jni::objects::{JClassLoader, JObject};
+    use jni::refs::LoaderContext;
+    use jni::strings::JNIString;
+    use jni::{errors::Result as JResult, Env, JavaVM};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    let raw_context = ctx.context() as jni::sys::jobject;
+
+    let result: JResult<bool> = vm.attach_current_thread(|env: &mut Env<'_>| {
+        let context = unsafe { JObject::from_raw(env, raw_context) };
+        let loader = env
+            .call_method(
+                &context,
+                jni::jni_str!("getClassLoader"),
+                jni::jni_sig!("()Ljava/lang/ClassLoader;"),
+                &[],
+            )?
+            .l()?;
+        let loader = env.cast_local::<JClassLoader>(loader)?;
+        let class = LoaderContext::Loader(&loader).load_class(
+            env,
+            jni::jni_str!("jp.hatsuboshi.funkotplayer.Import"),
+            true,
+        )?;
+        env.call_static_method(
+            &class,
+            JNIString::new("hasInFlight"),
+            jni::jni_sig!("()Z"),
+            &[],
+        )?
+        .z()
+    });
+    result.map_err(|e| format!("Import.hasInFlight: {e}"))
+}
+
 /// Outcome of the most recent notification ⚑ (`CONTROL_FLAG` = 3).
 #[cfg(target_os = "android")]
 static LAST_FLAG_OK: AtomicBool = AtomicBool::new(false);
@@ -5198,7 +5648,8 @@ pub fn run() {
             queue_state,
             get_allow_non_funkot,
             set_allow_non_funkot,
-            share_feedback
+            share_feedback,
+            take_pending_import
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
