@@ -17,6 +17,13 @@
 # wireless debugging:
 #   ADB=1 ./dev.sh adb devices -l
 #
+# The adb server lives and dies with the container, so `adb connect` does not
+# carry over between runs -- every invocation starts from an empty device list
+# and has to connect again. Put the connect in the same command as the work:
+#   ADB=1 ./dev.sh bash -c 'adb connect <ip>:<port> && adb install -r ...'
+# (The adb *keys* do persist: /root/.android is a named volume, so a device
+# paired once stays paired.)
+#
 # Hot reload on the device needs BOTH --host 127.0.0.1 and adb reverse. Without
 # --host the Tauri CLI rewrites devUrl to WSL2's NAT address, which the phone
 # cannot reach, and the window comes up blank; setting TAURI_DEV_HOST first does

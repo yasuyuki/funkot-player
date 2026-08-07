@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -39,6 +40,20 @@ object Import {
      * not fire again. See [hasInFlight].
      */
     private val inFlight = AtomicInteger(0)
+
+    /**
+     * Count of URIs that failed to stage since the last [takeFailed] call.
+     *
+     * Unlike the staging directory itself — which is deliberately the only
+     * state this object keeps, precisely so a process death can't lose or
+     * duplicate anything (see the class doc) — this counter *is* purely
+     * in-memory and can be lost if the process dies before Rust reads it.
+     * That's acceptable here because losing it only costs the user a single
+     * toast's worth of "N failed" count, not a file: the failure already
+     * means the bytes were never staged, so there is nothing left to recover
+     * by re-reading the directory.
+     */
+    private val failed = AtomicInteger(0)
 
     /**
      * Called from both `MainActivity.onCreate` (cold start) and
@@ -94,8 +109,9 @@ object Import {
                 val importDir = File(appContext.cacheDir, "funkot-import").apply { mkdirs() }
                 uris.forEachIndexed { index, uri ->
                     val name = displayNameFor(appContext, uri, index + 1)
-                    val partFile = reservePartFile(importDir, name)
+                    var partFile: File? = null
                     try {
+                        partFile = reservePartFile(importDir, name)
                         val input = appContext.contentResolver.openInputStream(uri)
                             ?: throw IOException("openInputStream returned null for $uri")
                         input.use { source ->
@@ -109,8 +125,12 @@ object Import {
                     } catch (e: Exception) {
                         // Copy (or the final rename) failed partway through:
                         // drop the partial file and move on to the next uri
-                        // rather than losing the whole share.
-                        partFile.delete()
+                        // rather than losing the whole share. partFile can
+                        // still be null here if reservePartFile itself threw
+                        // (e.g. storage exhaustion) before creating anything.
+                        partFile?.delete()
+                        failed.incrementAndGet()
+                        Log.w("funkot", "import failed for $uri: ${e.message}")
                     }
                 }
             } finally {
@@ -120,6 +140,9 @@ object Import {
         try {
             thread.start()
         } catch (e: Exception) {
+            // failed must be incremented before inFlight is decremented (see
+            // the ordering note on takeFailed / hasInFlight below).
+            failed.addAndGet(uris.size)
             inFlight.decrementAndGet()
             throw e
         }
@@ -134,6 +157,16 @@ object Import {
      */
     @JvmStatic
     fun hasInFlight(): Boolean = inFlight.get() > 0
+
+    /**
+     * Returns the number of URIs that have failed to stage since the last
+     * call to this function, resetting the count to zero (a destructive
+     * read — unlike [hasInFlight], which callers may poll repeatedly). Rust
+     * must call this *after* [hasInFlight] on each poll: see the ordering
+     * note on [failed] and `take_pending_import` in `lib.rs`.
+     */
+    @JvmStatic
+    fun takeFailed(): Int = failed.getAndSet(0)
 
     /**
      * `OpenableColumns.DISPLAY_NAME`, falling back to the basename of

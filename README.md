@@ -189,9 +189,35 @@ Release (signed; needs `src-tauri/gen/android/keystore.properties` +
 `.secrets/upload-keystore.jks`, both gitignored):
 
 ```sh
+./scripts/check-release-invariants.sh                 # see Invariant checks
 ./dev.sh npx tauri android build --target aarch64
 # → src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
+
+### Invariant checks
+
+```sh
+./scripts/check-release-invariants.sh
+```
+
+No Docker and no toolchain. CI runs it on every push
+(`.github/workflows/checks.yml`); run it yourself before building a release
+APK, because that build happens locally and never passes through CI.
+
+It exists for one shape of bug: **release-only, silent, and invisible to debug
+testing.** `isMinifyEnabled` is false for debug and true for release, so
+anything R8 shrinks away keeps working in every on-device check made with a
+debug APK, and no warning is printed at build time either. `Import.hasInFlight`
+shipped that way — share-sheet import was dead in every release build for as
+long as the feature existed, and nothing short of installing a release APK
+would have shown it.
+
+**When a bug turns out to have that shape, add a check to that script rather
+than only fixing the bug.** A rule that lives in a code comment gets skipped by
+the next person who adds a class; one that lives in the script cannot be. New
+checks go in as a `check_*` function called from the list at the bottom of the
+file. Keep the script toolchain-free: the moment it needs a build, it stops
+running on every push.
 
 ### Shipping a GitHub Release
 
@@ -379,6 +405,14 @@ place it matters, but they are easy to undo by accident:
   `android.app.Application`'s and therefore the boot loader. Getting this wrong
   costs the notification, the foreground service and the MediaSession, while
   leaving playback itself working, so it is easy to miss.
+- **A class Rust reaches over JNI needs a `-keep` rule in
+  `gen/android/app/proguard-rules.pro`,** with `{ *; }` rather than a narrower
+  member list. `load_class` and `call_static_method` take strings, so R8 sees no
+  reference and shrinks or renames the class away in release, where
+  `isMinifyEnabled` is true — while debug, where it is false, goes on working.
+  A missing rule for `Import` is what left share-sheet import dead in every
+  release build. `./scripts/check-release-invariants.sh` diffs the two lists;
+  see [Invariant checks](#invariant-checks).
 - The Tauri CLI must be a **project-local** npm install. A global one makes the
   generated Gradle task run `node tauri` and fail to resolve it.
 - **Share-sheet import keeps no in-process queue.** `Import.kt` stages a file

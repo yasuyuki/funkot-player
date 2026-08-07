@@ -1,0 +1,28 @@
+name: Checks
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  invariants:
+    name: Release-only invariants
+    runs-on: ubuntu-latest
+    steps:
+      # No `path:` and no sibling checkout: unlike the Windows workflows this
+      # job builds nothing, so it needs neither funkot-core nor a toolchain.
+      - uses: actions/checkout@v7
+
+      # Checks that need no toolchain live in one script, so that the same
+      # command runs here and on a developer's machine. Keep this job free of
+      # builds -- the moment it needs the Android SDK it stops being cheap
+      # enough to run on every push, and it will get restricted to tags, which
+      # is far too late for a release-only invariant.
+      - name: Check release-only invariants
+        run: ./scripts/check-release-invariants.sh

@@ -800,7 +800,9 @@ struct ImportResult {
     /// Staged files whose extension `is_supported_track` does not recognise.
     skipped: u32,
     /// Staged files that passed `classify_import` but whose copy into
-    /// `music_dir` failed (`copy_atomic`).
+    /// `music_dir` failed (`copy_atomic`), plus URIs that failed even
+    /// earlier, during staging itself (`Import.kt`'s `onIntent` — see
+    /// `Import.takeFailed`), before a file ever reached this walk.
     failed: u32,
     /// `true` when `Import.kt` is still copying a file into the staging
     /// dir. `Import.onIntent`'s copy runs on a background thread and this
@@ -859,8 +861,29 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
         let in_flight = android_import_has_in_flight()?;
 
         let staging_dir = android_cache_dir()?.join("funkot-import");
+
+        // Must be read after `in_flight` above, never before: an increment
+        // of `Import`'s `failed` counter always completes, inside the copy
+        // thread's loop, before that thread's `finally` decrements
+        // `inFlight`. So once `in_flight` reads `false`, every failure from
+        // that run is already reflected here. Reading this first instead
+        // risks a failure landing in between the two reads: `in_flight`
+        // would then still report `false` (nothing tells the frontend to
+        // poll again) while the failure that just happened is lost.
+        //
+        // Read after `android_cache_dir()?` above (rather than right after
+        // `in_flight`) so that if that call fails, this destructive read
+        // (see `Import.takeFailed`'s doc comment) never happens and the
+        // failure count survives to be picked up on the next poll instead
+        // of being reset and lost. A later `read_dir` I/O error below can
+        // still lose an already-taken count, but that path returns `Err`
+        // and surfaces to the frontend as `lastError`, unlike a silently
+        // dropped toast.
+        let failed = android_import_take_failed()?;
+
         let mut result = ImportResult {
             in_flight,
+            failed,
             ..ImportResult::default()
         };
         let entries = match std::fs::read_dir(&staging_dir) {
@@ -5465,6 +5488,53 @@ fn android_import_has_in_flight() -> Result<bool, String> {
         .z()
     });
     result.map_err(|e| format!("Import.hasInFlight: {e}"))
+}
+
+/// `Import.takeFailed()` — number of URIs that failed to stage since the
+/// last call (a destructive read: the Kotlin side resets its counter to
+/// zero). Must be called *after* [`android_import_has_in_flight`] on each
+/// poll — see [`ImportResult::failed`]'s doc comment and this function's own
+/// call site in `take_pending_import` for why that order matters.
+///
+/// Same classloader routing as [`android_import_has_in_flight`].
+#[cfg(target_os = "android")]
+fn android_import_take_failed() -> Result<u32, String> {
+    use jni::objects::{JClassLoader, JObject};
+    use jni::refs::LoaderContext;
+    use jni::strings::JNIString;
+    use jni::{errors::Result as JResult, Env, JavaVM};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    let raw_context = ctx.context() as jni::sys::jobject;
+
+    let result: JResult<i32> = vm.attach_current_thread(|env: &mut Env<'_>| {
+        let context = unsafe { JObject::from_raw(env, raw_context) };
+        let loader = env
+            .call_method(
+                &context,
+                jni::jni_str!("getClassLoader"),
+                jni::jni_sig!("()Ljava/lang/ClassLoader;"),
+                &[],
+            )?
+            .l()?;
+        let loader = env.cast_local::<JClassLoader>(loader)?;
+        let class = LoaderContext::Loader(&loader).load_class(
+            env,
+            jni::jni_str!("jp.hatsuboshi.funkotplayer.Import"),
+            true,
+        )?;
+        env.call_static_method(
+            &class,
+            JNIString::new("takeFailed"),
+            jni::jni_sig!("()I"),
+            &[],
+        )?
+        .i()
+    });
+    result
+        .map(|n| n as u32)
+        .map_err(|e| format!("Import.takeFailed: {e}"))
 }
 
 /// Outcome of the most recent notification ⚑ (`CONTROL_FLAG` = 3).
