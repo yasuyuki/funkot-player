@@ -4415,6 +4415,19 @@ fn analyze_these(
     spawn_analysis_worker(app.clone(), pending, cache_dir.to_path_buf(), overrides);
 }
 
+/// Progress payload for the `library-scan` event.
+///
+/// Emitted while `refresh_library` walks the music folder and content-hashes
+/// each track — especially useful over SMB where hashing can take a long time
+/// and the UI would otherwise keep showing the previous library with no feedback.
+#[derive(serde::Serialize, Clone)]
+struct LibraryScanProgress {
+    /// `"walking"` while collecting paths; `"hashing"` while building rows.
+    phase: String,
+    found: usize,
+    done: usize,
+}
+
 /// Scan `music_dir` (recursively, subfolders included) for supported tracks
 /// and report what the analysis cache already knows about each.
 ///
@@ -4424,18 +4437,48 @@ fn analyze_these(
 /// (e.g. silent files) cannot re-queue forever via refresh → analyze → done.
 #[tauri::command(async)]
 fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<TrackRow>, String> {
+    use tauri::Emitter;
+
     let dirs = resolve_dirs(&app)?;
     let music_dir = PathBuf::from(&dirs.music_dir);
     let cache_dir = PathBuf::from(&dirs.cache_dir);
     let data_dir = PathBuf::from(&dirs.data_dir);
 
+    let _ = app.emit(
+        "library-scan",
+        LibraryScanProgress {
+            phase: "walking".into(),
+            found: 0,
+            done: 0,
+        },
+    );
+
     let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
     let overrides = store::load_overrides(&data_dir);
+    let found = paths.len();
 
-    let rows: Vec<TrackRow> = paths
-        .iter()
-        .map(|p| track_row(p, &cache_dir, &overrides))
-        .collect();
+    let _ = app.emit(
+        "library-scan",
+        LibraryScanProgress {
+            phase: "hashing".into(),
+            found,
+            done: 0,
+        },
+    );
+
+    // Explicit loop (not `.map`) so we can emit progress after each content-hash.
+    let mut rows: Vec<TrackRow> = Vec::with_capacity(found);
+    for path in &paths {
+        rows.push(track_row(path, &cache_dir, &overrides));
+        let _ = app.emit(
+            "library-scan",
+            LibraryScanProgress {
+                phase: "hashing".into(),
+                found,
+                done: rows.len(),
+            },
+        );
+    }
 
     if kick_analysis {
         // Reuse what `track_row` already worked out rather than calling

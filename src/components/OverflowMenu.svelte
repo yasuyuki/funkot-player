@@ -26,7 +26,15 @@
     scanBusy = true;
     ui.menuOpen = false;
     try {
-      await store.doRefreshLibrary();
+      const result = await store.doRefreshLibrary();
+      // Check `ok` first so the busy/error arms narrow cleanly (both are `ok: false`).
+      if (result.ok) {
+        toast.notify(`${result.count}曲見つかりました`);
+      } else if ("busy" in result) {
+        toast.notify("スキャン中です");
+      } else {
+        toast.notify(result.error);
+      }
     } finally {
       scanBusy = false;
     }

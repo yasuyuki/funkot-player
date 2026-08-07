@@ -160,6 +160,14 @@ export interface AnalysisProgress {
   row: TrackRow;
 }
 
+/// Matches `LibraryScanProgress`. Emitted as `library-scan` while
+/// `refresh_library` walks the music folder and content-hashes each track.
+export interface LibraryScanProgress {
+  phase: "walking" | "hashing";
+  found: number;
+  done: number;
+}
+
 export function queueState(): Promise<QueueSnapshot> {
   return invoke<QueueSnapshot>("queue_state");
 }

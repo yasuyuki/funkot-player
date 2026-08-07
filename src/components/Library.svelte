@@ -9,6 +9,7 @@
   let busy = $state<Record<string, boolean>>({});
 
   let analysis = $derived(store.analysis);
+  let libraryScan = $derived(store.libraryScan);
 
   function formatDuration(secs: number | null): string {
     if (secs === null || secs === undefined) return "-";
@@ -78,8 +79,17 @@
     </button>
   </div>
 
+  {#if libraryScan}
+    <p class="progress">
+      {#if libraryScan.phase === "walking"}
+        スキャン中…
+      {:else}
+        スキャン中 {libraryScan.found}曲を確認中 {libraryScan.done}/{libraryScan.found}
+      {/if}
+    </p>
+  {/if}
   {#if analysis}
-    <p class="progress">解析中 {analysis.done}/{analysis.total}: {store.relName(analysis.row.path)}</p>
+    <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
   {/if}
 
   <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->

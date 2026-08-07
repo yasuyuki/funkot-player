@@ -2,8 +2,8 @@
 // holds the results. Components read derived values off `store`; none of them
 // talk to `tauri.ts` directly for playback/queue state, so there is exactly
 // one poll loop and exactly one place a "what changed since last time" bug
-// can hide. Analysis events (`analysis-progress` / `analysis-done`) are also
-// listened to here only — same reason.
+// can hide. Analysis / library-scan events are also listened to here only —
+// same reason.
 import { listen } from "@tauri-apps/api/event";
 import {
   appDirs,
@@ -35,6 +35,7 @@ import type {
   AppDirs,
   FlaggedTrackRow,
   FlagResult,
+  LibraryScanProgress,
   PlayerState,
   QueueSnapshot,
   TrackRow,
@@ -63,6 +64,9 @@ class PlayerStore {
   /// Non-null while a background analysis run is in flight. Cleared on
   /// `analysis-done` (or overwritten by the next progress event).
   analysis = $state<{ done: number; total: number; name: string } | null>(null);
+  /// Non-null while `refresh_library` is walking / hashing. Cleared when the
+  /// invoke returns (success or error).
+  libraryScan = $state<LibraryScanProgress | null>(null);
   /// Last invoke failure, from either the poll loop or a transport action.
   /// Polling keeps running after one of these; it is not fatal.
   lastError = $state<string | null>(null);
@@ -109,24 +113,16 @@ class PlayerStore {
     } catch (e) {
       this.lastError = String(e);
     }
-    // The old UI only fetched the library when ⟳ was pressed; this fetches it
-    // at startup because the now-playing title/artist are resolved against it
-    // (a `TrackRow` lookup by file name), so there is nothing to show without
-    // it. The side effect is that `refresh_library(true)` also kicks off
-    // analysis of anything unanalysed — which is wanted here: the engine's
-    // loader would have to analyse those tracks mid-playback otherwise, and
-    // that is what the `stalled` phase is.
-    try {
-      const rows = await refreshLibrary(true);
-      this.library = new Map(rows.map((r) => [r.path, r]));
-    } catch (e) {
-      this.lastError = String(e);
-    }
 
-    // Analysis events land here only. Progress carries the finished row so
-    // we splice by path (no full folder walk per track); done reloads the
-    // listing without re-kicking analysis (failures must not loop forever).
+    // Register listeners before the startup refresh so `library-scan` (and
+    // analysis) progress is visible from the first walk, not only later rescans.
     try {
+      await listen<LibraryScanProgress>("library-scan", (event) => {
+        this.libraryScan = event.payload;
+      });
+      // Analysis events land here only. Progress carries the finished row so
+      // we splice by path (no full folder walk per track); done reloads the
+      // listing without re-kicking analysis (failures must not loop forever).
       await listen<AnalysisProgress>("analysis-progress", (event) => {
         const { done, total, name, row } = event.payload;
         this.analysis = { done, total, name };
@@ -138,6 +134,27 @@ class PlayerStore {
       });
     } catch (e) {
       this.lastError = String(e);
+    }
+
+    // The old UI only fetched the library when ⟳ was pressed; this fetches it
+    // at startup because the now-playing title/artist are resolved against it
+    // (a `TrackRow` lookup by file name), so there is nothing to show without
+    // it. The side effect is that `refresh_library(true)` also kicks off
+    // analysis of anything unanalysed — which is wanted here: the engine's
+    // loader would have to analyse those tracks mid-playback otherwise, and
+    // that is what the `stalled` phase is.
+    //
+    // Takes `#libraryBusy` so a slow SMB startup walk cannot race ⋮ 再スキャン
+    // (which would clear `libraryScan` from the first finisher's `finally`).
+    this.#libraryBusy = true;
+    try {
+      const rows = await refreshLibrary(true);
+      this.library = new Map(rows.map((r) => [r.path, r]));
+    } catch (e) {
+      this.lastError = String(e);
+    } finally {
+      this.libraryScan = null;
+      this.#libraryBusy = false;
     }
 
     this.#poll();
@@ -182,6 +199,7 @@ class PlayerStore {
       // shouldn't disrupt the UI after the worker itself has finished.
       this.lastError = String(e);
     } finally {
+      this.libraryScan = null;
       this.#libraryBusy = false;
     }
   }
@@ -397,15 +415,21 @@ class PlayerStore {
   }
 
   /// ⋮ 再スキャン. Refuses a second call while one is already in flight.
-  async doRefreshLibrary(): Promise<void> {
-    if (this.#libraryBusy) return;
+  async doRefreshLibrary(): Promise<
+    { ok: true; count: number } | { ok: false; error: string } | { ok: false; busy: true }
+  > {
+    if (this.#libraryBusy) return { ok: false, busy: true };
     this.#libraryBusy = true;
     try {
       const rows = await refreshLibrary();
       this.library = new Map(rows.map((r) => [r.path, r]));
+      return { ok: true, count: rows.length };
     } catch (e) {
-      this.lastError = String(e);
+      const error = String(e);
+      this.lastError = error;
+      return { ok: false, error };
     } finally {
+      this.libraryScan = null;
       this.#libraryBusy = false;
     }
   }
