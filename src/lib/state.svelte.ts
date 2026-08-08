@@ -179,16 +179,22 @@ class PlayerStore {
       }
     });
 
-    // The old UI only fetched the library when ⟳ was pressed; this fetches it
-    // at startup because the now-playing title/artist are resolved against it
-    // (a `TrackRow` lookup by file name), so there is nothing to show without
-    // it. The side effect is that `refresh_library(true)` also kicks off
-    // analysis of anything unanalysed — which is wanted here: the engine's
-    // loader would have to analyse those tracks mid-playback otherwise, and
-    // that is what the `stalled` phase is.
-    //
-    // Takes `#libraryBusy` so a slow SMB startup walk cannot race ⋮ 再スキャン
-    // (which would clear `libraryScan` from the first finisher's `finally`).
+    // Start polling before the startup library walk. A long scan holds
+    // `refreshLibrary` for a while; Start is still allowed during that time,
+    // and without `#poll` the UI would keep `phase ?? "idle"` / miss
+    // `now_playing` even though audio is already running. Title can fall
+    // back to basename; artist waits for a library row.
+    this.#poll();
+    setInterval(() => {
+      this.#tickNow = Date.now();
+    }, INTERPOLATION_TICK_MS);
+
+    // Startup walk: title/artist resolve against `library` (`TrackRow` by
+    // path), and `refresh_library(true)` also kicks analysis of unanalysed
+    // tracks — wanted here so the loader does not analyse mid-playback
+    // (`stalled`). Takes `#libraryBusy` so a slow SMB walk cannot race
+    // ⋮ 再スキャン (which would clear `libraryScan` from the first
+    // finisher's `finally`).
     this.#libraryBusy = true;
     try {
       const rows = await refreshLibrary(true);
@@ -199,11 +205,6 @@ class PlayerStore {
       this.libraryScan = null;
       this.#libraryBusy = false;
     }
-
-    this.#poll();
-    setInterval(() => {
-      this.#tickNow = Date.now();
-    }, INTERPOLATION_TICK_MS);
   }
 
   async #poll() {

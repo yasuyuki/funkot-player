@@ -3194,17 +3194,12 @@ fn start_impl(
         store::restored_folder_pos(&paths, session.in_flight.last().map(PathBuf::as_path));
     let queue = Arc::clone(&state.queue);
 
-    // Before `analyze_missing`, not after: the worker holds off while the
-    // phase says `Starting`, and it can only see that if it is already set.
+    // Set before the audio thread starts: any in-flight analysis worker
+    // (from `refresh_library`) holds off while the phase says `Starting`.
     set_phase(Phase::Starting);
     // Prefer playback/loader over background decode until the first next
     // slot is prepared (cleared in the cpal callback via `NEXT_PREPARED`).
     YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
-
-    // Kick off analysis for anything the folder holds that the cache does not
-    // already have a complete entry for, so the loader thread never has to
-    // run a synchronous analysis mid-playback (see `analyze_missing`).
-    analyze_missing(app, &paths, &cache, &data);
 
     // `session.paused` folds into `initial_paused` (never the other way
     // round): cold-start audition's own `true` must never be undone by a
@@ -4384,9 +4379,8 @@ static ANALYZING: AtomicBool = AtomicBool::new(false);
 /// the loader thread would have to run a fresh analysis on it before playback
 /// could use it, which is exactly the synchronous-analysis stall this exists
 /// to keep out of the audio path. Centralised so the library listing
-/// (`track_row`), the pick of what to hand the background worker
-/// (`analyze_missing`), and the loader-status log in `audio_thread` cannot
-/// drift on what "still needs analysis" means.
+/// (`track_row`), `refresh_library`'s pending pick, and the loader-status log in
+/// `audio_thread` cannot drift on what "still needs analysis" means.
 ///
 /// A hashing failure (unreadable file, etc.) reads the same as "not cached".
 fn analyzed_cache_entry(
@@ -4820,34 +4814,9 @@ mod scan_tracks_tests {
     }
 }
 
-/// Kick off a background analysis worker for whatever in `paths` the cache
-/// does not already have a complete entry for (see `analyzed_cache_entry`).
-/// Shared by `refresh_library`, which wants the listing to fill in live, and
-/// `start`, which wants it so the loader thread is never the one running a
-/// fresh analysis while it is also the only thing feeding the engine.
-///
-/// A no-op (and silent) when nothing is missing, or when a worker is already
-/// running (typical: Start during an in-flight `refresh_library` analysis) —
-/// hashing every path just to hit the spawn no-op is wasted Start latency.
-fn analyze_missing(app: &tauri::AppHandle, paths: &[PathBuf], cache_dir: &Path, data_dir: &Path) {
-    if ANALYZING.load(Ordering::SeqCst) {
-        return;
-    }
-    // Hand the worker only what is actually missing. `fill_missing` checks the
-    // cache *after* it is given a decoded buffer, so passing an already-analysed
-    // track still costs a full decode — adding one file to a large library would
-    // otherwise re-decode the whole library, which is the same heat and battery
-    // cost the serial worker exists to avoid.
-    let pending: Vec<PathBuf> = paths
-        .iter()
-        .filter(|p| analyzed_cache_entry(p, cache_dir).is_none())
-        .cloned()
-        .collect();
-    analyze_these(app, pending, cache_dir, data_dir);
-}
-
-/// As [`analyze_missing`], for a caller that has already worked out which
-/// tracks are unanalysed and should not pay to hash them all over again.
+/// Kick off a background analysis worker for a caller-supplied list of tracks
+/// that still need analysis. `refresh_library` builds this list from `track_row`
+/// so each file is content-hashed only once.
 fn analyze_these(
     app: &tauri::AppHandle,
     pending: Vec<PathBuf>,
@@ -4928,9 +4897,9 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     }
 
     if kick_analysis {
-        // Reuse what `track_row` already worked out rather than calling
-        // `analyze_missing`, which would hash every file a second time: `analyzed`
-        // is exactly `analyzed_cache_entry(...).is_some()`.
+        // Reuse what `track_row` already worked out so we do not hash every
+        // file a second time: `analyzed` is exactly
+        // `analyzed_cache_entry(...).is_some()`.
         let pending: Vec<PathBuf> = paths
             .iter()
             .zip(&rows)

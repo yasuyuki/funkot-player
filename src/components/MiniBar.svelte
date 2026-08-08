@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
+  import { primaryMode as resolvePrimaryMode, sessionActive } from "../lib/transportMode";
 
   interface Props {
     /// True while the transport sentinel is intersecting the viewport.
@@ -13,24 +14,20 @@
   let nextBusy = $state(false);
 
   let phase = $derived(store.player?.phase ?? "idle");
+  let paused = $derived(store.player?.paused ?? false);
   let auditioning = $derived(store.player?.auditioning ?? false);
 
-  // No start mode here: idle/starting/failed/disconnected keep the bar
-  // hidden. Pause/resume/skip enablement matches Transport otherwise.
-  let active = $derived(
-    !auditioning && (phase === "playing" || phase === "paused" || phase === "stalled"),
-  );
+  // Same mapping as Transport (transportMode.ts); idle/failed stay hidden.
+  let active = $derived(sessionActive(phase, auditioning));
   let show = $derived(!transportVisible && active);
 
-  let primaryMode = $derived(
-    phase === "paused" ? "resume" : phase === "playing" || phase === "stalled" ? "pause" : "off",
-  );
-  let primaryLabel = $derived(primaryMode === "resume" ? "▶" : "⏸");
-  let primaryDisabled = $derived(primaryMode === "off" || primaryBusy || auditioning);
+  let mode = $derived(resolvePrimaryMode(phase, paused, auditioning));
+  let primaryLabel = $derived(mode === "resume" ? "▶" : "⏸");
+  let primaryDisabled = $derived(mode === "off" || primaryBusy || auditioning);
   let nextDisabled = $derived(!active || nextBusy);
 
   async function onPrimaryClick() {
-    if (primaryBusy || primaryMode === "off") return;
+    if (primaryBusy || mode === "off") return;
     primaryBusy = true;
     try {
       await store.doTogglePause();
@@ -58,10 +55,10 @@
     <button
       type="button"
       class="ctrl"
-      class:resume={primaryMode === "resume"}
+      class:resume={mode === "resume"}
       disabled={primaryDisabled}
       onclick={onPrimaryClick}
-      aria-label={primaryMode === "resume" ? "再開" : "一時停止"}
+      aria-label={mode === "resume" ? "再開" : "一時停止"}
     >{primaryLabel}</button>
     <button
       type="button"
