@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ui } from "./lib/ui.svelte";
   import { store } from "./lib/state.svelte";
+  import { sessionActive } from "./lib/transportMode";
   import NowCard from "./components/NowCard.svelte";
   import AuditionBanner from "./components/AuditionBanner.svelte";
   import TransitionStrip from "./components/TransitionStrip.svelte";
@@ -19,6 +20,15 @@
   /// flips on when this goes false (user scrolled the transport away).
   let transportVisible = $state(true);
   let sentinelEl = $state<HTMLElement | null>(null);
+
+  /// Whether MiniBar is on screen. Derived here rather than inside MiniBar
+  /// because Toast docks on top of it and needs the same answer; the edit
+  /// tabs do not mount MiniBar at all, hence the mode test.
+  let miniBarVisible = $derived(
+    ui.mode === "play" &&
+      !transportVisible &&
+      sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false),
+  );
 
   $effect(() => {
     const el = sentinelEl;
@@ -62,14 +72,14 @@
   </div>
 </div>
 
-<Toast />
+<Toast raised={miniBarVisible} />
 
 <LogView />
 
 {#if ui.mode === "play"}
   <Queue />
   <Library />
-  <MiniBar {transportVisible} />
+  <MiniBar show={miniBarVisible} />
 {:else}
   <div class="subtabs" role="tablist" aria-label="編集サブタブ">
     <button

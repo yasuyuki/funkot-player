@@ -1,18 +1,15 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
-  import {
-    primaryMode as resolvePrimaryMode,
-    sessionActive,
-    canSkipNext,
-  } from "../lib/transportMode";
+  import { primaryMode as resolvePrimaryMode, canSkipNext } from "../lib/transportMode";
 
   interface Props {
-    /// True while the transport sentinel is intersecting the viewport.
-    /// MiniBar only shows when this is false *and* playback is active.
-    transportVisible: boolean;
+    /// Whether the bar is up. Derived in App rather than here because Toast
+    /// docks directly on top of this bar and has to know the same answer;
+    /// deriving it twice would let the two disagree for a frame.
+    show: boolean;
   }
 
-  let { transportVisible }: Props = $props();
+  let { show }: Props = $props();
 
   let primaryBusy = $state(false);
   let nextBusy = $state(false);
@@ -20,10 +17,6 @@
   let phase = $derived(store.player?.phase ?? "idle");
   let paused = $derived(store.player?.paused ?? false);
   let auditioning = $derived(store.player?.auditioning ?? false);
-
-  // Same mapping as Transport (transportMode.ts); idle/failed stay hidden.
-  let active = $derived(sessionActive(phase, auditioning));
-  let show = $derived(!transportVisible && active);
 
   let mode = $derived(resolvePrimaryMode(phase, paused, auditioning));
   let primaryLabel = $derived(mode === "resume" ? "▶" : "⏸");
