@@ -1,15 +1,19 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
-  import type { TrackRow } from "../lib/tauri";
+  import { openMusicDir, type TrackRow } from "../lib/tauri";
+  import { toast } from "../lib/toast.svelte";
 
   type SortKey = "title" | "artist";
 
   let query = $state("");
   let sortKey = $state<SortKey>("title");
   let busy = $state<Record<string, boolean>>({});
+  let openMusicBusy = $state(false);
 
   let analysis = $derived(store.analysis);
   let libraryScan = $derived(store.libraryScan);
+  let libraryEmpty = $derived(store.libraryList.length === 0);
+  let canOpenMusicDir = $derived(!!store.dirs?.music_dir_configurable);
 
   function formatDuration(secs: number | null): string {
     if (secs === null || secs === undefined) return "-";
@@ -60,6 +64,19 @@
   function addDisabled(row: TrackRow): boolean {
     return !!busy[row.path] || (isNonFunkot(row) && !store.allowNonFunkot);
   }
+
+  async function onOpenMusicDir() {
+    if (openMusicBusy) return;
+    openMusicBusy = true;
+    try {
+      const path = await openMusicDir();
+      toast.notify(path);
+    } catch (err) {
+      toast.notify(String(err));
+    } finally {
+      openMusicBusy = false;
+    }
+  }
 </script>
 
 <section class="library">
@@ -92,28 +109,56 @@
     <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
   {/if}
 
-  <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->
-  <ul class="list">
-    {#each rows as row (row.path)}
-      <li class="row" class:non-funkot={isNonFunkot(row)}>
-        <div class="text">
-          <div class="title">{row.title}</div>
-          <div class="sub">
-            <span class="artist">{row.artist || "—"}</span>
-            <span class="dur">{formatDuration(row.duration_secs)}</span>
-          </div>
-        </div>
-        <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
+  {#if libraryEmpty}
+    <div class="empty">
+      <p class="empty-title">曲がありません</p>
+      <!-- Desktop only, same platform test as OverflowMenu's folder items:
+           Android's music folder is under `Android/data`, which no file
+           manager has been able to reach since Android 11, so `open_music_dir`
+           can only report the path there. Store requirement 10.1.2.10 is a
+           Microsoft Store rule, so hiding the button on Android costs nothing;
+           the path stays visible in ⋮ → ログを表示 (see LogView). -->
+      {#if canOpenMusicDir}
+        <p class="empty-hint">
+          Musicフォルダを開いて音声ファイルを入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。
+        </p>
         <button
           type="button"
-          class="add"
-          disabled={addDisabled(row)}
-          onclick={() => onAdd(row.path)}
-          aria-label={`${row.title} をキューに追加`}
-        >+</button>
-      </li>
-    {/each}
-  </ul>
+          class="open-music"
+          disabled={openMusicBusy}
+          onclick={onOpenMusicDir}
+        >Musicフォルダを開く</button>
+      {:else}
+        <p class="empty-hint">
+          音声ファイルをMusicフォルダへ入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。
+          フォルダの場所は ⋮ メニューの「ログを表示」に出ます。
+        </p>
+      {/if}
+    </div>
+  {:else}
+    <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->
+    <ul class="list">
+      {#each rows as row (row.path)}
+        <li class="row" class:non-funkot={isNonFunkot(row)}>
+          <div class="text">
+            <div class="title">{row.title}</div>
+            <div class="sub">
+              <span class="artist">{row.artist || "—"}</span>
+              <span class="dur">{formatDuration(row.duration_secs)}</span>
+            </div>
+          </div>
+          <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
+          <button
+            type="button"
+            class="add"
+            disabled={addDisabled(row)}
+            onclick={() => onAdd(row.path)}
+            aria-label={`${row.title} をキューに追加`}
+          >+</button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
 </section>
 
 <style>
@@ -164,6 +209,40 @@
     margin: 0 0 var(--space-sm);
     font-size: var(--font-size-sm);
     color: var(--color-status-starting);
+  }
+
+  .empty {
+    margin: 0;
+    padding: var(--space-md);
+    color: var(--color-text-dim);
+    font-size: var(--font-size-sm);
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+
+  .empty-title {
+    margin: 0 0 var(--space-sm);
+    font-size: var(--font-size-md);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .empty-hint {
+    margin: 0 0 var(--space-md);
+    line-height: 1.4;
+  }
+
+  .open-music {
+    width: auto;
+    font-size: var(--font-size-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--color-transport-secondary-bg);
+    color: var(--color-transport-secondary-text);
+  }
+
+  .open-music:disabled {
+    background: var(--color-transport-disabled-bg);
+    color: var(--color-transport-disabled-text);
   }
 
   .list {

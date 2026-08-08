@@ -174,12 +174,12 @@ Partner Center のトップ（`partner.microsoft.com/dashboard`）は **商用�
 <Identity
   Name="（Partner Center の Identity Name）"
   Publisher="CN=（Partner Center の Publisher GUID）"
-  Version="0.1.1.0"
+  Version="0.1.2.0"
   ProcessorArchitecture="x64" />
 ```
 
 2. 必要なら `<Properties>` の `PublisherDisplayName` も Partner Center の表示名に合わせる。
-3. **Version** は Store 向け 4 部版数。初回は `0.1.1.0` でよい。以後 Store 更新のたびに上げる（例: `0.1.2.0`）。アプリの semver `0.1.1` と揃える。
+3. **Version** は Store 向け 4 部版数。初回は `0.1.1.0` でよい。以後 Store 更新のたびに上げる（例: `0.1.2.0`）。アプリの semver `0.1.2` と揃える。
 4. 変更をコミットして `main` に push する（次の CI がこの manifest を焼く）。
 
 仮のまま提出しないこと。現行 Identity（Partner Center 反映済み）:
@@ -247,7 +247,7 @@ artifact **`funkot-player-windows-msix`**（Identity = Partner Center 値）。
    - branch: `main`（Identity 反映済み）
    - `engine_ref`: 既定 `player/v0.1.1` でよい（変える場合は意図したタグ／コミット）
 3. 成功後、artifact **`funkot-player-windows-msix`** をダウンロードする。
-4. 中身の例: `Funkot_0.1.1.0_x64.msix`（版数が変わっていればファイル名も変わる）。
+4. 中身の例: `Funkot_0.1.2.0_x64.msix`（版数が変わっていればファイル名も変わる）。
 5. このファイルを **そのまま** Partner Center にアップロードする（自分で署名しない）。
 
 ### 方法 2: ローカル Windows
@@ -260,7 +260,7 @@ npm ci
 .\packaging\msix\scripts\pack-msix.ps1
 ```
 
-出力: `packaging\msix\out\Funkot_0.1.1.0_x64.msix`
+出力: `packaging\msix\out\Funkot_0.1.2.0_x64.msix`
 
 ### （任意）提出前のサイドロード試験
 
@@ -291,8 +291,8 @@ Store 提出物（未署名）をそのままダブルクリックすると、Ap
 
 1. **Packages** を開く。
 2. 次のいずれかの **未署名** `.msix` をアップロードする（自己署名しない）:
-   - CI artifact: Actions run [31077160621](https://github.com/yasuyuki/funkot-player/actions/runs/31077160621) → `funkot-player-windows-msix`
-   - ローカルコピー（gitignore）: `packaging/msix/out/Funkot_0.1.1.0_x64.msix`
+   - CI artifact: `main` の最新 `windows-msix` run → `funkot-player-windows-msix`（**この提出の版数の run**。古い run を使わない）
+   - ローカルコピー（gitignore）: `packaging/msix/out/Funkot_0.1.2.0_x64.msix`
 3. 検証エラーが無いか確認。Identity は次と一致していること:
    - Name=`hatsuboshi.jp.Funkotplayer`
    - Publisher=`CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64`
@@ -358,8 +358,11 @@ Funkot は、端末内の Music フォルダにある曲をつないで再生す
 **Notes for certification** に貼る:
 
 ```text
-- Music files are added by the user. In the app, open ⋮ → Musicフォルダを開く
-  (Open Music folder), copy audio files there, then Rescan.
+- On first launch the app creates its Music folder (under AppData).
+- To add tracks: use 「Musicフォルダを開く」 when the library is empty, or ⋮ → Musicフォルダを開く
+  (Open Music folder). Copy audio there (e.g. wav/mp3/flac/m4a/ogg), then ⋮ → 再スキャン (Rescan).
+- Example path: %APPDATA%\jp.hatsuboshi.funkotplayer\Music
+  (Store packages also use an AppData location under this package id).
 - Local playback only; no account. Feedback ZIP stays on device until the user shares it.
 - Desktop full-trust (runFullTrust) for audio and file access.
 - WebView2 Evergreen Runtime is expected on the PC (not bundled in the MSIX).
