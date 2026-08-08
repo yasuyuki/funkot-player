@@ -15,6 +15,9 @@
 # Session handoff notes (local, not for publication)
 /HANDOFF.md
 
+# win-run.sh success fingerprint (WSL-local; skip rebuild when unchanged)
+/.win-run.stamp
+
 # OS / editor noise
 .DS_Store
 Thumbs.db
