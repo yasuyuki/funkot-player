@@ -18,6 +18,17 @@
 ///   auditioning                             → false
 ///   idle | failed                           → false
 ///   else                                    → true
+///
+/// Mapping for `canSkipNext`:
+///   !sessionActive(phase, auditioning)      → false
+///   !nextPrepared                           → false
+///   else                                    → true
+///
+/// `nextPrepared` is `QueueSnapshot.reserved_prepared` (NEXT_PREPARED;
+/// audition/paused treat as prepared). Host silently drops TransitionToNext
+/// while next is None — mainly right after a transition until the loader
+/// finishes — and phase often stays `playing`, so UI must key off this flag
+/// rather than starting/stalled.
 
 export type PrimaryMode = "start" | "pause" | "resume" | "off";
 
@@ -45,5 +56,15 @@ export function primaryMode(
 export function sessionActive(phase: string, auditioning: boolean): boolean {
   if (auditioning) return false;
   if (phase === "idle" || phase === "failed") return false;
+  return true;
+}
+
+export function canSkipNext(
+  phase: string,
+  auditioning: boolean,
+  nextPrepared: boolean,
+): boolean {
+  if (!sessionActive(phase, auditioning)) return false;
+  if (!nextPrepared) return false;
   return true;
 }

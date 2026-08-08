@@ -1,6 +1,10 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
-  import { primaryMode as resolvePrimaryMode, sessionActive } from "../lib/transportMode";
+  import {
+    primaryMode as resolvePrimaryMode,
+    sessionActive,
+    canSkipNext,
+  } from "../lib/transportMode";
 
   interface Props {
     /// True while the transport sentinel is intersecting the viewport.
@@ -24,7 +28,10 @@
   let mode = $derived(resolvePrimaryMode(phase, paused, auditioning));
   let primaryLabel = $derived(mode === "resume" ? "▶" : "⏸");
   let primaryDisabled = $derived(mode === "off" || primaryBusy || auditioning);
-  let nextDisabled = $derived(!active || nextBusy);
+  let nextEnabled = $derived(
+    canSkipNext(phase, auditioning, store.queue?.reserved_prepared ?? false),
+  );
+  let nextDisabled = $derived(!nextEnabled || nextBusy);
 
   async function onPrimaryClick() {
     if (primaryBusy || mode === "off") return;
@@ -37,7 +44,7 @@
   }
 
   async function onNextClick() {
-    if (nextBusy || !active) return;
+    if (nextBusy || !nextEnabled) return;
     nextBusy = true;
     try {
       await store.doSkipNext();

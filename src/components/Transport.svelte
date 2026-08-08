@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
-  import { primaryMode as resolvePrimaryMode, sessionActive } from "../lib/transportMode";
+  import { primaryMode as resolvePrimaryMode, canSkipNext } from "../lib/transportMode";
 
   // Every command round-trips through the host, and `start`/`toggle_pause`
   // touch the filesystem or the audio thread; without a busy guard a second
@@ -39,7 +39,9 @@
   // which this rule is carried over from unchanged.
   let primaryDisabled = $derived(mode === "off" || primaryBusy);
 
-  let nextEnabled = $derived(sessionActive(phase, auditioning));
+  let nextEnabled = $derived(
+    canSkipNext(phase, auditioning, store.queue?.reserved_prepared ?? false),
+  );
   let nextDisabled = $derived(!nextEnabled || nextBusy);
 
   async function onPrimaryClick() {

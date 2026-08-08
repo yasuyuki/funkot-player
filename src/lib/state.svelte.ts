@@ -358,6 +358,9 @@ class PlayerStore {
   async doSkipNext(): Promise<void> {
     try {
       await skipNextCmd();
+      // Host drops TransitionToNext while next is unset; refresh queue so
+      // reserved_prepared (and thus canSkipNext) drops without waiting for poll.
+      await this.#refreshQueueNow();
     } catch (e) {
       this.lastError = String(e);
     }
