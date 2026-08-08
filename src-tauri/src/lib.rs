@@ -3176,14 +3176,14 @@ fn start_impl(
     // `in_flight` has now been folded back into `pending` above, so the
     // in-memory session starts this run with none still outstanding;
     // `on_reserved` repopulates it as the loader takes tracks back out.
-    // `paused` carries over as-is — a restart should not silently start
-    // playing if the listener left it paused.
+    // Start means "play": do not carry over a previous run's pause. In-process
+    // pause still goes through `flip_paused` → SESSION as before.
     {
         let mut s = SESSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         s.in_flight = Vec::new();
-        s.paused = session.paused;
+        s.paused = false;
     }
     persist_session();
     // Where `DrainPolicy::ContinueFolder` resumes folder cycling — see
@@ -3201,10 +3201,9 @@ fn start_impl(
     // slot is prepared (cleared in the cpal callback via `NEXT_PREPARED`).
     YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
 
-    // `session.paused` folds into `initial_paused` (never the other way
-    // round): cold-start audition's own `true` must never be undone by a
-    // restored `paused == false`.
-    let initial_paused = initial_paused || session.paused;
+    // Use the caller's `initial_paused` only (normal Start: false; cold
+    // audition: true). Do not OR in disk `session.paused` — Start is a play
+    // intent, and cold audition mute is already expressed by the caller flag.
     if let Err(e) = std::thread::Builder::new()
         .name("funkot-audio".into())
         .spawn(move || audio_thread(paths, cache, data, tx, queue, initial_paused, folder_pos))
