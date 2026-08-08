@@ -68,11 +68,11 @@ if [ ! -f "$APK" ]; then
     exit 1
 fi
 
-# One ./dev.sh call for connect + serial check + install: ADB=1 shares the
-# host's port 5037, and a second container's adb server fighting the first
-# looks like a device fault ("protocol fault (couldn't read status length)").
-# Every container also gets a fresh adb server, so connect has to happen here
-# too, not in a prior invocation.
+# One ./dev.sh call for connect + serial check + install. ADB=1 uses the
+# persistent adb server (funkot-player-adb); connect here is idempotent and
+# ensures ADDR is on that server's device list (wireless debugging's IP:port
+# changes when re-enabled), not because each invocation used to wipe the
+# server.
 #
 # The block below is deliberately single-quoted: it is a script for the
 # container's shell, and $1..$5 there are its own positional params (bound

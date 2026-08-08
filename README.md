@@ -248,18 +248,22 @@ by Smart App Control.
 Review assets on the draft, then **Publish release** (Android). Submit MSIX via
 Partner Center separately.
 
-Install and run on a device over wireless debugging:
+Install and run on a device over wireless debugging. `ADB=1` starts the
+persistent adb server (`./scripts/adb-server.sh start`) if needed; connect once
+per session, then later commands can omit connect:
 
 ```sh
+./scripts/adb-server.sh start                         # or let ADB=1 do it
 ADB=1 ./dev.sh adb pair <ip>:<pair-port> <code>       # once per device
-ADB=1 ./dev.sh adb connect <ip>:<connect-port>
+ADB=1 ./dev.sh adb connect <ip>:<connect-port>        # once per session
 ADB=1 ./dev.sh adb install -r \
     src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
 ADB=1 ./dev.sh adb logcat -s funkot
 ```
 
 The connect port differs from the pairing port; both are on the device's
-Wireless debugging screen.
+Wireless debugging screen. Stop the server with `./scripts/adb-server.sh stop`
+(avoid `adb kill-server` — it tears down that persistent server).
 
 This project has two physical devices, each pinned to one role (debug and
 release are signed with different keys, so installing the wrong role over
@@ -322,11 +326,16 @@ the next `adb install -r` into `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
   `nmap -sn 192.168.10.0/24`, then `nmap -Pn -p 1024-65535 --open -T4 <ip>`.
   Several ports answer; only one of them is adb, the rest go `offline` on
   `adb connect`. Do not narrow the range — ports above 50000 are common.
-- **Never run two `ADB=1 ./dev.sh` at once.** `--network host` means every
-  container shares the host's port 5037, and the adb servers fight. The symptom
-  is `protocol fault (couldn't read status length)`, which looks like a device
-  fault but is self-inflicted. Note also that each container gets a *fresh* adb
-  server, so every invocation must `adb connect` again.
+- **Persistent adb server.** Wireless clients share `funkot-player-adb`
+  (`./scripts/adb-server.sh`), which holds port 5037 on the host network.
+  Multiple `ADB=1 ./dev.sh` clients at once are fine once the server is up;
+  connect once per session and later invocations keep the same device list.
+  (Two cold starts racing to create the container are handled, but prefer a
+  single `./scripts/adb-server.sh start` first.) Commands that occupy the
+  device (e.g. `android dev`) can still conflict with each other. Prefer
+  `./scripts/adb-server.sh stop` over `adb kill-server`. After rebuilding
+  `funkot-player-dev`, recreate the server container so it picks up the new
+  image: `./scripts/adb-server.sh stop && docker rm funkot-player-adb`.
 - **Every reconnect pops a heads-up notification** ("Wireless debugging
   connected") over the top of the screen, and it eats taps aimed at the controls
   underneath — the tap opens Developer options instead, and the app looks

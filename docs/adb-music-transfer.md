@@ -29,11 +29,16 @@ PC 側で先に作ると読めないことがある（README と同じ）。
 
 ## 1. 端末に接続
 
+永続 adb server（`funkot-player-adb`）を先に起動する。`ADB=1` でも自動 start
+する。connect はセッションで一度でよい（connect-port は端末の Wireless
+debugging 画面。再有効化で変わる）。
+
 ```sh
+./scripts/adb-server.sh start   # または ADB=1 に任せる
+
 # 初回のみ（ペアリング）
 ADB=1 ./dev.sh adb pair <ip>:<pair-port> <code>
 
-# 毎回（connect-port は端末の Wireless debugging 画面）
 ADDR=192.168.10.119:42539   # 例。都度差し替え
 ADB=1 ./dev.sh adb connect "$ADDR"
 ADB=1 ./dev.sh adb -s "$ADDR" shell echo ok
@@ -155,8 +160,16 @@ sys.exit(0 if fail == 0 else 1)
 
 ## 4. 実行
 
+転送用の `docker run` は `dev.sh` を通らないので、**転送前に
+`./scripts/adb-server.sh start` と connect を済ませる**。`--network host` で
+既存の 5037 に載る。server が先に 5037 を握っていないと、転送コンテナが独自に
+server を立てて喧嘩する。
+
 ```sh
+./scripts/adb-server.sh start
 ADDR=192.168.10.119:42539   # 現在の connect-port
+ADB=1 ./dev.sh adb connect "$ADDR"   # 未接続なら
+
 REPO=/home/yasuyuki/Projects/funkot-player
 MUSIC=/mnt/oldpc/music
 
