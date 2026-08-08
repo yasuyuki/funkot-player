@@ -1656,6 +1656,11 @@ static MAIN_FRAMES: AtomicU64 = AtomicU64::new(0);
 /// `RenderState` and `open_output_stream`'s `try_lock`.
 static NEXT_PREPARED: AtomicBool = AtomicBool::new(false);
 
+/// Analysis worker yields while this is true: set at Start (`Phase::Starting`),
+/// cleared in the cpal callback once the main engine's next slot is filled
+/// (`NEXT_PREPARED`). Atomic-only so the callback never takes a lock.
+static YIELD_FOR_LOADER: AtomicBool = AtomicBool::new(false);
+
 /// Mirrors `Engine::frames_until_transition()` for the main engine, same
 /// publish site and same audition-freezes caveat as `NEXT_PREPARED` above.
 /// `u64::MAX` is the sentinel for "unknown" (covers both `Engine`'s own
@@ -2263,7 +2268,13 @@ fn open_output_stream(
                         // See `NEXT_PREPARED` / `FRAMES_UNTIL_TRANSITION`'s
                         // doc comments: atomic publish only, no lock, since
                         // this callback must never block on one.
-                        NEXT_PREPARED.store(engine.next_track_path().is_some(), Ordering::Relaxed);
+                        let next_ready = engine.next_track_path().is_some();
+                        NEXT_PREPARED.store(next_ready, Ordering::Relaxed);
+                        if next_ready {
+                            // First next-slot fill ends the Start→loader yield
+                            // window; analysis may resume. Atomic only.
+                            YIELD_FOR_LOADER.store(false, Ordering::Relaxed);
+                        }
                         FRAMES_UNTIL_TRANSITION.store(
                             engine.frames_until_transition().unwrap_or(u64::MAX),
                             Ordering::Relaxed,
@@ -3186,6 +3197,9 @@ fn start_impl(
     // Before `analyze_missing`, not after: the worker holds off while the
     // phase says `Starting`, and it can only see that if it is already set.
     set_phase(Phase::Starting);
+    // Prefer playback/loader over background decode until the first next
+    // slot is prepared (cleared in the cpal callback via `NEXT_PREPARED`).
+    YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
 
     // Kick off analysis for anything the folder holds that the cache does not
     // already have a complete entry for, so the loader thread never has to
@@ -3201,6 +3215,7 @@ fn start_impl(
         .spawn(move || audio_thread(paths, cache, data, tx, queue, initial_paused, folder_pos))
     {
         set_phase(Phase::Idle);
+        YIELD_FOR_LOADER.store(false, Ordering::Relaxed);
         return Err(format!("spawn audio thread: {e}"));
     }
 
@@ -4811,8 +4826,13 @@ mod scan_tracks_tests {
 /// `start`, which wants it so the loader thread is never the one running a
 /// fresh analysis while it is also the only thing feeding the engine.
 ///
-/// A no-op (and silent) when nothing is missing.
+/// A no-op (and silent) when nothing is missing, or when a worker is already
+/// running (typical: Start during an in-flight `refresh_library` analysis) —
+/// hashing every path just to hit the spawn no-op is wasted Start latency.
 fn analyze_missing(app: &tauri::AppHandle, paths: &[PathBuf], cache_dir: &Path, data_dir: &Path) {
+    if ANALYZING.load(Ordering::SeqCst) {
+        return;
+    }
     // Hand the worker only what is actually missing. `fill_missing` checks the
     // cache *after* it is given a decoded buffer, so passing an already-analysed
     // track still costs a full decode — adding one file to a large library would
@@ -5091,28 +5111,41 @@ fn reapply_overrides(path: &std::path::Path, cache_dir: &std::path::Path, o: &st
 /// better than analysing nothing.
 const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Block until the first track is actually making sound.
+/// Block while Start / loader work should own decode CPU and disk.
+///
+/// Called by the analysis worker before each track, not once at thread entry:
+/// a worker started while Idle (refresh-before-start) would otherwise keep
+/// decoding other files after Start flips the phase to `Starting`, and steal
+/// CPU/disk from the loader. Mid-decode of the current file is not cancelled;
+/// yielding happens before the next track.
+///
+/// Waits while any of:
+/// - `Phase::Starting` — first non-silent buffer not yet reached
+/// - `Phase::Stalled` — silence; stop competing so the loader can recover
+/// - `Phase::Playing` and `YIELD_FOR_LOADER` — after first sound, still cover
+///   first-track Upgrade and the first next-slot prepare (`get_or_analyze` on
+///   cache miss). Cleared when the cpal callback sees `next_track_path()`.
 ///
 /// The engine's loader analyses a track itself when the cache has no complete
 /// entry for it (`funkot-core` `cache::get_or_analyze`, reached from
 /// `prepare_track` and from the first track's Upgrade). That analysis is what
-/// this worker exists to do ahead of time — but for the *first* track the
-/// loader is already doing it, on the one thread feeding the engine, and
-/// piling on there is how a press of start turns into a wait for silence.
+/// this worker exists to do ahead of time — but overlapping it on Start is
+/// how a press of start turns into a wait for silence.
 ///
-/// Note what this does **not** wait for. `Starting` ends at the first
-/// non-silent buffer, which the loader reaches on a ~20 s head preview
-/// (`prepare_first_live`) — its full analysis of that same first track is
-/// still running afterwards. So this buys the decode-and-first-sound burst,
-/// not the whole of track one, and the worker can still briefly overlap the
-/// loader on that file. The per-track cache re-check in the worker loop is
-/// what keeps that overlap from costing a second full analysis.
-///
-/// Idle (nothing playing) does not wait at all, which is the plain
+/// If the next slot never fills while still Playing (drain empty, prepare
+/// stuck, …), `YIELD_FOR_LOADER` stays true and each subsequent track wait
+/// can re-arm up to `STARTUP_WAIT`. Idle / Paused / Failed / Disconnected
+/// (or Playing with the flag cleared) does not wait — the plain
 /// press-scan-before-start case.
 fn wait_out_startup() {
     let until = std::time::Instant::now() + STARTUP_WAIT;
-    while get_phase() == Phase::Starting && std::time::Instant::now() < until {
+    while std::time::Instant::now() < until {
+        let phase = get_phase();
+        let hold = matches!(phase, Phase::Starting | Phase::Stalled)
+            || (phase == Phase::Playing && YIELD_FOR_LOADER.load(Ordering::Relaxed));
+        if !hold {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
@@ -5140,10 +5173,13 @@ fn spawn_analysis_worker(
         .spawn(move || {
             use tauri::Emitter;
 
-            wait_out_startup();
-
             let total = paths.len();
             for (i, path) in paths.iter().enumerate() {
+                // Yield before starting the next track so Start's
+                // `prepare_first_live` is not fighting an in-flight library
+                // decode. See `wait_out_startup`.
+                wait_out_startup();
+
                 let name = file_name_str(path);
 
                 // Re-checked here, not just when the list was built: the
