@@ -7,17 +7,11 @@ mod queue;
 mod store;
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::formats::probe::Hint;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataOptions, StandardTag};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use funkot_core::engine::{
@@ -1846,41 +1840,7 @@ fn session_metadata_for(now: Option<&Path>, tags: &CachedTags) -> (String, Strin
 }
 
 fn probe_tags_inner(path: &Path) -> Result<CachedTags, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let mut format = symphonia::default::get_probe()
-        .probe(
-            &hint,
-            mss,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        )
-        .map_err(|e| e.to_string())?;
-    let mut title = None;
-    let mut artist = None;
-    if let Some(rev) = format.metadata().skip_to_latest() {
-        for tag in &rev.media.tags {
-            match &tag.std {
-                Some(StandardTag::TrackTitle(s)) if title.is_none() => {
-                    let t = s.trim();
-                    if !t.is_empty() {
-                        title = Some(t.to_string());
-                    }
-                }
-                Some(StandardTag::Artist(s)) if artist.is_none() => {
-                    let a = s.trim();
-                    if !a.is_empty() {
-                        artist = Some(a.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    let (title, artist) = store::probe_audio_tags(path)?;
     Ok(CachedTags { title, artist })
 }
 
@@ -3905,7 +3865,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
             continue;
         };
         // Same path/bars/manual/analyzed sources as the library table.
-        let row = track_row(path, &cache_dir, &overrides, Some(&hash));
+        let row = track_row(path, &cache_dir, &overrides, Some(&hash), None);
         meta_by_hash.insert(
             hash,
             store::FlagTrackMeta {
@@ -4423,15 +4383,24 @@ fn gated_non_funkot(
 
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.
 ///
-/// `hash` is resolved once by the caller (`resolve_content_hash` / `content_hash`)
-/// so this path never content-hashes the file again.
+/// `hash` is resolved once by the caller (`resolve_content_hash` /
+/// `resolve_library_file` / `content_hash`) so this path never content-hashes
+/// the file again.
+///
+/// `tags: Some` uses the caller's tags (library refresh after hash-index
+/// resolve). `tags: None` falls back to [`cached_tags_for`] (analysis worker
+/// and other call sites).
 fn track_row(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
     overrides: &store::Overrides,
     hash: Option<&str>,
+    tags: Option<CachedTags>,
 ) -> TrackRow {
-    let tags = cached_tags_for(path);
+    let tags = match tags {
+        Some(t) => t,
+        None => cached_tags_for(path),
+    };
     let (title, artist) = session_metadata_for(Some(path), &tags);
     match hash.and_then(|h| analyzed_cache_entry(cache_dir, h).map(|a| (h, a))) {
         Some((hash, a)) => {
@@ -4528,7 +4497,7 @@ mod cache_state_tests {
         let (track, _) = track_with_analysis(&dir.0);
         let hash = funkot_core::cache::content_hash(&track).unwrap();
         assert!(analyzed_cache_entry(&dir.0, &hash).is_none());
-        assert!(!track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash)).analyzed);
+        assert!(!track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash), None).analyzed);
     }
 
     #[test]
@@ -4539,7 +4508,7 @@ mod cache_state_tests {
         let hash = funkot_core::cache::content_hash(&track).unwrap();
 
         assert!(analyzed_cache_entry(&dir.0, &hash).is_some());
-        let row = track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash));
+        let row = track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash), None);
         assert!(row.analyzed);
         assert_eq!(row.intro_bars, Some(analysis.intro_bars));
         // Tagless fixture: title falls back to file name, artist empty;
@@ -4564,7 +4533,7 @@ mod cache_state_tests {
         let hash = funkot_core::cache::content_hash(&track).unwrap();
 
         assert!(analyzed_cache_entry(&dir.0, &hash).is_none());
-        let row = track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash));
+        let row = track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash), None);
         assert!(!row.analyzed);
         // And the numbers are withheld too: showing bars the engine is about
         // to recompute invites hand-correcting a value that is on its way out.
@@ -4578,7 +4547,7 @@ mod cache_state_tests {
         let dir = TempDir::new("missing-hash");
         let track = dir.0.join("nope.wav");
         assert!(analyzed_cache_entry(&dir.0, "deadbeef").is_none());
-        assert!(!track_row(&track, &dir.0, &store::Overrides::new(), None).analyzed);
+        assert!(!track_row(&track, &dir.0, &store::Overrides::new(), None, None).analyzed);
     }
 
     /// `track_row` must honour the hash the caller already resolved — no second
@@ -4599,9 +4568,31 @@ mod cache_state_tests {
                 ..Default::default()
             },
         );
-        let row = track_row(&track, &cache.0, &overrides, Some(&hash));
+        let row = track_row(&track, &cache.0, &overrides, Some(&hash), None);
         assert!(row.analyzed);
         assert!(row.is_funkot);
+    }
+
+    /// `tags: Some` must be used as-is — no `cached_tags_for` / file open.
+    /// A missing path would fail probe; passed tags still win.
+    #[test]
+    fn track_row_uses_passed_tags_without_probe() {
+        let dir = TempDir::new("row-tags");
+        let track = dir.0.join("does-not-exist.wav");
+        let tags = CachedTags {
+            title: Some("From Index".into()),
+            artist: Some("Cached Artist".into()),
+        };
+        let row = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            None,
+            Some(tags),
+        );
+        assert_eq!(row.title, "From Index");
+        assert_eq!(row.artist, "Cached Artist");
+        assert!(!row.analyzed);
     }
 
     #[test]
@@ -4713,7 +4704,7 @@ mod cache_state_tests {
         let hash = funkot_core::cache::content_hash(&track).unwrap();
         assert_eq!(
             path_str(&track),
-            track_row(&track, &cache.0, &store::Overrides::new(), Some(&hash)).path
+            track_row(&track, &cache.0, &store::Overrides::new(), Some(&hash), None).path
         );
     }
 }
@@ -4928,18 +4919,40 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
         },
     );
 
-    // Explicit loop (not `.map`) so we can emit progress after each content-hash.
+    // Explicit loop (not `.map`) so we can emit progress after each resolve.
     let mut rows: Vec<TrackRow> = Vec::with_capacity(found);
     let mut seen_paths = std::collections::BTreeSet::new();
     for path in &paths {
         let path_key = path.to_string_lossy().into_owned();
-        seen_paths.insert(path_key);
-        let hash = store::resolve_content_hash(path, &mut hash_index).ok();
+        seen_paths.insert(path_key.clone());
+        let (hash, tags) = match store::resolve_library_file(path, &mut hash_index) {
+            Ok(resolved) => {
+                let tags = CachedTags {
+                    title: resolved.title,
+                    artist: resolved.artist,
+                };
+                // Seed TAG_CACHE from the index whenever tags are known so
+                // later cached_tags_for callers (MediaSession, analysis rows)
+                // neither re-open on hit nor keep stale tags after a re-probe.
+                if hash_index
+                    .get(&path_key)
+                    .is_some_and(|e| e.tags_cached)
+                {
+                    TAG_CACHE
+                        .lock()
+                        .unwrap()
+                        .insert(path.to_path_buf(), tags.clone());
+                }
+                (Some(resolved.hash), Some(tags))
+            }
+            Err(_) => (None, None),
+        };
         rows.push(track_row(
             path,
             &cache_dir,
             &overrides,
             hash.as_deref(),
+            tags,
         ));
         let _ = app.emit(
             "library-scan",
@@ -5097,7 +5110,7 @@ fn set_bars_impl(
         log::warn!("cannot persist manual bars: {e}");
     }
 
-    Ok(track_row(track, cache_dir, &overrides, Some(&hash)))
+    Ok(track_row(track, cache_dir, &overrides, Some(&hash), None))
 }
 
 /// Progress payload for the `analysis-progress` event.
@@ -5233,7 +5246,7 @@ fn spawn_analysis_worker(
                             done: i + 1,
                             total,
                             name,
-                            row: track_row(path, &cache_dir, &overrides, hash.as_deref()),
+                            row: track_row(path, &cache_dir, &overrides, hash.as_deref(), None),
                         },
                     );
                     continue;
@@ -5257,7 +5270,7 @@ fn spawn_analysis_worker(
 
                 // Built after `reapply_overrides` so a successful run's row
                 // reflects the corrected numbers, not the analyzer's raw ones.
-                let row = track_row(path, &cache_dir, &overrides, hash.as_deref());
+                let row = track_row(path, &cache_dir, &overrides, hash.as_deref(), None);
                 let _ = app.emit(
                     "analysis-progress",
                     AnalysisProgress {

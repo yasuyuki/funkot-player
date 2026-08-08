@@ -33,9 +33,14 @@
 //! anything still there (including `flags.json` if present).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::{MetadataOptions, StandardTag};
 
 const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
@@ -399,15 +404,34 @@ pub fn save_overrides(dir: &Path, overrides: &Overrides) -> io::Result<()> {
 ///
 /// `mtime_ms` + `len` are a cheap fingerprint so a library rescan can skip
 /// re-reading file bytes when nothing has changed on disk.
+///
+/// When `tags_cached` is true, `title`/`artist` were probed (both `None` means
+/// the file has no usable tags). Older `hash-index.json` entries lack these
+/// fields and deserialize as `tags_cached: false`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HashIndexEntry {
     pub mtime_ms: u64,
     pub len: u64,
     pub hash: String,
+    /// When true, `title`/`artist` were probed and may be stored (both None = no tags).
+    #[serde(default)]
+    pub tags_cached: bool,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
 }
 
 /// Path → content hash, with mtime/size so unchanged files skip re-hashing.
 pub type HashIndex = BTreeMap<String, HashIndexEntry>;
+
+/// Hash + embedded tags for one library file after [`resolve_library_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLibraryFile {
+    pub hash: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+}
 
 /// Load the content-hash index saved under `dir`.
 ///
@@ -448,7 +472,53 @@ fn file_mtime_ms_and_len(path: &Path) -> Option<(u64, u64)> {
     Some((mtime_ms, len))
 }
 
+/// Probe embedded title/artist via symphonia (open + metadata only).
+///
+/// Successful probes include "no tags" (`Ok((None, None))`). I/O / probe
+/// errors are `Err` so callers can avoid marking `tags_cached`.
+pub fn probe_audio_tags(path: &Path) -> Result<(Option<String>, Option<String>), String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut title = None;
+    let mut artist = None;
+    if let Some(rev) = format.metadata().skip_to_latest() {
+        for tag in &rev.media.tags {
+            match &tag.std {
+                Some(StandardTag::TrackTitle(s)) if title.is_none() => {
+                    let t = s.trim();
+                    if !t.is_empty() {
+                        title = Some(t.to_string());
+                    }
+                }
+                Some(StandardTag::Artist(s)) if artist.is_none() => {
+                    let a = s.trim();
+                    if !a.is_empty() {
+                        artist = Some(a.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((title, artist))
+}
+
 /// Return `path`'s content hash, reusing [`HashIndex`] when mtime+size match.
+///
+/// Does not probe or clear tags on a fingerprint hit. On miss, inserts with
+/// `tags_cached: false` (hash-only; library refresh fills tags later).
 // ponytail: mtime+size fingerprint can disagree after same-mtime overwrite; re-verify content if needed.
 pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<String> {
     let key = path.to_string_lossy().into_owned();
@@ -472,10 +542,95 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
                 mtime_ms,
                 len,
                 hash: hash.clone(),
+                tags_cached: false,
+                title: None,
+                artist: None,
             },
         );
     }
     Ok(hash)
+}
+
+/// Resolve content hash and embedded tags for a library scan, updating `index`
+/// in place. Does not persist to disk.
+///
+/// - Fingerprint miss → content-hash + tags probe → write full entry
+/// - Fingerprint hit + `tags_cached` → no file open; return stored hash/tags
+/// - Fingerprint hit + `!tags_cached` → skip content-hash; probe tags only
+pub fn resolve_library_file(
+    path: &Path,
+    index: &mut HashIndex,
+) -> io::Result<ResolvedLibraryFile> {
+    let key = path.to_string_lossy().into_owned();
+    let fingerprint = file_mtime_ms_and_len(path);
+
+    if let Some((mtime_ms, len)) = fingerprint {
+        if let Some(entry) = index.get(&key) {
+            if entry.mtime_ms == mtime_ms && entry.len == len {
+                if entry.tags_cached {
+                    return Ok(ResolvedLibraryFile {
+                        hash: entry.hash.clone(),
+                        title: entry.title.clone(),
+                        artist: entry.artist.clone(),
+                    });
+                }
+                let hash = entry.hash.clone();
+                match probe_audio_tags(path) {
+                    Ok((title, artist)) => {
+                        index.insert(
+                            key,
+                            HashIndexEntry {
+                                mtime_ms,
+                                len,
+                                hash: hash.clone(),
+                                tags_cached: true,
+                                title: title.clone(),
+                                artist: artist.clone(),
+                            },
+                        );
+                        return Ok(ResolvedLibraryFile {
+                            hash,
+                            title,
+                            artist,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(ResolvedLibraryFile {
+                            hash,
+                            title: None,
+                            artist: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let hash = funkot_core::cache::content_hash(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let (title, artist, tags_cached) = match probe_audio_tags(path) {
+        Ok((t, a)) => (t, a, true),
+        Err(_) => (None, None, false),
+    };
+
+    if let Some((mtime_ms, len)) = fingerprint {
+        index.insert(
+            key,
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: hash.clone(),
+                tags_cached,
+                title: title.clone(),
+                artist: artist.clone(),
+            },
+        );
+    }
+    Ok(ResolvedLibraryFile {
+        hash,
+        title,
+        artist,
+    })
 }
 
 /// One automatic transition pair the listener flagged as bad.
@@ -961,10 +1116,29 @@ mod tests {
                 mtime_ms: 1_700_000_000_000,
                 len: 4096,
                 hash: "abc".into(),
+                tags_cached: true,
+                title: Some("A".into()),
+                artist: Some("Artist".into()),
             },
         );
         save_hash_index(&dir.0, &index).unwrap();
         assert_eq!(load_hash_index(&dir.0), index);
+    }
+
+    #[test]
+    fn hash_index_old_entry_deserializes_without_tags() {
+        let dir = TempDir::new("hash-index-old-format");
+        fs::write(
+            dir.0.join(HASH_INDEX_FILE),
+            br#"{"/music/a.flac":{"mtime_ms":1,"len":10,"hash":"abc"}}"#,
+        )
+        .unwrap();
+        let loaded = load_hash_index(&dir.0);
+        let entry = &loaded["/music/a.flac"];
+        assert_eq!(entry.hash, "abc");
+        assert!(!entry.tags_cached);
+        assert!(entry.title.is_none());
+        assert!(entry.artist.is_none());
     }
 
     #[test]
@@ -1063,6 +1237,9 @@ mod tests {
                 mtime_ms: 1,
                 len: 10,
                 hash: "kept".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
             },
         );
         index.insert(
@@ -1071,6 +1248,9 @@ mod tests {
                 mtime_ms: 2,
                 len: 20,
                 hash: "gone".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
             },
         );
         index.retain(|path, _| path == "/music/kept.flac");
@@ -1079,6 +1259,170 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert!(loaded.contains_key("/music/kept.flac"));
         assert!(!loaded.contains_key("/music/gone.flac"));
+    }
+
+    /// Fingerprint + tags_cached hit must not open the file: changed bytes with
+    /// restored mtime still return the stored hash and title.
+    #[test]
+    fn resolve_library_reuses_tags_when_fingerprint_and_tags_cached() {
+        let dir = TempDir::new("hash-index-tags-hit");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 256]).unwrap();
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: "stale-hash".into(),
+                tags_cached: true,
+                title: Some("Cached Title".into()),
+                artist: Some("Cached Artist".into()),
+            },
+        );
+
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, vec![9u8; 256]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        let resolved = resolve_library_file(&path, &mut index).unwrap();
+        assert_eq!(resolved.hash, "stale-hash");
+        assert_eq!(resolved.title.as_deref(), Some("Cached Title"));
+        assert_eq!(resolved.artist.as_deref(), Some("Cached Artist"));
+        // Fresh content_hash would see the new bytes — proves we skipped open
+        // for hashing; stored title would be wiped by a real probe of this
+        // non-audio payload, so keeping it proves tags were not re-probed.
+        let fresh = funkot_core::cache::content_hash(&path).unwrap();
+        assert_ne!(resolved.hash, fresh);
+        assert_eq!(index[&key].title.as_deref(), Some("Cached Title"));
+    }
+
+    /// Tiny PCM WAV (no tags) so `probe_audio_tags` succeeds with both None.
+    fn write_silent_wav(path: &Path, fill: u8) {
+        let sample_rate = 8_000u32;
+        let channels = 1u16;
+        let bits = 16u16;
+        let n_samples = 64u32;
+        let data_size = n_samples * (bits as u32 / 8) * u32::from(channels);
+        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * u32::from(channels) * (u32::from(bits) / 8);
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        let block_align = channels * bits / 8;
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        buf.extend(std::iter::repeat(fill).take(data_size as usize));
+        fs::write(path, buf).unwrap();
+    }
+
+    /// Pre-tags index entry: fingerprint hit still skips content_hash, probes
+    /// tags once, and upgrades the entry to `tags_cached`.
+    #[test]
+    fn resolve_library_upgrades_old_entry_tags_without_rehash() {
+        let dir = TempDir::new("hash-index-tags-upgrade");
+        let path = dir.0.join("track.wav");
+        write_silent_wav(&path, 1);
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: "kept-hash".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        write_silent_wav(&path, 9);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        let resolved = resolve_library_file(&path, &mut index).unwrap();
+        assert_eq!(resolved.hash, "kept-hash");
+        let fresh = funkot_core::cache::content_hash(&path).unwrap();
+        assert_ne!(resolved.hash, fresh);
+
+        let entry = &index[&key];
+        assert!(entry.tags_cached);
+        assert_eq!(entry.hash, "kept-hash");
+        // Tagless WAV: both None is still a successful probe.
+        assert!(entry.title.is_none());
+        assert!(entry.artist.is_none());
+    }
+
+    /// `resolve_content_hash` miss must not wipe a prior tags-cached entry's
+    /// fields only when fingerprint still hits — and on miss inserts
+    /// tags_cached: false without inventing tags.
+    #[test]
+    fn resolve_content_hash_miss_inserts_without_tags() {
+        let dir = TempDir::new("hash-index-hash-only-miss");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 128]).unwrap();
+
+        let mut index = HashIndex::new();
+        let hash = resolve_content_hash(&path, &mut index).unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let entry = &index[&key];
+        assert_eq!(entry.hash, hash);
+        assert!(!entry.tags_cached);
+        assert!(entry.title.is_none());
+        assert!(entry.artist.is_none());
+    }
+
+    /// Fingerprint hit on `resolve_content_hash` must leave tags fields alone.
+    #[test]
+    fn resolve_content_hash_hit_preserves_tags() {
+        let dir = TempDir::new("hash-index-hash-preserves-tags");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 128]).unwrap();
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: "h".into(),
+                tags_cached: true,
+                title: Some("T".into()),
+                artist: Some("A".into()),
+            },
+        );
+
+        assert_eq!(resolve_content_hash(&path, &mut index).unwrap(), "h");
+        let entry = &index[&key];
+        assert!(entry.tags_cached);
+        assert_eq!(entry.title.as_deref(), Some("T"));
+        assert_eq!(entry.artist.as_deref(), Some("A"));
     }
 
     #[test]
