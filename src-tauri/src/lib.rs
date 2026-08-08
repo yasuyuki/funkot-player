@@ -546,8 +546,15 @@ fn app_dirs(app: tauri::AppHandle) -> Result<AppDirs, String> {
 }
 
 /// Resolve (and create) the Music folder, open it on desktop, and return its
-/// absolute path. Android cannot reliably open an app-private folder in a
-/// file manager Intent, so it returns the path only for a UI toast.
+/// absolute path.
+///
+/// Desktop only in practice: the Android music folder sits under
+/// `Android/data`, which no file manager can reach since Android 11 (both
+/// `ACTION_VIEW` and `ACTION_OPEN_DOCUMENT_TREE` are refused there), so the
+/// UI hides the menu item and shows the path in the log panel instead. The
+/// Android arm is left as a path-returning no-op rather than an error: it
+/// stays honest if something else ever calls it, and the folder is created
+/// by `ensure_dirs` on every launch regardless.
 #[tauri::command(async)]
 fn open_music_dir(app: tauri::AppHandle) -> Result<String, String> {
     let dirs = resolve_dirs(&app)?;

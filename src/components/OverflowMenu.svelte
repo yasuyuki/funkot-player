@@ -46,9 +46,9 @@
     ui.menuOpen = false;
     try {
       const path = await openMusicDir();
-      // Android cannot open the folder; the path toast is the UX. Desktop
-      // already opened Explorer / the file manager — still show the path so
-      // Windows Store users can confirm where files go.
+      // The file manager is already up by now; the toast rides on top of it
+      // so Windows Store users can confirm where files go. Desktop only —
+      // see the guard on the menu item.
       toast.notify(path);
     } catch (err) {
       toast.notify(String(err));
@@ -178,12 +178,18 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu" onclick={(event) => event.stopPropagation()}>
       <button type="button" onclick={onRescan} disabled={scanBusy}>再スキャン</button>
-      <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
+      <!-- Desktop only. `music_dir_configurable` is the platform test here
+           (false on Android, see tauri.ts's AppDirs): Android's music folder
+           lives under `Android/data`, which no file manager can reach since
+           Android 11, so "開く" cannot be honoured there and the item would
+           only name something it does not do. The path itself is still
+           reachable on Android -- LogView prints it. -->
       {#if store.dirs?.music_dir_configurable}
+        <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
         <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>音楽フォルダを変更</button>
-      {/if}
-      {#if store.dirs?.music_dir_configurable && store.dirs?.music_dir_custom}
-        <button type="button" onclick={onResetMusicDir} disabled={musicDirResetBusy}>音楽フォルダを既定に戻す</button>
+        {#if store.dirs?.music_dir_custom}
+          <button type="button" onclick={onResetMusicDir} disabled={musicDirResetBusy}>音楽フォルダを既定に戻す</button>
+        {/if}
       {/if}
       <button type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
         非Funkotも再生: {store.allowNonFunkot ? "ON" : "OFF"}

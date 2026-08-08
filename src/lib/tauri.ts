@@ -77,8 +77,9 @@ export function appDirs(): Promise<AppDirs> {
   return invoke<AppDirs>("app_dirs");
 }
 
-/// Opens the Music folder on desktop (explorer / xdg-open) and always returns
-/// its absolute path. On Android the folder is not opened — toast the path.
+/// Opens the Music folder (explorer / open / xdg-open) and returns its
+/// absolute path. Desktop only: the UI hides the menu item on Android, where
+/// the folder cannot be opened at all (see `open_music_dir` in `lib.rs`).
 export function openMusicDir(): Promise<string> {
   return invoke<string>("open_music_dir");
 }
