@@ -60,6 +60,12 @@ if [ ! -d "$CORE_DIR/funkot-core" ]; then
     exit 1
 fi
 
+# A path dependency builds whatever is checked out over there, so the engine in
+# this build is decided by that tree's current state and nothing records it.
+# Say which one it was: -dirty means uncommitted engine changes are baked in,
+# and the describe relates it to the player/vX.Y.Z tags CI builds from.
+echo "engine: $(git -C "$CORE_DIR" describe --tags --always --dirty 2>/dev/null || echo '?') ($(git -C "$CORE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'))" >&2
+
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker build -t "$IMAGE" .
 fi
