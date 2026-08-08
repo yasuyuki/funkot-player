@@ -2479,7 +2479,11 @@ fn audio_thread(
             }
         }))
         .on_reserved(Box::new(move |path| {
-            let analysis = if analyzed_cache_entry(path, &cache_dir_for_log).is_some() {
+            let analysis = funkot_core::cache::content_hash(path)
+                .ok()
+                .and_then(|h| analyzed_cache_entry(&cache_dir_for_log, &h))
+                .is_some();
+            let analysis = if analysis {
                 "cached"
             } else {
                 "missing"
@@ -3712,7 +3716,10 @@ fn played_duration_for(app: &tauri::AppHandle, now: &Path) -> Option<f64> {
     }
     let dirs = resolve_dirs(app).ok()?;
     let cache_dir = PathBuf::from(dirs.cache_dir);
-    let secs = analyzed_cache_entry(now, &cache_dir).and_then(|a| played_duration_secs(&a));
+    let secs = funkot_core::cache::content_hash(now)
+        .ok()
+        .and_then(|h| analyzed_cache_entry(&cache_dir, &h))
+        .and_then(|a| played_duration_secs(&a));
     *PLAYED_DURATION.lock().unwrap() = Some((now.to_path_buf(), secs));
     secs
 }
@@ -3898,7 +3905,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
             continue;
         };
         // Same path/bars/manual/analyzed sources as the library table.
-        let row = track_row(path, &cache_dir, &overrides);
+        let row = track_row(path, &cache_dir, &overrides, Some(&hash));
         meta_by_hash.insert(
             hash,
             store::FlagTrackMeta {
@@ -4381,15 +4388,13 @@ static ANALYZING: AtomicBool = AtomicBool::new(false);
 /// (`track_row`), `refresh_library`'s pending pick, and the loader-status log in
 /// `audio_thread` cannot drift on what "still needs analysis" means.
 ///
-/// A hashing failure (unreadable file, etc.) reads the same as "not cached".
+/// `hash` is the caller's already-resolved content hash — this never opens the
+/// audio file. A missing / incomplete cache entry reads the same as "not cached".
 fn analyzed_cache_entry(
-    path: &std::path::Path,
     cache_dir: &std::path::Path,
+    hash: &str,
 ) -> Option<funkot_core::TrackAnalysis> {
-    funkot_core::cache::content_hash(path)
-        .ok()
-        .and_then(|hash| funkot_core::cache::load(cache_dir, &hash))
-        .filter(|a| !a.needs_reanalysis)
+    funkot_core::cache::load(cache_dir, hash).filter(|a| !a.needs_reanalysis)
 }
 
 /// `true` when the track is analysed and effectively non-Funkot — the gate
@@ -4400,28 +4405,37 @@ fn gated_non_funkot(
     cache_dir: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> bool {
-    let Some(a) = analyzed_cache_entry(path, cache_dir) else {
+    // Read-only use of the index: never save here. Persist is `refresh_library`
+    // only — otherwise folder-drain / enqueue races with refresh and can
+    // overwrite a pruned index with a stale map.
+    let mut index = store::load_hash_index(data_dir);
+    let Ok(hash) = store::resolve_content_hash(path, &mut index) else {
         return false;
     };
-    let override_funkot = funkot_core::cache::content_hash(path)
-        .ok()
-        .and_then(|h| store::load_overrides(data_dir).get(&h).and_then(|o| o.funkot));
+    let Some(a) = analyzed_cache_entry(cache_dir, &hash) else {
+        return false;
+    };
+    let override_funkot = store::load_overrides(data_dir)
+        .get(&hash)
+        .and_then(|o| o.funkot);
     !store::effective_is_funkot(a.is_funkot, override_funkot)
 }
 
-/// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `path`.
+/// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.
+///
+/// `hash` is resolved once by the caller (`resolve_content_hash` / `content_hash`)
+/// so this path never content-hashes the file again.
 fn track_row(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
     overrides: &store::Overrides,
+    hash: Option<&str>,
 ) -> TrackRow {
     let tags = cached_tags_for(path);
     let (title, artist) = session_metadata_for(Some(path), &tags);
-    match analyzed_cache_entry(path, cache_dir) {
-        Some(a) => {
-            let override_funkot = funkot_core::cache::content_hash(path)
-                .ok()
-                .and_then(|h| overrides.get(&h).and_then(|o| o.funkot));
+    match hash.and_then(|h| analyzed_cache_entry(cache_dir, h).map(|a| (h, a))) {
+        Some((hash, a)) => {
+            let override_funkot = overrides.get(hash).and_then(|o| o.funkot);
             TrackRow {
                 path: path.to_string_lossy().into_owned(),
                 title,
@@ -4512,8 +4526,9 @@ mod cache_state_tests {
     fn no_cache_entry_reads_as_unanalyzed() {
         let dir = TempDir::new("none");
         let (track, _) = track_with_analysis(&dir.0);
-        assert!(analyzed_cache_entry(&track, &dir.0).is_none());
-        assert!(!track_row(&track, &dir.0, &store::Overrides::new()).analyzed);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        assert!(analyzed_cache_entry(&dir.0, &hash).is_none());
+        assert!(!track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash)).analyzed);
     }
 
     #[test]
@@ -4521,9 +4536,10 @@ mod cache_state_tests {
         let dir = TempDir::new("complete");
         let (track, analysis) = track_with_analysis(&dir.0);
         store_for(&track, &dir.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
 
-        assert!(analyzed_cache_entry(&track, &dir.0).is_some());
-        let row = track_row(&track, &dir.0, &store::Overrides::new());
+        assert!(analyzed_cache_entry(&dir.0, &hash).is_some());
+        let row = track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash));
         assert!(row.analyzed);
         assert_eq!(row.intro_bars, Some(analysis.intro_bars));
         // Tagless fixture: title falls back to file name, artist empty;
@@ -4545,9 +4561,10 @@ mod cache_state_tests {
         let (track, mut analysis) = track_with_analysis(&dir.0);
         analysis.needs_reanalysis = true;
         store_for(&track, &dir.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
 
-        assert!(analyzed_cache_entry(&track, &dir.0).is_none());
-        let row = track_row(&track, &dir.0, &store::Overrides::new());
+        assert!(analyzed_cache_entry(&dir.0, &hash).is_none());
+        let row = track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash));
         assert!(!row.analyzed);
         // And the numbers are withheld too: showing bars the engine is about
         // to recompute invites hand-correcting a value that is on its way out.
@@ -4557,9 +4574,34 @@ mod cache_state_tests {
     }
 
     #[test]
-    fn an_unreadable_file_reads_as_unanalyzed_rather_than_erroring() {
-        let dir = TempDir::new("missing-file");
-        assert!(analyzed_cache_entry(&dir.0.join("nope.wav"), &dir.0).is_none());
+    fn a_missing_hash_reads_as_unanalyzed_rather_than_erroring() {
+        let dir = TempDir::new("missing-hash");
+        let track = dir.0.join("nope.wav");
+        assert!(analyzed_cache_entry(&dir.0, "deadbeef").is_none());
+        assert!(!track_row(&track, &dir.0, &store::Overrides::new(), None).analyzed);
+    }
+
+    /// `track_row` must honour the hash the caller already resolved — no second
+    /// `content_hash` — so an override keyed by that hash is applied.
+    #[test]
+    fn track_row_uses_passed_hash_for_override_without_rehash() {
+        let cache = TempDir::new("row-hash-cache");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash.clone(),
+            store::BarOverride {
+                funkot: Some(true),
+                ..Default::default()
+            },
+        );
+        let row = track_row(&track, &cache.0, &overrides, Some(&hash));
+        assert!(row.analyzed);
+        assert!(row.is_funkot);
     }
 
     #[test]
@@ -4668,7 +4710,11 @@ mod cache_state_tests {
     fn path_str_matches_track_row_path() {
         let cache = TempDir::new("path-str-cache");
         let (track, _) = track_with_analysis(&cache.0);
-        assert_eq!(path_str(&track), track_row(&track, &cache.0, &store::Overrides::new()).path);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        assert_eq!(
+            path_str(&track),
+            track_row(&track, &cache.0, &store::Overrides::new(), Some(&hash)).path
+        );
     }
 }
 
@@ -4870,6 +4916,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
 
     let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
     let overrides = store::load_overrides(&data_dir);
+    let mut hash_index = store::load_hash_index(&data_dir);
     let found = paths.len();
 
     let _ = app.emit(
@@ -4883,8 +4930,17 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
 
     // Explicit loop (not `.map`) so we can emit progress after each content-hash.
     let mut rows: Vec<TrackRow> = Vec::with_capacity(found);
+    let mut seen_paths = std::collections::BTreeSet::new();
     for path in &paths {
-        rows.push(track_row(path, &cache_dir, &overrides));
+        let path_key = path.to_string_lossy().into_owned();
+        seen_paths.insert(path_key);
+        let hash = store::resolve_content_hash(path, &mut hash_index).ok();
+        rows.push(track_row(
+            path,
+            &cache_dir,
+            &overrides,
+            hash.as_deref(),
+        ));
         let _ = app.emit(
             "library-scan",
             LibraryScanProgress {
@@ -4893,6 +4949,11 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
                 done: rows.len(),
             },
         );
+    }
+
+    hash_index.retain(|path, _| seen_paths.contains(path));
+    if let Err(e) = store::save_hash_index(&data_dir, &hash_index) {
+        log::warn!("cannot save hash-index.json: {e}");
     }
 
     if kick_analysis {
@@ -5036,7 +5097,7 @@ fn set_bars_impl(
         log::warn!("cannot persist manual bars: {e}");
     }
 
-    Ok(track_row(track, cache_dir, &overrides))
+    Ok(track_row(track, cache_dir, &overrides, Some(&hash)))
 }
 
 /// Progress payload for the `analysis-progress` event.
@@ -5156,7 +5217,12 @@ fn spawn_analysis_worker(
                 // have done it. `fill_missing` would notice too, but only
                 // after a full decode — and it is the decode, tens of MB and
                 // seconds of CPU, that is worth not repeating on a phone.
-                if analyzed_cache_entry(path, &cache_dir).is_some() {
+                let hash = funkot_core::cache::content_hash(path).ok();
+                if hash
+                    .as_deref()
+                    .and_then(|h| analyzed_cache_entry(&cache_dir, h))
+                    .is_some()
+                {
                     log::info!(
                         "analysis: {} was done elsewhere, skipping",
                         path.display()
@@ -5167,7 +5233,7 @@ fn spawn_analysis_worker(
                             done: i + 1,
                             total,
                             name,
-                            row: track_row(path, &cache_dir, &overrides),
+                            row: track_row(path, &cache_dir, &overrides, hash.as_deref()),
                         },
                     );
                     continue;
@@ -5191,7 +5257,7 @@ fn spawn_analysis_worker(
 
                 // Built after `reapply_overrides` so a successful run's row
                 // reflects the corrected numbers, not the analyzer's raw ones.
-                let row = track_row(path, &cache_dir, &overrides);
+                let row = track_row(path, &cache_dir, &overrides, hash.as_deref());
                 let _ = app.emit(
                     "analysis-progress",
                     AnalysisProgress {
