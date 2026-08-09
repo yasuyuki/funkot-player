@@ -2,7 +2,7 @@
 
 WSL から wireless adb で、ホスト上の音源ツリーを端末のアプリ Music へ
 push する手順。2026-08-08 に Windows の `is_funkot=true` **412曲 / ~26.5GB** を
-Pixel 10 Pro（release）へ転送して成功した方法。
+release 端末へ転送して成功した方法。
 
 USB MTP や共有シートでの少数コピーは [README.md](../README.md) の
 「Or copy over USB」を使う。こちらは大量・再実行可能・途中再開向け。
@@ -13,8 +13,8 @@ USB MTP や共有シートでの少数コピーは [README.md](../README.md) の
 
 | 項目 | 成功時の例 |
 |---|---|
-| 端末 | Pixel 10 Pro（release 署名。serial `57301FDCH008G0`） |
-| adb | wireless debugging の `IP:connect-port`（再有効化で変わる） |
+| 端末 | release 役の端末（`adb-device --model release` で分かる） |
+| adb | `adb-device release` が返すセレクタ |
 | 音源ルート（WSL） | `/mnt/oldpc/music`（UNC `\\LAPTOP-QM7J9GBE\music`） |
 | 端末側の宛先 | `/storage/emulated/0/Android/data/jp.hatsuboshi.funkotplayer/files/Music` |
 | 開発コンテナ | イメージ `funkot-player-dev`、volume `funkot-player-android-home` |
@@ -29,25 +29,25 @@ PC 側で先に作ると読めないことがある（README と同じ）。
 
 ## 1. 端末に接続
 
-永続 adb server（`funkot-player-adb`）を先に起動する。`ADB=1` でも自動 start
-する。connect はセッションで一度でよい（connect-port は端末の Wireless
-debugging 画面。再有効化で変わる）。
+**アドレスを手で書かない。** `adb-device` が役割から探して返す（永続 adb
+server も必要なら起動する）。どの端末が release 役かはこの PC 側の設定にある。
 
 ```sh
-./scripts/adb-server.sh start   # または ADB=1 に任せる
-
-# 初回のみ（ペアリング）
-ADB=1 ./dev.sh adb pair <ip>:<pair-port> <code>
-
-ADDR=192.168.10.119:42539   # 例。都度差し替え
-ADB=1 ./dev.sh adb connect "$ADDR"
+ADDR=$(adb-device release)
 ADB=1 ./dev.sh adb -s "$ADDR" shell echo ok
+```
+
+見つからないときはスクリプトが端末側の確認手順を出す。ペアリングだけは人が要る
+（コードと pair-port は端末の Wireless debugging 画面にしかない）:
+
+```sh
+ADB=1 ./dev.sh adb pair <ip>:<pair-port> <code>
 ```
 
 release APK の入れ直しは:
 
 ```sh
-./scripts/install-apk.sh release "$ADDR"
+./scripts/install-apk.sh release
 ```
 
 ---
@@ -166,9 +166,7 @@ sys.exit(0 if fail == 0 else 1)
 server を立てて喧嘩する。
 
 ```sh
-./scripts/adb-server.sh start
-ADDR=192.168.10.119:42539   # 現在の connect-port
-ADB=1 ./dev.sh adb connect "$ADDR"   # 未接続なら
+ADDR=$(adb-device release)   # server 起動と connect も済む
 
 REPO=/home/yasuyuki/Projects/funkot-player
 MUSIC=/mnt/oldpc/music
@@ -207,6 +205,6 @@ Wi‑Fi で数十 GB は **1 時間前後**かかり得る。コンテナが生�
 2. **`ADB=1 ./dev.sh` 経由の push** — `/mnt/oldpc` がコンテナに見えない。
 3. **ホストの `cat` が `bat` エイリアス** — heredoc でスクリプトを吐くときは
    `/usr/bin/cat` か Python でファイルを書く。
-4. **wireless の port** — 再有効化のたびに変わる。`install-apk.sh` 同様、
-   都度 `ADDR` を渡す。
-5. **release / debug の混在** — 署名が違う。Pixel 10 Pro は release のみ。
+4. **wireless の port** — 再有効化のたびに変わる。だから `ADDR` を書き留めず、
+   毎回 `adb-device <role>` に引かせる。
+5. **release / debug の混在** — 署名が違う。役割は端末に固定。

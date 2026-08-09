@@ -248,37 +248,39 @@ by Smart App Control.
 Review assets on the draft, then **Publish release** (Android). Submit MSIX via
 Partner Center separately.
 
-Install and run on a device over wireless debugging. `ADB=1` starts the
-persistent adb server (`./scripts/adb-server.sh start`) if needed; connect once
-per session, then later commands can omit connect:
+Install and run on a device over wireless debugging. Development uses two
+phones, one per role: `debug` and `release` are signed with different keys, so
+installing one over the other fails and forces a data-wiping `adb uninstall`.
+
+Devices are addressed by role, never by address. Which phone fills which role
+is a property of your machine, so it is configured there rather than in this
+repository — see `adb-device`, which finds whatever IP and port wireless
+debugging is using today and verifies the device's serial before handing it
+back:
 
 ```sh
-./scripts/adb-server.sh start                         # or let ADB=1 do it
+adb-device                                            # roles, and where they are
+ADDR=$(adb-device debug)
+ADB=1 ./dev.sh adb -s "$ADDR" logcat -s funkot
+./scripts/install-apk.sh debug                        # finds the phone itself
+./scripts/install-apk.sh release
+```
+
+`install-apk.sh` refuses to install unless the serial it finds matches the role
+you asked for. Pass an address only to override the search
+(`./scripts/install-apk.sh debug <ip>:<port>`, or `$FUNKOT_ADB_ADDR`).
+
+Pairing is the one step that still needs the phone in your hand — the code and
+the pairing port are only on its Wireless debugging screen, and the pairing
+port is not the connect port:
+
+```sh
 ADB=1 ./dev.sh adb pair <ip>:<pair-port> <code>       # once per device
-ADB=1 ./dev.sh adb connect <ip>:<connect-port>        # once per session
-ADB=1 ./dev.sh adb install -r \
-    src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
-ADB=1 ./dev.sh adb logcat -s funkot
 ```
 
-The connect port differs from the pairing port; both are on the device's
-Wireless debugging screen. Stop the server with `./scripts/adb-server.sh stop`
-(avoid `adb kill-server` — it tears down that persistent server).
-
-This project has two physical devices, each pinned to one role (debug and
-release are signed with different keys, so installing the wrong role over
-the other fails and forces a data-wiping `adb uninstall`). Use
-`scripts/install-apk.sh` instead of a raw `adb install` — the wireless
-debugging address changes every time it is re-enabled, but each device's
-`ro.serialno` does not, so the script connects to whatever address you give
-it and refuses to install unless the serial it finds there matches the role
-you asked for:
-
-```sh
-./scripts/install-apk.sh debug <ip>:<connect-port>
-./scripts/install-apk.sh release <ip>:<connect-port>
-# or: FUNKOT_ADB_ADDR=<ip>:<connect-port> ./scripts/install-apk.sh debug
-```
+`ADB=1` starts the persistent adb server (`./scripts/adb-server.sh start`) if
+needed. Stop it with `./scripts/adb-server.sh stop` (avoid `adb kill-server` —
+it tears down that persistent server).
 
 ### Running the desktop build
 
@@ -322,10 +324,16 @@ Docker volume. Deleting it means re-pairing *and* a new signing key, which turns
 the next `adb install -r` into `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
 
 - **Finding the device.** Both its IP (DHCP) and its wireless-debugging port
-  change. mDNS does not cross the container boundary, so scan for it:
-  `nmap -sn 192.168.10.0/24`, then `nmap -Pn -p 1024-65535 --open -T4 <ip>`.
-  Several ports answer; only one of them is adb, the rest go `offline` on
-  `adb connect`. Do not narrow the range — ports above 50000 are common.
+  change, so `adb-device <role>` rediscovers them from the serial rather than
+  anyone writing an address down. It tries the adb server's device list, then
+  the address it remembered last time (cached under `~/.cache`), then mDNS —
+  and verifies the serial before believing any of them.
+  **mDNS is the slow path**: after a cold adb server one phone here showed up in
+  about a second and the other took ~90 s, which is why the remembered address
+  is tried first and why the mDNS wait is generous (`ADB_DEVICE_WAIT`).
+  Discovery runs in the adb *server*, so it only works at all because that
+  server now has its own long-lived container — a server that dies with each
+  command never finishes discovering.
 - **Persistent adb server.** Wireless clients share `funkot-player-adb`
   (`./scripts/adb-server.sh`), which holds port 5037 on the host network.
   Multiple `ADB=1 ./dev.sh` clients at once are fine once the server is up;

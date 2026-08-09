@@ -88,8 +88,10 @@ description: funkot-player の版数（アプリのバージョン）を上げ�
    その版数の APK はまだ存在しない
 2. release APK はローカルでしか焼かない（CI 経路が無い）。焼く前に
    `./scripts/check-release-invariants.sh` を通す
-3. `./scripts/install-apk.sh <debug|release> <adb-address>` で入れる。
-   **debug と release は署名が違い、端末の役割は固定**（Pixel 10 Pro = release のみ）
+3. `./scripts/install-apk.sh <debug|release>` で入れる（アドレスは自動で引く）。
+   **debug と release は署名が違い、役割は端末に固定**。役割と端末の対応は
+   この PC の設定側にあり、リポジトリには持たせない。端末まわりの正本は
+   skill `android-device`
 4. Play Console は未使用。Android 側に提出作業は無い
 
 ## 版数の食い違いを疑うとき
