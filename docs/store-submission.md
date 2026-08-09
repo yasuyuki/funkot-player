@@ -485,9 +485,13 @@ Local playback only. No account and no automatic upload. WebView2 (usually alrea
 
 ## 版数の上げ方（2 回目以降の Store 更新）
 
-1. アプリの版数（`tauri.conf.json` / Cargo / Android など、既存のリリース手順）を上げる。
-2. `Package.appxmanifest` の `Identity Version` を 4 部で上げる（例: `0.1.2.0`）。**前回提出より大きいこと。**
-3. `main` に push → `windows-msix` を再実行 → 新しい未署名 MSIX を提出。
+1. `./scripts/set-version.sh <X.Y.Z>` を回す。`tauri.conf.json` / Cargo / npm /
+   `Package.appxmanifest` の `Identity Version` / `pack-msix.ps1` の `$PackageVersion` を
+   まとめて書く。**手で個別に直さない**（`pack-msix.ps1` はマニフェストを読まないので、
+   片方だけ直すと中身と違う版数の MSIX が焼ける）。
+   **番号は前回提出より大きいこと。** 決め方と Android 側は
+   `.claude/skills/app-version/SKILL.md`。
+2. `main` に push → `windows-msix` を再実行 → 新しい未署名 MSIX を提出。
 
 ---
 

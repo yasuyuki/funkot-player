@@ -26,3 +26,9 @@ jobs:
       # is far too late for a release-only invariant.
       - name: Check release-only invariants
         run: ./scripts/check-release-invariants.sh
+
+      # Eight files spell out the version and nothing links them, so drift is
+      # silent until a package ships with a label that disagrees with its
+      # contents. Same script a developer runs; also needs no toolchain.
+      - name: Check the version is consistent
+        run: ./scripts/set-version.sh --check
