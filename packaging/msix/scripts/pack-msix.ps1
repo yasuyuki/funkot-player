@@ -10,7 +10,7 @@
 #   .\packaging\msix\scripts\pack-msix.ps1 -SkipBuild   # use existing release exe
 #
 # Output (unsigned):
-#   packaging\msix\out\Funkot_0.1.2.0_x64.msix
+#   packaging\msix\out\Funkot_0.1.3.0_x64.msix
 #
 # Notes:
 #   - Build uses --no-bundle so WiX/NSIS icons are not required; MSIX is packed
@@ -35,7 +35,7 @@ $ManifestSrc = Join-Path $MsixRoot "Package.appxmanifest"
 $IconsDir = Join-Path $RepoRoot "src-tauri\icons"
 $ReleaseDir = Join-Path $RepoRoot "src-tauri\target\release"
 $ExeName = "funkot-player.exe"
-$PackageVersion = "0.1.2.0"
+$PackageVersion = "0.1.3.0"
 $OutDir = Join-Path $MsixRoot "out"
 $OutMsix = Join-Path $OutDir "Funkot_${PackageVersion}_x64.msix"
 $StagingDir = Join-Path $MsixRoot "staging"

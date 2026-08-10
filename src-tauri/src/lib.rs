@@ -323,11 +323,133 @@ fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
     let music = base.join("Music");
     let cache = base.join("funkot-cache");
     ensure_dirs(&music, &cache, &base)?;
+    // Windows Store: first launch with an empty Music folder gets two short
+    // demo WAVs so Start is not unusable. Android / other desktops skip this.
+    #[cfg(target_os = "windows")]
+    seed_demo_tracks_best_effort(&music, &base);
     Ok(AppDirs {
         music_dir: music.to_string_lossy().into_owned(),
         cache_dir: cache.to_string_lossy().into_owned(),
         data_dir: base.to_string_lossy().into_owned(),
     })
+}
+
+/// Windows-only: seed two bundled demo WAVs into Music on first empty launch.
+/// Failures are logged and ignored so directory resolution still succeeds.
+#[cfg(target_os = "windows")]
+fn seed_demo_tracks_best_effort(music_dir: &Path, data_dir: &Path) {
+    const DEMO_01: &[u8] = include_bytes!("../resources/demo/01-demo.wav");
+    const DEMO_02: &[u8] = include_bytes!("../resources/demo/02-demo.wav");
+    match seed_demo_tracks_if_needed(
+        music_dir,
+        data_dir,
+        &[("01-demo.wav", DEMO_01), ("02-demo.wav", DEMO_02)],
+    ) {
+        Ok(true) => log::info!("seeded demo tracks into {}", music_dir.display()),
+        Ok(false) => {}
+        Err(e) => log::warn!("demo seed skipped: {e}"),
+    }
+}
+
+/// If `data_dir/demo_seeded` is absent and Music has zero supported tracks,
+/// write `demos` into Music and create the sentinel. Returns `Ok(true)` when
+/// both files and the sentinel were written. On mid-write failure, already
+/// written demo files are removed so a later launch can retry. Available
+/// under `cfg(test)` so non-Windows CI can exercise it.
+#[cfg(any(test, target_os = "windows"))]
+fn seed_demo_tracks_if_needed(
+    music_dir: &Path,
+    data_dir: &Path,
+    demos: &[(&str, &[u8])],
+) -> Result<bool, String> {
+    let sentinel = data_dir.join("demo_seeded");
+    if sentinel.exists() {
+        return Ok(false);
+    }
+    let track_count = match std::fs::read_dir(music_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| is_supported_track(p))
+            .count(),
+        Err(e) => return Err(format!("cannot read {}: {e}", music_dir.display())),
+    };
+    if track_count > 0 {
+        return Ok(false);
+    }
+    // Roll back partial demo writes so a mid-loop failure cannot leave a
+    // single track behind (that would block retry: track_count > 0 and no
+    // sentinel, so Start still sees need >= 2).
+    let mut written: Vec<PathBuf> = Vec::new();
+    for (name, bytes) in demos {
+        let dest = music_dir.join(name);
+        if let Err(e) = std::fs::write(&dest, bytes) {
+            for w in &written {
+                let _ = std::fs::remove_file(w);
+            }
+            return Err(format!("cannot write {}: {e}", dest.display()));
+        }
+        written.push(dest);
+    }
+    if let Err(e) = std::fs::write(&sentinel, b"") {
+        for w in &written {
+            let _ = std::fs::remove_file(w);
+        }
+        return Err(format!("cannot create {}: {e}", sentinel.display()));
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod demo_seed_tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_pair() -> (PathBuf, PathBuf) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("funkot-demo-seed-{stamp}"));
+        let music = root.join("Music");
+        let data = root.join("data");
+        fs::create_dir_all(&music).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        (music, data)
+    }
+
+    #[test]
+    fn empty_music_seeds_two_tracks_and_sentinel() {
+        let (music, data) = temp_pair();
+        let demos: &[(&str, &[u8])] = &[
+            ("01-demo.wav", include_bytes!("../resources/demo/01-demo.wav")),
+            ("02-demo.wav", include_bytes!("../resources/demo/02-demo.wav")),
+        ];
+        assert_eq!(seed_demo_tracks_if_needed(&music, &data, demos).unwrap(), true);
+        assert!(data.join("demo_seeded").is_file());
+        assert!(music.join("01-demo.wav").is_file());
+        assert!(music.join("02-demo.wav").is_file());
+        let count = fs::read_dir(&music)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| is_supported_track(p))
+            .count();
+        assert_eq!(count, 2);
+        // Sentinel present: do not seed again.
+        assert_eq!(seed_demo_tracks_if_needed(&music, &data, demos).unwrap(), false);
+        let _ = fs::remove_dir_all(music.parent().unwrap());
+    }
+
+    #[test]
+    fn existing_track_skips_seed() {
+        let (music, data) = temp_pair();
+        fs::write(music.join("already.wav"), b"RIFF").unwrap();
+        let demos: &[(&str, &[u8])] = &[("01-demo.wav", b"a"), ("02-demo.wav", b"b")];
+        assert_eq!(seed_demo_tracks_if_needed(&music, &data, demos).unwrap(), false);
+        assert!(!data.join("demo_seeded").exists());
+        assert!(!music.join("01-demo.wav").exists());
+        let _ = fs::remove_dir_all(music.parent().unwrap());
+    }
 }
 
 /// Runs `store::migrate_from` once per process rather than once per call.

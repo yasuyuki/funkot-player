@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { openMusicDir } from "../lib/tauri";
   import { store } from "../lib/state.svelte";
+  import { toast } from "../lib/toast.svelte";
   import { ui } from "../lib/ui.svelte";
 
   const PHASE_LABEL: Record<string, string> = {
@@ -36,6 +38,25 @@
   // phase (e.g. a failed `skip_next` while still playing) would be
   // completely invisible.
   let showLogLink = $derived(phase === "failed" || store.lastError !== null);
+  // Store certification path: when Start fails for too few tracks, offer the
+  // same Music-folder opener as Library / OverflowMenu next to the log link.
+  let showOpenMusic = $derived(
+    store.lastError !== null && store.lastError.includes("need >= 2 tracks"),
+  );
+  let openMusicBusy = $state(false);
+
+  async function onOpenMusicDir() {
+    if (openMusicBusy) return;
+    openMusicBusy = true;
+    try {
+      const path = await openMusicDir();
+      toast.notify(path);
+    } catch (err) {
+      toast.notify(String(err));
+    } finally {
+      openMusicBusy = false;
+    }
+  }
 </script>
 
 <div class="now-card">
@@ -62,10 +83,22 @@
     <span class="time">{formatTime(duration)}</span>
   </div>
 
-  {#if showLogLink}
-    <button type="button" class="log-link" onclick={() => (ui.logOpen = true)}>
-      ログを表示
-    </button>
+  {#if showLogLink || showOpenMusic}
+    <div class="error-actions">
+      {#if showLogLink}
+        <button type="button" class="log-link" onclick={() => (ui.logOpen = true)}>
+          ログを表示
+        </button>
+      {/if}
+      {#if showOpenMusic}
+        <button
+          type="button"
+          class="log-link"
+          disabled={openMusicBusy}
+          onclick={onOpenMusicDir}
+        >Musicフォルダを開く</button>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -132,13 +165,20 @@
        animating on top of that would make the bar visibly lag itself. */
   }
 
+  .error-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm) var(--space-md);
+    margin-top: var(--space-sm);
+  }
+
   /* Overrides tokens.css's default `button` (full width, large padding):
      this is an inline text link under the card, not a standalone control. */
   .log-link {
     width: auto;
     font-size: var(--font-size-sm);
     padding: 0;
-    margin-top: var(--space-sm);
+    margin: 0;
     background: transparent;
     color: var(--color-link);
     text-decoration: underline;

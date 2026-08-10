@@ -359,6 +359,8 @@ Funkot は、端末内の Music フォルダにある曲をつないで再生す
 
 ```text
 - On first launch the app creates its Music folder (under AppData).
+- On first Windows launch, if Music is empty, the app seeds two short demo tracks so Start works immediately.
+- Testers can replace/delete demos via 「Musicフォルダを開く」 / Open Music folder; demos are not re-seeded after first run.
 - To add tracks: use 「Musicフォルダを開く」 when the library is empty, or ⋮ → Musicフォルダを開く
   (Open Music folder). Copy audio there (e.g. wav/mp3/flac/m4a/ogg), then ⋮ → 再スキャン (Rescan).
 - Example path: %APPDATA%\jp.hatsuboshi.funkotplayer\Music
