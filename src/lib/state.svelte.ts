@@ -25,6 +25,8 @@ import {
   auditionTransition as auditionTransitionCmd,
   auditionAgain as auditionAgainCmd,
   resumeAutodj as resumeAutodjCmd,
+  setMusicDir as setMusicDirCmd,
+  resetMusicDir as resetMusicDirCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -75,6 +77,12 @@ class PlayerStore {
   /// Shared with `#reloadLibraryQuiet` so analysis-done cannot start a second
   /// `refresh_library` on top of an in-flight rescan (or vice versa).
   #libraryBusy = false;
+  /// Bumped on every Music-folder change refresh so a superseded wait / walk
+  /// yields to the latest `doSetMusicDir` / `doResetMusicDir`.
+  #musicDirGen = 0;
+  /// When a Music-folder change lands while analysis is still running, set so
+  /// `analysis-done` re-runs a kick refresh instead of a quiet reload.
+  #rekickAnalysisAfterDone = false;
   /// Bumped on every immediate queue refresh after enqueue/dequeue/reorder.
   /// Poll / refresh responses whose captured gen no longer matches are
   /// discarded so a slow poll cannot overwrite a fresher post-mutation snapshot.
@@ -89,6 +97,9 @@ class PlayerStore {
   async #init() {
     try {
       this.dirs = await appDirs();
+      if (this.dirs.music_dir_unavailable) {
+        this.lastError = `指定した音楽フォルダを開けません: ${this.dirs.music_dir_custom}（既定のフォルダを使います）`;
+      }
     } catch (e) {
       this.lastError = String(e);
     }
@@ -112,12 +123,20 @@ class PlayerStore {
     try {
       await listen<AnalysisProgress>("analysis-progress", (event) => {
         const { done, total, name, row } = event.payload;
+        // Stale worker from a previous music_dir must not pollute the list
+        // or the progress banner after the folder was changed.
+        if (!this.#pathUnderMusicDir(row.path)) return;
         this.analysis = { done, total, name };
         this.#replaceLibraryRow(row);
       });
       await listen("analysis-done", () => {
         this.analysis = null;
-        void this.#reloadLibraryQuiet();
+        if (this.#rekickAnalysisAfterDone) {
+          this.#rekickAnalysisAfterDone = false;
+          void this.#refreshLibraryAfterMusicDirChange();
+        } else {
+          void this.#reloadLibraryQuiet();
+        }
       });
     } catch (e) {
       this.lastError = String(e);
@@ -164,6 +183,43 @@ class PlayerStore {
       // Ignore on analysis-done the same way legacy did: a stray error here
       // shouldn't disrupt the UI after the worker itself has finished.
       this.lastError = String(e);
+    } finally {
+      this.#libraryBusy = false;
+    }
+  }
+
+  #pathUnderMusicDir(path: string): boolean {
+    const root = this.dirs?.music_dir;
+    if (!root) return true;
+    const norm = (s: string) => s.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+    const p = norm(path);
+    const r = norm(root);
+    return p === r || p.startsWith(r + "/");
+  }
+
+  /// Wait out an in-flight library walk, then rescan with analysis kick.
+  /// Generation-guarded so rapid Music-folder changes do not apply a stale list.
+  async #refreshLibraryAfterMusicDirChange(): Promise<void> {
+    this.#musicDirGen += 1;
+    const gen = this.#musicDirGen;
+    if (this.analysis !== null) {
+      this.#rekickAnalysisAfterDone = true;
+    }
+    while (this.#libraryBusy) {
+      if (gen !== this.#musicDirGen) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (gen !== this.#musicDirGen) return;
+    this.#libraryBusy = true;
+    try {
+      const rows = await refreshLibrary(true);
+      if (gen === this.#musicDirGen) {
+        this.library = new Map(rows.map((r) => [r.name, r]));
+      }
+    } catch (e) {
+      if (gen === this.#musicDirGen) {
+        this.lastError = String(e);
+      }
     } finally {
       this.#libraryBusy = false;
     }
@@ -531,6 +587,41 @@ class PlayerStore {
     } catch (e) {
       this.lastError = String(e);
       return false;
+    }
+  }
+
+  /// Opens the native folder picker (⋮ Musicフォルダを選ぶ) and applies the
+  /// result. `changed: false` covers a cancelled dialog. Waits out any
+  /// in-flight library walk before rescanning (see `#refreshLibraryAfterMusicDirChange`).
+  async doSetMusicDir(): Promise<
+    { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
+  > {
+    try {
+      const result = await setMusicDirCmd();
+      this.dirs = result.dirs;
+      if (result.changed) await this.#refreshLibraryAfterMusicDirChange();
+      return { ok: true, changed: result.changed, restartRequired: result.restart_required };
+    } catch (e) {
+      const message = String(e);
+      this.lastError = message;
+      return { ok: false, error: message };
+    }
+  }
+
+  /// Clears whatever folder `doSetMusicDir` configured (⋮ Musicフォルダを既定に
+  /// 戻す), reverting to the default Music folder.
+  async doResetMusicDir(): Promise<
+    { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
+  > {
+    try {
+      const result = await resetMusicDirCmd();
+      this.dirs = result.dirs;
+      if (result.changed) await this.#refreshLibraryAfterMusicDirChange();
+      return { ok: true, changed: result.changed, restartRequired: result.restart_required };
+    } catch (e) {
+      const message = String(e);
+      this.lastError = message;
+      return { ok: false, error: message };
     }
   }
 }

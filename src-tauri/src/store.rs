@@ -43,6 +43,10 @@ const FLAGS_FILE: &str = "flags.json";
 const DISMISSED_FILE: &str = "dismissed.json";
 const META_FILE: &str = "meta.json";
 const SESSION_FILE: &str = "session.json";
+// Only referenced by `load_settings`/`save_settings`, which Android never
+// calls — see their doc comments for why the whole chain needs the attribute.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+const SETTINGS_FILE: &str = "settings.json";
 
 /// Metadata bundled with a feedback ZIP (`share_feedback`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -205,6 +209,51 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(session)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(SESSION_FILE), json)
+}
+
+/// User-configurable app settings (desktop only). `music_dir`, when set, is
+/// the folder the listener picked via `set_music_dir`; `None` means "use the
+/// default `Music` folder under `data_dir`" — deliberately distinct from an
+/// invalid path, which `resolve_music_dir` falls back on without touching
+/// this file.
+///
+/// `store` is a private module (`mod store;`, not `pub mod`), so these `pub`
+/// items are not part of the crate's public API and Android — which never
+/// calls any of them — would otherwise flag all four as dead code.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(target_os = "android", allow(dead_code))]
+pub struct Settings {
+    #[serde(default)]
+    pub music_dir: Option<PathBuf>,
+}
+
+/// Load settings previously saved under `dir`.
+///
+/// Missing or corrupt → [`Settings::default`] (same policy as
+/// [`load_session`] / [`load_flags`]): losing a folder choice is
+/// recoverable, refusing to launch is not. A missing file is expected on
+/// every first run and stays silent; a corrupt one logs a warning.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+pub fn load_settings(dir: &Path) -> Settings {
+    let bytes = match fs::read(dir.join(SETTINGS_FILE)) {
+        Ok(b) => b,
+        Err(_) => return Settings::default(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(settings) => settings,
+        Err(e) => {
+            log::warn!("{SETTINGS_FILE} is unreadable, using defaults: {e}");
+            Settings::default()
+        }
+    }
+}
+
+/// Persist `settings` under `dir`, overwriting any previous save.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(settings)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(SETTINGS_FILE), json)
 }
 
 /// Build the pending queue to restore after a restart: `in_flight` first (the
@@ -1323,6 +1372,29 @@ mod tests {
         let dir = TempDir::new("session-corrupt");
         fs::write(dir.0.join(SESSION_FILE), b"{not json").unwrap();
         assert_eq!(load_session(&dir.0), Session::new());
+    }
+
+    #[test]
+    fn settings_missing_file_is_default() {
+        let dir = TempDir::new("settings-missing");
+        assert_eq!(load_settings(&dir.0), Settings::default());
+    }
+
+    #[test]
+    fn settings_round_trip_music_dir() {
+        let dir = TempDir::new("settings-roundtrip");
+        let settings = Settings {
+            music_dir: Some(PathBuf::from("/somewhere/Music")),
+        };
+        save_settings(&dir.0, &settings).unwrap();
+        assert_eq!(load_settings(&dir.0), settings);
+    }
+
+    #[test]
+    fn settings_corrupt_file_is_default() {
+        let dir = TempDir::new("settings-corrupt");
+        fs::write(dir.0.join(SETTINGS_FILE), b"{not json").unwrap();
+        assert_eq!(load_settings(&dir.0), Settings::default());
     }
 
     #[test]

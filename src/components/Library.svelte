@@ -9,6 +9,7 @@
   let sortKey = $state<SortKey>("title");
   let busy = $state<Record<string, boolean>>({});
   let openMusicBusy = $state(false);
+  let setMusicBusy = $state(false);
 
   let analysis = $derived(store.analysis);
   let libraryEmpty = $derived(store.libraryList.length === 0);
@@ -55,6 +56,48 @@
     }
   }
 
+  /// Error code (`set_music_dir`) → Japanese toast text. Keep in sync with
+  /// `OverflowMenu.svelte` / `src-tauri/src/lib.rs` / `src/lib/tauri.ts`.
+  function toastForMusicDirError(error: string): string {
+    switch (error) {
+      case "not_absolute":
+        return "絶対パスのフォルダを選んでください";
+      case "not_found":
+        return "そのフォルダが見つかりません";
+      case "not_a_directory":
+        return "フォルダを選んでください";
+      case "not_readable":
+        return "そのフォルダを読み取れません";
+      case "contains_app_data":
+        return "アプリのデータフォルダを含むフォルダは選べません";
+      case "unsupported_platform":
+        return "この端末では変更できません";
+      default:
+        return "Musicフォルダを変更できませんでした";
+    }
+  }
+
+  async function onSetMusicDir() {
+    if (setMusicBusy) return;
+    setMusicBusy = true;
+    try {
+      const result = await store.doSetMusicDir();
+      if (!result.ok) {
+        toast.notify(toastForMusicDirError(result.error));
+      } else if (!result.changed) {
+        toast.notify("変更しませんでした");
+      } else if (result.restartRequired) {
+        toast.notify(
+          `Musicフォルダを変更しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
+        );
+      } else {
+        toast.notify(`Musicフォルダを変更しました: ${store.dirs?.music_dir}`);
+      }
+    } finally {
+      setMusicBusy = false;
+    }
+  }
+
   async function onOpenMusicDir() {
     if (openMusicBusy) return;
     openMusicBusy = true;
@@ -71,6 +114,17 @@
 
 <section class="library">
   <h2 class="heading">ライブラリ</h2>
+
+  {#if store.dirs?.music_dir_configurable}
+    <div class="music-dir-actions">
+      <button
+        type="button"
+        class="open-music"
+        disabled={setMusicBusy}
+        onclick={onSetMusicDir}
+      >Musicフォルダを選ぶ</button>
+    </div>
+  {/if}
 
   <!-- Sticky so search stays reachable while scrolling hundreds of rows. -->
   <div class="toolbar">
@@ -94,7 +148,11 @@
     <div class="empty">
       <p class="empty-title">曲がありません</p>
       <p class="empty-hint">
-        Musicフォルダを開いて音声ファイルを入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。
+        {#if store.dirs?.music_dir_configurable}
+          「Musicフォルダを選ぶ」か「Musicフォルダを開く」で音源の場所を用意し、⋮ の「再スキャン」でライブラリに反映します（ファイルはコピーしません）。
+        {:else}
+          「Musicフォルダを開く」で音源の場所を用意し、⋮ の「再スキャン」でライブラリに反映します（ファイルはコピーしません）。
+        {/if}
       </p>
       <button
         type="button"
@@ -139,6 +197,10 @@
     font-size: var(--font-size-md);
     font-weight: 600;
     color: var(--color-text);
+  }
+
+  .music-dir-actions {
+    margin: 0 0 var(--space-sm);
   }
 
   .toolbar {

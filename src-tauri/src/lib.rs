@@ -223,6 +223,20 @@ struct AppDirs {
     /// from `cache_dir` because deleting the cache is a documented repair for
     /// bad analysis, and it must not take the listener's own work with it.
     data_dir: String,
+    /// The `settings.json` value that produced `music_dir`, if any was set.
+    /// `None` on a fresh install, after `reset_music_dir`, or always on
+    /// Android (`music_dir_configurable` is `false` there). Distinct from
+    /// `music_dir` itself: this is what the UI shows as "currently
+    /// configured", which stays the listener's choice even when it could not
+    /// be used this launch (see `music_dir_unavailable`).
+    music_dir_custom: Option<String>,
+    /// `true` when `music_dir_custom` was set but unusable this launch (could
+    /// not be read), so `music_dir` fell back to the default. `settings.json`
+    /// is left untouched in that case — see `resolve_music_dir`.
+    music_dir_unavailable: bool,
+    /// Whether `set_music_dir`/`reset_music_dir` can do anything on this
+    /// platform. `true` on desktop, `false` on Android.
+    music_dir_configurable: bool,
 }
 
 /// Ask Android for the app's own directories.
@@ -308,10 +322,15 @@ fn platform_dirs() -> Result<AppDirs, String> {
         music_dir: music,
         cache_dir: cache.to_string_lossy().into_owned(),
         data_dir: files,
+        music_dir_custom: None,
+        music_dir_unavailable: false,
+        music_dir_configurable: false,
     })
 }
 
-/// Desktop: everything under the per-app data directory Tauri resolves for us.
+/// Desktop: everything under the per-app data directory Tauri resolves for
+/// us, except `music_dir`, which the listener can redirect via
+/// `set_music_dir` (`settings.json`, see `store::Settings`).
 #[cfg(not(target_os = "android"))]
 fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
     use tauri::Manager;
@@ -320,18 +339,182 @@ fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
         .path()
         .app_data_dir()
         .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
-    let music = base.join("Music");
+    let default_music = base.join("Music");
     let cache = base.join("funkot-cache");
+    let configured = store::load_settings(&base).music_dir;
+    let (music, unavailable) = resolve_music_dir(configured.as_deref(), &default_music, |p| {
+        std::fs::read_dir(p).is_ok()
+    });
+    if unavailable {
+        log::warn!(
+            "configured music dir {} is not readable, falling back to {}",
+            configured.as_deref().unwrap_or(Path::new("")).display(),
+            default_music.display()
+        );
+    }
     ensure_dirs(&music, &cache, &base)?;
-    // Windows Store: first launch with an empty Music folder gets two short
-    // demo WAVs so Start is not unusable. Android / other desktops skip this.
+    // Windows Store: first launch with an empty default Music folder gets two
+    // short demo WAVs so Start is not unusable. Always seed into
+    // `default_music` only — never into a user-chosen custom root. Android /
+    // other desktops skip this.
     #[cfg(target_os = "windows")]
-    seed_demo_tracks_best_effort(&music, &base);
+    {
+        let _ = std::fs::create_dir_all(&default_music);
+        seed_demo_tracks_best_effort(&default_music, &base);
+    }
     Ok(AppDirs {
         music_dir: music.to_string_lossy().into_owned(),
         cache_dir: cache.to_string_lossy().into_owned(),
         data_dir: base.to_string_lossy().into_owned(),
+        music_dir_custom: configured.map(|p| p.to_string_lossy().into_owned()),
+        music_dir_unavailable: unavailable,
+        music_dir_configurable: true,
     })
+}
+
+/// The music folder a launch should use: `configured` when it is readable,
+/// `default_music` otherwise (including when nothing was ever configured).
+/// The second element of the pair is whether a *configured* path was
+/// rejected as unreadable — never `true` when `configured` is `None`, since
+/// "nothing configured" is not an unavailable configuration, just an absent
+/// one.
+///
+/// `readable` is injected so this stays testable without touching the
+/// filesystem (same pattern as `store::restored_pending`'s `exists`).
+///
+/// Never returns `configured` unchecked: `ensure_dirs`'s `create_dir_all`
+/// must only ever see the default path or a path that `read_dir` just
+/// confirmed it can already list — never an unverified user-chosen path.
+///
+/// Android's `platform_dirs` never calls this (its `AppDirs` is built by
+/// hand — see its `#[cfg]` split), so this would otherwise be dead code
+/// there.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+fn resolve_music_dir(
+    configured: Option<&Path>,
+    default_music: &Path,
+    readable: impl Fn(&Path) -> bool,
+) -> (PathBuf, bool) {
+    match configured {
+        None => (default_music.to_path_buf(), false),
+        Some(p) if readable(p) => (p.to_path_buf(), false),
+        Some(_) => (default_music.to_path_buf(), true),
+    }
+}
+
+/// Rejects a candidate music folder without touching the filesystem: not an
+/// absolute path, or a folder that would itself contain the app's own data
+/// dir (which would put `settings.json`/`queue.json`/the analysis cache
+/// inside the folder the library scanner walks). Filesystem-backed checks
+/// (exists / is a directory / is readable) live in `set_music_dir` itself —
+/// see its doc comment.
+///
+/// Android does not call `set_music_dir`'s real body (see its `#[cfg]`
+/// split), so this would otherwise be dead code there.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+fn check_music_dir_shape(candidate: &Path, data_dir: &Path) -> Result<(), &'static str> {
+    if !candidate.is_absolute() {
+        return Err("not_absolute");
+    }
+    if data_dir.starts_with(candidate) {
+        return Err("contains_app_data");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod music_dir_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_music_dir_unset_uses_default() {
+        let default_music = Path::new("/data/Music");
+        let (music, unavailable) = resolve_music_dir(None, default_music, |_| true);
+        assert_eq!(music, default_music);
+        assert!(!unavailable);
+    }
+
+    #[test]
+    fn resolve_music_dir_uses_configured_when_readable() {
+        let configured = Path::new("/elsewhere/MyMusic");
+        let default_music = Path::new("/data/Music");
+        let (music, unavailable) = resolve_music_dir(Some(configured), default_music, |_| true);
+        assert_eq!(music, configured);
+        assert!(!unavailable);
+    }
+
+    #[test]
+    fn resolve_music_dir_falls_back_to_default_when_unreadable() {
+        let configured = Path::new("/gone/MyMusic");
+        let default_music = Path::new("/data/Music");
+        let (music, unavailable) = resolve_music_dir(Some(configured), default_music, |_| false);
+        assert_eq!(music, default_music);
+        assert!(unavailable);
+    }
+
+    #[test]
+    fn check_music_dir_shape_rejects_a_relative_path() {
+        let data_dir = Path::new("/data/app");
+        assert_eq!(
+            check_music_dir_shape(Path::new("relative/Music"), data_dir),
+            Err("not_absolute")
+        );
+    }
+
+    #[test]
+    fn check_music_dir_shape_rejects_a_parent_of_data_dir() {
+        let data_dir = Path::new("/data/app");
+        assert_eq!(
+            check_music_dir_shape(Path::new("/data"), data_dir),
+            Err("contains_app_data")
+        );
+    }
+
+    #[test]
+    fn check_music_dir_shape_accepts_a_sibling_of_data_dir() {
+        let data_dir = Path::new("/data/app");
+        assert_eq!(
+            check_music_dir_shape(Path::new("/data/Music"), data_dir),
+            Ok(())
+        );
+    }
+
+    /// The default music dir (`data_dir.join("Music")`) must never be
+    /// rejected: `platform_dirs` runs it through the exact same shape check
+    /// as a user's choice by construction, so a false rejection here would
+    /// break every fresh install.
+    #[test]
+    fn check_music_dir_shape_accepts_the_default_music_dir() {
+        let data_dir = Path::new("/data/app");
+        assert_eq!(check_music_dir_shape(&data_dir.join("Music"), data_dir), Ok(()));
+    }
+
+    #[test]
+    fn check_music_dir_shape_rejects_when_candidate_equals_data_dir() {
+        let data_dir = Path::new("/data/app");
+        assert_eq!(
+            check_music_dir_shape(data_dir, data_dir),
+            Err("contains_app_data")
+        );
+    }
+
+    /// Pins which path `resolve_music_dir` actually probes: only ever the
+    /// configured one, never the default. A `readable` that ignored its
+    /// argument (e.g. `|_| true`) would pass every other test in this module
+    /// even if the real predicate call site were wrong.
+    #[test]
+    fn resolve_music_dir_probes_only_the_configured_path() {
+        let configured = Path::new("/elsewhere/MyMusic");
+        let default_music = Path::new("/data/Music");
+        let probed = std::cell::Cell::new(Vec::new());
+        let (_, _) = resolve_music_dir(Some(configured), default_music, |p| {
+            let mut seen = probed.take();
+            seen.push(p.to_path_buf());
+            probed.set(seen);
+            true
+        });
+        assert_eq!(probed.into_inner(), vec![configured.to_path_buf()]);
+    }
 }
 
 /// Windows-only: seed two bundled demo WAVs into Music on first empty launch.
@@ -528,6 +711,138 @@ fn open_music_dir(app: tauri::AppHandle) -> Result<String, String> {
     }
 
     Ok(dirs.music_dir)
+}
+
+/// Outcome of [`set_music_dir`] / [`reset_music_dir`].
+#[derive(serde::Serialize, Clone, Debug)]
+struct SetMusicDirResult {
+    /// Whether the listener actually picked (or cleared) a folder. `false`
+    /// on a cancelled dialog, or a `reset_music_dir` call when nothing was
+    /// configured.
+    changed: bool,
+    /// The resolved directories after this call — the same as before the
+    /// call when `changed` is `false`.
+    dirs: AppDirs,
+    /// `true` when `changed` and the audio thread has already started this
+    /// launch (`AppState::started`): the running `Engine` keeps scanning the
+    /// old folder until the app restarts.
+    restart_required: bool,
+}
+
+/// Opens a native folder-picker and, if the listener confirms a folder,
+/// validates it and saves it to `settings.json` (`store::Settings`),
+/// applying it to every command from here on (except the already-running
+/// automatic selection — see [`SetMusicDirResult::restart_required`]).
+///
+/// Does not move, copy, or delete anything: the previous folder's files stay
+/// exactly where they are, and the analysis cache / hand corrections are
+/// keyed by content hash, so they carry over automatically for any file that
+/// is also present under the new folder.
+///
+/// Errors are one of `"not_absolute"` / `"not_found"` / `"not_a_directory"`
+/// / `"not_readable"` / `"contains_app_data"` / `"unsupported_platform"`
+/// (Android has no folder-picker backend, so it always returns the last
+/// one). `src/lib/tauri.ts` and `OverflowMenu.svelte` match on these exact
+/// strings — keep this contract in sync on all three, the same as
+/// `reorder`/`dequeue`'s error codes.
+///
+/// Always `async`: `blocking_pick_folder` must never run on the main thread.
+#[tauri::command(async)]
+fn set_music_dir(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<SetMusicDirResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (&app, &state);
+        return Err("unsupported_platform".into());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri::Manager;
+        use tauri_plugin_dialog::DialogExt;
+
+        let dirs = resolve_dirs(&app)?;
+
+        let mut b = app
+            .dialog()
+            .file()
+            .set_title("Musicフォルダを選ぶ")
+            .set_directory(&dirs.music_dir);
+        if let Some(w) = app.get_webview_window("main") {
+            b = b.set_parent(&w);
+        }
+        let picked = b.blocking_pick_folder();
+
+        let Some(fp) = picked else {
+            return Ok(SetMusicDirResult {
+                changed: false,
+                dirs,
+                restart_required: false,
+            });
+        };
+        let path = fp.into_path().map_err(|_| "not_absolute".to_string())?;
+
+        check_music_dir_shape(&path, Path::new(&dirs.data_dir))?;
+        match std::fs::metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("not_found".into()),
+            Err(_) => return Err("not_readable".into()),
+            Ok(m) if !m.is_dir() => return Err("not_a_directory".into()),
+            Ok(_) => {}
+        }
+        if std::fs::read_dir(&path).is_err() {
+            return Err("not_readable".into());
+        }
+
+        let data = Path::new(&dirs.data_dir);
+        let mut settings = store::load_settings(data);
+        settings.music_dir = Some(path);
+        store::save_settings(data, &settings)
+            .map_err(|e| format!("cannot save settings: {e}"))?;
+
+        let dirs = resolve_dirs(&app)?;
+        let restart_required = *state.started.lock().unwrap();
+        Ok(SetMusicDirResult {
+            changed: true,
+            dirs,
+            restart_required,
+        })
+    }
+}
+
+/// Clears whatever folder `set_music_dir` configured, reverting to the
+/// default `Music` folder. A no-op (`changed: false`) when nothing was
+/// configured. Same `"unsupported_platform"` behaviour on Android as
+/// [`set_music_dir`]; see its doc comment for the shared error contract.
+#[tauri::command(async)]
+fn reset_music_dir(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<SetMusicDirResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (&app, &state);
+        return Err("unsupported_platform".into());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let dirs = resolve_dirs(&app)?;
+        let data = Path::new(&dirs.data_dir);
+        let mut settings = store::load_settings(data);
+        let changed = settings.music_dir.is_some();
+        if changed {
+            settings.music_dir = None;
+            store::save_settings(data, &settings)
+                .map_err(|e| format!("cannot save settings: {e}"))?;
+        }
+        let dirs = resolve_dirs(&app)?;
+        let restart_required = changed && *state.started.lock().unwrap();
+        Ok(SetMusicDirResult {
+            changed,
+            dirs,
+            restart_required,
+        })
+    }
 }
 
 /// Outcome of [`share_feedback`]: Android opened a chooser, or desktop wrote a path.
@@ -2945,6 +3260,7 @@ mod played_duration_secs_tests {
             outro_bars_manual: false,
             outro_structure_bars_manual: false,
             needs_reanalysis: false,
+            is_funkot: true,
             rms_dbfs: -14.0,
             gain_db: 0.0,
         }
@@ -4573,8 +4889,15 @@ pub fn run() {
     #[cfg(not(target_os = "android"))]
     env_logger::init();
 
-    tauri::Builder::default()
-        .manage(AppState::default())
+    let builder = tauri::Builder::default().manage(AppState::default());
+    // Desktop-only folder-picker for `set_music_dir`. Rust calls it directly
+    // (no `invoke` from the webview), so no `capabilities/default.json`
+    // permission is needed. Not registered on Android: `set_music_dir`'s
+    // Android branch never calls it (see its `#[cfg]` split), and no
+    // folder-picker backend exists there anyway.
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.plugin(tauri_plugin_dialog::init());
+    builder
         .setup(|app| {
             // Preload the queue tab before ▶ is pressed: `start_impl` is
             // otherwise the only place `queue.json` / `session.json` get
@@ -4615,6 +4938,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_dirs,
             open_music_dir,
+            set_music_dir,
+            reset_music_dir,
             start,
             poll_log,
             toggle_pause,

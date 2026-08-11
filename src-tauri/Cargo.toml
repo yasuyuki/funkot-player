@@ -1,6 +1,6 @@
 [package]
 name = "funkot-player"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "MIT"
 description = "Auto-DJ music player for Funkot, built on funkot-core"
@@ -55,6 +55,14 @@ ndk-context = "0.1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger = "0.11"
+# デスクトップのフォルダ選択ダイアログ（set_music_dir）。Rust からしか呼ばないので
+# capabilities への dialog 権限追加は不要。Android は folder picker 非対応なので入れない。
+#
+# default-features = false は必須。このプラグインの default は ["gtk3"] で、
+# rfd 0.16 の backend.rs は not(feature = "gtk3") のときにしか
+# xdg_desktop_portal モジュールをコンパイルしない -- 両方立てると GTK3 が黙って勝つ。
+# Flatpak / snap ではサンドボックス外を選ばせるためにポータル経路が要る。
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
 
 # The shipped APK is a --debug build (see README), so the dev profile is what
 # runs on the phone. Unoptimized, funkot-core's decode/analysis/stretch is ~26x

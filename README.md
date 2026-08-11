@@ -50,16 +50,29 @@ Install **Funkot** from the Microsoft Store (when published). Unsigned NSIS
 installers on GitHub Releases are **not** the recommended path — Smart App
 Control / SmartScreen often blocks them.
 
-Tracks go in the app's Music folder, created on first launch. In the app,
-choose **⋮ → Musicフォルダを開く** to open it in Explorer (and show the path).
-Under a classic (non-Store) install the folder is usually:
+Tracks go in a Music folder the app can scan. On Windows, choose
+**Musicフォルダを選ぶ** (library toolbar or ⋮) to point at an existing folder
+— files are not copied or moved. Or use **⋮ → Musicフォルダを開く** to open
+the default Music folder in Explorer (and show the path) if you prefer to
+copy tracks there. Under a classic (non-Store) install the default folder is
+usually:
 
 ```
 %APPDATA%\jp.hatsuboshi.funkotplayer\Music
 ```
 
-Under MSIX the resolved path may differ; always use the menu. Copy files
-there, then press **開始** or **⋮ → 再スキャン**.
+Under MSIX the resolved path may differ; always use the menu. After choosing
+or copying, press **開始** or **⋮ → 再スキャン**.
+
+**Musicフォルダを選ぶ** works on Windows/Mac/Linux only (not Android).
+Changing the folder does not move files. Analysis and manual corrections are
+keyed by content hash, so the same files carry over. Automatic selection
+switches after a restart.
+
+Linux: folder picking needs xdg-desktop-portal and a matching backend
+(xdg-desktop-portal-gtk, etc.). Flatpak/snap usually provide this. Without
+it the dialog may not open and the app only shows that nothing changed
+(zenity may be used as a fallback).
 
 Privacy policy (Store): [docs/privacy.md](docs/privacy.md) /
 https://yasuyuki.github.io/funkot-player/privacy.html
@@ -106,6 +119,12 @@ corrections stay on the phone.
 - **⋮ → 再スキャン** — pick up tracks added since the last scan.
 - **⋮ → Musicフォルダを開く** — open the Music folder (Windows / desktop) or
   show its path (Android toast) so you can copy tracks in.
+- **⋮ → Musicフォルダを選ぶ** — pick a different folder to play from
+  (Windows/Mac/Linux only). Files are not moved; analysis and manual
+  corrections carry over for files that also exist under the new folder.
+  Also available as a button on the library screen.
+- **⋮ → Musicフォルダを既定に戻す** — revert to the default Music folder
+  (shown only after a custom folder is set).
 - **⋮ → 意見を送る** — share a small ZIP of your corrections. Android opens
   the system share sheet; Windows saves the ZIP and shows its path.
 - **⋮ → ログを表示** — diagnostic log for troubleshooting.

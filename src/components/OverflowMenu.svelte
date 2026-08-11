@@ -7,6 +7,8 @@
   let scanBusy = $state(false);
   let openMusicBusy = $state(false);
   let feedbackBusy = $state(false);
+  let musicDirBusy = $state(false);
+  let musicDirResetBusy = $state(false);
 
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
@@ -43,6 +45,72 @@
       toast.notify(String(err));
     } finally {
       openMusicBusy = false;
+    }
+  }
+
+  /// Error code (`set_music_dir`/`reset_music_dir`) → Japanese toast text.
+  /// Codes must stay in sync with `src-tauri/src/lib.rs` and
+  /// `src/lib/tauri.ts` (same contract as `Queue.svelte`'s `toastForError`).
+  function toastForMusicDirError(error: string): string {
+    switch (error) {
+      case "not_absolute":
+        return "絶対パスのフォルダを選んでください";
+      case "not_found":
+        return "そのフォルダが見つかりません";
+      case "not_a_directory":
+        return "フォルダを選んでください";
+      case "not_readable":
+        return "そのフォルダを読み取れません";
+      case "contains_app_data":
+        return "アプリのデータフォルダを含むフォルダは選べません";
+      case "unsupported_platform":
+        return "この端末では変更できません";
+      default:
+        return "Musicフォルダを変更できませんでした";
+    }
+  }
+
+  async function onSetMusicDir() {
+    if (musicDirBusy) return;
+    musicDirBusy = true;
+    ui.menuOpen = false;
+    try {
+      const result = await store.doSetMusicDir();
+      if (!result.ok) {
+        toast.notify(toastForMusicDirError(result.error));
+      } else if (!result.changed) {
+        toast.notify("変更しませんでした");
+      } else if (result.restartRequired) {
+        toast.notify(
+          `Musicフォルダを変更しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
+        );
+      } else {
+        toast.notify(`Musicフォルダを変更しました: ${store.dirs?.music_dir}`);
+      }
+    } finally {
+      musicDirBusy = false;
+    }
+  }
+
+  async function onResetMusicDir() {
+    if (musicDirResetBusy) return;
+    musicDirResetBusy = true;
+    ui.menuOpen = false;
+    try {
+      const result = await store.doResetMusicDir();
+      if (!result.ok) {
+        toast.notify(toastForMusicDirError(result.error));
+      } else if (!result.changed) {
+        toast.notify("変更しませんでした");
+      } else if (result.restartRequired) {
+        toast.notify(
+          `既定のMusicフォルダに戻しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
+        );
+      } else {
+        toast.notify(`既定のMusicフォルダに戻しました: ${store.dirs?.music_dir}`);
+      }
+    } finally {
+      musicDirResetBusy = false;
     }
   }
 
@@ -86,6 +154,12 @@
     <div class="menu" onclick={(event) => event.stopPropagation()}>
       <button type="button" onclick={onRescan} disabled={scanBusy}>再スキャン</button>
       <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
+      {#if store.dirs?.music_dir_configurable}
+        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>Musicフォルダを選ぶ</button>
+      {/if}
+      {#if store.dirs?.music_dir_configurable && store.dirs?.music_dir_custom}
+        <button type="button" onclick={onResetMusicDir} disabled={musicDirResetBusy}>Musicフォルダを既定に戻す</button>
+      {/if}
       <button type="button" onclick={onShowLog}>ログを表示</button>
       <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>意見を送る</button>
     </div>

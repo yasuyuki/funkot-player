@@ -13,6 +13,17 @@ export interface AppDirs {
   music_dir: string;
   cache_dir: string;
   data_dir: string;
+  /// The `settings.json` value that produced `music_dir`, or `null` if
+  /// nothing is configured (fresh install, after a reset, or always on
+  /// Android).
+  music_dir_custom: string | null;
+  /// `true` when `music_dir_custom` was set but unreadable this launch, so
+  /// `music_dir` fell back to the default. `settings.json` is left
+  /// untouched when this is `true`.
+  music_dir_unavailable: boolean;
+  /// Whether `setMusicDir`/`resetMusicDir` can do anything on this
+  /// platform. `true` on desktop, `false` on Android.
+  music_dir_configurable: boolean;
 }
 
 /// Matches `TransitionInfo`.
@@ -63,6 +74,32 @@ export function appDirs(): Promise<AppDirs> {
 /// its absolute path. On Android the folder is not opened — toast the path.
 export function openMusicDir(): Promise<string> {
   return invoke<string>("open_music_dir");
+}
+
+/// Matches `SetMusicDirResult`.
+export interface SetMusicDirResult {
+  changed: boolean;
+  dirs: AppDirs;
+  restart_required: boolean;
+}
+
+/// Opens a native folder-picker dialog and, if the listener confirms a
+/// folder, validates it and saves it to `settings.json`. Desktop only
+/// (Windows/Mac/Linux) — rejects with `"unsupported_platform"` on Android.
+///
+/// Rejects with one of `"not_absolute"` / `"not_found"` / `"not_a_directory"`
+/// / `"not_readable"` / `"contains_app_data"` / `"unsupported_platform"`
+/// (see `set_music_dir`'s doc comment in `src-tauri/src/lib.rs`) — this file
+/// and that one, plus `OverflowMenu.svelte`, must keep the exact strings in
+/// sync.
+export function setMusicDir(): Promise<SetMusicDirResult> {
+  return invoke<SetMusicDirResult>("set_music_dir");
+}
+
+/// Clears whatever folder `setMusicDir` configured, reverting to the default
+/// Music folder. Same error contract as `setMusicDir`.
+export function resetMusicDir(): Promise<SetMusicDirResult> {
+  return invoke<SetMusicDirResult>("reset_music_dir");
 }
 
 export function playerState(): Promise<PlayerState> {
