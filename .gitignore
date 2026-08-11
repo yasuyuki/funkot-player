@@ -12,8 +12,12 @@
 # Local music and analysis cache used for testing
 /testdata/
 
-# Session handoff notes (local, not for publication)
+# Session handoff / deferred issues (local, not for publication)
 /HANDOFF.md
+/ISSUES.md
+
+# Local stamp from scripts/win-run.sh (host fingerprint)
+/.win-run.stamp
 
 # OS / editor noise
 .DS_Store
