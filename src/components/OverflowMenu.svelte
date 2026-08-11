@@ -1,14 +1,16 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
-  import { openMusicDir, shareFeedback } from "../lib/tauri";
-  import { toast } from "../lib/toast.svelte";
   import { ui } from "../lib/ui.svelte";
+  import { toast } from "../lib/toast.svelte";
+  import { openMusicDir, shareFeedback } from "../lib/tauri";
 
   let scanBusy = $state(false);
   let openMusicBusy = $state(false);
-  let feedbackBusy = $state(false);
   let musicDirBusy = $state(false);
-  let musicDirResetBusy = $state(false);
+  let feedbackBusy = $state(false);
+
+  let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
+  let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
 
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
@@ -16,8 +18,8 @@
   }
 
   function onShowLog() {
-    ui.logOpen = true;
     ui.menuOpen = false;
+    ui.logOpen = true;
   }
 
   async function onRescan() {
@@ -36,8 +38,10 @@
     openMusicBusy = true;
     ui.menuOpen = false;
     try {
+      // Desktop opens Explorer / the file manager; Android only returns the
+      // path (the private Music folder is not reliably openable via Intent).
       const path = await openMusicDir();
-      // Android cannot open the folder; the path toast is the UX. Desktop
+      // Always toast the path: Android has no Explorer, and desktop has
       // already opened Explorer / the file manager — still show the path so
       // Windows Store users can confirm where files go.
       toast.notify(path);
@@ -48,7 +52,7 @@
     }
   }
 
-  /// Error code (`set_music_dir`/`reset_music_dir`) → Japanese toast text.
+  /// Error code (`set_music_dir`) → Japanese toast text.
   /// Codes must stay in sync with `src-tauri/src/lib.rs` and
   /// `src/lib/tauri.ts` (same contract as `Queue.svelte`'s `toastForError`).
   function toastForMusicDirError(error: string): string {
@@ -92,28 +96,6 @@
     }
   }
 
-  async function onResetMusicDir() {
-    if (musicDirResetBusy) return;
-    musicDirResetBusy = true;
-    ui.menuOpen = false;
-    try {
-      const result = await store.doResetMusicDir();
-      if (!result.ok) {
-        toast.notify(toastForMusicDirError(result.error));
-      } else if (!result.changed) {
-        toast.notify("変更しませんでした");
-      } else if (result.restartRequired) {
-        toast.notify(
-          `既定のMusicフォルダに戻しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
-        );
-      } else {
-        toast.notify(`既定のMusicフォルダに戻しました: ${store.dirs?.music_dir}`);
-      }
-    } finally {
-      musicDirResetBusy = false;
-    }
-  }
-
   async function onShareFeedback() {
     if (feedbackBusy) return;
     feedbackBusy = true;
@@ -153,12 +135,14 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu" onclick={(event) => event.stopPropagation()}>
       <button type="button" onclick={onRescan} disabled={scanBusy}>再スキャン</button>
-      <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
-      {#if store.dirs?.music_dir_configurable}
+      {#if musicDirConfigurable && musicDirNeeded}
         <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>Musicフォルダを選ぶ</button>
       {/if}
-      {#if store.dirs?.music_dir_configurable && store.dirs?.music_dir_custom}
-        <button type="button" onclick={onResetMusicDir} disabled={musicDirResetBusy}>Musicフォルダを既定に戻す</button>
+      {#if musicDirConfigurable && !musicDirNeeded}
+        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>Musicフォルダを変更</button>
+      {/if}
+      {#if !musicDirNeeded}
+        <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
       {/if}
       <button type="button" onclick={onShowLog}>ログを表示</button>
       <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>意見を送る</button>

@@ -333,15 +333,15 @@ Store 提出物（未署名）をそのままダブルクリックすると、Ap
 **説明（コピー用）:**
 
 ```text
-Funkot は、端末内の曲をつないで再生する Auto-DJ プレイヤーです。アカウント不要。曲の追加は「Musicフォルダを選ぶ」で既存のフォルダを指定するか（ファイルはコピーしません）、「Musicフォルダを開く」で既定フォルダを開いてファイルを置いたあと、再スキャンしてください。
+Funkot は、端末内の曲をつないで再生する Auto-DJ プレイヤーです。アカウント不要。初回は「Musicフォルダを選ぶ」で既存のフォルダを指定してください（ファイルはコピーしません）。選んだあと「Musicフォルダを開く」で中身を確認し、必要なら再スキャンしてください。
 ```
 
 **機能・短い箇条書き（任意）:**
 
 ```text
 - 端末内の曲をつないで連続再生
-- Musicフォルダを選ぶで既存フォルダをスキャン対象にする（コピーしない）
-- ⋮ → Musicフォルダを開く で既定配置先を表示（任意）
+- 初回は Musicフォルダを選ぶが必須（コピーしない）
+- 設定後は ⋮ → Musicフォルダを開く / 変更
 - アカウント不要・ローカル再生
 ```
 
@@ -359,15 +359,10 @@ Funkot は、端末内の曲をつないで再生する Auto-DJ プレイヤー�
 **Notes for certification** に貼る:
 
 ```text
-- On first launch the app creates its default Music folder (under AppData).
-- On first Windows launch, if the default Music folder is empty, the app seeds two demo tracks (≥30s beat tracks) so Start plays immediately. Demo seeding always targets the default Music folder only (never a user-chosen custom folder).
-- Primary path for certification: use 「Musicフォルダを選ぶ」 / Pick Music folder (library button or ⋮). Point at a folder that already has audio. Files are not copied or moved; that folder becomes the library scan root. Then ⋮ → 再スキャン (Rescan) if needed.
-- Optional: 「Musicフォルダを開く」 / Open Music folder opens the current Music path in Explorer so you can inspect or copy into the default folder.
-- Testers can replace/delete demos via Open Music folder on the default Music path; demos are not re-seeded after first run.
-- To reset a custom folder: ⋮ → Musicフォルダを既定に戻す (shown only when a custom folder is set).
+- On first desktop launch there is no default Music library root and no demo seed. Start stays disabled until the tester picks a folder.
+- Required path for certification: use 「Musicフォルダを選ぶ」 / Pick Music folder (empty-state primary button or ⋮). Point at a folder that already has audio (≥2 tracks to Start). Files are not copied or moved; that folder becomes the library scan root. Then ⋮ → 再スキャン (Rescan) if needed.
+- After a folder is set: 「Musicフォルダを変更」 / Change Music folder, and 「Musicフォルダを開く」 / Open Music folder (Explorer) to inspect or add files.
 - Supported audio examples: wav/mp3/flac/m4a/ogg.
-- Example default path: %APPDATA%\jp.hatsuboshi.funkotplayer\Music
-  (Store packages also use an AppData location under this package id).
 - Local playback only; no account. Feedback ZIP stays on device until the user shares it.
 - Desktop full-trust (runFullTrust) for audio and file access.
 - WebView2 Evergreen Runtime is expected on the PC (not bundled in the MSIX).
@@ -403,7 +398,7 @@ Smart App Control に阻まれないことと、Music 配置 UX を確認する�
 
 失敗時の切り分け:
 
-- フォルダを選べない → ダイアログ／権限。既定 Music への「開く」経路で切り分け。
+- フォルダを選べない → ダイアログ／権限。設定済みなら「開く」でパスを確認。
 - 曲が無い → 再スキャン前か、選んだフォルダと違う場所を見ている。
 - 起動しない／WebView2 → Evergreen Runtime の有無を確認。
 
@@ -427,7 +422,7 @@ Funkot は、端末の曲を DJ 風のつなぎで連続再生するプレイヤ
 ■ はじめかた
 1. 「Musicフォルダを選ぶ」（ライブラリまたは ⋮）で音声があるフォルダを指定
 2. 必要なら「再スキャン」または再生開始
-3. （任意）「Musicフォルダを開く」で既定フォルダを Explorer 表示し、そこへコピーしてもよい
+3. （任意）「Musicフォルダを開く」で選んだフォルダを Explorer 表示し、そこへファイルを追加してもよい
 
 ■ できること
 ・指定した Music フォルダ内の曲をループでつなぎ再生
@@ -450,7 +445,7 @@ Funkot は、端末の曲を DJ 風のつなぎで連続再生するプレイヤ
 端末内の曲をつないで連続再生
 アカウント不要・ローカル再生のみ
 Musicフォルダを選ぶで既存フォルダをスキャン（コピーしない）
-⋮ → Musicフォルダを開く で既定配置先を表示（任意）
+⋮ → Musicフォルダを開く で選んだフォルダを表示（任意）
 キューの編集とセッション維持
 intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP

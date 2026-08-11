@@ -48,7 +48,11 @@
   // restarted, not another tap, so the button stays off rather than looking
   // like it would retry -- see legacy/index.html's `applyPhase` comment,
   // which this rule is carried over from unchanged.
-  let primaryDisabled = $derived(primaryMode === "off" || primaryBusy);
+  let primaryDisabled = $derived(
+    primaryMode === "off" ||
+      primaryBusy ||
+      (primaryMode === "start" && !store.canStart),
+  );
 
   let nextEnabled = $derived(
     !auditioning && (phase === "playing" || phase === "paused" || phase === "stalled"),

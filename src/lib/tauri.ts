@@ -14,15 +14,16 @@ export interface AppDirs {
   cache_dir: string;
   data_dir: string;
   /// The `settings.json` value that produced `music_dir`, or `null` if
-  /// nothing is configured (fresh install, after a reset, or always on
-  /// Android).
+  /// nothing is configured (fresh install, or always on Android).
   music_dir_custom: string | null;
-  /// `true` when `music_dir_custom` was set but unreadable this launch, so
-  /// `music_dir` fell back to the default. `settings.json` is left
-  /// untouched when this is `true`.
+  /// `true` when `music_dir_custom` was set but unreadable this launch.
+  /// `settings.json` is left untouched. Implies `music_dir_needed`.
   music_dir_unavailable: boolean;
-  /// Whether `setMusicDir`/`resetMusicDir` can do anything on this
-  /// platform. `true` on desktop, `false` on Android.
+  /// Desktop: `true` until settings has a readable `music_dir`. Android:
+  /// always `false`. While `true`, Start must stay disabled.
+  music_dir_needed: boolean;
+  /// Whether `setMusicDir` can do anything on this platform. `true` on
+  /// desktop, `false` on Android.
   music_dir_configurable: boolean;
 }
 
@@ -94,12 +95,6 @@ export interface SetMusicDirResult {
 /// sync.
 export function setMusicDir(): Promise<SetMusicDirResult> {
   return invoke<SetMusicDirResult>("set_music_dir");
-}
-
-/// Clears whatever folder `setMusicDir` configured, reverting to the default
-/// Music folder. Same error contract as `setMusicDir`.
-export function resetMusicDir(): Promise<SetMusicDirResult> {
-  return invoke<SetMusicDirResult>("reset_music_dir");
 }
 
 export function playerState(): Promise<PlayerState> {

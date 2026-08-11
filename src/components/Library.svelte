@@ -13,6 +13,8 @@
 
   let analysis = $derived(store.analysis);
   let libraryEmpty = $derived(store.libraryList.length === 0);
+  let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
+  let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
 
   function formatDuration(secs: number | null): string {
     if (secs === null || secs === undefined) return "-";
@@ -115,17 +117,6 @@
 <section class="library">
   <h2 class="heading">ライブラリ</h2>
 
-  {#if store.dirs?.music_dir_configurable}
-    <div class="music-dir-actions">
-      <button
-        type="button"
-        class="open-music"
-        disabled={setMusicBusy}
-        onclick={onSetMusicDir}
-      >Musicフォルダを選ぶ</button>
-    </div>
-  {/if}
-
   <!-- Sticky so search stays reachable while scrolling hundreds of rows. -->
   <div class="toolbar">
     <input
@@ -144,22 +135,39 @@
     <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
   {/if}
 
-  {#if libraryEmpty}
+  {#if musicDirNeeded}
+    <div class="empty">
+      <p class="empty-title">Musicフォルダを選んでください</p>
+      <div class="empty-actions">
+        {#if musicDirConfigurable}
+          <button
+            type="button"
+            class="set-music"
+            disabled={setMusicBusy}
+            onclick={onSetMusicDir}
+          >Musicフォルダを選ぶ</button>
+        {/if}
+      </div>
+    </div>
+  {:else if libraryEmpty}
     <div class="empty">
       <p class="empty-title">曲がありません</p>
-      <p class="empty-hint">
-        {#if store.dirs?.music_dir_configurable}
-          「Musicフォルダを選ぶ」か「Musicフォルダを開く」で音源の場所を用意し、⋮ の「再スキャン」でライブラリに反映します（ファイルはコピーしません）。
-        {:else}
-          「Musicフォルダを開く」で音源の場所を用意し、⋮ の「再スキャン」でライブラリに反映します（ファイルはコピーしません）。
+      <div class="empty-actions">
+        {#if musicDirConfigurable}
+          <button
+            type="button"
+            class="set-music"
+            disabled={setMusicBusy}
+            onclick={onSetMusicDir}
+          >Musicフォルダを選ぶ</button>
         {/if}
-      </p>
-      <button
-        type="button"
-        class="open-music"
-        disabled={openMusicBusy}
-        onclick={onOpenMusicDir}
-      >Musicフォルダを開く</button>
+        <button
+          type="button"
+          class="open-music"
+          disabled={openMusicBusy}
+          onclick={onOpenMusicDir}
+        >Musicフォルダを開く</button>
+      </div>
     </div>
   {:else}
     <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->
@@ -197,10 +205,6 @@
     font-size: var(--font-size-md);
     font-weight: 600;
     color: var(--color-text);
-  }
-
-  .music-dir-actions {
-    margin: 0 0 var(--space-sm);
   }
 
   .toolbar {
@@ -251,25 +255,36 @@
   }
 
   .empty-title {
-    margin: 0 0 var(--space-sm);
+    margin: 0 0 var(--space-md);
     font-size: var(--font-size-md);
     font-weight: 600;
     color: var(--color-text);
   }
 
-  .empty-hint {
-    margin: 0 0 var(--space-md);
-    line-height: 1.4;
+  .empty-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
   }
 
+  .set-music,
   .open-music {
     width: auto;
     font-size: var(--font-size-sm);
     padding: var(--space-sm) var(--space-md);
+  }
+
+  .set-music {
+    background: var(--color-transport-primary-bg);
+    color: var(--color-transport-primary-text);
+  }
+
+  .open-music {
     background: var(--color-transport-secondary-bg);
     color: var(--color-transport-secondary-text);
   }
 
+  .set-music:disabled,
   .open-music:disabled {
     background: var(--color-transport-disabled-bg);
     color: var(--color-transport-disabled-text);

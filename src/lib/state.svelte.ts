@@ -26,7 +26,6 @@ import {
   auditionAgain as auditionAgainCmd,
   resumeAutodj as resumeAutodjCmd,
   setMusicDir as setMusicDirCmd,
-  resetMusicDir as resetMusicDirCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -78,7 +77,7 @@ class PlayerStore {
   /// `refresh_library` on top of an in-flight rescan (or vice versa).
   #libraryBusy = false;
   /// Bumped on every Music-folder change refresh so a superseded wait / walk
-  /// yields to the latest `doSetMusicDir` / `doResetMusicDir`.
+  /// yields to the latest `doSetMusicDir`.
   #musicDirGen = 0;
   /// When a Music-folder change lands while analysis is still running, set so
   /// `analysis-done` re-runs a kick refresh instead of a quiet reload.
@@ -97,8 +96,8 @@ class PlayerStore {
   async #init() {
     try {
       this.dirs = await appDirs();
-      if (this.dirs.music_dir_unavailable) {
-        this.lastError = `指定した音楽フォルダを開けません: ${this.dirs.music_dir_custom}（既定のフォルダを使います）`;
+      if (this.dirs.music_dir_needed && this.dirs.music_dir_unavailable) {
+        this.lastError = `指定した音楽フォルダを開けません: ${this.dirs.music_dir_custom}`;
       }
     } catch (e) {
       this.lastError = String(e);
@@ -243,6 +242,11 @@ class PlayerStore {
   /// follows the last full refresh; progress splices update values in place.
   get libraryList(): TrackRow[] {
     return Array.from(this.library.values());
+  }
+
+  /// Engine start needs a usable Music folder and at least two tracks.
+  get canStart(): boolean {
+    return !this.dirs?.music_dir_needed && this.libraryList.length >= 2;
   }
 
   /// Seconds into the current track, client-side interpolated between polls.
@@ -608,22 +612,6 @@ class PlayerStore {
     }
   }
 
-  /// Clears whatever folder `doSetMusicDir` configured (⋮ Musicフォルダを既定に
-  /// 戻す), reverting to the default Music folder.
-  async doResetMusicDir(): Promise<
-    { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
-  > {
-    try {
-      const result = await resetMusicDirCmd();
-      this.dirs = result.dirs;
-      if (result.changed) await this.#refreshLibraryAfterMusicDirChange();
-      return { ok: true, changed: result.changed, restartRequired: result.restart_required };
-    } catch (e) {
-      const message = String(e);
-      this.lastError = message;
-      return { ok: false, error: message };
-    }
-  }
 }
 
 export const store = new PlayerStore();

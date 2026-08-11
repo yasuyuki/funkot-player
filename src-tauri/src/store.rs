@@ -212,10 +212,10 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
 }
 
 /// User-configurable app settings (desktop only). `music_dir`, when set, is
-/// the folder the listener picked via `set_music_dir`; `None` means "use the
-/// default `Music` folder under `data_dir`" — deliberately distinct from an
-/// invalid path, which `resolve_music_dir` falls back on without touching
-/// this file.
+/// the folder the listener picked via `set_music_dir`; `None` means no folder
+/// has been chosen yet (`music_dir_needed`). An unreadable configured path is
+/// left in this file — `resolve_music_dir` reports it as needed/unavailable
+/// without clearing the setting.
 ///
 /// `store` is a private module (`mod store;`, not `pub mod`), so these `pub`
 /// items are not part of the crate's public API and Android — which never
