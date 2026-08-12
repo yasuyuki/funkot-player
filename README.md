@@ -124,6 +124,8 @@ corrections stay on the phone.
 
 ## For developers
 
+Setup: [docs/development-setup.md](docs/development-setup.md)
+
 Analysis and mixing come from
 [funkot-autodj](https://github.com/yasuyuki/funkot-autodj)'s `funkot-core`.
 This repo is the player around it.
