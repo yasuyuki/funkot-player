@@ -26,7 +26,6 @@ import {
   auditionAgain as auditionAgainCmd,
   resumeAutodj as resumeAutodjCmd,
   setMusicDir as setMusicDirCmd,
-  resetMusicDir as resetMusicDirCmd,
   getAllowNonFunkot as getAllowNonFunkotCmd,
   setAllowNonFunkot as setAllowNonFunkotCmd,
   takePendingImport as takePendingImportCmd,
@@ -129,8 +128,8 @@ class PlayerStore {
   async #init() {
     try {
       this.dirs = await appDirs();
-      if (this.dirs.music_dir_unavailable) {
-        this.lastError = `指定した音楽フォルダを開けません: ${this.dirs.music_dir_custom}（既定のフォルダを使います）`;
+      if (this.dirs.music_dir_needed && this.dirs.music_dir_unavailable) {
+        this.lastError = `指定した音楽フォルダを開けません: ${this.dirs.music_dir_custom}`;
       }
     } catch (e) {
       this.lastError = String(e);
@@ -260,6 +259,12 @@ class PlayerStore {
   /// follows the last full refresh; progress splices update values in place.
   get libraryList(): TrackRow[] {
     return Array.from(this.library.values());
+  }
+
+  /// Start stays off until a usable Music folder is chosen and at least two
+  /// tracks are listed. `music_dir_needed` is the Store first-launch gate.
+  get canStart(): boolean {
+    return !this.dirs?.music_dir_needed && this.libraryList.length >= 2;
   }
 
   /// Seconds into the current track, client-side interpolated between polls.
@@ -691,7 +696,7 @@ class PlayerStore {
     }
   }
 
-  /// Opens the native folder picker (⋮ 音楽フォルダを変更) and applies the
+  /// Opens the native folder picker (⋮ Musicフォルダを選ぶ / 変更) and applies the
   /// result. `changed: false` covers a cancelled dialog. Reuses
   /// `doRefreshLibrary` for the post-change rescan rather than starting a
   /// second, parallel library walk.
@@ -700,23 +705,6 @@ class PlayerStore {
   > {
     try {
       const result = await setMusicDirCmd();
-      this.dirs = result.dirs;
-      if (result.changed) await this.doRefreshLibrary();
-      return { ok: true, changed: result.changed, restartRequired: result.restart_required };
-    } catch (e) {
-      const message = String(e);
-      this.lastError = message;
-      return { ok: false, error: message };
-    }
-  }
-
-  /// Clears whatever folder `doSetMusicDir` configured (⋮ 音楽フォルダを既定に
-  /// 戻す), reverting to the default Music folder.
-  async doResetMusicDir(): Promise<
-    { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
-  > {
-    try {
-      const result = await resetMusicDirCmd();
       this.dirs = result.dirs;
       if (result.changed) await this.doRefreshLibrary();
       return { ok: true, changed: result.changed, restartRequired: result.restart_required };

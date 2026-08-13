@@ -9,11 +9,13 @@
   let sortKey = $state<SortKey>("title");
   let busy = $state<Record<string, boolean>>({});
   let openMusicBusy = $state(false);
+  let setMusicBusy = $state(false);
 
   let analysis = $derived(store.analysis);
   let libraryScan = $derived(store.libraryScan);
   let libraryEmpty = $derived(store.libraryList.length === 0);
-  let canOpenMusicDir = $derived(!!store.dirs?.music_dir_configurable);
+  let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
+  let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
 
   function formatDuration(secs: number | null): string {
     if (secs === null || secs === undefined) return "-";
@@ -65,6 +67,48 @@
     return !!busy[row.path] || (isNonFunkot(row) && !store.allowNonFunkot);
   }
 
+  /// Error code (`set_music_dir`) → Japanese toast text. Keep in sync with
+  /// `OverflowMenu.svelte` / `src-tauri/src/lib.rs` / `src/lib/tauri.ts`.
+  function toastForMusicDirError(error: string): string {
+    switch (error) {
+      case "not_absolute":
+        return "絶対パスのフォルダを選んでください";
+      case "not_found":
+        return "そのフォルダが見つかりません";
+      case "not_a_directory":
+        return "フォルダを選んでください";
+      case "not_readable":
+        return "そのフォルダを読み取れません";
+      case "contains_app_data":
+        return "アプリのデータフォルダを含むフォルダは選べません";
+      case "unsupported_platform":
+        return "この端末では変更できません";
+      default:
+        return "Musicフォルダを変更できませんでした";
+    }
+  }
+
+  async function onSetMusicDir() {
+    if (setMusicBusy) return;
+    setMusicBusy = true;
+    try {
+      const result = await store.doSetMusicDir();
+      if (!result.ok) {
+        toast.notify(toastForMusicDirError(result.error));
+      } else if (!result.changed) {
+        toast.notify("変更しませんでした");
+      } else if (result.restartRequired) {
+        toast.notify(
+          `Musicフォルダを変更しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
+        );
+      } else {
+        toast.notify(`Musicフォルダを変更しました: ${store.dirs?.music_dir}`);
+      }
+    } finally {
+      setMusicBusy = false;
+    }
+  }
+
   async function onOpenMusicDir() {
     if (openMusicBusy) return;
     openMusicBusy = true;
@@ -109,7 +153,21 @@
     <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
   {/if}
 
-  {#if libraryEmpty}
+  {#if musicDirNeeded}
+    <div class="empty">
+      <p class="empty-title">Musicフォルダを選んでください</p>
+      <div class="empty-actions">
+        {#if musicDirConfigurable}
+          <button
+            type="button"
+            class="set-music"
+            disabled={setMusicBusy}
+            onclick={onSetMusicDir}
+          >Musicフォルダを選ぶ</button>
+        {/if}
+      </div>
+    </div>
+  {:else if libraryEmpty}
     <div class="empty">
       <p class="empty-title">曲がありません</p>
       <!-- Desktop only, same platform test as OverflowMenu's folder items:
@@ -118,7 +176,7 @@
            can only report the path there. Store requirement 10.1.2.10 is a
            Microsoft Store rule, so hiding the button on Android costs nothing;
            the path stays visible in ⋮ → ログを表示 (see LogView). -->
-      {#if canOpenMusicDir}
+      {#if musicDirConfigurable}
         <p class="empty-hint">
           Musicフォルダを開いて音声ファイルを入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。
         </p>
@@ -232,10 +290,25 @@
     line-height: 1.4;
   }
 
+  .empty-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+  }
+
+  .set-music,
   .open-music {
     width: auto;
     font-size: var(--font-size-sm);
     padding: var(--space-sm) var(--space-md);
+  }
+
+  .set-music {
+    background: var(--color-transport-primary-bg);
+    color: var(--color-transport-primary-text);
+  }
+
+  .open-music {
     background: var(--color-transport-secondary-bg);
     color: var(--color-transport-secondary-text);
   }

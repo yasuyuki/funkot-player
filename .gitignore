@@ -12,11 +12,11 @@
 # Local music and analysis cache used for testing
 /testdata/
 
-# Session handoff notes and deferred-issue list (local, not for publication)
+# Session handoff / deferred issues (local, not for publication)
 /HANDOFF.md
 /ISSUES.md
 
-# win-run.sh success fingerprint (WSL-local; skip rebuild when unchanged)
+# Local stamp from scripts/win-run.sh (host fingerprint)
 /.win-run.stamp
 
 # OS / editor noise

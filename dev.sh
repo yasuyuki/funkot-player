@@ -54,6 +54,13 @@
 set -eu
 cd "$(dirname "$0")"
 
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker Engine is required but \`docker\` was not found on PATH." >&2
+    echo "Install Docker Engine and ensure \`docker\` works for your user." >&2
+    echo "See docs/development-setup.md" >&2
+    exit 127
+fi
+
 IMAGE=funkot-player-dev
 CORE_DIR=${FUNKOT_CORE_REPO:-"$PWD/../funkot-autodj-for-ui"}
 

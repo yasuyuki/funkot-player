@@ -50,7 +50,7 @@ Windows の本配布は **MSIX + Partner Center**。署名は提出後に Micros
   - 予備（gist）: https://gist.github.com/yasuyuki/2bcd2f2737dd02e1622b2e593c258ade
   - リポジトリは **public**（Pages 用に公開済み）
 - [x] E. Identity 反映後の未署名 MSIX 再生成（CI run `31077160621`、artifact `funkot-player-windows-msix`）
-- [ ] F. Partner Center 提出（節 F のクリック順。**スクショ撮影は Windows 実機が必要**）
+- [x] F. Partner Center 提出（認証通過。公開後の実機確認は節 G）
 - [ ] G. 認証通過後の実機確認（Store インストール → Music → 再生）
 
 ---
@@ -333,14 +333,15 @@ Store 提出物（未署名）をそのままダブルクリックすると、Ap
 **説明（コピー用）:**
 
 ```text
-Funkot は、端末内の Music フォルダにある曲をつないで再生する Auto-DJ プレイヤーです。アカウント不要。曲の追加はアプリのメニュー「Musicフォルダを開く」からフォルダを開き、ファイルを置いて再スキャンしてください。
+Funkot は、端末内の曲をつないで再生する Auto-DJ プレイヤーです。アカウント不要。初回は「Musicフォルダを選ぶ」で既存のフォルダを指定してください（ファイルはコピーしません）。選んだあと「Musicフォルダを開く」で中身を確認し、必要なら再スキャンしてください。
 ```
 
 **機能・短い箇条書き（任意）:**
 
 ```text
 - 端末内の曲をつないで連続再生
-- ⋮ → Musicフォルダを開く で配置先を表示
+- 初回は Musicフォルダを選ぶが必須（コピーしない）
+- 設定後は ⋮ → Musicフォルダを開く / 変更
 - アカウント不要・ローカル再生
 ```
 
@@ -358,11 +359,10 @@ Funkot は、端末内の Music フォルダにある曲をつないで再生す
 **Notes for certification** に貼る:
 
 ```text
-- On first launch the app creates its Music folder (under AppData).
-- To add tracks: use 「Musicフォルダを開く」 when the library is empty, or ⋮ → Musicフォルダを開く
-  (Open Music folder). Copy audio there (e.g. wav/mp3/flac/m4a/ogg), then ⋮ → 再スキャン (Rescan).
-- Example path: %APPDATA%\jp.hatsuboshi.funkotplayer\Music
-  (Store packages also use an AppData location under this package id).
+- On first desktop launch there is no default Music library root and no demo seed. Start stays disabled until the tester picks a folder.
+- Required path for certification: use 「Musicフォルダを選ぶ」 / Pick Music folder (empty-state primary button or ⋮). Point at a folder that already has audio (≥2 tracks to Start). Files are not copied or moved; that folder becomes the library scan root. Then ⋮ → 再スキャン (Rescan) if needed.
+- After a folder is set: 「Musicフォルダを変更」 / Change Music folder, and 「Musicフォルダを開く」 / Open Music folder (Explorer) to inspect or add files.
+- Supported audio examples: wav/mp3/flac/m4a/ogg.
 - Local playback only; no account. Feedback ZIP stays on device until the user shares it.
 - Desktop full-trust (runFullTrust) for audio and file access.
 - WebView2 Evergreen Runtime is expected on the PC (not bundled in the MSIX).
@@ -390,16 +390,16 @@ Smart App Control に阻まれないことと、Music 配置 UX を確認する�
 
 1. **Microsoft Store** から Funkot をインストールする（NSIS / GitHub の exe ではない）。
 2. 起動する。
-3. **⋮ → Musicフォルダを開く** — Explorer が開き、実際の Music パスが見えること。
-4. そのフォルダに音声ファイル（対応形式）をコピーする。
-5. アプリで **再スキャン**する。
+3. **Musicフォルダを選ぶ**（ライブラリ上または ⋮）— 既存の音声フォルダを指定し、ライブラリに出ること（コピーされないこと）。
+4. （任意）**⋮ → Musicフォルダを開く** — Explorer が開き、現在の Music パスが見えること。
+5. 必要なら **再スキャン**する。
 6. ライブラリに曲が出ること、**1 曲以上再生**できることを確認する。
 7. （任意）ウィンドウを開いたまま再生が続くこと、Smart App Control のブロックが出ないこと。
 
 失敗時の切り分け:
 
-- Music が開けない → パッケージ化・仮想化パス。メニュー経由か再確認。
-- 曲が無い → 再スキャン前か、コピー先がメニューで開いたフォルダと違う。
+- フォルダを選べない → ダイアログ／権限。設定済みなら「開く」でパスを確認。
+- 曲が無い → 再スキャン前か、選んだフォルダと違う場所を見ている。
 - 起動しない／WebView2 → Evergreen Runtime の有無を確認。
 
 ---
@@ -417,15 +417,15 @@ Partner Center の Store 一覧用。日本語だけで提出可。英語は任�
 ### 説明（本文）
 
 ```text
-Funkot は、端末の Music フォルダにある曲を、DJ 風のつなぎで連続再生するプレイヤーです。デッキ操作やビートマッチは不要。フォルダを用意すれば、あとは再生するだけです。
+Funkot は、端末の曲を DJ 風のつなぎで連続再生するプレイヤーです。デッキ操作やビートマッチは不要。「Musicフォルダを選ぶ」で既存フォルダを指定すれば（ファイルはコピーしません）、あとは再生するだけです。
 
 ■ はじめかた
-1. ⋮ メニューから「Musicフォルダを開く」
-2. 音声ファイルをそのフォルダにコピー
-3. 「再スキャン」または再生開始
+1. 「Musicフォルダを選ぶ」（ライブラリまたは ⋮）で音声があるフォルダを指定
+2. 必要なら「再スキャン」または再生開始
+3. （任意）「Musicフォルダを開く」で選んだフォルダを Explorer 表示し、そこへファイルを追加してもよい
 
 ■ できること
-・Music フォルダ内の曲をループでつなぎ再生
+・指定した Music フォルダ内の曲をループでつなぎ再生
 ・キューの追加・並び替え・削除（再開後も維持）
 ・つなぎ位置（intro / outro）の手直し
 ・「このつなぎは不適切」でフィードバックを残せる
@@ -433,7 +433,7 @@ Funkot は、端末の Music フォルダにある曲を、DJ 風のつなぎで
 
 ■ 注意
 ・アカウント登録やクラウド同期はありません。再生は端末内のみです。
-・曲の追加はアプリ内の Music フォルダ経由で行ってください（エクスプローラーで開きます）。
+・フォルダ選択ではファイルを移動・コピーしません。スキャン対象の根だけ変わります。
 ・再生には WebView2（通常は Windows に付属）が必要です。
 
 つなぎの感覚について意見を集め、より自然な連続再生にしていくためのアプリです。気になるつなぎがあれば「このつなぎは不適切」から教えてください。
@@ -442,9 +442,10 @@ Funkot は、端末の Music フォルダにある曲を、DJ 風のつなぎで
 ### アプリの機能（Features・1行ずつ・最大あたり Partner Center の件数に合わせて削る）
 
 ```text
-端末内 Music フォルダの曲をつないで連続再生
+端末内の曲をつないで連続再生
 アカウント不要・ローカル再生のみ
-⋮ → Musicフォルダを開く で配置先を表示
+Musicフォルダを選ぶで既存フォルダをスキャン（コピーしない）
+⋮ → Musicフォルダを開く で選んだフォルダを表示（任意）
 キューの編集とセッション維持
 intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
@@ -468,9 +469,9 @@ On-device Auto-DJ player. No account. Drop tracks in Music and play.
 Funkot plays the tracks in your on-device Music folder back-to-back with DJ-style transitions. No decks, no beatmatching — prepare a folder and hit play.
 
 Getting started
-1. Open ⋮ → Musicフォルダを開く (Open Music folder)
-2. Copy audio files into that folder
-3. Rescan or start playback
+1. Use Musicフォルダを選ぶ (Pick Music folder) to point at a folder with audio (files are not copied)
+2. Rescan or start playback
+3. Optional: Open Music folder in Explorer to inspect or copy into the default Music path
 
 Highlights
 • Continuous transitions across your library

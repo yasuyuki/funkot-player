@@ -8,8 +8,10 @@
   let openMusicBusy = $state(false);
   let feedbackBusy = $state(false);
   let musicDirBusy = $state(false);
-  let musicDirResetBusy = $state(false);
   let allowNonFunkotBusy = $state(false);
+
+  let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
+  let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
 
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
@@ -57,7 +59,7 @@
     }
   }
 
-  /// Error code (`set_music_dir`/`reset_music_dir`) → Japanese toast text.
+  /// Error code (`set_music_dir`) → Japanese toast text.
   /// Codes must stay in sync with `src-tauri/src/lib.rs` and
   /// `src/lib/tauri.ts` (same contract as `Queue.svelte`'s `toastForError`).
   function toastForMusicDirError(error: string): string {
@@ -75,7 +77,7 @@
       case "unsupported_platform":
         return "この端末では変更できません";
       default:
-        return "音楽フォルダを変更できませんでした";
+        return "Musicフォルダを変更できませんでした";
     }
   }
 
@@ -91,35 +93,13 @@
         toast.notify("変更しませんでした");
       } else if (result.restartRequired) {
         toast.notify(
-          `音楽フォルダを変更しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
+          `Musicフォルダを変更しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
         );
       } else {
-        toast.notify(`音楽フォルダを変更しました: ${store.dirs?.music_dir}`);
+        toast.notify(`Musicフォルダを変更しました: ${store.dirs?.music_dir}`);
       }
     } finally {
       musicDirBusy = false;
-    }
-  }
-
-  async function onResetMusicDir() {
-    if (musicDirResetBusy) return;
-    musicDirResetBusy = true;
-    ui.menuOpen = false;
-    try {
-      const result = await store.doResetMusicDir();
-      if (!result.ok) {
-        toast.notify(toastForMusicDirError(result.error));
-      } else if (!result.changed) {
-        toast.notify("変更しませんでした");
-      } else if (result.restartRequired) {
-        toast.notify(
-          `既定の音楽フォルダに戻しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
-        );
-      } else {
-        toast.notify(`既定の音楽フォルダに戻しました: ${store.dirs?.music_dir}`);
-      }
-    } finally {
-      musicDirResetBusy = false;
     }
   }
 
@@ -178,18 +158,12 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu" onclick={(event) => event.stopPropagation()}>
       <button type="button" onclick={onRescan} disabled={scanBusy}>再スキャン</button>
-      <!-- Desktop only. `music_dir_configurable` is the platform test here
-           (false on Android, see tauri.ts's AppDirs): Android's music folder
-           lives under `Android/data`, which no file manager can reach since
-           Android 11, so "開く" cannot be honoured there and the item would
-           only name something it does not do. The path itself is still
-           reachable on Android -- LogView prints it. -->
-      {#if store.dirs?.music_dir_configurable}
+      {#if musicDirConfigurable && musicDirNeeded}
+        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>Musicフォルダを選ぶ</button>
+      {/if}
+      {#if musicDirConfigurable && !musicDirNeeded}
+        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>Musicフォルダを変更</button>
         <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
-        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>音楽フォルダを変更</button>
-        {#if store.dirs?.music_dir_custom}
-          <button type="button" onclick={onResetMusicDir} disabled={musicDirResetBusy}>音楽フォルダを既定に戻す</button>
-        {/if}
       {/if}
       <button type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
         非Funkotも再生: {store.allowNonFunkot ? "ON" : "OFF"}

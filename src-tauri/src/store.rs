@@ -217,9 +217,10 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
 /// User-configurable app settings (`settings.json`).
 ///
 /// `music_dir`, when set, is the folder the listener picked via
-/// `set_music_dir` (desktop only); `None` means "use the default `Music`
-/// folder under `data_dir`" — deliberately distinct from an invalid path,
-/// which `resolve_music_dir` falls back on without touching this file.
+/// `set_music_dir` (desktop only); `None` means no folder has been chosen
+/// yet (`music_dir_needed`). An unreadable configured path is left in this
+/// file — `resolve_music_dir` reports it as needed/unavailable without
+/// clearing the setting.
 ///
 /// `allow_non_funkot` is read/written on every platform (library enqueue and
 /// folder-drain gate).

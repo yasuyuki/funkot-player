@@ -50,16 +50,22 @@ Install **Funkot** from the Microsoft Store (when published). Unsigned NSIS
 installers on GitHub Releases are **not** the recommended path — Smart App
 Control / SmartScreen often blocks them.
 
-Tracks go in the app's Music folder, created on first launch. In the app,
-choose **⋮ → Musicフォルダを開く** to open it in Explorer (and show the path).
-Under a classic (non-Store) install the folder is usually:
+On first desktop launch the app does **not** invent a Music library root or
+seed demo tracks. Choose **Musicフォルダを選ぶ** (empty-state button or ⋮)
+and point at a folder that already has audio — files are not copied or moved.
+Until that choice is made, Start stays disabled. After a folder is set, use
+**⋮ → Musicフォルダを開く** to inspect it in Explorer, and **⋮ → Musicフォルダを変更**
+to pick another root. Then press **開始** (needs ≥2 tracks) or **⋮ → 再スキャン**.
 
-```
-%APPDATA%\jp.hatsuboshi.funkotplayer\Music
-```
+**Musicフォルダを選ぶ / 変更** works on Windows/Mac/Linux only (not Android).
+Changing the folder does not move files. Analysis and manual corrections are
+keyed by content hash, so the same files carry over. Automatic selection
+switches after a restart.
 
-Under MSIX the resolved path may differ; always use the menu. Copy files
-there, then press **開始** or **⋮ → 再スキャン**.
+Linux: folder picking needs xdg-desktop-portal and a matching backend
+(xdg-desktop-portal-gtk, etc.). Flatpak/snap usually provide this. Without
+it the dialog may not open and the app only shows that nothing changed
+(zenity may be used as a fallback).
 
 **⋮ → 音楽フォルダを変更** で別のフォルダを指定できる（Windows/Mac/Linux のみ。
 Android は不可）。変更してもファイルは移動されない。解析結果と手動補正は内容
@@ -137,13 +143,13 @@ Bulk / resume-safe push from WSL over wireless adb (hundreds of tracks): see
 - **編集** — fix intro / outro bar counts on a transition that sounded wrong.
   Corrections are kept and re-applied after a fresh analysis.
 - **⋮ → 再スキャン** — pick up tracks added since the last scan.
-- **⋮ → Musicフォルダを開く** — open the Music folder (Windows / desktop) or
-  show its path (Android toast) so you can copy tracks in.
-- **⋮ → 音楽フォルダを変更** — pick a different folder to play from
-  (Windows/Mac/Linux only). Files are not moved; analysis and manual
-  corrections carry over for files that also exist under the new folder.
-- **⋮ → 音楽フォルダを既定に戻す** — revert to the default Music folder
-  (shown only after a custom folder is set).
+- **⋮ → Musicフォルダを選ぶ** — required on first desktop launch when no
+  folder is configured yet (Windows/Mac/Linux only). Files are not moved.
+- **⋮ → Musicフォルダを変更** — pick a different folder after one is set
+  (desktop only). Analysis and manual corrections carry over by content hash.
+- **⋮ → Musicフォルダを開く** — open the current Music folder (desktop).
+  Hidden until a folder is chosen, and hidden on Android (`Android/data` is
+  not reachable from a file manager).
 - **⋮ → 意見を送る** — share a small ZIP of your corrections. Android opens
   the system share sheet; Windows saves the ZIP and shows its path.
 - **⋮ → ログを表示** — diagnostic log for troubleshooting.
@@ -151,6 +157,8 @@ Bulk / resume-safe push from WSL over wireless adb (hundreds of tracks): see
 ---
 
 ## For developers
+
+Setup: [docs/development-setup.md](docs/development-setup.md)
 
 Analysis and mixing come from
 [funkot-autodj](https://github.com/yasuyuki/funkot-autodj)'s `funkot-core`.
@@ -316,6 +324,23 @@ GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
   those code points. Not an app bug; a real desktop has the glyphs.
 - This is the Linux path. **Windows installers are built in CI** (see Shipping a
   GitHub Release). **macOS builds are still untried.**
+
+### Windows host smoke (WSL → native exe)
+
+Build/deploy to `C:\funkot-player-test`, then run with an AppData guard so the
+live profile is restored when the window closes:
+
+```sh
+./scripts/win-run.sh                         # build if needed, deploy
+./scripts/win-profile-guard.sh -Run -ReplaceBackup
+```
+
+`-Run` backs up settings JSON + `Music\` + `funkot-cache\` to
+`%APPDATA%\jp.hatsuboshi.funkotplayer.guard-bak`, **wipes the live profile to
+empty** (Store-like first launch: `music_dir_needed`, pick a Music folder),
+launches the exe, and restores on exit. Pass `-InPlace` to skip the wipe.
+Manual `-Backup` / `-Restore` are available; `-SkipCache` omits the analysis
+cache from the round-trip.
 
 ### Working with a device
 
