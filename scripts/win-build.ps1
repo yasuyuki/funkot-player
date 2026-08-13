@@ -42,9 +42,17 @@ function Invoke-Deploy {
 }
 
 if (-not $DeployOnly) {
+    # A WSL-launched build can inherit a remapped USERPROFILE from its parent
+    # process tree, pointing rustup at an empty home with no toolchains.
+    # GetFolderPath reads the profile from the user token, so it survives that.
+    $realProfile = [Environment]::GetFolderPath('UserProfile')
+    if (-not $realProfile) { $realProfile = Join-Path $env:HOMEDRIVE $env:HOMEPATH }
+    $env:RUSTUP_HOME = Join-Path $realProfile '.rustup'
+    $env:CARGO_HOME  = Join-Path $realProfile '.cargo'
+
     # WSL-launched powershell often misses User PATH; put tool bins first.
     $env:Path = @(
-        (Join-Path $env:USERPROFILE '.cargo\bin'),
+        (Join-Path $env:CARGO_HOME 'bin'),
         'C:\Program Files\Git\cmd',
         'C:\Program Files\nodejs',
         $env:Path
@@ -61,6 +69,8 @@ if (-not $DeployOnly) {
             Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2]
         }
     }
+
+    Write-Host "rustup home: $env:RUSTUP_HOME"
 
     if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
         throw 'link.exe not found after vcvars; MSVC Build Tools env was not applied'
