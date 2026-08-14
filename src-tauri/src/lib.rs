@@ -3605,6 +3605,7 @@ mod played_duration_secs_tests {
             outro_structure_bars_manual: false,
             needs_reanalysis: false,
             is_funkot: true,
+            classify_scores: None,
             rms_dbfs: -14.0,
             gain_db: 0.0,
         }

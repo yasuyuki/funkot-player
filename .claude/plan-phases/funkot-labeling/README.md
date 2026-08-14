@@ -30,7 +30,7 @@
 
 | # | ファイル | 内容 | リポジトリ | 依存 | 状態 |
 |---|---|---|---|---|---|
-| 01 | [phase-01-classify-scores.md](phase-01-classify-scores.md) | 判定スコアの保存 | funkot-autodj-for-ui | — | 未着手 |
+| 01 | [phase-01-classify-scores.md](phase-01-classify-scores.md) | 判定スコアの保存 | funkot-autodj-for-ui | — | 完了 |
 | 02 | [phase-02-label-store.md](phase-02-label-store.md) | ラベル永続化とコマンド層 | funkot-player | — | 完了 |
 | 03 | [phase-03-play-history.md](phase-03-play-history.md) | 再生履歴 | funkot-player | — | 未着手 |
 | 04 | [phase-04-labeling-mode.md](phase-04-labeling-mode.md) | ラベリングモード（head のみ伸長） | 両方 | — | 未着手 |
