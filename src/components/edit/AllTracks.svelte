@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store } from "../../lib/state.svelte";
-  import { toast } from "../../lib/toast.svelte";
+  import { toast, BULK_DISMISS_MS } from "../../lib/toast.svelte";
   import ChipEditor from "./ChipEditor.svelte";
   import type { TrackRow } from "../../lib/tauri";
 
@@ -154,32 +154,33 @@
   ) {
     if (busy || (!rootOnly && !absDir)) return;
     busy = true;
-    const prev = tracks.map((t) => ({
-      path: t.path,
-      label: t.label,
-      is_funkot: t.is_funkot,
-    }));
     try {
-      // Root heading is music_dir; `set_folder_label` would recurse the
-      // whole library. Label only the root-level files already in this group.
+      // Root heading is music_dir; `set_folder_label` would recurse the whole
+      // library. Label only the root-level files in this group, one call each,
+      // and undo them the same way — the host's bulk undo snapshot belongs to
+      // `set_folder_label`, which this branch never reaches.
       let n: number | null;
+      let undo: () => Promise<boolean>;
       if (rootOnly) {
+        const prev = tracks.map((t) => ({ path: t.path, label: t.label }));
         const results = await Promise.all(
           tracks.map((t) => store.doSetLabel(t.path, verdict)),
         );
         n = results.every((r) => r !== null) ? tracks.length : null;
+        undo = async () => {
+          for (const p of prev) {
+            const ok = await store.doSetLabel(p.path, p.label);
+            if (!ok) return false;
+          }
+          return true;
+        };
       } else {
         n = await store.doSetFolderLabel(absDir, verdict);
+        undo = () => store.doUndoLastFolderLabel();
       }
       if (n === null) return;
       const word = verdict ? "Funkot" : "非Funkot";
-      toast.show(`${n}曲を ${word} に登録`, async () => {
-        for (const p of prev) {
-          const ok = await store.doSetLabel(p.path, p.label);
-          if (!ok) return false;
-        }
-        return true;
-      });
+      toast.show(`${n}曲を ${word} に登録`, undo, BULK_DISMISS_MS);
     } finally {
       busy = false;
     }

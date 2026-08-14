@@ -950,6 +950,33 @@ static LAST_FLAG_UNDO: Mutex<Option<String>> = Mutex::new(None);
 /// Dismiss key last written by `dismiss_flags`, for a single-shot undo.
 static LAST_DISMISS_UNDO: Mutex<Option<String>> = Mutex::new(None);
 
+/// One track's label state as it stood immediately before a
+/// `set_folder_label` wrote over it. `None` means "there was no entry", which
+/// undo restores by removing rather than by writing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FolderLabelUndo {
+    hash: String,
+    label: Option<store::TrackLabel>,
+    funkot: Option<bool>,
+}
+
+/// What `set_folder_label` overwrote, for a single-shot undo — the bulk
+/// counterpart of [`LAST_FLAG_UNDO`].
+///
+/// The webview used to undo a folder label by replaying `set_label` once per
+/// track, which meant one round trip (and one `labels.json` + `library.json`
+/// rewrite) per track, and could only ever restore the rows the *listing*
+/// knew about. `set_folder_label` walks the folder on *disk*, so anything on
+/// disk but not yet in the listing was labeled and then left labeled.
+/// Snapshotting here keeps what undo touches identical to what the write
+/// touched.
+///
+/// In memory only. The 取消 that reaches this does not outlive the toast
+/// offering it, so there is nothing for a persisted token to be useful for,
+/// and a token reloaded next launch would name a folder that may since have
+/// changed on disk.
+static LAST_FOLDER_LABEL_UNDO: Mutex<Option<Vec<FolderLabelUndo>>> = Mutex::new(None);
+
 /// What the next launch will restore (see `store::Session`). Mutated by its
 /// three save sites directly (each takes only this mutex, the same pattern
 /// `reorder`/`dequeue` use for `queue` — see `persist_queue`), then handed to
@@ -5071,10 +5098,67 @@ mod cache_state_tests {
 
         let scanned = scan_tracks(&music.0).unwrap();
         assert_eq!(scanned.len(), 3, "scan_tracks paths: {scanned:?}");
-        let count = set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        let (count, undo) = set_folder_label_impl(&data.0, &music.0, true).unwrap();
         assert_eq!(count, 3);
+        assert_eq!(undo.len(), 3);
         assert_eq!(store::load_labels(&data.0).len(), 3);
         assert!(store::load_labels(&data.0).values().all(|l| l.verdict));
+    }
+
+    /// Undo puts every track back where it was, including the distinction
+    /// between "was labeled the other way" and "was never labeled".
+    #[test]
+    fn undo_folder_label_restores_previous_state() {
+        let cache = TempDir::new("folder-undo-cache");
+        let data = TempDir::new("folder-undo-data");
+        let music = TempDir::new("folder-undo-music");
+        std::fs::write(music.0.join("a.wav"), vec![1u8; 4096]).unwrap();
+        std::fs::write(music.0.join("b.wav"), vec![2u8; 4096]).unwrap();
+        std::fs::write(music.0.join("c.mp3"), vec![3u8; 4096]).unwrap();
+
+        // a was already non-Funkot; b and c were never judged.
+        let a = music.0.join("a.wav");
+        set_label_impl(&cache.0, &data.0, &a, Some(false)).unwrap();
+        let before = store::load_labels(&data.0);
+        assert_eq!(before.len(), 1);
+
+        let (count, undo) = set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(store::load_labels(&data.0).len(), 3);
+
+        assert_eq!(undo_folder_label_impl(&data.0, &undo).unwrap(), 3);
+        let after = store::load_labels(&data.0);
+        assert_eq!(after.len(), 1, "b and c must go back to unlabeled");
+        let hash = store::resolve_content_hash(&a, &mut store::load_hash_index(&data.0)).unwrap();
+        assert_eq!(after.get(&hash).map(|l| l.verdict), Some(false));
+        assert_eq!(
+            store::load_overrides(&data.0).get(&hash).and_then(|o| o.funkot),
+            Some(false),
+            "the library.json mirror must follow the label back"
+        );
+    }
+
+    /// Undo clears the `funkot` mirror without taking hand-set bars with it.
+    #[test]
+    fn undo_folder_label_keeps_manual_bars() {
+        let data = TempDir::new("folder-undo-bars-data");
+        let music = TempDir::new("folder-undo-bars-music");
+        std::fs::write(music.0.join("a.wav"), vec![7u8; 4096]).unwrap();
+
+        let (_, undo) = set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        assert_eq!(undo.len(), 1);
+
+        // A bar edit lands after the bulk label, before 取消 is pressed.
+        let mut overrides = store::load_overrides(&data.0);
+        overrides.get_mut(&undo[0].hash).unwrap().intro_bars = Some(32);
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        undo_folder_label_impl(&data.0, &undo).unwrap();
+        let after = store::load_overrides(&data.0);
+        let entry = after.get(&undo[0].hash).expect("entry kept for the bars");
+        assert_eq!(entry.intro_bars, Some(32));
+        assert_eq!(entry.funkot, None);
+        assert!(store::load_labels(&data.0).is_empty());
     }
 
     #[test]
@@ -5638,6 +5722,8 @@ fn set_label_impl(
 ///
 /// Returns how many tracks were labeled (hash successes, including relabels).
 /// There is no bulk-clear: `verdict` is always a concrete bool.
+///
+/// Arms [`undo_last_folder_label`] with what this overwrote.
 #[tauri::command(async)]
 fn set_folder_label(
     app: tauri::AppHandle,
@@ -5649,26 +5735,47 @@ fn set_folder_label(
     let _saving = SAVE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    set_folder_label_impl(&data_dir, Path::new(&dir), verdict)
+    let (count, undo) = set_folder_label_impl(&data_dir, Path::new(&dir), verdict)?;
+    *LAST_FOLDER_LABEL_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(undo);
+    Ok(count)
 }
 
 /// Core of [`set_folder_label`], split for unit tests without `AppHandle`.
+///
+/// Returns `(labeled count, undo snapshot)`. The count is per *path* (what
+/// the toast reports as 曲数); the snapshot is per *content hash*, which is
+/// what the label files are keyed by.
 fn set_folder_label_impl(
     data_dir: &std::path::Path,
     dir: &std::path::Path,
     verdict: bool,
-) -> Result<usize, String> {
+) -> Result<(usize, Vec<FolderLabelUndo>), String> {
     let paths = scan_tracks(dir)?;
     let mut index = store::load_hash_index(data_dir);
     let mut labels = store::load_labels(data_dir);
     let mut overrides = store::load_overrides(data_dir);
     let labeled_at_ms = now_ms();
     let mut count = 0usize;
+    let mut undo: Vec<FolderLabelUndo> = Vec::new();
+    let mut snapshotted = std::collections::HashSet::new();
 
     for path in &paths {
         let Ok(hash) = store::resolve_content_hash(path, &mut index) else {
             continue;
         };
+        // Snapshot before the write, and at most once per hash: the same
+        // track copied into two subfolders resolves to one hash, and the
+        // second visit would otherwise record the verdict written moments
+        // ago as if it were the previous state.
+        if snapshotted.insert(hash.clone()) {
+            undo.push(FolderLabelUndo {
+                hash: hash.clone(),
+                label: labels.get(&hash).cloned(),
+                funkot: overrides.get(&hash).and_then(|o| o.funkot),
+            });
+        }
         labels.insert(
             hash.clone(),
             store::TrackLabel {
@@ -5686,7 +5793,77 @@ fn set_folder_label_impl(
     if let Err(e) = store::save_overrides(data_dir, &overrides) {
         log::warn!("cannot persist manual bars: {e}");
     }
-    Ok(count)
+    Ok((count, undo))
+}
+
+/// Restore what the most recent [`set_folder_label`] overwrote (single-shot).
+///
+/// Returns how many tracks were restored.
+#[tauri::command(async)]
+fn undo_last_folder_label(app: tauri::AppHandle) -> Result<usize, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entries = {
+        let slot = LAST_FOLDER_LABEL_UNDO
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.clone().ok_or_else(|| "nothing to undo".to_string())?
+    };
+
+    let restored = undo_folder_label_impl(&data_dir, &entries)?;
+    // Only consume the token after both writes land, so a failed save leaves
+    // the toast's 取消 usable — same rule as [`undo_last_flag`].
+    *LAST_FOLDER_LABEL_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    Ok(restored)
+}
+
+/// Core of [`undo_last_folder_label`], split for unit tests without `AppHandle`.
+fn undo_folder_label_impl(
+    data_dir: &std::path::Path,
+    entries: &[FolderLabelUndo],
+) -> Result<usize, String> {
+    let mut labels = store::load_labels(data_dir);
+    let mut overrides = store::load_overrides(data_dir);
+
+    for entry in entries {
+        match &entry.label {
+            Some(label) => {
+                labels.insert(entry.hash.clone(), label.clone());
+            }
+            None => {
+                labels.remove(&entry.hash);
+            }
+        }
+        match entry.funkot {
+            Some(v) => {
+                overrides.entry(entry.hash.clone()).or_default().funkot = Some(v);
+            }
+            None => {
+                // Restore only `funkot`. A `set_bars` edit may have landed on
+                // this entry since the bulk write, and removing the entry
+                // outright would take those hand-set bars with it. Drop it
+                // only once nothing is left — same rule as `set_label_impl`'s
+                // `None` branch.
+                if let Some(o) = overrides.get_mut(&entry.hash) {
+                    o.funkot = None;
+                    if o.intro_bars.is_none() && o.outro_structure_bars.is_none() {
+                        overrides.remove(&entry.hash);
+                    }
+                }
+            }
+        }
+    }
+
+    store::save_labels(data_dir, &labels).map_err(|e| format!("cannot persist labels: {e}"))?;
+    store::save_overrides(data_dir, &overrides)
+        .map_err(|e| format!("cannot persist manual bars: {e}"))?;
+    Ok(entries.len())
 }
 
 /// Summarise human labels vs the current music library size.
@@ -5735,6 +5912,11 @@ fn clear_labels_and_history(app: tauri::AppHandle) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     clear_labels_and_history_impl(&data_dir);
+    // A folder-label undo armed before the wipe would put part of the labels
+    // back, which is the opposite of what the user just confirmed.
+    *LAST_FOLDER_LABEL_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     Ok(())
 }
 
@@ -6459,6 +6641,7 @@ pub fn run() {
             set_bars,
             set_label,
             set_folder_label,
+            undo_last_folder_label,
             label_stats,
             clear_labels_and_history,
             enqueue,

@@ -31,6 +31,7 @@ import {
   takePendingImport as takePendingImportCmd,
   setLabel as setLabelCmd,
   setFolderLabel as setFolderLabelCmd,
+  undoLastFolderLabel as undoLastFolderLabelCmd,
   clearLabelsAndHistory as clearLabelsAndHistoryCmd,
 } from "./tauri";
 import type {
@@ -127,6 +128,11 @@ class PlayerStore {
   /// Drops overlapping F/J/Space while a skip invoke is in flight, so the
   /// progress index cannot walk the library faster than playback.
   #labelSkipBusy = false;
+  /// The listing rows `doSetFolderLabel` patched, so `doUndoLastFolderLabel`
+  /// can put the display back without re-listing. The authoritative undo is
+  /// the host's own snapshot; this is only the screen's half of it. `null`
+  /// once consumed, so a second 取消 cannot fire.
+  #folderLabelUndoRows: TrackRow[] | null = null;
 
   constructor() {
     void this.#init();
@@ -467,8 +473,8 @@ class PlayerStore {
   }
 
   /// Optimistic folder-wide label. Reverts every patched row on failure.
-  /// Returns the labeled count, or `null` on failure. Caller should snapshot
-  /// `{ path, label, is_funkot }[]` before calling if it needs undo.
+  /// Returns the labeled count, or `null` on failure. Arms
+  /// `doUndoLastFolderLabel`; callers do not need their own snapshot.
   async doSetFolderLabel(
     dir: string,
     verdict: boolean,
@@ -486,16 +492,50 @@ class PlayerStore {
     }
     this.library = next;
     try {
-      return await setFolderLabelCmd(dir, verdict);
+      const count = await setFolderLabelCmd(dir, verdict);
+      this.#folderLabelUndoRows = prevRows;
+      return count;
     } catch (e) {
-      const restored = new Map(this.library);
-      for (const row of prevRows) {
-        restored.set(row.path, row);
-      }
-      this.library = restored;
+      this.#restoreLibraryRows(prevRows);
+      this.#folderLabelUndoRows = null;
       this.lastError = String(e);
       return null;
     }
+  }
+
+  /// Undo the last folder-wide label. One invoke: the host kept its own
+  /// snapshot (`LAST_FOLDER_LABEL_UNDO`), so this neither walks the folder
+  /// nor rewrites `labels.json` once per track — and it restores tracks that
+  /// are on disk but not yet in this listing, which replaying `set_label` per
+  /// visible row could not.
+  ///
+  /// The local rows are put back from `#folderLabelUndoRows` rather than by
+  /// re-listing: `refresh_library` re-walks the whole music folder, which is
+  /// a network round trip per track on an SMB library.
+  async doUndoLastFolderLabel(): Promise<boolean> {
+    const rows = this.#folderLabelUndoRows;
+    if (!rows) return false;
+    try {
+      await undoLastFolderLabelCmd();
+      this.#restoreLibraryRows(rows);
+      this.#folderLabelUndoRows = null;
+      return true;
+    } catch (e) {
+      // Leave the token armed: the host only consumes its own after both
+      // writes land, so 取消 stays usable for a retry.
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /// Put a batch of previously-captured rows back into `library`, preserving
+  /// insertion order for everything else (one Map rebuild, not one per row).
+  #restoreLibraryRows(rows: TrackRow[]): void {
+    const next = new Map(this.library);
+    for (const row of rows) {
+      next.set(row.path, row);
+    }
+    this.library = next;
   }
 
   /// Records `player.last_transition` as a bad mix. Never touches playback

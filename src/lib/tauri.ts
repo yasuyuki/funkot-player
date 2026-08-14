@@ -306,9 +306,16 @@ export function setLabel(path: string, verdict: boolean | null): Promise<TrackRo
   return invoke<TrackRow>("set_label", { path, verdict });
 }
 
-/// Label every supported track under `dir` (recursive). Returns how many were labeled.
+/// Label every supported track under `dir` (recursive). Returns how many were
+/// labeled, and arms `undoLastFolderLabel`.
 export function setFolderLabel(dir: string, verdict: boolean): Promise<number> {
   return invoke<number>("set_folder_label", { dir, verdict });
+}
+
+/// Restore what the last `setFolderLabel` overwrote (single-shot). Returns how
+/// many tracks were restored; rejects with `"nothing to undo"` once consumed.
+export function undoLastFolderLabel(): Promise<number> {
+  return invoke<number>("undo_last_folder_label");
 }
 
 export function labelStats(): Promise<LabelStats> {
