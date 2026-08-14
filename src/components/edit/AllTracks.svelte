@@ -40,23 +40,34 @@
     return store.pathBasename(md) || "（ルート）";
   }
 
+  /// Exactly one group per top-level segment, ordered by where that segment
+  /// first appears in scan order.
+  ///
+  /// Must not group by *runs* of `rows`: `scan_tracks` sorts whole paths, so a
+  /// root-level file sorts among the directory *names* rather than beside the
+  /// other root-level files (`music/Bbb.mp3` lands between `music/AlbumB/` and
+  /// `music/Cccc/`). Runs therefore emit the `""` group several times, handing
+  /// `{#each}` the same key twice — Svelte throws `each_key_duplicate` there,
+  /// and in a production build that error carries no message, so the table
+  /// silently rendered nothing and the throw took the rest of the flush
+  /// (other panels' handlers, the scan/analysis progress line) with it.
   let groups = $derived.by(() => {
-    const out: FolderGroup[] = [];
-    let current: FolderGroup | null = null;
+    const byKey = new Map<string, FolderGroup>();
     for (const row of rows) {
       const seg = topSegment(store.relName(row.path));
-      if (!current || current.key !== seg) {
-        current = {
+      let group = byKey.get(seg);
+      if (!group) {
+        group = {
           key: seg,
           title: seg || rootHeading(),
           absDir: folderAbsDir(row.path, seg),
           tracks: [],
         };
-        out.push(current);
+        byKey.set(seg, group);
       }
-      current.tracks.push(row);
+      group.tracks.push(row);
     }
-    return out;
+    return Array.from(byKey.values());
   });
 
   function cellMark(manual: boolean, low: boolean): string {
@@ -206,7 +217,7 @@
       </tr>
     </thead>
     <tbody>
-      {#each groups as group (group.key + "\0" + group.absDir)}
+      {#each groups as group (group.key)}
         <tr class="folder-row">
           <td class="folder-name" colspan="1">{group.title}</td>
           <td class="folder-acts" colspan="5">
