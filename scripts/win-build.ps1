@@ -49,6 +49,9 @@ if (-not $DeployOnly) {
     if (-not $realProfile) { $realProfile = Join-Path $env:HOMEDRIVE $env:HOMEPATH }
     $env:RUSTUP_HOME = Join-Path $realProfile '.rustup'
     $env:CARGO_HOME  = Join-Path $realProfile '.cargo'
+    # Cursor injects CARGO_TARGET_DIR (sandbox cache). Tauri then writes the
+    # exe there while deploy copies src-tauri\target\release — a stale binary.
+    Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
 
     # WSL-launched powershell often misses User PATH; put tool bins first.
     $env:Path = @(
