@@ -323,6 +323,12 @@ pub type PendingObserver = Box<dyn FnMut(&[PathBuf]) + Send>;
 /// queue or the folder-drain fallback. See [`HostSource::on_reserved`].
 pub type ReservedObserver = Box<dyn FnMut(&Path) + Send>;
 
+/// Called with the folder-drain cursor (`DrainPolicy::ContinueFolder.pos`,
+/// next 0-based index to pick) each time [`HostSource::pick_folder_track`]
+/// returns a path. Not called for pending-queue pops. See
+/// [`HostSource::on_folder_pos`].
+pub type FolderPosObserver = Box<dyn FnMut(usize) + Send>;
+
 /// Called for each folder-drain candidate; return `true` to skip that path
 /// and try the next. See [`HostSource::skip_folder_entry`].
 pub type FolderSkip = Box<dyn FnMut(&Path) -> bool + Send>;
@@ -340,6 +346,7 @@ pub struct HostSource {
     calls: usize,
     on_pending_consumed: Option<PendingObserver>,
     on_reserved: Option<ReservedObserver>,
+    on_folder_pos: Option<FolderPosObserver>,
     folder_skip: Option<FolderSkip>,
 }
 
@@ -351,6 +358,7 @@ impl HostSource {
             calls: 0,
             on_pending_consumed: None,
             on_reserved: None,
+            on_folder_pos: None,
             folder_skip: None,
         }
     }
@@ -410,6 +418,20 @@ impl HostSource {
         self.on_reserved = Some(observer);
         self
     }
+
+    /// Run `observer` with the folder-drain cursor after
+    /// [`Self::pick_folder_track`] returns a path. `pos` is the next
+    /// 0-based index the policy will consider (already advanced past the
+    /// path just picked, including wrap).
+    ///
+    /// Not called when `next` took a track from the pending queue — the
+    /// folder cursor did not move. Same threading rule as
+    /// `on_pending_consumed` / `on_reserved`: loader thread, queue lock
+    /// released.
+    pub fn on_folder_pos(mut self, observer: FolderPosObserver) -> Self {
+        self.on_folder_pos = Some(observer);
+        self
+    }
 }
 
 impl TrackSource for HostSource {
@@ -441,7 +463,13 @@ impl HostSource {
                     // can take milliseconds and must not stall enqueue/reorder.
                     drop(q);
                     let path = match Self::pick_folder_track(&mut self.policy, folder_skip) {
-                        Some(path) => path,
+                        Some(path) => {
+                            if let Some(observer) = self.on_folder_pos.as_mut() {
+                                let DrainPolicy::ContinueFolder { pos, .. } = &self.policy;
+                                observer(*pos);
+                            }
+                            path
+                        }
                         None => {
                             let mut q = self.queue.lock().unwrap();
                             q.reserved = None;
@@ -887,6 +915,30 @@ mod tests {
         source.next(); // pending drained, falls back to the folder
 
         assert_eq!(*seen.lock().unwrap(), vec![p("priority"), p("f1")]);
+    }
+
+    fn recording_folder_pos_observer() -> (Arc<Mutex<Vec<usize>>>, FolderPosObserver) {
+        let seen: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        (seen, Box::new(move |pos: usize| sink.lock().unwrap().push(pos)))
+    }
+
+    #[test]
+    fn on_folder_pos_fires_for_folder_drain_including_wrap_not_for_pending() {
+        let q = new_shared_queue();
+        enqueue(&q, p("pending"));
+        let (seen, observer) = recording_folder_pos_observer();
+        let mut source =
+            HostSource::new(Arc::clone(&q), folder_policy(&["f1", "f2", "f3"]))
+                .on_folder_pos(observer);
+
+        source.next(); // pending — folder cursor must not move
+        assert!(seen.lock().unwrap().is_empty());
+
+        source.next(); // f1 → pos 1
+        source.next(); // f2 → pos 2
+        source.next(); // f3 → pos 0 (wrap)
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2, 0]);
     }
 
     #[test]

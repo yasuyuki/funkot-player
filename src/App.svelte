@@ -47,6 +47,38 @@
       void store.loadFlaggedTracks();
     }
   });
+
+  // Labeling shortcuts: F = Funkot+skip, J = non-Funkot+skip, Space = skip.
+  // Disabled while typing in inputs (covers Library search). No toast on the
+  // keyboard path — click UI owns undo toasts.
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target;
+      if (
+        t instanceof HTMLInputElement ||
+        t instanceof HTMLTextAreaElement ||
+        t instanceof HTMLSelectElement ||
+        (t instanceof HTMLElement && t.isContentEditable)
+      ) {
+        return;
+      }
+      const key = e.key;
+      if (key === "f" || key === "F") {
+        e.preventDefault();
+        void store.doLabelAndSkip(true);
+      } else if (key === "j" || key === "J") {
+        e.preventDefault();
+        void store.doLabelAndSkip(false);
+      } else if (key === " ") {
+        e.preventDefault();
+        void store.doLabelAndSkip(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 </script>
 
 <div class="header">

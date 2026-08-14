@@ -29,6 +29,8 @@ import {
   getAllowNonFunkot as getAllowNonFunkotCmd,
   setAllowNonFunkot as setAllowNonFunkotCmd,
   takePendingImport as takePendingImportCmd,
+  setLabel as setLabelCmd,
+  setFolderLabel as setFolderLabelCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -41,6 +43,7 @@ import type {
   QueueSnapshot,
   TrackRow,
 } from "./tauri";
+import { canSkipNext } from "./transportMode";
 import { toast } from "./toast.svelte";
 
 /// How often `player_state` / `queue_state` are polled. A self-rescheduling
@@ -120,6 +123,10 @@ class PlayerStore {
   #queueGen = 0;
   /// Generation guard for `loadFlaggedTracks` (legacy `flaggedLoadGen`).
   #flaggedGen = 0;
+  /// Shortcut-burst cursor: while F/J/Space advance faster than the 500ms
+  /// poll, `labelingPath` follows the expected next `now_playing` instead of
+  /// lagging on the still-current track. Cleared once poll catches up.
+  #pendingNow = $state<string | null>(null);
 
   constructor() {
     void this.#init();
@@ -211,6 +218,12 @@ class PlayerStore {
       const state = await playerState();
       this.player = state;
       this.#polledAt = Date.now();
+      if (
+        this.#pendingNow !== null &&
+        state.now_playing === this.#pendingNow
+      ) {
+        this.#pendingNow = null;
+      }
     } catch (e) {
       this.lastError = String(e);
     }
@@ -259,6 +272,27 @@ class PlayerStore {
   /// follows the last full refresh; progress splices update values in place.
   get libraryList(): TrackRow[] {
     return Array.from(this.library.values());
+  }
+
+  /// Path the labeling shortcuts / AllTracks highlight target. Prefers the
+  /// shortcut-burst cursor so F/J/Space do not all hit the same poll-lagged
+  /// `now_playing`.
+  get labelingPath(): string | null {
+    return this.#pendingNow ?? this.player?.now_playing ?? null;
+  }
+
+  /// Listening (or shortcut-cursor) position as `n / total` for the labeling
+  /// UI. Uses library insertion order (folder-scan order), not `folder_pos`
+  /// (that is next-to-pick, one ahead of now).
+  get labelProgress(): { current: number; total: number } {
+    const total =
+      this.queue?.folder_len && this.queue.folder_len > 0
+        ? this.queue.folder_len
+        : this.libraryList.length;
+    const path = this.labelingPath;
+    if (!path) return { current: 0, total };
+    const idx = this.libraryList.findIndex((r) => r.path === path);
+    return { current: idx >= 0 ? idx + 1 : 0, total };
   }
 
   /// Start stays off until a usable Music folder is chosen and at least two
@@ -360,14 +394,113 @@ class PlayerStore {
     }
   }
 
-  async doSkipNext(): Promise<void> {
+  async doSkipNext(): Promise<boolean> {
     try {
       await skipNextCmd();
       // Host drops TransitionToNext while next is unset; refresh queue so
       // reserved_prepared (and thus canSkipNext) drops without waiting for poll.
       await this.#refreshQueueNow();
+      return true;
     } catch (e) {
       this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /// Scan-order successor of `path` (wraps). Used as the shortcut-burst
+  /// cursor so overlapping F/J/Space do not all stick to the still-stale
+  /// `queue.reserved` slot.
+  #nextInLibrary(path: string): string | null {
+    const list = this.libraryList;
+    const idx = list.findIndex((r) => r.path === path);
+    if (idx < 0 || list.length === 0) return this.queue?.reserved ?? null;
+    return list[(idx + 1) % list.length]?.path ?? null;
+  }
+
+  /// Label the current labeling cursor (optionally) and skip to the next
+  /// track without waiting for the label write. Used by F / J / Space.
+  ///
+  /// `#pendingNow` walks `libraryList` synchronously *before* awaiting skip
+  /// so a second keydown cannot relabel the same track. Skip is gated the
+  /// same way as Transport (`canSkipNext`): the host silently drops
+  /// `TransitionToNext` when next is unset, and advancing the cursor then
+  /// would desync labeling from what's playing.
+  async doLabelAndSkip(verdict: boolean | null): Promise<void> {
+    const path = this.labelingPath;
+    if (!path) return;
+    const next = this.#nextInLibrary(path);
+    if (verdict !== null) {
+      void this.doSetLabel(path, verdict);
+    }
+    const phase = this.player?.phase ?? "idle";
+    const auditioning = this.player?.auditioning ?? false;
+    const prepared = this.queue?.reserved_prepared ?? false;
+    if (!canSkipNext(phase, auditioning, prepared)) return;
+    this.#pendingNow = next;
+    const ok = await this.doSkipNext();
+    if (!ok && this.#pendingNow === next) this.#pendingNow = null;
+  }
+
+  /// Optimistic single-track label write. Reverts on failure. Returns the
+  /// server row (or `null`) so callers can build toast undo.
+  async doSetLabel(
+    path: string,
+    verdict: boolean | null,
+  ): Promise<TrackRow | null> {
+    const prev = this.library.get(path);
+    if (prev) {
+      const patched: TrackRow = { ...prev };
+      if (verdict === true) {
+        patched.label = true;
+        patched.is_funkot = true;
+      } else if (verdict === false) {
+        patched.label = false;
+        patched.is_funkot = false;
+      } else {
+        patched.label = null;
+      }
+      this.#replaceLibraryRow(patched);
+    }
+    try {
+      const updated = await setLabelCmd(path, verdict);
+      this.#replaceLibraryRow(updated);
+      return updated;
+    } catch (e) {
+      if (prev) this.#replaceLibraryRow(prev);
+      this.lastError = String(e);
+      return null;
+    }
+  }
+
+  /// Optimistic folder-wide label. Reverts every patched row on failure.
+  /// Returns the labeled count, or `null` on failure. Caller should snapshot
+  /// `{ path, label, is_funkot }[]` before calling if it needs undo.
+  async doSetFolderLabel(
+    dir: string,
+    verdict: boolean,
+  ): Promise<number | null> {
+    const prevRows: TrackRow[] = [];
+    const next = new Map(this.library);
+    for (const row of next.values()) {
+      const under =
+        row.path === dir ||
+        row.path.startsWith(`${dir}/`) ||
+        row.path.startsWith(`${dir}\\`);
+      if (!under) continue;
+      prevRows.push(row);
+      next.set(row.path, { ...row, label: verdict, is_funkot: verdict });
+    }
+    this.library = next;
+    try {
+      return await setFolderLabelCmd(dir, verdict);
+    } catch (e) {
+      const restored = new Map(this.library);
+      for (const row of prevRows) {
+        restored.set(row.path, row);
+      }
+      this.library = restored;
+      this.lastError = String(e);
+      return null;
     }
   }
 

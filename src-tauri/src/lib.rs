@@ -8,7 +8,7 @@ mod store;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -53,6 +53,16 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Live copy of `settings.json`'s `allow_non_funkot`. Folder drain reads this
 /// on the loader thread; `set_allow_non_funkot` updates it without restart.
 static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(false);
+
+/// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
+/// Written from `start_impl` before spawn and from the loader's
+/// `on_folder_pos` observer; read by `queue_state` for the labeling UI.
+static FOLDER_POS: AtomicUsize = AtomicUsize::new(0);
+
+/// Folder-track count for the current playback session (`paths.len()` at
+/// `start_impl`). Written before spawn so the UI does not flash `0/0`
+/// while Starting.
+static FOLDER_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// True while an audition `Engine` is installed in [`RenderState::audition`].
 /// `events_thread` uses this only to drop stale audition-tagged events after
@@ -2503,6 +2513,9 @@ fn audio_thread(
                 session.in_flight.push(path.to_path_buf());
             }
             persist_session();
+        }))
+        .on_folder_pos(Box::new(|pos| {
+            FOLDER_POS.store(pos, Ordering::Relaxed);
         }));
     let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
@@ -3208,6 +3221,10 @@ fn start_impl(
     // Use the caller's `initial_paused` only (normal Start: false; cold
     // audition: true). Do not OR in disk `session.paused` — Start is a play
     // intent, and cold audition mute is already expressed by the caller flag.
+    // Publish folder cursor before spawn so Starting-phase polls do not see
+    // a stale 0/0 while the audio thread is still coming up.
+    FOLDER_LEN.store(paths.len(), Ordering::Relaxed);
+    FOLDER_POS.store(folder_pos, Ordering::Relaxed);
     if let Err(e) = std::thread::Builder::new()
         .name("funkot-audio".into())
         .spawn(move || audio_thread(paths, cache, data, tx, queue, initial_paused, folder_pos))
@@ -4093,6 +4110,11 @@ struct QueueSnapshot {
     /// `null` when unknown: stopped, auditioning/preparing an audition, or no
     /// active deck yet.
     transition_in_secs: Option<f64>,
+    /// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
+    folder_pos: usize,
+    /// Folder-track count for this playback session (`scan_tracks` length at
+    /// start). `0` before the first successful `start`.
+    folder_len: usize,
 }
 
 /// Save the queue's current pending contents to `queue.json`. Failure is
@@ -4357,6 +4379,8 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
         reserved_swappable,
         reserved_prepared,
         transition_in_secs,
+        folder_pos: FOLDER_POS.load(Ordering::Relaxed),
+        folder_len: FOLDER_LEN.load(Ordering::Relaxed),
     })
 }
 

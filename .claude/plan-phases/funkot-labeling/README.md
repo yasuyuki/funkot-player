@@ -34,7 +34,7 @@
 | 02 | [phase-02-label-store.md](phase-02-label-store.md) | ラベル永続化とコマンド層 | funkot-player | — | 完了 |
 | 03 | [phase-03-play-history.md](phase-03-play-history.md) | 再生履歴 | funkot-player | — | 完了 |
 | 04 | [phase-04-labeling-mode.md](phase-04-labeling-mode.md) | ラベリングモード（head のみ伸長） | 両方 | — | 未着手 |
-| 05 | [phase-05-labeling-ui.md](phase-05-labeling-ui.md) | ラベリング UI | funkot-player | 02 | 未着手 |
+| 05 | [phase-05-labeling-ui.md](phase-05-labeling-ui.md) | ラベリング UI | funkot-player | 02 | 完了 |
 | 06 | [phase-06-export-and-tuning.md](phase-06-export-and-tuning.md) | エクスポート・突合・しきい値調整 | 両方 | 01, 02, 05 | 未着手 |
 
 ## 順序の制約（1つだけ、しかし重要）

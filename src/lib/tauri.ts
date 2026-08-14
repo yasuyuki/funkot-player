@@ -149,6 +149,10 @@ export interface QueueSnapshot {
   /// Seconds until the engine's automatic transition may begin, or `null`
   /// when unknown (stopped, auditioning, or no active deck).
   transition_in_secs: number | null;
+  /// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
+  folder_pos: number;
+  /// Folder-track count for this playback session. `0` before first start.
+  folder_len: number;
 }
 
 /// Matches `AnalysisProgress`. Emitted as `analysis-progress`; `row` is the
