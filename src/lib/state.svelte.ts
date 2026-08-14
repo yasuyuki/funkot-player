@@ -124,10 +124,9 @@ class PlayerStore {
   #queueGen = 0;
   /// Generation guard for `loadFlaggedTracks` (legacy `flaggedLoadGen`).
   #flaggedGen = 0;
-  /// Shortcut-burst cursor: while F/J/Space advance faster than the 500ms
-  /// poll, `labelingPath` follows the expected next `now_playing` instead of
-  /// lagging on the still-current track. Cleared once poll catches up.
-  #pendingNow = $state<string | null>(null);
+  /// Drops overlapping F/J/Space while a skip invoke is in flight, so the
+  /// progress index cannot walk the library faster than playback.
+  #labelSkipBusy = false;
 
   constructor() {
     void this.#init();
@@ -219,12 +218,6 @@ class PlayerStore {
       const state = await playerState();
       this.player = state;
       this.#polledAt = Date.now();
-      if (
-        this.#pendingNow !== null &&
-        state.now_playing === this.#pendingNow
-      ) {
-        this.#pendingNow = null;
-      }
     } catch (e) {
       this.lastError = String(e);
     }
@@ -275,22 +268,20 @@ class PlayerStore {
     return Array.from(this.library.values());
   }
 
-  /// Path the labeling shortcuts / AllTracks highlight target. Prefers the
-  /// shortcut-burst cursor so F/J/Space do not all hit the same poll-lagged
-  /// `now_playing`.
+  /// Path the labeling shortcuts / AllTracks highlight target: the track
+  /// actually playing (not an optimistic skip cursor).
   get labelingPath(): string | null {
-    return this.#pendingNow ?? this.player?.now_playing ?? null;
+    return this.player?.now_playing ?? null;
   }
 
-  /// Listening (or shortcut-cursor) position as `n / total` for the labeling
-  /// UI. Uses library insertion order (folder-scan order), not `folder_pos`
-  /// (that is next-to-pick, one ahead of now).
+  /// Listening position as `n / total`. Uses `now_playing` in library
+  /// insertion order (folder-scan order), not `folder_pos` (next-to-pick).
   get labelProgress(): { current: number; total: number } {
     const total =
       this.queue?.folder_len && this.queue.folder_len > 0
         ? this.queue.folder_len
         : this.libraryList.length;
-    const path = this.labelingPath;
+    const path = this.player?.now_playing ?? null;
     if (!path) return { current: 0, total };
     const idx = this.libraryList.findIndex((r) => r.path === path);
     return { current: idx >= 0 ? idx + 1 : 0, total };
@@ -408,38 +399,27 @@ class PlayerStore {
     }
   }
 
-  /// Scan-order successor of `path` (wraps). Used as the shortcut-burst
-  /// cursor so overlapping F/J/Space do not all stick to the still-stale
-  /// `queue.reserved` slot.
-  #nextInLibrary(path: string): string | null {
-    const list = this.libraryList;
-    const idx = list.findIndex((r) => r.path === path);
-    if (idx < 0 || list.length === 0) return this.queue?.reserved ?? null;
-    return list[(idx + 1) % list.length]?.path ?? null;
-  }
-
-  /// Label the current labeling cursor (optionally) and skip to the next
-  /// track without waiting for the label write. Used by F / J / Space.
-  ///
-  /// `#pendingNow` walks `libraryList` synchronously *before* awaiting skip
-  /// so a second keydown cannot relabel the same track. Skip is gated the
-  /// same way as Transport (`canSkipNext`): the host silently drops
-  /// `TransitionToNext` when next is unset, and advancing the cursor then
-  /// would desync labeling from what's playing.
+  /// Label the playing track (optionally) and skip. Extra F/J/Space while
+  /// skip is in flight are dropped — otherwise the progress index walks the
+  /// library on every keydown while `reserved_prepared` is still true.
   async doLabelAndSkip(verdict: boolean | null): Promise<void> {
-    const path = this.labelingPath;
+    if (this.#labelSkipBusy) return;
+    const path = this.player?.now_playing ?? null;
     if (!path) return;
-    const next = this.#nextInLibrary(path);
-    if (verdict !== null) {
-      void this.doSetLabel(path, verdict);
-    }
     const phase = this.player?.phase ?? "idle";
     const auditioning = this.player?.auditioning ?? false;
     const prepared = this.queue?.reserved_prepared ?? false;
-    if (!canSkipNext(phase, auditioning, prepared)) return;
-    this.#pendingNow = next;
-    const ok = await this.doSkipNext();
-    if (!ok && this.#pendingNow === next) this.#pendingNow = null;
+    if (!canSkipNext(phase, auditioning, prepared)) {
+      if (verdict !== null) void this.doSetLabel(path, verdict);
+      return;
+    }
+    this.#labelSkipBusy = true;
+    if (verdict !== null) void this.doSetLabel(path, verdict);
+    try {
+      await this.doSkipNext();
+    } finally {
+      this.#labelSkipBusy = false;
+    }
   }
 
   /// Optimistic single-track label write. Reverts on failure. Returns the
