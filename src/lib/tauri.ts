@@ -65,6 +65,8 @@ export interface TrackRow {
   /// Effective Funkot flag. Unanalysed rows are `true` (not greyed); grey
   /// with `analyzed && !is_funkot`.
   is_funkot: boolean;
+  /// Human Funkot / non-Funkot label (`labels.json`). Unlabeled is `null`.
+  label: boolean | null;
   intro_bars: number | null;
   outro_structure_bars: number | null;
   outro_bars: number | null;
@@ -283,6 +285,28 @@ export function setBars(
     outroStructureBars,
     markManual,
   });
+}
+
+/// Matches `LabelStats`.
+export interface LabelStats {
+  labeled: number;
+  total: number;
+  funkot: number;
+  not_funkot: number;
+}
+
+/// Set or clear one track's human Funkot label. `verdict: null` clears it.
+export function setLabel(path: string, verdict: boolean | null): Promise<TrackRow> {
+  return invoke<TrackRow>("set_label", { path, verdict });
+}
+
+/// Label every supported track under `dir` (recursive). Returns how many were labeled.
+export function setFolderLabel(dir: string, verdict: boolean): Promise<number> {
+  return invoke<number>("set_folder_label", { dir, verdict });
+}
+
+export function labelStats(): Promise<LabelStats> {
+  return invoke<LabelStats>("label_stats");
 }
 
 export function auditionTransition(

@@ -1,6 +1,7 @@
 //! Persistence for the playback queue (`queue.json`), the bar counts the
-//! user has corrected by hand (`library.json`), and transition flags the
-//! listener marked as bad (`flags.json`).
+//! user has corrected by hand (`library.json`), transition flags the
+//! listener marked as bad (`flags.json`), and human Funkot / non-Funkot
+//! labels (`labels.json`).
 //!
 //! # Why the app keeps its own copy of the manual bars
 //!
@@ -21,13 +22,15 @@
 //!
 //! In `AppDirs::data_dir`, and deliberately *not* in the analysis cache.
 //! These files are the listener's own work — the queue they built, the
-//! corrections they made, and the transitions they flagged — whereas the
-//! cache holds derived data that is meant to be disposable, and that the
-//! README tells people to delete outright when analysis misbehaves. User
-//! data under a directory whose published repair step is `rm -rf` does not
-//! survive the first repair. `data_dir` is still internal storage
-//! (`filesDir` on Android, the app data dir on desktop), so this asks for
-//! no new permission and stays out of the MTP-visible folder.
+//! corrections they made, the transitions they flagged, and the Funkot
+//! labels they assigned — whereas the cache holds derived data that is
+//! meant to be disposable, and that the README tells people to delete
+//! outright when analysis misbehaves. User data under a directory whose
+//! published repair step is `rm -rf` does not survive the first repair.
+//! `data_dir` is still internal storage (`filesDir` on Android, the app
+//! data dir on desktop), so this asks for no new permission and stays out
+//! of the MTP-visible folder. `labels.json` has never lived in the cache,
+//! so it is not part of [`migrate_from`].
 //!
 //! Early builds did keep queue/library in the cache; `migrate_from` moves
 //! anything still there (including `flags.json` if present).
@@ -45,6 +48,7 @@ use symphonia::core::meta::{MetadataOptions, StandardTag};
 const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
 const FLAGS_FILE: &str = "flags.json";
+const LABELS_FILE: &str = "labels.json";
 const DISMISSED_FILE: &str = "dismissed.json";
 const META_FILE: &str = "meta.json";
 const SESSION_FILE: &str = "session.json";
@@ -361,7 +365,9 @@ pub struct BarOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outro_structure_bars: Option<u32>,
     /// Manual Funkot / non-Funkot override. `None` follows analysis
-    /// `is_funkot`. Not written by the current UI (data model only).
+    /// `is_funkot`. One-way mirror of [`TrackLabel`] in `labels.json`
+    /// (label is source of truth); set by `set_label` / `set_folder_label`,
+    /// not by bar-edit UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub funkot: Option<bool>,
 }
@@ -672,6 +678,44 @@ pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(flags)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(FLAGS_FILE), json)
+}
+
+/// Human Funkot / non-Funkot label for one track.
+///
+/// Keyed by content hash in [`Labels`]. Presence of a key means the listener
+/// has judged the track; `verdict == false` is distinct from "not yet labeled"
+/// (no key). [`BarOverride::funkot`] mirrors this one-way.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrackLabel {
+    pub verdict: bool,
+    pub labeled_at_ms: u64,
+}
+
+/// Hand-assigned Funkot labels for the whole library, keyed by content hash.
+pub type Labels = BTreeMap<String, TrackLabel>;
+
+/// Load human labels saved under `dir`.
+///
+/// Missing or corrupt → empty map (same policy as [`load_flags`]).
+pub fn load_labels(dir: &Path) -> Labels {
+    let bytes = match fs::read(dir.join(LABELS_FILE)) {
+        Ok(b) => b,
+        Err(_) => return Labels::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(e) => {
+            log::warn!("{LABELS_FILE} is unreadable, starting empty: {e}");
+            Labels::new()
+        }
+    }
+}
+
+/// Persist `labels` under `dir`, overwriting any previous save.
+pub fn save_labels(dir: &Path, labels: &Labels) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(labels)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(LABELS_FILE), json)
 }
 
 const EMPTY_JSON_OBJECT: &[u8] = b"{}";
@@ -1540,6 +1584,58 @@ mod tests {
         let dir = TempDir::new("flags-corrupt");
         fs::write(dir.0.join(FLAGS_FILE), b"{not json").unwrap();
         assert!(load_flags(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn missing_labels_file_is_empty() {
+        let dir = TempDir::new("labels-missing");
+        assert!(load_labels(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn corrupt_labels_file_is_empty_not_a_panic() {
+        let dir = TempDir::new("labels-corrupt");
+        fs::write(dir.0.join(LABELS_FILE), b"{not json").unwrap();
+        assert!(load_labels(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn labels_round_trip_verdict_and_timestamp() {
+        let dir = TempDir::new("labels-roundtrip");
+        let mut labels = Labels::new();
+        labels.insert(
+            "hash-true".into(),
+            TrackLabel {
+                verdict: true,
+                labeled_at_ms: 1_700_000_000_000,
+            },
+        );
+        labels.insert(
+            "hash-false".into(),
+            TrackLabel {
+                verdict: false,
+                labeled_at_ms: 1_700_000_000_100,
+            },
+        );
+        save_labels(&dir.0, &labels).unwrap();
+        assert_eq!(load_labels(&dir.0), labels);
+    }
+
+    #[test]
+    fn labels_false_verdict_distinct_from_unlabeled() {
+        let dir = TempDir::new("labels-false-vs-absent");
+        let mut labels = Labels::new();
+        labels.insert(
+            "labeled-false".into(),
+            TrackLabel {
+                verdict: false,
+                labeled_at_ms: 42,
+            },
+        );
+        save_labels(&dir.0, &labels).unwrap();
+        let loaded = load_labels(&dir.0);
+        assert_eq!(loaded.get("labeled-false").map(|l| l.verdict), Some(false));
+        assert!(!loaded.contains_key("never-labeled"));
     }
 
     #[test]

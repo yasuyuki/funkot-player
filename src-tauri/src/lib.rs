@@ -916,8 +916,8 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
     }
 }
 
-/// Serialises writes under `data_dir` (`queue.json`, `flags.json`, and
-/// `session.json`).
+/// Serialises writes under `data_dir` (`queue.json`, `flags.json`,
+/// `labels.json`, and `session.json`).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
 /// really do overlap — tapping ✕ on one row and ↑ on another in quick
@@ -3857,6 +3857,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
         scan_tracks(&music_dir)?
     };
     let overrides = store::load_overrides(&data_dir);
+    let labels = store::load_labels(&data_dir);
 
     let mut meta_by_hash = std::collections::BTreeMap::new();
     for path in &paths {
@@ -3864,7 +3865,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
             continue;
         };
         // Same path/bars/manual/analyzed sources as the library table.
-        let row = track_row(path, &cache_dir, &overrides, Some(&hash), None);
+        let row = track_row(path, &cache_dir, &overrides, &labels, Some(&hash), None);
         meta_by_hash.insert(
             hash,
             store::FlagTrackMeta {
@@ -4322,6 +4323,9 @@ struct TrackRow {
     /// are `true` so the library does not grey them; the enqueue gate still
     /// lets unanalysed tracks through separately.
     is_funkot: bool,
+    /// Human Funkot / non-Funkot label from `labels.json`. Unlabeled is `None`
+    /// (distinct from effective [`Self::is_funkot`]).
+    label: Option<bool>,
     intro_bars: Option<u32>,
     /// The structural outro boundary — where the track collapses. This is the
     /// number the UI shows and edits.
@@ -4333,6 +4337,15 @@ struct TrackRow {
     outro_manual: bool,
     intro_low_confidence: bool,
     outro_low_confidence: bool,
+}
+
+/// Counts of human labels vs library size for the labeling UI.
+#[derive(serde::Serialize, Clone)]
+struct LabelStats {
+    labeled: usize,
+    total: usize,
+    funkot: usize,
+    not_funkot: usize,
 }
 
 /// Guards against starting a second analysis worker while one is running.
@@ -4389,10 +4402,13 @@ fn gated_non_funkot(
 /// `tags: Some` uses the caller's tags (library refresh after hash-index
 /// resolve). `tags: None` falls back to [`cached_tags_for`] (analysis worker
 /// and other call sites).
+///
+/// `label` comes from `labels` (content-hash key), not from `overrides.funkot`.
 fn track_row(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
     overrides: &store::Overrides,
+    labels: &store::Labels,
     hash: Option<&str>,
     tags: Option<CachedTags>,
 ) -> TrackRow {
@@ -4401,6 +4417,7 @@ fn track_row(
         None => cached_tags_for(path),
     };
     let (title, artist) = session_metadata_for(Some(path), &tags);
+    let label = hash.and_then(|h| labels.get(h).map(|l| l.verdict));
     match hash.and_then(|h| analyzed_cache_entry(cache_dir, h).map(|a| (h, a))) {
         Some((hash, a)) => {
             let override_funkot = overrides.get(hash).and_then(|o| o.funkot);
@@ -4415,6 +4432,7 @@ fn track_row(
                 },
                 analyzed: true,
                 is_funkot: store::effective_is_funkot(a.is_funkot, override_funkot),
+                label,
                 intro_bars: Some(a.intro_bars),
                 outro_structure_bars: Some(a.outro_structure_bars),
                 outro_bars: Some(a.outro_bars),
@@ -4431,6 +4449,7 @@ fn track_row(
             duration_secs: None,
             analyzed: false,
             is_funkot: true,
+            label,
             intro_bars: None,
             outro_structure_bars: None,
             outro_bars: None,
@@ -4496,7 +4515,15 @@ mod cache_state_tests {
         let (track, _) = track_with_analysis(&dir.0);
         let hash = funkot_core::cache::content_hash(&track).unwrap();
         assert!(analyzed_cache_entry(&dir.0, &hash).is_none());
-        assert!(!track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash), None).analyzed);
+        assert!(!track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            Some(&hash),
+            None
+        )
+        .analyzed);
     }
 
     #[test]
@@ -4507,7 +4534,14 @@ mod cache_state_tests {
         let hash = funkot_core::cache::content_hash(&track).unwrap();
 
         assert!(analyzed_cache_entry(&dir.0, &hash).is_some());
-        let row = track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash), None);
+        let row = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            Some(&hash),
+            None,
+        );
         assert!(row.analyzed);
         assert_eq!(row.intro_bars, Some(analysis.intro_bars));
         // Tagless fixture: title falls back to file name, artist empty;
@@ -4532,7 +4566,14 @@ mod cache_state_tests {
         let hash = funkot_core::cache::content_hash(&track).unwrap();
 
         assert!(analyzed_cache_entry(&dir.0, &hash).is_none());
-        let row = track_row(&track, &dir.0, &store::Overrides::new(), Some(&hash), None);
+        let row = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            Some(&hash),
+            None,
+        );
         assert!(!row.analyzed);
         // And the numbers are withheld too: showing bars the engine is about
         // to recompute invites hand-correcting a value that is on its way out.
@@ -4546,7 +4587,15 @@ mod cache_state_tests {
         let dir = TempDir::new("missing-hash");
         let track = dir.0.join("nope.wav");
         assert!(analyzed_cache_entry(&dir.0, "deadbeef").is_none());
-        assert!(!track_row(&track, &dir.0, &store::Overrides::new(), None, None).analyzed);
+        assert!(!track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            None,
+            None
+        )
+        .analyzed);
     }
 
     /// `track_row` must honour the hash the caller already resolved — no second
@@ -4567,7 +4616,14 @@ mod cache_state_tests {
                 ..Default::default()
             },
         );
-        let row = track_row(&track, &cache.0, &overrides, Some(&hash), None);
+        let row = track_row(
+            &track,
+            &cache.0,
+            &overrides,
+            &store::Labels::new(),
+            Some(&hash),
+            None,
+        );
         assert!(row.analyzed);
         assert!(row.is_funkot);
     }
@@ -4586,6 +4642,7 @@ mod cache_state_tests {
             &track,
             &dir.0,
             &store::Overrides::new(),
+            &store::Labels::new(),
             None,
             Some(tags),
         );
@@ -4703,7 +4760,162 @@ mod cache_state_tests {
         let hash = funkot_core::cache::content_hash(&track).unwrap();
         assert_eq!(
             path_str(&track),
-            track_row(&track, &cache.0, &store::Overrides::new(), Some(&hash), None).path
+            track_row(
+                &track,
+                &cache.0,
+                &store::Overrides::new(),
+                &store::Labels::new(),
+                Some(&hash),
+                None,
+            )
+            .path
+        );
+    }
+
+    #[test]
+    fn set_label_impl_true_writes_labels_and_mirrors_override() {
+        let cache = TempDir::new("label-true-cache");
+        let data = TempDir::new("label-true-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        let row = set_label_impl(&cache.0, &data.0, &track, Some(true)).unwrap();
+        assert_eq!(row.label, Some(true));
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let labels = store::load_labels(&data.0);
+        let entry = labels.get(&hash).expect("label present");
+        assert!(entry.verdict);
+        assert!(entry.labeled_at_ms > 0);
+        assert_eq!(
+            store::load_overrides(&data.0)
+                .get(&hash)
+                .and_then(|o| o.funkot),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn set_label_impl_false_is_distinct_from_unlabeled() {
+        let cache = TempDir::new("label-false-cache");
+        let data = TempDir::new("label-false-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        set_label_impl(&cache.0, &data.0, &track, Some(false)).unwrap();
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let labels = store::load_labels(&data.0);
+        assert_eq!(labels.get(&hash).map(|l| l.verdict), Some(false));
+        assert!(!labels.contains_key("never-labeled"));
+    }
+
+    #[test]
+    fn set_label_impl_none_clears_label_and_removes_empty_override() {
+        let cache = TempDir::new("label-clear-cache");
+        let data = TempDir::new("label-clear-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        set_label_impl(&cache.0, &data.0, &track, Some(true)).unwrap();
+        let row = set_label_impl(&cache.0, &data.0, &track, None).unwrap();
+        assert_eq!(row.label, None);
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        assert!(!store::load_labels(&data.0).contains_key(&hash));
+        assert!(!store::load_overrides(&data.0).contains_key(&hash));
+    }
+
+    #[test]
+    fn set_label_impl_none_keeps_override_when_intro_bars_remain() {
+        let cache = TempDir::new("label-keep-intro-cache");
+        let data = TempDir::new("label-keep-intro-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash.clone(),
+            store::BarOverride {
+                intro_bars: Some(8),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        set_label_impl(&cache.0, &data.0, &track, Some(false)).unwrap();
+        set_label_impl(&cache.0, &data.0, &track, None).unwrap();
+
+        let entry = store::load_overrides(&data.0)
+            .get(&hash)
+            .cloned()
+            .expect("override entry kept");
+        assert_eq!(entry.intro_bars, Some(8));
+        assert_eq!(entry.funkot, None);
+        assert!(!store::load_labels(&data.0).contains_key(&hash));
+    }
+
+    #[test]
+    fn set_folder_label_impl_recurses_and_skips_non_audio() {
+        let data = TempDir::new("folder-label-data");
+        let music = TempDir::new("folder-label-music");
+        // Distinct bytes so content hashes differ (keys are hashes, not paths).
+        std::fs::write(music.0.join("a.wav"), vec![1u8; 4096]).unwrap();
+        std::fs::create_dir_all(music.0.join("sub").join("nested")).unwrap();
+        std::fs::write(music.0.join("sub").join("b.wav"), vec![2u8; 4096]).unwrap();
+        std::fs::write(music.0.join("sub").join("nested").join("c.mp3"), vec![3u8; 4096])
+            .unwrap();
+        std::fs::write(music.0.join("readme.txt"), b"not audio").unwrap();
+        std::fs::write(music.0.join("sub").join("notes.md"), b"skip").unwrap();
+
+        let scanned = scan_tracks(&music.0).unwrap();
+        assert_eq!(scanned.len(), 3, "scan_tracks paths: {scanned:?}");
+        let count = set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(store::load_labels(&data.0).len(), 3);
+        assert!(store::load_labels(&data.0).values().all(|l| l.verdict));
+    }
+
+    #[test]
+    fn label_stats_impl_matches_music_dir_and_verdicts() {
+        let data = TempDir::new("label-stats-data");
+        let music = TempDir::new("label-stats-music");
+        std::fs::write(music.0.join("a.wav"), vec![10u8; 4096]).unwrap();
+        std::fs::write(music.0.join("b.wav"), vec![20u8; 4096]).unwrap();
+        std::fs::write(music.0.join("c.mp3"), vec![30u8; 4096]).unwrap();
+
+        set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        let a = music.0.join("a.wav");
+        // Relabel one track as non-Funkot via path hash (no cache needed).
+        let cache = TempDir::new("label-stats-cache");
+        set_label_impl(&cache.0, &data.0, &a, Some(false)).unwrap();
+
+        let stats = label_stats_impl(&data.0, Some(music.0.as_path()));
+        let expected_total = scan_tracks(&music.0).unwrap().len();
+        assert_eq!(stats.total, expected_total);
+        assert_eq!(stats.labeled, 3);
+        assert_eq!(stats.funkot, 2);
+        assert_eq!(stats.not_funkot, 1);
+        assert_eq!(label_stats_impl(&data.0, None).total, 0);
+    }
+
+    #[test]
+    fn set_label_survives_reload() {
+        let cache = TempDir::new("label-reload-cache");
+        let data = TempDir::new("label-reload-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        set_label_impl(&cache.0, &data.0, &track, Some(false)).unwrap();
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let reloaded = store::load_labels(&data.0);
+        assert_eq!(reloaded.get(&hash).map(|l| l.verdict), Some(false));
+        assert!(reloaded[&hash].labeled_at_ms > 0);
+        assert_eq!(
+            store::load_overrides(&data.0)
+                .get(&hash)
+                .and_then(|o| o.funkot),
+            Some(false)
         );
     }
 }
@@ -4863,7 +5075,14 @@ fn analyze_these(
     }
     log::info!("{} track(s) need analysis", pending.len());
     let overrides = store::load_overrides(data_dir);
-    spawn_analysis_worker(app.clone(), pending, cache_dir.to_path_buf(), overrides);
+    let labels = store::load_labels(data_dir);
+    spawn_analysis_worker(
+        app.clone(),
+        pending,
+        cache_dir.to_path_buf(),
+        overrides,
+        labels,
+    );
 }
 
 /// Progress payload for the `library-scan` event.
@@ -4909,6 +5128,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
 
     let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
     let overrides = store::load_overrides(&data_dir);
+    let labels = store::load_labels(&data_dir);
     let mut hash_index = store::load_hash_index(&data_dir);
     let found = paths.len();
 
@@ -4953,6 +5173,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
             path,
             &cache_dir,
             &overrides,
+            &labels,
             hash.as_deref(),
             tags,
         ));
@@ -5112,7 +5333,185 @@ fn set_bars_impl(
         log::warn!("cannot persist manual bars: {e}");
     }
 
-    Ok(track_row(track, cache_dir, &overrides, Some(&hash), None))
+    let labels = store::load_labels(data_dir);
+    Ok(track_row(
+        track,
+        cache_dir,
+        &overrides,
+        &labels,
+        Some(&hash),
+        None,
+    ))
+}
+
+/// Set or clear the human Funkot label for one track.
+///
+/// `verdict: Some(true/false)` writes `labels.json` and mirrors into
+/// `BarOverride.funkot`. `None` removes the label and clears the mirror.
+#[tauri::command(async)]
+fn set_label(
+    app: tauri::AppHandle,
+    path: String,
+    verdict: Option<bool>,
+) -> Result<TrackRow, String> {
+    let dirs = resolve_dirs(&app)?;
+    let cache_dir = PathBuf::from(&dirs.cache_dir);
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_label_impl(&cache_dir, &data_dir, Path::new(&path), verdict)
+}
+
+/// Core of [`set_label`], split out so unit tests can drive labels + library
+/// without an `AppHandle` / global lock.
+fn set_label_impl(
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    track: &std::path::Path,
+    verdict: Option<bool>,
+) -> Result<TrackRow, String> {
+    let mut index = store::load_hash_index(data_dir);
+    let hash = store::resolve_content_hash(track, &mut index)
+        .map_err(|e| format!("cannot hash {}: {e}", track.display()))?;
+
+    let mut labels = store::load_labels(data_dir);
+    match verdict {
+        Some(v) => {
+            labels.insert(
+                hash.clone(),
+                store::TrackLabel {
+                    verdict: v,
+                    labeled_at_ms: now_ms(),
+                },
+            );
+        }
+        None => {
+            labels.remove(&hash);
+        }
+    }
+    if let Err(e) = store::save_labels(data_dir, &labels) {
+        log::warn!("cannot persist labels: {e}");
+    }
+
+    let mut overrides = store::load_overrides(data_dir);
+    match verdict {
+        Some(v) => {
+            overrides.entry(hash.clone()).or_default().funkot = Some(v);
+        }
+        None => {
+            if let Some(entry) = overrides.get_mut(&hash) {
+                entry.funkot = None;
+                if entry.intro_bars.is_none()
+                    && entry.outro_structure_bars.is_none()
+                    && entry.funkot.is_none()
+                {
+                    overrides.remove(&hash);
+                }
+            }
+        }
+    }
+    if let Err(e) = store::save_overrides(data_dir, &overrides) {
+        log::warn!("cannot persist manual bars: {e}");
+    }
+
+    Ok(track_row(
+        track,
+        cache_dir,
+        &overrides,
+        &labels,
+        Some(&hash),
+        None,
+    ))
+}
+
+/// Label every supported track under `dir` (recursive) with the same verdict.
+///
+/// Returns how many tracks were labeled (hash successes, including relabels).
+/// There is no bulk-clear: `verdict` is always a concrete bool.
+#[tauri::command(async)]
+fn set_folder_label(
+    app: tauri::AppHandle,
+    dir: String,
+    verdict: bool,
+) -> Result<usize, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_folder_label_impl(&data_dir, Path::new(&dir), verdict)
+}
+
+/// Core of [`set_folder_label`], split for unit tests without `AppHandle`.
+fn set_folder_label_impl(
+    data_dir: &std::path::Path,
+    dir: &std::path::Path,
+    verdict: bool,
+) -> Result<usize, String> {
+    let paths = scan_tracks(dir)?;
+    let mut index = store::load_hash_index(data_dir);
+    let mut labels = store::load_labels(data_dir);
+    let mut overrides = store::load_overrides(data_dir);
+    let labeled_at_ms = now_ms();
+    let mut count = 0usize;
+
+    for path in &paths {
+        let Ok(hash) = store::resolve_content_hash(path, &mut index) else {
+            continue;
+        };
+        labels.insert(
+            hash.clone(),
+            store::TrackLabel {
+                verdict,
+                labeled_at_ms,
+            },
+        );
+        overrides.entry(hash).or_default().funkot = Some(verdict);
+        count += 1;
+    }
+
+    if let Err(e) = store::save_labels(data_dir, &labels) {
+        log::warn!("cannot persist labels: {e}");
+    }
+    if let Err(e) = store::save_overrides(data_dir, &overrides) {
+        log::warn!("cannot persist manual bars: {e}");
+    }
+    Ok(count)
+}
+
+/// Summarise human labels vs the current music library size.
+#[tauri::command(async)]
+fn label_stats(app: tauri::AppHandle) -> Result<LabelStats, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let music_dir = if dirs.music_dir_needed {
+        None
+    } else {
+        Some(Path::new(dirs.music_dir.as_str()))
+    };
+    Ok(label_stats_impl(&data_dir, music_dir))
+}
+
+/// Core of [`label_stats`], split for unit tests without `AppHandle`.
+fn label_stats_impl(data_dir: &std::path::Path, music_dir: Option<&Path>) -> LabelStats {
+    let labels = store::load_labels(data_dir);
+    let labeled = labels.len();
+    let funkot = labels.values().filter(|l| l.verdict).count();
+    let not_funkot = labels.values().filter(|l| !l.verdict).count();
+    let total = match music_dir {
+        Some(dir) => scan_tracks(dir).map(|p| p.len()).unwrap_or(0),
+        None => 0,
+    };
+    LabelStats {
+        labeled,
+        total,
+        funkot,
+        not_funkot,
+    }
 }
 
 /// Progress payload for the `analysis-progress` event.
@@ -5205,6 +5604,7 @@ fn spawn_analysis_worker(
     paths: Vec<PathBuf>,
     cache_dir: PathBuf,
     overrides: store::Overrides,
+    labels: store::Labels,
 ) {
     if ANALYZING.swap(true, Ordering::SeqCst) {
         // Already running; refresh_library's caller will see progress events
@@ -5248,7 +5648,14 @@ fn spawn_analysis_worker(
                             done: i + 1,
                             total,
                             name,
-                            row: track_row(path, &cache_dir, &overrides, hash.as_deref(), None),
+                            row: track_row(
+                                path,
+                                &cache_dir,
+                                &overrides,
+                                &labels,
+                                hash.as_deref(),
+                                None,
+                            ),
                         },
                     );
                     continue;
@@ -5272,7 +5679,14 @@ fn spawn_analysis_worker(
 
                 // Built after `reapply_overrides` so a successful run's row
                 // reflects the corrected numbers, not the analyzer's raw ones.
-                let row = track_row(path, &cache_dir, &overrides, hash.as_deref(), None);
+                let row = track_row(
+                    path,
+                    &cache_dir,
+                    &overrides,
+                    &labels,
+                    hash.as_deref(),
+                    None,
+                );
                 let _ = app.emit(
                     "analysis-progress",
                     AnalysisProgress {
@@ -5796,6 +6210,9 @@ pub fn run() {
             undo_last_dismiss,
             refresh_library,
             set_bars,
+            set_label,
+            set_folder_label,
+            label_stats,
             enqueue,
             reorder,
             dequeue,
