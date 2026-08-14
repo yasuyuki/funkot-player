@@ -89,6 +89,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pulseaudio-utils \
     xdotool \
     imagemagick \
+    # rfd's Linux folder picker talks to xdg-desktop-portal first, then
+    # zenity. The portal is not in this container; without zenity the
+    # dialog never appears and the UI only toasts 「変更しませんでした」.
+    zenity \
     # The UI's text is Japanese. Android ships CJK fonts; this container did
     # not, so every label came out as tofu and a desktop screenshot could not
     # be read.

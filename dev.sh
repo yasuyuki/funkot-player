@@ -108,6 +108,9 @@ if [ "${GUI:-0}" = 1 ]; then
         exit 1
     }
     mkdir -p "$PWD/.desktop-data/Music"
+    # Trixie zenity is GTK4. GSK's default GL/Vulkan path draws only the
+    # window chrome on WSLg; cairo is the software renderer. Do not put
+    # comments inside GUI_ARGS — it is word-split into docker argv.
     GUI_ARGS="--shm-size=1g
         -v /tmp/.X11-unix:/tmp/.X11-unix
         -v /mnt/wslg:/mnt/wslg
@@ -118,6 +121,7 @@ if [ "${GUI:-0}" = 1 ]; then
         -e PULSE_SERVER=unix:/mnt/wslg/PulseServer
         -e WEBKIT_DISABLE_COMPOSITING_MODE=1
         -e WEBKIT_DISABLE_DMABUF_RENDERER=1
+        -e GSK_RENDERER=cairo
         -e RUST_LOG=${RUST_LOG:-info}"
 fi
 
