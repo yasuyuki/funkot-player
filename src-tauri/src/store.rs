@@ -1,7 +1,7 @@
 //! Persistence for the playback queue (`queue.json`), the bar counts the
 //! user has corrected by hand (`library.json`), transition flags the
-//! listener marked as bad (`flags.json`), and human Funkot / non-Funkot
-//! labels (`labels.json`).
+//! listener marked as bad (`flags.json`), human Funkot / non-Funkot
+//! labels (`labels.json`), and play history (`history.json`).
 //!
 //! # Why the app keeps its own copy of the manual bars
 //!
@@ -22,15 +22,16 @@
 //!
 //! In `AppDirs::data_dir`, and deliberately *not* in the analysis cache.
 //! These files are the listener's own work — the queue they built, the
-//! corrections they made, the transitions they flagged, and the Funkot
-//! labels they assigned — whereas the cache holds derived data that is
-//! meant to be disposable, and that the README tells people to delete
-//! outright when analysis misbehaves. User data under a directory whose
-//! published repair step is `rm -rf` does not survive the first repair.
-//! `data_dir` is still internal storage (`filesDir` on Android, the app
-//! data dir on desktop), so this asks for no new permission and stays out
-//! of the MTP-visible folder. `labels.json` has never lived in the cache,
-//! so it is not part of [`migrate_from`].
+//! corrections they made, the transitions they flagged, the Funkot
+//! labels they assigned, and the play history they accumulated — whereas the
+//! cache holds derived data that is meant to be disposable, and that the
+//! README tells people to delete outright when analysis misbehaves. User
+//! data under a directory whose published repair step is `rm -rf` does not
+//! survive the first repair. `data_dir` is still internal storage
+//! (`filesDir` on Android, the app data dir on desktop), so this asks for no
+//! new permission and stays out of the MTP-visible folder. `labels.json` and
+//! `history.json` have never lived in the cache, so they are not part of
+//! [`migrate_from`].
 //!
 //! Early builds did keep queue/library in the cache; `migrate_from` moves
 //! anything still there (including `flags.json` if present).
@@ -49,6 +50,7 @@ const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
 const FLAGS_FILE: &str = "flags.json";
 const LABELS_FILE: &str = "labels.json";
+const HISTORY_FILE: &str = "history.json";
 const DISMISSED_FILE: &str = "dismissed.json";
 const META_FILE: &str = "meta.json";
 const SESSION_FILE: &str = "session.json";
@@ -716,6 +718,51 @@ pub fn save_labels(dir: &Path, labels: &Labels) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(labels)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(LABELS_FILE), json)
+}
+
+/// One play-history entry for a track (keyed by content hash in [`History`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlayRecord {
+    pub count: u32,
+    /// Unix epoch milliseconds of the most recent time this track became now.
+    pub last_played_ms: u64,
+}
+
+/// Play counts / last-played times for the whole library, keyed by content hash.
+pub type History = BTreeMap<String, PlayRecord>;
+
+/// Load play history saved under `dir`.
+///
+/// Missing or corrupt → empty map (same policy as [`load_flags`]).
+pub fn load_history(dir: &Path) -> History {
+    let bytes = match fs::read(dir.join(HISTORY_FILE)) {
+        Ok(b) => b,
+        Err(_) => return History::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(e) => {
+            log::warn!("{HISTORY_FILE} is unreadable, starting empty: {e}");
+            History::new()
+        }
+    }
+}
+
+/// Persist `history` under `dir`, overwriting any previous save.
+pub fn save_history(dir: &Path, history: &History) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(history)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(HISTORY_FILE), json)
+}
+
+/// Increment play count and stamp `last_played_ms` for `hash`.
+pub fn record_play(history: &mut History, hash: &str, now_ms: u64) {
+    let entry = history.entry(hash.to_string()).or_insert(PlayRecord {
+        count: 0,
+        last_played_ms: 0,
+    });
+    entry.count = entry.count.saturating_add(1);
+    entry.last_played_ms = now_ms;
 }
 
 const EMPTY_JSON_OBJECT: &[u8] = b"{}";
@@ -1665,6 +1712,44 @@ mod tests {
         let loaded = load_flags(&dir.0);
         assert_eq!(loaded[&key].count, 2);
         assert_eq!(loaded[&key].last_flagged_ms, 200);
+    }
+
+    #[test]
+    fn missing_history_file_is_empty() {
+        let dir = TempDir::new("history-missing");
+        assert!(load_history(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn corrupt_history_file_is_empty_not_a_panic() {
+        let dir = TempDir::new("history-corrupt");
+        fs::write(dir.0.join(HISTORY_FILE), b"{not json").unwrap();
+        assert!(load_history(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn history_round_trip_count_and_timestamp() {
+        let dir = TempDir::new("history-roundtrip");
+        let mut history = History::new();
+        history.insert(
+            "hash-a".into(),
+            PlayRecord {
+                count: 3,
+                last_played_ms: 1_700_000_000_000,
+            },
+        );
+        save_history(&dir.0, &history).unwrap();
+        assert_eq!(load_history(&dir.0), history);
+    }
+
+    #[test]
+    fn record_play_same_hash_twice_increments_count() {
+        let mut history = History::new();
+        record_play(&mut history, "same-hash", 100);
+        record_play(&mut history, "same-hash", 200);
+        let entry = &history["same-hash"];
+        assert_eq!(entry.count, 2);
+        assert_eq!(entry.last_played_ms, 200);
     }
 
     fn meta(

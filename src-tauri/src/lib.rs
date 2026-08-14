@@ -917,7 +917,7 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
 }
 
 /// Serialises writes under `data_dir` (`queue.json`, `flags.json`,
-/// `labels.json`, and `session.json`).
+/// `labels.json`, `history.json`, and `session.json`).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
 /// really do overlap — tapping ✕ on one row and ↑ on another in quick
@@ -2022,6 +2022,33 @@ fn retire_in_flight_up_to(now: Option<&Path>) {
     persist_session();
 }
 
+/// Heard = this path just became `NowTracker::now`. No duration threshold
+/// (labeling skips too fast for one). Audition is not heard.
+fn record_heard(path: &Path) {
+    let Some(data_dir) = DATA_DIR.get() else {
+        log::warn!("record_heard: DATA_DIR not resolved yet");
+        return;
+    };
+    // Hash outside SAVE_LOCK (same as gated_non_funkot): index is read-only
+    // here — never save. Persist of hash-index is `refresh_library` only.
+    let mut index = store::load_hash_index(data_dir);
+    let hash = match store::resolve_content_hash(path, &mut index) {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!("record_heard: cannot hash {}: {e}", path.display());
+            return;
+        }
+    };
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut history = store::load_history(data_dir);
+    store::record_play(&mut history, &hash, now_ms());
+    if let Err(e) = store::save_history(data_dir, &history) {
+        log::warn!("cannot persist history: {e}");
+    }
+}
+
 fn events_thread(rx: Receiver<PlaybackEvent>) {
     for ev in rx {
         match ev {
@@ -2059,6 +2086,11 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 // Never for an audition event — see `retire_in_flight_up_to`.
                 if changed && !audition {
                     retire_in_flight_up_to(now_path.as_deref());
+                    // Interrupt fold assigned `now` — record heard (tracker
+                    // guard already dropped).
+                    if let Some(ref p) = now_path {
+                        record_heard(p);
+                    }
                 }
             }
             PlaybackEvent::Engine {
@@ -2081,6 +2113,10 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
                 if changed && !audition {
                     retire_in_flight_up_to(now_path.as_deref());
+                    // `on_track_started` assigned `now` (in_progress was none).
+                    if let Some(ref p) = now_path {
+                        record_heard(p);
+                    }
                 }
             }
             PlaybackEvent::Engine {
@@ -2105,6 +2141,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     let changed = tracker.now != before;
                     (completed, changed, tracker.now.clone())
                 };
+                let heard = completed.is_some() && !audition;
                 if let Some((from, to, origin)) = completed {
                     log::info!(
                         "transition: {} -> {} ({})",
@@ -2118,6 +2155,14 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
                 if changed && !audition {
                     retire_in_flight_up_to(now_path.as_deref());
+                }
+                // Record even when path is unchanged (same-track restart:
+                // `changed` is false but `now = to` was assigned). Skip
+                // no-op TransitionEnded (`completed` is None).
+                if heard {
+                    if let Some(ref p) = now_path {
+                        record_heard(p);
+                    }
                 }
             }
         }
@@ -3859,6 +3904,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
     };
     let overrides = store::load_overrides(&data_dir);
     let labels = store::load_labels(&data_dir);
+    let history = store::load_history(&data_dir);
 
     let mut meta_by_hash = std::collections::BTreeMap::new();
     for path in &paths {
@@ -3866,7 +3912,15 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
             continue;
         };
         // Same path/bars/manual/analyzed sources as the library table.
-        let row = track_row(path, &cache_dir, &overrides, &labels, Some(&hash), None);
+        let row = track_row(
+            path,
+            &cache_dir,
+            &overrides,
+            &labels,
+            &history,
+            Some(&hash),
+            None,
+        );
         meta_by_hash.insert(
             hash,
             store::FlagTrackMeta {
@@ -4338,6 +4392,9 @@ struct TrackRow {
     outro_manual: bool,
     intro_low_confidence: bool,
     outro_low_confidence: bool,
+    /// `history.json` `last_played_ms` for this track's content hash; `None`
+    /// when never heard (count is not exposed on the row).
+    played_at_ms: Option<u64>,
 }
 
 /// Counts of human labels vs library size for the labeling UI.
@@ -4405,11 +4462,13 @@ fn gated_non_funkot(
 /// and other call sites).
 ///
 /// `label` comes from `labels` (content-hash key), not from `overrides.funkot`.
+/// `played_at_ms` comes from `history` (same key).
 fn track_row(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
     overrides: &store::Overrides,
     labels: &store::Labels,
+    history: &store::History,
     hash: Option<&str>,
     tags: Option<CachedTags>,
 ) -> TrackRow {
@@ -4419,6 +4478,7 @@ fn track_row(
     };
     let (title, artist) = session_metadata_for(Some(path), &tags);
     let label = hash.and_then(|h| labels.get(h).map(|l| l.verdict));
+    let played_at_ms = hash.and_then(|h| history.get(h).map(|r| r.last_played_ms));
     match hash.and_then(|h| analyzed_cache_entry(cache_dir, h).map(|a| (h, a))) {
         Some((hash, a)) => {
             let override_funkot = overrides.get(hash).and_then(|o| o.funkot);
@@ -4441,6 +4501,7 @@ fn track_row(
                 outro_manual: a.outro_structure_bars_manual || a.outro_bars_manual,
                 intro_low_confidence: a.intro_bars_low_confidence,
                 outro_low_confidence: a.outro_bars_low_confidence,
+                played_at_ms,
             }
         }
         None => TrackRow {
@@ -4458,6 +4519,7 @@ fn track_row(
             outro_manual: false,
             intro_low_confidence: false,
             outro_low_confidence: false,
+            played_at_ms,
         },
     }
 }
@@ -4521,6 +4583,7 @@ mod cache_state_tests {
             &dir.0,
             &store::Overrides::new(),
             &store::Labels::new(),
+            &store::History::new(),
             Some(&hash),
             None
         )
@@ -4540,6 +4603,7 @@ mod cache_state_tests {
             &dir.0,
             &store::Overrides::new(),
             &store::Labels::new(),
+            &store::History::new(),
             Some(&hash),
             None,
         );
@@ -4572,6 +4636,7 @@ mod cache_state_tests {
             &dir.0,
             &store::Overrides::new(),
             &store::Labels::new(),
+            &store::History::new(),
             Some(&hash),
             None,
         );
@@ -4593,6 +4658,7 @@ mod cache_state_tests {
             &dir.0,
             &store::Overrides::new(),
             &store::Labels::new(),
+            &store::History::new(),
             None,
             None
         )
@@ -4622,6 +4688,7 @@ mod cache_state_tests {
             &cache.0,
             &overrides,
             &store::Labels::new(),
+            &store::History::new(),
             Some(&hash),
             None,
         );
@@ -4644,12 +4711,50 @@ mod cache_state_tests {
             &dir.0,
             &store::Overrides::new(),
             &store::Labels::new(),
+            &store::History::new(),
             None,
             Some(tags),
         );
         assert_eq!(row.title, "From Index");
         assert_eq!(row.artist, "Cached Artist");
         assert!(!row.analyzed);
+    }
+
+    #[test]
+    fn track_row_maps_history_last_played_ms_to_played_at_ms() {
+        let dir = TempDir::new("row-history");
+        let (track, _) = track_with_analysis(&dir.0);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+
+        let row_absent = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &store::History::new(),
+            Some(&hash),
+            None,
+        );
+        assert_eq!(row_absent.played_at_ms, None);
+
+        let mut history = store::History::new();
+        history.insert(
+            hash.clone(),
+            store::PlayRecord {
+                count: 2,
+                last_played_ms: 1_700_000_000_123,
+            },
+        );
+        let row_present = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &history,
+            Some(&hash),
+            None,
+        );
+        assert_eq!(row_present.played_at_ms, Some(1_700_000_000_123));
     }
 
     #[test]
@@ -4766,6 +4871,7 @@ mod cache_state_tests {
                 &cache.0,
                 &store::Overrides::new(),
                 &store::Labels::new(),
+                &store::History::new(),
                 Some(&hash),
                 None,
             )
@@ -5077,12 +5183,14 @@ fn analyze_these(
     log::info!("{} track(s) need analysis", pending.len());
     let overrides = store::load_overrides(data_dir);
     let labels = store::load_labels(data_dir);
+    let history = store::load_history(data_dir);
     spawn_analysis_worker(
         app.clone(),
         pending,
         cache_dir.to_path_buf(),
         overrides,
         labels,
+        history,
     );
 }
 
@@ -5130,6 +5238,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
     let overrides = store::load_overrides(&data_dir);
     let labels = store::load_labels(&data_dir);
+    let history = store::load_history(&data_dir);
     let mut hash_index = store::load_hash_index(&data_dir);
     let found = paths.len();
 
@@ -5175,6 +5284,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
             &cache_dir,
             &overrides,
             &labels,
+            &history,
             hash.as_deref(),
             tags,
         ));
@@ -5335,11 +5445,13 @@ fn set_bars_impl(
     }
 
     let labels = store::load_labels(data_dir);
+    let history = store::load_history(data_dir);
     Ok(track_row(
         track,
         cache_dir,
         &overrides,
         &labels,
+        &history,
         Some(&hash),
         None,
     ))
@@ -5416,11 +5528,13 @@ fn set_label_impl(
         log::warn!("cannot persist manual bars: {e}");
     }
 
+    let history = store::load_history(data_dir);
     Ok(track_row(
         track,
         cache_dir,
         &overrides,
         &labels,
+        &history,
         Some(&hash),
         None,
     ))
@@ -5606,6 +5720,7 @@ fn spawn_analysis_worker(
     cache_dir: PathBuf,
     overrides: store::Overrides,
     labels: store::Labels,
+    history: store::History,
 ) {
     if ANALYZING.swap(true, Ordering::SeqCst) {
         // Already running; refresh_library's caller will see progress events
@@ -5654,6 +5769,7 @@ fn spawn_analysis_worker(
                                 &cache_dir,
                                 &overrides,
                                 &labels,
+                                &history,
                                 hash.as_deref(),
                                 None,
                             ),
@@ -5685,6 +5801,7 @@ fn spawn_analysis_worker(
                     &cache_dir,
                     &overrides,
                     &labels,
+                    &history,
                     hash.as_deref(),
                     None,
                 );

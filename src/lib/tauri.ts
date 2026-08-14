@@ -74,6 +74,8 @@ export interface TrackRow {
   outro_manual: boolean;
   intro_low_confidence: boolean;
   outro_low_confidence: boolean;
+  /// `history.json` last_played_ms; null when never heard.
+  played_at_ms: number | null;
 }
 
 export function appDirs(): Promise<AppDirs> {

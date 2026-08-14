@@ -96,7 +96,12 @@
     <tbody>
       {#each rows as row (row.path)}
         <tr class:non-funkot={isNonFunkot(row)}>
-          <td class="name">{store.relName(row.path)}</td>
+          <td class="name">
+            {#if row.played_at_ms != null}
+              <span class="played">✓</span>
+            {/if}
+            {store.relName(row.path)}
+          </td>
           <td>
             {#if row.intro_bars === null}
               -
@@ -187,6 +192,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .played {
+    color: var(--color-text-dim);
+    margin-right: 0.25em;
   }
 
   .mix {
