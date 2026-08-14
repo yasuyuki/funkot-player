@@ -2,6 +2,7 @@
   import { ui } from "./lib/ui.svelte";
   import { store } from "./lib/state.svelte";
   import { sessionActive } from "./lib/transportMode";
+  import UiBoundary from "./components/UiBoundary.svelte";
   import NowCard from "./components/NowCard.svelte";
   import AuditionBanner from "./components/AuditionBanner.svelte";
   import TransitionStrip from "./components/TransitionStrip.svelte";
@@ -83,35 +84,55 @@
 
 <div class="header">
   <h1 class="app-title">Funkot</h1>
-  <OverflowMenu />
+  <UiBoundary>
+    <OverflowMenu />
+  </UiBoundary>
 </div>
 
 {#if store.player?.auditioning}
-  <AuditionBanner />
+  <UiBoundary>
+    <AuditionBanner />
+  </UiBoundary>
 {:else}
-  <NowCard />
+  <UiBoundary>
+    <NowCard />
+  </UiBoundary>
 {/if}
 
 <div class="playback-blocks">
   <div class="transport-block">
-    <Transport />
+    <UiBoundary>
+      <Transport />
+    </UiBoundary>
     <!-- Tied to Transport, not the whole playback-blocks: scrolling transport
          away must still reveal MiniBar even when TransitionStrip follows. -->
     <div class="minibar-sentinel" bind:this={sentinelEl} aria-hidden="true"></div>
   </div>
   <div class="strip-block">
-    <TransitionStrip />
+    <UiBoundary>
+      <TransitionStrip />
+    </UiBoundary>
   </div>
 </div>
 
-<Toast raised={miniBarVisible} />
+<UiBoundary>
+  <Toast raised={miniBarVisible} />
+</UiBoundary>
 
-<LogView />
+<UiBoundary>
+  <LogView />
+</UiBoundary>
 
 {#if ui.mode === "play"}
-  <Queue />
-  <Library />
-  <MiniBar show={miniBarVisible} />
+  <UiBoundary>
+    <Queue />
+  </UiBoundary>
+  <UiBoundary>
+    <Library />
+  </UiBoundary>
+  <UiBoundary>
+    <MiniBar show={miniBarVisible} />
+  </UiBoundary>
 {:else}
   <div class="subtabs" role="tablist" aria-label="編集サブタブ">
     <button
@@ -134,12 +155,18 @@
 
   {#if ui.editSub === "flags"}
     {#if ui.flaggedDetailKey}
-      <FlaggedDetail />
+      <UiBoundary>
+        <FlaggedDetail />
+      </UiBoundary>
     {:else}
-      <FlaggedList />
+      <UiBoundary>
+        <FlaggedList />
+      </UiBoundary>
     {/if}
   {:else}
-    <AllTracks />
+    <UiBoundary>
+      <AllTracks />
+    </UiBoundary>
   {/if}
 {/if}
 

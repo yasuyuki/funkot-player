@@ -81,7 +81,8 @@ class PlayerStore {
   /// Non-null while `refresh_library` is walking / hashing. Cleared when the
   /// invoke returns (success or error).
   libraryScan = $state<LibraryScanProgress | null>(null);
-  /// Last invoke failure, from either the poll loop or a transport action.
+  /// Last invoke failure, from either the poll loop or a transport action,
+  /// or a render throw caught by `<svelte:boundary>` (`UiBoundary`).
   /// Polling keeps running after one of these; it is not fatal.
   lastError = $state<string | null>(null);
   /// Edit-tab flagged list (`list_flagged_tracks`). Empty until first load.

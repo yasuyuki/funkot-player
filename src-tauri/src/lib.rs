@@ -6617,6 +6617,13 @@ pub fn run() {
                     log::warn!("setup: cannot resolve dirs, queue preload skipped: {e}");
                 }
             }
+            // Linux GUI debug: open the WebKit inspector with the window so a
+            // render throw is visible. Svelte 5 does not catch throws during
+            // an effect flush; production minifies the message to a URL.
+            #[cfg(all(debug_assertions, not(target_os = "android")))]
+            if let Some(w) = app.get_webview_window("main") {
+                w.open_devtools();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
