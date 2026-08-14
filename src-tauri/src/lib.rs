@@ -4987,6 +4987,76 @@ mod cache_state_tests {
     }
 
     #[test]
+    fn clear_labels_and_history_impl_empties_labels_and_history() {
+        let data = TempDir::new("clear-lh-data");
+        let mut labels = store::Labels::new();
+        labels.insert(
+            "hash-a".into(),
+            store::TrackLabel {
+                verdict: true,
+                labeled_at_ms: 1,
+            },
+        );
+        store::save_labels(&data.0, &labels).unwrap();
+        let mut history = store::History::new();
+        history.insert(
+            "hash-a".into(),
+            store::PlayRecord {
+                count: 3,
+                last_played_ms: 99,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+
+        clear_labels_and_history_impl(&data.0);
+
+        assert!(store::load_labels(&data.0).is_empty());
+        assert!(store::load_history(&data.0).is_empty());
+    }
+
+    #[test]
+    fn clear_labels_and_history_impl_keeps_intro_bars() {
+        let data = TempDir::new("clear-lh-keep-intro");
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            "hash-b".into(),
+            store::BarOverride {
+                intro_bars: Some(8),
+                funkot: Some(false),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        clear_labels_and_history_impl(&data.0);
+
+        let entry = store::load_overrides(&data.0)
+            .get("hash-b")
+            .cloned()
+            .expect("override kept");
+        assert_eq!(entry.intro_bars, Some(8));
+        assert_eq!(entry.funkot, None);
+    }
+
+    #[test]
+    fn clear_labels_and_history_impl_removes_funkot_only_override() {
+        let data = TempDir::new("clear-lh-funkot-only");
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            "hash-c".into(),
+            store::BarOverride {
+                funkot: Some(false),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        clear_labels_and_history_impl(&data.0);
+
+        assert!(!store::load_overrides(&data.0).contains_key("hash-c"));
+    }
+
+    #[test]
     fn set_folder_label_impl_recurses_and_skips_non_audio() {
         let data = TempDir::new("folder-label-data");
         let music = TempDir::new("folder-label-music");
@@ -5650,6 +5720,41 @@ fn label_stats_impl(data_dir: &std::path::Path, music_dir: Option<&Path>) -> Lab
         total,
         funkot,
         not_funkot,
+    }
+}
+
+/// Wipe all human labels and play history, and clear `BarOverride.funkot` mirrors.
+///
+/// Intro/outro hand edits are kept. Empty override entries (no intro, outro, or
+/// funkot) are removed — same rule as [`set_label_impl`]'s `None` branch.
+#[tauri::command(async)]
+fn clear_labels_and_history(app: tauri::AppHandle) -> Result<(), String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_labels_and_history_impl(&data_dir);
+    Ok(())
+}
+
+/// Core of [`clear_labels_and_history`], split for unit tests without `AppHandle`.
+fn clear_labels_and_history_impl(data_dir: &std::path::Path) {
+    if let Err(e) = store::save_labels(data_dir, &store::Labels::new()) {
+        log::warn!("cannot persist labels: {e}");
+    }
+    if let Err(e) = store::save_history(data_dir, &store::History::new()) {
+        log::warn!("cannot persist history: {e}");
+    }
+    let mut overrides = store::load_overrides(data_dir);
+    for entry in overrides.values_mut() {
+        entry.funkot = None;
+    }
+    overrides.retain(|_, entry| {
+        entry.intro_bars.is_some() || entry.outro_structure_bars.is_some()
+    });
+    if let Err(e) = store::save_overrides(data_dir, &overrides) {
+        log::warn!("cannot persist manual bars: {e}");
     }
 }
 
@@ -6355,6 +6460,7 @@ pub fn run() {
             set_label,
             set_folder_label,
             label_stats,
+            clear_labels_and_history,
             enqueue,
             reorder,
             dequeue,

@@ -9,6 +9,7 @@
   let feedbackBusy = $state(false);
   let musicDirBusy = $state(false);
   let allowNonFunkotBusy = $state(false);
+  let clearLabelsBusy = $state(false);
 
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
   let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
@@ -119,6 +120,23 @@
     }
   }
 
+  async function onClearLabelsAndHistory() {
+    if (clearLabelsBusy) return;
+    if (!window.confirm("ラベルと再生履歴を全部消しますか？")) return;
+    clearLabelsBusy = true;
+    ui.menuOpen = false;
+    try {
+      const ok = await store.doClearLabelsAndHistory();
+      if (ok) {
+        toast.notify("ラベルと再生履歴を消しました");
+      } else {
+        toast.notify(store.lastError ?? "ラベルと再生履歴を消せませんでした");
+      }
+    } finally {
+      clearLabelsBusy = false;
+    }
+  }
+
   async function onShareFeedback() {
     if (feedbackBusy) return;
     feedbackBusy = true;
@@ -167,6 +185,9 @@
       {/if}
       <button type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
         非Funkotも再生: {store.allowNonFunkot ? "ON" : "OFF"}
+      </button>
+      <button type="button" onclick={onClearLabelsAndHistory} disabled={clearLabelsBusy}>
+        ラベルと再生履歴を消す
       </button>
       <button type="button" onclick={onShowLog}>ログを表示</button>
       <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>意見を送る</button>

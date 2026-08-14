@@ -315,6 +315,11 @@ export function labelStats(): Promise<LabelStats> {
   return invoke<LabelStats>("label_stats");
 }
 
+/// Wipe all labels and play history (and `BarOverride.funkot` mirrors).
+export function clearLabelsAndHistory(): Promise<void> {
+  return invoke<void>("clear_labels_and_history");
+}
+
 export function auditionTransition(
   fromPath: string,
   toPath: string,

@@ -31,6 +31,7 @@ import {
   takePendingImport as takePendingImportCmd,
   setLabel as setLabelCmd,
   setFolderLabel as setFolderLabelCmd,
+  clearLabelsAndHistory as clearLabelsAndHistoryCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -469,6 +470,19 @@ class PlayerStore {
       if (prev) this.#replaceLibraryRow(prev);
       this.lastError = String(e);
       return null;
+    }
+  }
+
+  /// Wipe labels + play history, then quietly refresh the library list
+  /// (`refresh_library(false)` — no analysis re-kick).
+  async doClearLabelsAndHistory(): Promise<boolean> {
+    try {
+      await clearLabelsAndHistoryCmd();
+      await this.#reloadLibraryQuiet();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
     }
   }
 
