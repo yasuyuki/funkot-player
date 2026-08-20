@@ -35,7 +35,24 @@
 | 03 | [phase-03-play-history.md](phase-03-play-history.md) | 再生履歴 | funkot-player | — | 完了 |
 | 04 | [phase-04-labeling-mode.md](phase-04-labeling-mode.md) | ラベリングモード（head のみ伸長） | 両方 | — | 実機確認済み（OFF不変・ON10連打ゼロ待ち）。両リポジトリ未コミット |
 | 05 | [phase-05-labeling-ui.md](phase-05-labeling-ui.md) | ラベリング UI | funkot-player | 02 | 完了 |
-| 06 | [phase-06-export-and-tuning.md](phase-06-export-and-tuning.md) | エクスポート・突合・しきい値調整 | 両方 | 01, 02, 05 | 未着手 |
+| 05a | [phase-05a-cursor-phase-rule.md](phase-05a-cursor-phase-rule.md) | Cursor で phase を実行できるようにする | ワークスペースルート | — | 未着手 |
+| 05b | [phase-05b-baseline-freeze.md](phase-05b-baseline-freeze.md) | 削除前に基準値を凍結する | funkot-autodj-for-ui | — | 未着手 |
+| 05c | [phase-05c-test-residue-purge.md](phase-05c-test-residue-purge.md) | テスト残骸の一掃と再解析 | 両方 | **05b** | 未着手 |
+| 05d | [phase-05d-agreement-harness.md](phase-05d-agreement-harness.md) | 自己一致率 30曲×2 の道具立て | funkot-player | — | 未着手 |
+| 05e | [phase-05e-plan-facts-sync.md](phase-05e-plan-facts-sync.md) | 計画文書を実測へ合わせる | 両方 | — | 未着手 |
+| 06 | [phase-06-export-and-tuning.md](phase-06-export-and-tuning.md) | エクスポート・突合・しきい値調整 | 両方 | 01, 02, 05, 05a–05e | 未着手 |
+
+## 05a–05e — 人手パスを始める前の準備
+
+05 まででコードは揃った。**残っているのは人が798曲を聴く作業**だが、その前に
+どのフェーズにも属さない準備が要る。実機テストが残した状態の除去、自己一致率を
+測る道具、そして計画文書に書かれた前提のうち実測と食い違うものの訂正。
+
+順序の制約は **05b → 05c** の1つだけ。他は互いに独立で、どの順でも着手できる。
+
+**旧 corpus 393件（`funkot-autodj-for-ui/testdata/classify_*.txt`）は動作テストの
+過程で作られたもので、内容が誤っている。流用しない。** これは phase-06 の
+「旧 corpus との突合」が成立しないことを意味する（05e で記述を落とす）。
 
 ## 順序の制約（1つだけ、しかし重要）
 
