@@ -50,7 +50,7 @@ phase-06 の対象範囲の1/4を占めており、**その corpus が誤りだ�
 - 突合の基準値として **`is_funkot: true` 412/798** を明記。
   しきい値変更で `allow_non_funkot` OFF の見え方が何曲変わるかは、この412との差で出す
 - 「完了後」の「新しい `classify_*.txt` をコミットする。旧版は git log に残る」を
-  **訂正**。`funkot-autodj-for-ui/.gitignore:11` が `/testdata/*` を除外しており
+  **訂正**。`testdata`（`funkot-autodj-for-ui/.gitignore`）が `/testdata/*` を除外しており
   未追跡。除外理由は**ユーザーの実ライブラリのファイル一覧を public repo へ
   出さないため**。差し替え前に 05b のバックアップ先へ退避する運用に書き換える
 
@@ -87,7 +87,7 @@ phase-06 の対象範囲の1/4を占めており、**その corpus が誤りだ�
 | `.claude/plan-phases/funkot-labeling/README.md` | 分割計画のインデックス |
 | `.claude/plan-phases/funkot-labeling/phase-06-export-and-tuning.md` | 主な書き換え対象 |
 | `funkot-autodj-for-ui/funkot-core/examples/classify_probe.rs` | doc コメント |
-| `funkot-autodj-for-ui/.gitignore:11` | `/testdata/*` の除外。訂正の根拠 |
+| `testdata`（`funkot-autodj-for-ui/.gitignore`） | `/testdata/*` の除外。訂正の根拠 |
 | `funkot-player/HANDOFF.md` | local-data へのシンボリックリンク。commit しない |
 
 ## 制約・不変条件

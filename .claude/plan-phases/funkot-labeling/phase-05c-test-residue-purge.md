@@ -48,7 +48,7 @@
 **書き換える**
 
 - `settings.json` の `allow_non_funkot` を **`true`** へ。
-  OFF だとフォルダ巡回が解析済み非Funkot をスキップし（`lib.rs:2394-2399`）、
+  OFF だとフォルダ巡回が解析済み非Funkot をスキップし（`ALLOW_NON_FUNKOT` / `gated_non_funkot`（`src-tauri/src/lib.rs`））、
   **偽陰性＝最も確認したい曲が一度も再生されない**。忘れると798曲パス全体が無効になる
 - `settings.json` の `labeling_mode` を **`true`** へ。04 の仕様どおり
   **次回の ▶（`doStart`）から有効**（アプリ再起動は不要）
@@ -78,7 +78,7 @@
 
 アプリを起動 → 再スキャン → 798曲の解析完了まで待つ。
 **再スキャンしたらアプリを再起動する** — フォルダ巡回の曲リストは `start` 時点の
-スナップショット（`lib.rs:3076` → `lib.rs:3168`）で、再スキャンしても切り替わらない。
+スナップショット（`start_impl` / `scan_tracks`（`src-tauri/src/lib.rs`））で、再スキャンしても切り替わらない。
 
 ## 対象外
 
@@ -93,9 +93,9 @@
 | パス | 役割 |
 |---|---|
 | `%APPDATA%\jp.hatsuboshi.funkotplayer\` | 初期化対象 |
-| `src-tauri/src/store.rs:49-58` | 各 JSON のファイル名定数。消してよい対象の正本 |
-| `src-tauri/src/lib.rs:2394-2399` | `allow_non_funkot` OFF のスキップ |
-| `src-tauri/src/lib.rs:3076`, `lib.rs:3168` | 巡回リストのスナップショット |
+| `LABELS_FILE` / `HISTORY_FILE` / `HASH_INDEX_FILE`（`src-tauri/src/store.rs`） | 各 JSON のファイル名定数。消してよい対象の正本 |
+| `ALLOW_NON_FUNKOT` / `gated_non_funkot`（`src-tauri/src/lib.rs`） | `allow_non_funkot` OFF のスキップ |
+| `start_impl` / `scan_tracks`（`src-tauri/src/lib.rs`） | 巡回リストのスナップショット |
 | `funkot-autodj-for-ui/testdata/classify_*.txt` | 除去対象の旧 corpus |
 | `funkot-autodj-for-ui/docs/labeling.md`「汚染されたキャッシュで評価しないこと」 | 決定性と manual フラグ検査の根拠 |
 | `C:\funkot-test\` | 除去対象 |

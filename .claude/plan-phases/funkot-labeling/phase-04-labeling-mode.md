@@ -10,21 +10,20 @@
 
 ## 待ちの正体（調査済み・再調査不要）
 
-`⏭ 次の曲` は `reserved_prepared`（`lib.rs:4293`）が立つまで押せない
-（`transportMode.ts:62-70` の `canSkipNext`）。これは `NEXT_PREPARED`
-（`lib.rs:2223`）= 次曲の**デコード + 全曲タイムストレッチ完了**を意味する。
+`⏭ 次の曲` は `reserved_prepared`（`src-tauri/src/lib.rs`）が立つまで押せない
+（`canSkipNext`（`src/lib/transportMode.ts`））。これは `NEXT_PREPARED`（`src-tauri/src/lib.rs`）= 次曲の**デコード + 全曲タイムストレッチ完了**を意味する。
 
-全曲ストレッチは**7–8分FLACで約8秒**（`engine.rs:2070-2072` の実測コメント）。
+全曲ストレッチは**7–8分FLACで約8秒**（`FIRST_LIVE_HEAD_SECS`（`funkot-core/src/engine.rs`））。
 798曲なら純粋な待ち時間だけで1.5時間を超える。
 
-**解析はすでに前倒し済み**（`spawn_analysis_worker` `lib.rs:5203`）なので、
+**解析はすでに前倒し済み**（`spawn_analysis_worker`（`src-tauri/src/lib.rs`））なので、
 初期解析へ回せる処理は残っていない。残っているのはストレッチで、これは音声なので
-JSON キャッシュには載らない（`cache.rs:1`「JSON analysis cache」）。
+JSON キャッシュには載らない（`content_hash`（`funkot-core/src/cache.rs`）「JSON analysis cache」）。
 
 ## 対処: `prepare_first_live` の head 方式を全曲へ
 
-`engine.rs:2076` の `prepare_first_live` が既に「頭20秒だけ伸ばして先に鳴らし、
-フルは後追いで差し替える」を実装済み。**20秒 head なら約0.3秒**（同:2070-2072）。
+`prepare_first_live`（`funkot-core/src/engine.rs`）が既に「頭20秒だけ伸ばして先に鳴らし、
+フルは後追いで差し替える」を実装済み。**20秒 head なら約0.3秒**（`FIRST_LIVE_HEAD_SECS`（`funkot-core/src/engine.rs`））。
 1曲目だけの仕組みを、ラベリング中は全曲に広げる。
 
 ## 対象範囲
@@ -32,7 +31,7 @@ JSON キャッシュには載らない（`cache.rs:1`「JSON analysis cache」�
 ### funkot-autodj-for-ui
 
 - `funkot-core/src/engine.rs` — `EngineOptions` に `head_only_secs: Option<f64>` を追加
-- `prepare_one`（`engine.rs:2062`）が、これが `Some` のとき `prepare_track` ではなく
+- `prepare_one`（`funkot-core/src/engine.rs`）が、これが `Some` のとき `prepare_track` ではなく
   head プレビューのみを作り、**Upgrade を送らない**
 - `finish_prepare(..., preview = true)` は既に「outro を EOF に留めて暫定 mix point が
   早発しないようにする」実装なので、そのまま受け皿に使える
@@ -40,10 +39,10 @@ JSON キャッシュには載らない（`cache.rs:1`「JSON analysis cache」�
 ### funkot-player
 
 - `store.rs` の `Settings` に `labeling_mode: bool`（`#[serde(default)]`）。
-  `allow_non_funkot`（`store.rs:228-235`）と同じ形
+  `allow_non_funkot`（`src-tauri/src/store.rs`）と同じ形
 - `get_labeling_mode` / `set_labeling_mode` コマンド。
-  `get_allow_non_funkot` / `set_allow_non_funkot`（`lib.rs:4093,4102`）が見本
-- `OverflowMenu.svelte` にトグル（既存の「非Funkotも再生」`OverflowMenu.svelte:107-119`
+  `get_allow_non_funkot` / `set_allow_non_funkot`（`src-tauri/src/lib.rs`）が見本
+- `OverflowMenu.svelte` にトグル（既存の「非Funkotも再生」`onToggleAllowNonFunkot`（`src/components/OverflowMenu.svelte`）
   の隣）
 - エンジン起動時に `head_only_secs` へ反映
 
@@ -57,9 +56,9 @@ JSON キャッシュには載らない（`cache.rs:1`「JSON analysis cache」�
 
 - ストリーミング化。DSP 上は可能（`signalsmith_stretch::Stretch` は元々
   `process` / `input_latency` / `output_latency` / `flush` を持つストリーミング API で、
-  現在使っている `exact()`（`stretch.rs:283`）はその上の全バッファ版ラッパ。
-  rubato もブロック処理）。しかし `PreparedTrack.samples`（`engine.rs:64`）の
-  全曲materialized前提、末尾依存の `derive_outro_start_out`（`engine.rs:2455`）、
+  現在使っている `exact`（`funkot-core/src/stretch.rs`）はその上の全バッファ版ラッパ。
+  rubato もブロック処理）。しかし `PreparedTrack` / `samples`（`funkot-core/src/engine.rs`）の
+  全曲materialized前提、末尾依存の `derive_outro_start_out`（`funkot-core/src/engine.rs`）、
   曲ペア依存の `align_next_entry_with_phase_hypotheses` を作り直す
   **2リポジトリ跨ぎのエンジンアーキテクチャ変更**になる。
   ラベリングには不要（トランジションが要らないので末尾も曲ペアも不要）。
@@ -73,12 +72,12 @@ JSON キャッシュには載らない（`cache.rs:1`「JSON analysis cache」�
 - ラベリング中はトランジションが成立しない前提。スキップは**ハードカット**として
   確実に動くこと
 - `EngineOptions` の `rate` は現行コードが「never 上書き」と明言している
-  （`lib.rs:3571-3577`）。触らない
+  （`output_sample_rate`（`src-tauri/src/lib.rs`））。触らない
 
 ## 実装前に必ず確認すること
 
 **`preview: true` のトラックに対して `NavAction::TransitionToNext` がどう振る舞うか。**
-`engine.rs:1068-1072` は `next_track` が `None` のとき黙って落とす。
+`NavAction::TransitionToNext`（`funkot-core/src/engine.rs`）は `next_track` が `None` のとき黙って落とす。
 head のみのトラックが連続する状況で、
 
 - スキップが確実に次曲へ進むか
@@ -136,6 +135,6 @@ npm run build
 ## 注意
 
 - リリースビルドで確認すること。デバッグビルドはストレッチが約26倍遅く
-  （`src-tauri/Cargo.toml:66-81`: 最適化なし162秒 vs あり6.3秒）、
+  （`profile.dev.package`（`src-tauri/Cargo.toml`）: 最適化なし162秒 vs あり6.3秒）、
   待ち時間の評価にならない
-- コストの主体は Signalsmith のストレッチ DSP（同:78-80）
+- コストの主体は Signalsmith のストレッチ DSP（`OPT_LEVEL`（`src-tauri/Cargo.toml`））

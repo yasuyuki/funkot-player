@@ -22,7 +22,7 @@
 
 **ラベルを集めるだけでは精度は上がらない。** スコアとラベルが揃って初めて
 しきい値を動かせる。現状 `is_funkot` は bool のみでスコアは捨てられている
-（`funkot-core/src/lib.rs:159` 『the scores themselves are not stored』）。
+（`classify_scores`（`funkot-core/src/lib.rs`） 『the scores themselves are not stored』）。
 
 ## フェーズ
 
@@ -78,25 +78,25 @@
 ## 全計画に共通する注意
 
 1. **`allow_non_funkot` を ON にしないとラベリングは成立しない。** OFF だと
-   フォルダ巡回が解析済み非Funkot をスキップする（`lib.rs:2394-2399`）ため、
+   フォルダ巡回が解析済み非Funkot をスキップする（`ALLOW_NON_FUNKOT` / `gated_non_funkot`（`src-tauri/src/lib.rs`））ため、
    **偽陰性＝最も確認したい曲が一度も再生されない**
 2. **フォルダ巡回の曲リストは `start` 時点のスナップショット**
-   （`lib.rs:3076` → `lib.rs:3168`）。再スキャンしても切り替わらず、再起動が要る
-3. `MIN_DURATION_SECS = 30.0`（`analysis.rs:46`）未満は解析がエラーになり、
+   （`start_impl` / `scan_tracks`（`src-tauri/src/lib.rs`））。再スキャンしても切り替わらず、再起動が要る
+3. `MIN_DURATION_SECS = 30.0`（`MIN_DURATION_SECS`（`funkot-core/src/analysis.rs`））未満は解析がエラーになり、
    未解析扱いでゲートも掛からずスコアも出ない。手動ラベルは付くがしきい値調整
    には使えない。ISSUES.md に既出
 4. player が参照する funkot-core は **`funkot-autodj-for-ui` 側**
-   （`funkot-player/src-tauri/Cargo.toml:47` の path 依存）。`funkot-autodj` 本体ではない
+   （`path`（`src-tauri/Cargo.toml`）依存）。`funkot-autodj` 本体ではない
 5. `/mnt/oldpc/music` は WSL 再起動でマウントが外れる。作業開始時に `oldpc-music`
 
 ## 調査で確定した事実（再調査不要）
 
 - ライブラリ実数: **798** 音声ファイル、126トップディレクトリ
 - 旧 corpus 393件のパスは**全て現存**（diff 可能）
-- 解析は既に前倒し済み（`spawn_analysis_worker` `lib.rs:5203`）。
+- 解析は既に前倒し済み（`spawn_analysis_worker`（`src-tauri/src/lib.rs`））。
   **初期解析へ回せる処理はもう残っていない**
-- 「次の曲」待ちの正体は全曲タイムストレッチ **約8秒/曲**（`engine.rs:2070`）。
+- 「次の曲」待ちの正体は全曲タイムストレッチ **約8秒/曲**（`FIRST_LIVE_HEAD_SECS`（`funkot-core/src/engine.rs`））。
   音声なので JSON キャッシュには載らない
-- 判定ロジックは `classify_is_funkot`（`funkot-core/src/analysis.rs:1380`）、
-  しきい値は `analysis.rs:63,68,74`
-- `BarOverride.funkot`（`store.rs:363`）は読み取り経路が完成済み・書き込み経路のみ不在
+- 判定ロジックは `classify_is_funkot`（`funkot-core/src/analysis.rs`）、
+  しきい値は `CLASSIFY_MIN_Z` / `CLASSIFY_MIN_Z_RATIO` / `CLASSIFY_MAX_HALF_RATIO`（`funkot-core/src/analysis.rs`）
+- `BarOverride::funkot`（`src-tauri/src/store.rs`）は読み取り経路が完成済み・書き込み経路のみ不在

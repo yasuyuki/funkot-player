@@ -18,8 +18,8 @@ Funkot↔Not Funkot を切り替える」。これに従う。
 
 - `NowCard.svelte` に判定トグルを置く
 - `AllTracks.svelte` の行にラベル列を追加
-- パターンは `AllTracks.svelte:40-64` の `onChipPick`（楽観更新 → 成功したら
-  トーストで取り消し可）を踏襲。`state.svelte.ts:252-256` の
+- パターンは `onChipPick`（`src/components/edit/AllTracks.svelte`）（楽観更新 → 成功したら
+  トーストで取り消し可）を踏襲。`replaceLibraryRow`（`src/lib/state.svelte.ts`）の
   `#replaceLibraryRow(row)` を使えば Map の挿入順を保ったまま1行だけ差し替わる
 
 ### (b) フォルダ単位の一括ラベル
@@ -34,13 +34,13 @@ Funkot↔Not Funkot を切り替える」。これに従う。
 
 現状の混乱の元:
 
-- フォルダ巡回順 = `scan_tracks` の**絶対パスソート順**（`lib.rs:2992-2998`）
-- `AllTracks.svelte:11` の表示順（`libraryList` の挿入順）は**これと一致する**
-- しかし `Library.svelte:33-44` は**曲名順にソートしている**ため一致しない
+- フォルダ巡回順 = `scan_tracks` の**絶対パスソート順**（`scan_tracks`（`src-tauri/src/lib.rs`））
+- `libraryList`（`src/components/edit/AllTracks.svelte`）の表示順（`libraryList` の挿入順）は**これと一致する**
+- しかし `sortKey`（`src/components/Library.svelte`）は**曲名順にソートしている**ため一致しない
 
 やること:
 
-- `DrainPolicy::ContinueFolder { pos }`（`queue.rs:311`）が真のカーソル。
+- `DrainPolicy::ContinueFolder`（`src-tauri/src/queue.rs`） の `{ pos }` が真のカーソル。
   これを `QueueSnapshot` に露出する（バックエンド側の小さな追加）
 - UI に **`412 / 798`** の形で現在位置と総数を出す
 - ラベリング用の一覧を**巡回順**で描き、行に「現在位置 / ラベル済み / 再生済み」を出す
@@ -49,7 +49,7 @@ Funkot↔Not Funkot を切り替える」。これに従う。
 
 現状**仕組みがゼロ**（`keydown` / `KeyboardEvent` のヒット0件）。
 `App.svelte` の `$effect` で `window.addEventListener("keydown", ...)` を張り、
-クリーンアップで外す（`OverflowMenu.svelte:141-148` の既存パターン）。
+クリーンアップで外す（`onDocClick`（`src/components/OverflowMenu.svelte`）の既存パターン）。
 
 | キー | 動作 |
 |---|---|
@@ -61,7 +61,7 @@ Funkot↔Not Funkot を切り替える」。これに従う。
 
 ## 対象外
 
-- 仮想リスト。798行は全部 DOM に出る。`Library.svelte:197` に
+- 仮想リスト。798行は全部 DOM に出る。`rows`（`src/components/Library.svelte`）に
   「Fixed row height keeps a virtual-list swap possible later (YAGNI now)」の
   コメントがあり、必要になってからでよい
 - Android のタッチ操作向け作り込み（今回は Windows デスクトップ）
@@ -70,7 +70,7 @@ Funkot↔Not Funkot を切り替える」。これに従う。
 ## 制約・不変条件
 
 - `tauri.ts` の interface は serde の snake_case を**同名で**ミラーする
-  （`tauri.ts:1-8`「ズレると silently undefined」）
+  （`snake_case`（`src/lib/tauri.ts`）「ズレると silently undefined」）
 - 楽観更新は失敗時に必ず元へ戻す
 - CSS は `src/tokens.css` の既存トークンを使う。新しい色を勝手に足さない
 
@@ -109,11 +109,11 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ### 1. 作業前の設定確認
 
 - **`⋮ 非Funkotも再生` を ON にする。** OFF だとフォルダ巡回が解析済み非Funkot を
-  スキップし（`lib.rs:2394-2399`）、**偽陰性＝最も確認したい曲が一度も
+  スキップし（`ALLOW_NON_FUNKOT` / `gated_non_funkot`（`src-tauri/src/lib.rs`））、**偽陰性＝最も確認したい曲が一度も
   再生されない**。これを忘れると798曲のパス全体が無効になる
 - 01 が完了していることを確認（798曲の再解析が済んでいること）
 - 再スキャンしたら**アプリを再起動する**。フォルダ巡回の曲リストは `start` 時点の
-  スナップショット（`lib.rs:3076` → `lib.rs:3168`）
+  スナップショット（`start_impl` / `scan_tracks`（`src-tauri/src/lib.rs`））
 
 ### 2. 自己一致率の測定（数十分）
 

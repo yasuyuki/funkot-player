@@ -14,19 +14,18 @@
 
 ### `src-tauri/src/store.rs`
 
-- `HISTORY_FILE = "history.json"` を定数一覧（`store.rs:45-52`）に追加
+- `HISTORY_FILE = "history.json"` を定数一覧（`HISTORY_FILE`（`src-tauri/src/store.rs`））に追加
 - `PlayRecord { count: u32, last_played_ms: u64 }`、
   `History = BTreeMap<String, PlayRecord>`（キーは content hash）
-- `load_history` / `save_history` — `load_flags` / `save_flags`
-  （`store.rs:656-678`）と同形
+- `load_history` / `save_history` — `load_flags` / `save_flags`（`src-tauri/src/store.rs`）と同形
 
 ### `src-tauri/src/lib.rs`
 
 - **書き込み地点は「実際に現在曲になった時点」。** `NowTracker` の
   transition started で `to` が現在曲になる箇所に足す
-- **`on_reserved`（`queue.rs:396-412`）ではない。** あれは「予約した」であって
+- **`on_reserved`（`src-tauri/src/queue.rs`）ではない。** あれは「予約した」であって
   「聴いた」ではない。キューに積んだだけの曲を再生済みにしてはならない
-- `TrackRow`（`lib.rs:4310`）に `played_at_ms: Option<u64>` を追加
+- `TrackRow`（`src-tauri/src/lib.rs`）に `played_at_ms: Option<u64>` を追加
 - `src/lib/tauri.ts` の `TrackRow` interface に**同名で**ミラー
 
 ### 表示（最小限）
@@ -44,7 +43,7 @@
 
 - content hash がキー
 - ユーザー所有データなので `data_dir` 直下。解析キャッシュに置かない
-- `SAVE_LOCK` のロック順序（`lib.rs:2400-2420`）を守る
+- `SAVE_LOCK` のロック順序（`SAVE_LOCK`（`src-tauri/src/lib.rs`））を守る
 - 保存失敗は warn のみ。**再生を止めない**
 - 履歴書き込みが cpal のオーディオコールバック上で走らないこと。
   ファイル I/O をリアルタイムスレッドに載せない

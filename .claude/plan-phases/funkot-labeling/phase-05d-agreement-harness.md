@@ -9,7 +9,7 @@ README と phase-05 が要求する「30曲をランダムに選んで2回ラベ
 測る」を、**実際に測れるようにする**。
 
 いまの実装では測れない。`labels.json` は
-`BTreeMap<content_hash, TrackLabel>`（`store.rs:703-704`）で、
+`Labels` / `TrackLabel`（`src-tauri/src/store.rs`）で、
 **ハッシュごとに判定を1つしか持たない**。2回目のラベル付けは1回目を上書きするので、
 2つのパスを比べる手段が無い。人が聴き始めてから気付くと、30曲を聴き直すことになる。
 
@@ -34,7 +34,7 @@ README と phase-05 が要求する「30曲をランダムに選んで2回ラベ
 hash	rel_path	title	artist
 ```
 
-並びは巡回順（絶対パスのソート順。`lib.rs:2992-2998` の `scan_tracks` と同じ）に
+並びは巡回順（絶対パスのソート順。`scan_tracks`（`src-tauri/src/lib.rs`）と同じ）に
 そろえる。人はこの一覧を見ながらアプリの検索ボックスで曲を引く。
 
 ### `snapshot --out <pass-N.json>`
@@ -72,9 +72,9 @@ hash	rel_path	title	artist
 | パス | 役割 |
 |---|---|
 | `scripts/adb-push-music-list.py` | 置き場と書き方の手本 |
-| `src-tauri/src/store.rs:52`, `703-704`, `706-726` | `labels.json` のファイル名・型・読み書き |
-| `src-tauri/src/lib.rs:4501` | `TrackLabel` の意味（`None` は未ラベル） |
-| `src-tauri/src/lib.rs:2992-2998` | `scan_tracks` の並び（巡回順の正本） |
+| `LABELS_FILE` / `TrackLabel` / `load_labels` / `save_labels`（`src-tauri/src/store.rs`） | `labels.json` のファイル名・型・読み書き |
+| `TrackRow`（`src-tauri/src/lib.rs`） | `TrackLabel` の意味（`None` は未ラベル） |
+| `scan_tracks`（`src-tauri/src/lib.rs`） | `scan_tracks` の並び（巡回順の正本） |
 | `%APPDATA%\jp.hatsuboshi.funkotplayer\hash-index.json` | サンプル抽出の母集合（798件） |
 | `%APPDATA%\jp.hatsuboshi.funkotplayer\labels.json` | 読み書き対象 |
 

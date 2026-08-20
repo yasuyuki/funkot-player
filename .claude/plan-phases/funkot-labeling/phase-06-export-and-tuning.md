@@ -30,7 +30,7 @@
 
 - `classify_probe` をキャッシュ済みスコア（01 で保存）から回す。
   798曲の掃引が**ミリ秒で終わる**
-- 掃引対象は3つ（`funkot-core/src/analysis.rs:63,68,74`）:
+- 掃引対象は3つ（`CLASSIFY_MIN_Z` / `CLASSIFY_MIN_Z_RATIO` / `CLASSIFY_MAX_HALF_RATIO`（`funkot-core/src/analysis.rs`））:
 
   | 定数 | 現在値 | 現在の根拠 |
   |---|---|---|
@@ -56,7 +56,7 @@
 
 ## 制約・不変条件
 
-- 判定の3条件の構造（`GridLock::verdict` `analysis.rs:1409`、head/tail の良い方を
+- 判定の3条件の構造（`GridLock::verdict`（`funkot-core/src/analysis.rs`）、head/tail の良い方を
   採る + 半速拒否）は変えない。動かすのは値だけ
 - しきい値変更後は `CACHE_VERSION` の bump が要るか判断すること
   （判定結果が変わるがスコアは変わらないので、**bump 不要**のはず。
@@ -71,7 +71,7 @@
 4. 人手ラベル基準の混同行列が出る
 5. しきい値更新後、**05 で測った自己一致率と比べて意味のある精度**が出ている
    （自己一致率を超える精度は測定できない）
-6. `analysis.rs:63,68,74` のコメントが人手ラベル基準の数字に更新されている
+6. `CLASSIFY_MIN_Z` / `CLASSIFY_MIN_Z_RATIO` / `CLASSIFY_MAX_HALF_RATIO`（`funkot-core/src/analysis.rs`）のコメントが人手ラベル基準の数字に更新されている
 7. `CHANGELOG` の精度表が更新されている
 8. `cargo test -p funkot-core` が通る
 
@@ -97,11 +97,11 @@ diff <(sort testdata/classify_funkot.txt) <(sort <新しい classify_funkot.txt>
 
 ## 注意
 
-- **`MIN_DURATION_SECS = 30.0`（`analysis.rs:46`）未満の曲は解析がエラーになり、
+- **`MIN_DURATION_SECS = 30.0`（`MIN_DURATION_SECS`（`funkot-core/src/analysis.rs`））未満の曲は解析がエラーになり、
   スコアが無い。** 手動ラベルは付いていてもしきい値調整には使えないので、
   掃引の母集合から外すこと。何曲該当したかは記録する
 - 30秒未満の曲は未解析扱いでゲートも掛からない（`gated_non_funkot` は
-  `analyzed_cache_entry` が `None` なら `false` を返す、`lib.rs:4362-4380`）。
+  `analyzed_cache_entry` が `None` なら `false` を返す、`gated_non_funkot`（`src-tauri/src/lib.rs`））。
   ISSUES.md に既出の問題
 - しきい値を動かすと `allow_non_funkot` OFF での曲の見え方が変わる。
   ユーザーのライブラリで何曲が新たに除外/追加されるかを事前に出すこと
