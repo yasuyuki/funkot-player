@@ -22,8 +22,7 @@ phase-06 の対象範囲の1/4を占めており、**その corpus が誤りだ�
 | 冒頭の図 | `classify_*.txt を再生成 → 旧 corpus と diff = 仮実装の誤りの所在` | **この枝を落とす。** ラベル → 突合先はキャッシュ済みスコアだけ |
 | 「なぜやるか」 | 「精度評価が循環している」 | 循環に加えて、**corpus 自体が動作テストの産物で内容が誤っている**ことを書く |
 | 「調査で確定した事実」 | 「旧 corpus 393件のパスは全て現存（diff 可能）」 | **削除。** 「旧 corpus は流用しない」に置き換える |
-| 同 | 「ライブラリ実数 798 音声ファイル、126トップディレクトリ」 | 798 は正。**126 → 103**（実測） |
-| 全計画に共通する注意 3 | `MIN_DURATION_SECS` 未満は手動ラベルが付いても掃引に使えない | 一般論としては正しいが、**このライブラリでは該当0曲**である旨を追記 |
+| 全計画に共通する注意 3 | `MIN_DURATION_SECS` 未満は手動ラベルが付いても掃引に使えない | 一般論としては正しいが、**このライブラリでは発生しない**旨を書く（件数は `./scripts/labeling-facts.sh`） |
 | フェーズ表 | 05a–05e の行を追加 | 05 と 06 の間に置く |
 
 ### (b) `phase-06-export-and-tuning.md`
@@ -45,10 +44,8 @@ phase-06 の対象範囲の1/4を占めており、**その corpus が誤りだ�
 - (d) 精度の再測定: 「循環した数字なので、そのまま残さない」を
   **「誤ったデータから出ている数字なので、そのまま残さない」**へ。
   循環しているだけなら測り直せば救えるが、元データが誤っている場合は救えない
-- 「注意」の `MIN_DURATION_SECS`: **該当0曲。掃引の母集合は798全件**である旨を追記。
+- 「注意」の `MIN_DURATION_SECS`: **このライブラリでは発生しない**旨を追記（件数は `./scripts/labeling-facts.sh`）。
   「何曲該当したかは記録する」は残す（ライブラリが変われば復活する）
-- 突合の基準値として **`is_funkot: true` 412/798** を明記。
-  しきい値変更で `allow_non_funkot` OFF の見え方が何曲変わるかは、この412との差で出す
 - 「完了後」の「新しい `classify_*.txt` をコミットする。旧版は git log に残る」を
   **訂正**。`testdata`（`funkot-autodj-for-ui/.gitignore`）が `/testdata/*` を除外しており
   未追跡。除外理由は**ユーザーの実ライブラリのファイル一覧を public repo へ
@@ -106,12 +103,10 @@ phase-06 の対象範囲の1/4を占めており、**その corpus が誤りだ�
    `classify_funkot_hhhb.txt` への参照が**1つも残っていない**（「流用しない」と
    書く箇所を除く）
 2. 同ファイルに `/mnt/oldpc/music` と `\\LAPTOP-QM7J9GBE\music` の対応が書かれている
-3. 同ファイルに `412` が現行判定の基準値として書かれている
-4. `README.md` のフェーズ表に 05a–05e の5行があり、04 行が「完了」になっている
-5. `README.md` に `126` が残っていない（`103` になっている）
-6. `classify_probe.rs` の doc コメントが corpus を正解データとして紹介していない
-7. `cargo test -p funkot-core` が通る（doc コメント変更が doctest を壊していないこと）
-8. `git -C funkot-player status --short` の差分がドキュメントのみ
+3. `README.md` のフェーズ表に 05a–05e の5行があり、04 行が「完了」になっている
+4. `classify_probe.rs` の doc コメントが corpus を正解データとして紹介していない
+5. `cargo test -p funkot-core` が通る（doc コメント変更が doctest を壊していないこと）
+6. `git -C funkot-player status --short` の差分がドキュメントのみ
 
 ## 検証コマンド
 
@@ -121,9 +116,7 @@ cd <workspace-root>
 P=funkot-player/.claude/plan-phases/funkot-labeling
 grep -c 'classify_funkot.txt\|classify_not_funkot.txt\|classify_funkot_hhhb.txt' $P/phase-06-export-and-tuning.md
 grep -c 'oldpc/music' $P/phase-06-export-and-tuning.md
-grep -c '412' $P/phase-06-export-and-tuning.md
 grep -c 'phase-05[a-e]-' $P/README.md          # 5 以上
-grep -c '126' $P/README.md                      # 0
 
 cd funkot-autodj-for-ui
 cargo test -p funkot-core

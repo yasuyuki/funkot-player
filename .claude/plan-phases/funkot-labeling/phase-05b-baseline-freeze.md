@@ -104,6 +104,10 @@ hash	unc_path	wsl_path
 oldpc-music
 ls /mnt/oldpc/music | head -3
 
+# cache / settings / labels（数字の正本）
+cd <workspace-root>/funkot-player
+./scripts/labeling-facts.sh
+
 cd <workspace-root>/funkot-autodj-for-ui
 
 wc -l testdata/classify_baseline_798.tsv        # 799（ヘッダ込み）

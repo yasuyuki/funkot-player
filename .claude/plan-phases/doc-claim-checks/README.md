@@ -51,7 +51,7 @@
 | 01 | [phase-01-doc-claim-checker.md](phase-01-doc-claim-checker.md) | 検査を先に置く | — | 完了 |
 | 02 | [phase-02-line-citation-purge.md](phase-02-line-citation-purge.md) | 94件の引用を変換する | 01 | 完了 |
 | 03 | [phase-03-labeling-facts-script.md](phase-03-labeling-facts-script.md) | 事実を1箇所から出す | — | 完了 |
-| 04 | [phase-04-facts-single-source.md](phase-04-facts-single-source.md) | 「再調査不要」を消す | 02, 03 | 未着手 |
+| 04 | [phase-04-facts-single-source.md](phase-04-facts-single-source.md) | 「再調査不要」を消す | 02, 03 | 完了 |
 
 01 → 02 と、02・03 → 04 の順序制約がある。01 と 03 は互いに独立。
 

@@ -132,19 +132,16 @@
 ## 検証コマンド
 
 ```bash
+# cache / settings / labels（数字の正本）。--print は EXPECT_MANUAL が
+# まだ残骸 1 件の宣言のままでも落ちないようにする。05c 完了後に 0 へ直す。
+cd <workspace-root>/funkot-player
+./scripts/labeling-facts.sh --print
+
 APP=/mnt/c/Users/<user>/AppData/Roaming/jp.hatsuboshi.funkotplayer
 BAK=$(ls -dt ${APP}.bak-* | head -1)
 
-ls "$APP/funkot-cache" | wc -l                                        # 798
-grep -l '"version": 14' "$APP"/funkot-cache/*.json | wc -l            # 798
-grep -lE '"(intro|outro|outro_structure)_bars_manual" *: *true' "$APP"/funkot-cache/*.json | wc -l   # 0
-grep -lE '"needs_reanalysis" *: *true' "$APP"/funkot-cache/*.json | wc -l                            # 0
-grep -lE '"is_funkot" *: *true' "$APP"/funkot-cache/*.json | wc -l    # 412
-grep -lE '"classify_scores" *: *null' "$APP"/funkot-cache/*.json | wc -l                             # 0
-
-cat "$APP/labels.json"                                                # {}
+# このフェーズが消す残骸（スクリプトは session/flags/library を見ない）
 ls "$APP"/history.json "$APP"/session.json "$APP"/flags.json "$APP"/library.json 2>&1   # 全て No such file
-cat "$APP/settings.json"                                              # allow_non_funkot: true
 
 ls /mnt/c/funkot-test 2>&1                                            # No such file
 ls "$BAK/testdata-corpus"                                             # classify_*.txt 3件
