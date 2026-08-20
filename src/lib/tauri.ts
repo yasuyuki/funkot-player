@@ -190,6 +190,17 @@ export function setAllowNonFunkot(allow: boolean): Promise<boolean> {
   return invoke<boolean>("set_allow_non_funkot", { allow });
 }
 
+/// Current `settings.json` `labeling_mode`.
+export function getLabelingMode(): Promise<boolean> {
+  return invoke<boolean>("get_labeling_mode");
+}
+
+/// Persist `labeling_mode`. Fixed at engine construction (no live switch) —
+/// takes effect from the next engine startup, not the running session.
+export function setLabelingMode(on: boolean): Promise<boolean> {
+  return invoke<boolean>("set_labeling_mode", { on });
+}
+
 // `index`/`from`/`to` below are indices into the *displayed* queue list
 // (`[reserved?] ++ pending` — index 0 is `reserved` when present, matching
 // `QueueSnapshot`), not just `pending`. `expect` is the path currently shown

@@ -28,6 +28,8 @@ import {
   setMusicDir as setMusicDirCmd,
   getAllowNonFunkot as getAllowNonFunkotCmd,
   setAllowNonFunkot as setAllowNonFunkotCmd,
+  getLabelingMode as getLabelingModeCmd,
+  setLabelingMode as setLabelingModeCmd,
   takePendingImport as takePendingImportCmd,
   setLabel as setLabelCmd,
   setFolderLabel as setFolderLabelCmd,
@@ -89,6 +91,18 @@ class PlayerStore {
   flaggedRows = $state<FlaggedTrackRow[]>([]);
   /// `settings.json` `allow_non_funkot`. Grey styling is independent of this.
   allowNonFunkot = $state(false);
+  /// `settings.json` `labeling_mode`: every prepare uses a 20s head-only
+  /// stretch instead of the full track, and skip becomes a hard cut.
+  labelingMode = $state(false);
+  /// `labelingMode`'s value at the moment the *running* session's `doStart`
+  /// last succeeded, or `null` if no session has started yet this app run.
+  /// `EngineOptions::head_only_secs` is fixed for the life of the `Engine`
+  /// (see `audio_thread` in `src-tauri/src/lib.rs`), so this is what the
+  /// currently-playing engine actually has -- distinct from `labelingMode`,
+  /// which is just the persisted setting and can be toggled again mid-session
+  /// without affecting anything until the next Start. Compare the two (see
+  /// `OverflowMenu.svelte`) to know whether a toggle is still pending.
+  activeLabelingMode = $state<boolean | null>(null);
 
   /// Wall-clock time (`Date.now()`) the current `player.position_secs` was
   /// read at, so `elapsed` can add "how long ago was that" on top of it
@@ -155,6 +169,11 @@ class PlayerStore {
     await this.doTakePendingImport();
     try {
       this.allowNonFunkot = await getAllowNonFunkotCmd();
+    } catch (e) {
+      this.lastError = String(e);
+    }
+    try {
+      this.labelingMode = await getLabelingModeCmd();
     } catch (e) {
       this.lastError = String(e);
     }
@@ -380,6 +399,11 @@ class PlayerStore {
     }
     try {
       await startCmd(this.dirs.music_dir, this.dirs.cache_dir);
+      // `start_impl` just read `labelingMode` fresh off disk to build this
+      // session's engine; record it so `OverflowMenu.svelte` can tell "this
+      // session already has the toggle you just did" apart from "you'll need
+      // to press ▶ again for it to apply".
+      this.activeLabelingMode = this.labelingMode;
     } catch (e) {
       this.lastError = String(e);
     }
@@ -398,7 +422,10 @@ class PlayerStore {
       await skipNextCmd();
       // Host drops TransitionToNext while next is unset; refresh queue so
       // reserved_prepared (and thus canSkipNext) drops without waiting for poll.
-      await this.#refreshQueueNow();
+      // Not awaited: `NEXT_PREPARED` is published asynchronously from the
+      // cpal callback, so waiting on this refresh here does not actually
+      // make the drop land any sooner -- it only delays this call's return.
+      void this.#refreshQueueNow();
       return true;
     } catch (e) {
       this.lastError = String(e);
@@ -592,6 +619,14 @@ class PlayerStore {
   async doSetAllowNonFunkot(allow: boolean): Promise<void> {
     try {
       this.allowNonFunkot = await setAllowNonFunkotCmd(allow);
+    } catch (e) {
+      this.lastError = String(e);
+    }
+  }
+
+  async doSetLabelingMode(on: boolean): Promise<void> {
+    try {
+      this.labelingMode = await setLabelingModeCmd(on);
     } catch (e) {
       this.lastError = String(e);
     }

@@ -238,6 +238,13 @@ pub struct Settings {
     /// and are skipped by folder drain. Greying in the library is independent.
     #[serde(default)]
     pub allow_non_funkot: bool,
+    /// When `true`, prepare switches to a head-only (20s from first_downbeat)
+    /// stretch for every track so a labeler can move through the library
+    /// without waiting on a full-track stretch. See
+    /// `EngineOptions::head_only_secs`. Fixed at `Engine` construction — a
+    /// change here takes effect on the next Start, not the running session.
+    #[serde(default)]
+    pub labeling_mode: bool,
 }
 
 /// Load settings previously saved under `dir`.
@@ -2170,6 +2177,34 @@ mod tests {
             Some(Path::new("/somewhere/Music"))
         );
         assert!(!loaded.allow_non_funkot);
+    }
+
+    #[test]
+    fn settings_round_trip_labeling_mode() {
+        let dir = TempDir::new("settings-labeling-mode");
+        let settings = Settings {
+            labeling_mode: true,
+            ..Default::default()
+        };
+        save_settings(&dir.0, &settings).unwrap();
+        assert_eq!(load_settings(&dir.0), settings);
+        assert!(!Settings::default().labeling_mode);
+    }
+
+    #[test]
+    fn settings_old_json_without_labeling_mode_defaults_false() {
+        let dir = TempDir::new("settings-legacy-labeling-mode");
+        fs::write(
+            dir.0.join(SETTINGS_FILE),
+            br#"{"music_dir":"/somewhere/Music"}"#,
+        )
+        .unwrap();
+        let loaded = load_settings(&dir.0);
+        assert_eq!(
+            loaded.music_dir.as_deref(),
+            Some(Path::new("/somewhere/Music"))
+        );
+        assert!(!loaded.labeling_mode);
     }
 
     #[test]

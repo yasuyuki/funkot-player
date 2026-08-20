@@ -94,11 +94,19 @@ head のみのトラックが連続する状況で、
    `cargo test --manifest-path src-tauri/Cargo.toml` が通る
 2. `labeling_mode = false` で既存のトランジション動作が変わらない
    （既存のトランジション関連テストが緑）
-3. `labeling_mode = true` で `⏭ 次の曲` を10回連打でき、**毎回待ちが体感ゼロ**
+3. `labeling_mode = true` で `⏭ 次の曲` を10回連打でき、**毎回待ちが体感ゼロ**。
+   Android では `LABELING_AVAILABLE`（`!cfg!(target_os = "android")`）によりトグル自体を隠す
+   （先読み12曲ぶんの head バッファがモバイル予算に合わないため）
 4. ラベリング中のスキップでハードカットが確実に成立し、無音・取りこぼしが無い
 5. head 窓が `first_downbeat` から取られ、イントロ待ちが無い
-6. `⋮` メニューからトグルでき、再起動なしで切り替わる
-7. 新規テスト: preview トラック連続時のスキップ挙動
+6. `⋮` メニューからトグルでき、**次回の ▶（`doStart`）から切り替わる**（アプリ再起動は不要。
+   ライブ切替は無し — `EngineOptions.head_only_secs` は `Engine` 構築時に固定され、
+   実行中セッションには効かない。トグル直後に文言で「次回の再生開始から」と示す条件は、
+   単に「セッションが動いている」ではなく「動いているセッションの `head_only_secs` が
+   トグル後の値と食い違っている」こと — `state.svelte.ts` の `activeLabelingMode` 参照）
+7. 新規テスト: preview トラック連続時のスキップ挙動、および10連打バーストが
+   1本の `next_track` スロットではなく `head_queue`（`HEAD_ONLY_PREFETCH` 段）から
+   さばかれること
 
 ## 検証コマンド
 

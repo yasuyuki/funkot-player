@@ -54,6 +54,43 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// on the loader thread; `set_allow_non_funkot` updates it without restart.
 static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(false);
 
+/// Labeling mode's head window length (seconds), input-side, per the
+/// confirmed design: kept at the same 20s already used for the first-live
+/// preview.
+const LABELING_HEAD_SECS: f64 = 20.0;
+
+/// ラベリングモードの先読みは 20 秒 head を最大 `HEAD_ONLY_PREFETCH + 3` 本
+/// 同時に保持する（48 kHz ステレオ f32 で約 115 MB）。Android の予算ではない。
+/// ⋮ のトグルは `OverflowMenu.svelte` 側で隠すが、それは表示の話でしかない。
+/// これは `settings.json` に居座った `labeling_mode: true` が先読みを起動して
+/// しまわないための、唯一の実効的な関門。
+const LABELING_AVAILABLE: bool = !cfg!(target_os = "android");
+
+/// `settings.json`'s raw `labeling_mode` gated by platform availability. The
+/// mode is fixed at `Engine` construction (no live switch — see
+/// `EngineOptions::head_only_secs`), so this is the one place that decides
+/// whether a session actually runs with labeling prefetch on.
+fn effective_labeling_mode(setting: bool) -> bool {
+    setting && LABELING_AVAILABLE
+}
+
+#[cfg(test)]
+mod labeling_mode_tests {
+    use super::*;
+
+    #[test]
+    fn labeling_mode_is_desktop_only() {
+        assert!(!effective_labeling_mode(false));
+        #[cfg(not(target_os = "android"))]
+        assert!(effective_labeling_mode(true));
+        #[cfg(target_os = "android")]
+        assert!(!effective_labeling_mode(true));
+        // `LABELING_AVAILABLE` is the only gate: `true` gated by it must
+        // match `effective_labeling_mode(true)` exactly.
+        assert_eq!(effective_labeling_mode(true), LABELING_AVAILABLE);
+    }
+}
+
 /// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
 /// Written from `start_impl` before spawn and from the loader's
 /// `on_folder_pos` observer; read by `queue_state` for the labeling UI.
@@ -2395,6 +2432,10 @@ fn audio_thread(
     // moves in here) rather than here, since the restored session's
     // `in_flight` it depends on lives there.
     folder_pos: usize,
+    // Already gated by `effective_labeling_mode` in `start_impl`. Fixed for
+    // the life of this `Engine` — there is no live switch (see
+    // `EngineOptions::head_only_secs`); changing it requires a restart.
+    labeling_mode: bool,
 ) {
     macro_rules! say {
         ($($a:tt)*) => {{ let m = format!($($a)*); log::info!("{m}"); let _ = log.send(m); }};
@@ -2448,6 +2489,7 @@ fn audio_thread(
     // reserved was already analyzed.
     let cache_dir_for_log = cache_dir.clone();
     options.cache_dir = cache_dir;
+    options.head_only_secs = labeling_mode.then_some(LABELING_HEAD_SECS);
 
     // `options.loop_playlist` is not set here: `Engine::new_with_source`
     // never reads it (only `Engine::new`'s internal `PlaylistSource` does).
@@ -3179,10 +3221,14 @@ fn start_impl(
     // runs first only when it succeeds (best-effort; Android's JNI context
     // may not be ready that early), so this is not redundant.
     let _ = DATA_DIR.set(data.clone());
-    {
+    // Fixed for the life of this `Engine` — there is no live labeling switch
+    // (see `EngineOptions::head_only_secs`), so `effective_labeling_mode` is
+    // resolved once here and carried straight into `audio_thread`.
+    let labeling_mode = {
         let settings = store::load_settings(&data);
         ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
-    }
+        effective_labeling_mode(settings.labeling_mode)
+    };
 
     // Restore whatever was still mid-flight or pending from a previous run
     // before the engine starts pulling from the queue. `in_flight` (tracks
@@ -3254,7 +3300,9 @@ fn start_impl(
     FOLDER_POS.store(folder_pos, Ordering::Relaxed);
     if let Err(e) = std::thread::Builder::new()
         .name("funkot-audio".into())
-        .spawn(move || audio_thread(paths, cache, data, tx, queue, initial_paused, folder_pos))
+        .spawn(move || {
+            audio_thread(paths, cache, data, tx, queue, initial_paused, folder_pos, labeling_mode)
+        })
     {
         set_phase(Phase::Idle);
         YIELD_FOR_LOADER.store(false, Ordering::Relaxed);
@@ -4214,6 +4262,27 @@ fn set_allow_non_funkot(app: tauri::AppHandle, allow: bool) -> Result<bool, Stri
         .map_err(|e| format!("cannot save settings: {e}"))?;
     ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
     Ok(allow)
+}
+
+/// Current `settings.json` `labeling_mode` (raw, pre-platform-gate).
+#[tauri::command(async)]
+fn get_labeling_mode(app: tauri::AppHandle) -> Result<bool, String> {
+    let dirs = resolve_dirs(&app)?;
+    Ok(store::load_settings(Path::new(&dirs.data_dir)).labeling_mode)
+}
+
+/// Persist `labeling_mode`. Fixed at `Engine` construction (no live switch —
+/// see `EngineOptions::head_only_secs`), so a running session keeps whatever
+/// mode it started with; the new value takes effect on the next Start.
+#[tauri::command(async)]
+fn set_labeling_mode(app: tauri::AppHandle, on: bool) -> Result<bool, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data = Path::new(&dirs.data_dir);
+    let mut settings = store::load_settings(data);
+    settings.labeling_mode = on;
+    store::save_settings(data, &settings)
+        .map_err(|e| format!("cannot save settings: {e}"))?;
+    Ok(on)
 }
 
 /// `queue::edit_displayed`'s `revoke` argument for the main engine: hands
@@ -6657,6 +6726,8 @@ pub fn run() {
             queue_state,
             get_allow_non_funkot,
             set_allow_non_funkot,
+            get_labeling_mode,
+            set_labeling_mode,
             share_feedback,
             take_pending_import
         ])

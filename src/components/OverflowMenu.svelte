@@ -3,16 +3,29 @@
   import { openMusicDir, shareFeedback } from "../lib/tauri";
   import { toast } from "../lib/toast.svelte";
   import { ui } from "../lib/ui.svelte";
+  import { sessionActive } from "../lib/transportMode";
 
   let scanBusy = $state(false);
   let openMusicBusy = $state(false);
   let feedbackBusy = $state(false);
   let musicDirBusy = $state(false);
   let allowNonFunkotBusy = $state(false);
+  let labelingModeBusy = $state(false);
   let clearLabelsBusy = $state(false);
 
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
   let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
+  // Labeling mode is fixed at engine construction (no live switch — see
+  // `EngineOptions::head_only_secs`), so a toggle only takes effect the next
+  // time ▶ is pressed (`doStart`), not merely "while a session happens to be
+  // running" -- a session already running WITH the current setting must not
+  // show this. Compare against `activeLabelingMode` (captured at the running
+  // session's own `doStart`), not just `sessionActive`.
+  let labelingModePending = $derived(
+    sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false) &&
+      store.activeLabelingMode !== null &&
+      store.activeLabelingMode !== store.labelingMode,
+  );
 
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
@@ -120,6 +133,30 @@
     }
   }
 
+  async function onToggleLabelingMode() {
+    if (labelingModeBusy) return;
+    labelingModeBusy = true;
+    ui.menuOpen = false;
+    try {
+      await store.doSetLabelingMode(!store.labelingMode);
+      if (labelingModePending) {
+        toast.notify(
+          store.labelingMode
+            ? "ラベリングモード: ON（次回の再生開始から有効）"
+            : "ラベリングモード: OFF（次回の再生開始から有効）",
+        );
+      } else {
+        toast.notify(
+          store.labelingMode
+            ? "ラベリングモード: ON（頭20秒だけ再生）"
+            : "ラベリングモード: OFF",
+        );
+      }
+    } finally {
+      labelingModeBusy = false;
+    }
+  }
+
   async function onClearLabelsAndHistory() {
     if (clearLabelsBusy) return;
     if (!window.confirm("ラベルと再生履歴を全部消しますか？")) return;
@@ -186,6 +223,15 @@
       <button type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
         非Funkotも再生: {store.allowNonFunkot ? "ON" : "OFF"}
       </button>
+      <!-- Desktop only, same platform test as the folder items above: labeling
+           mode prefetches a dozen stretched head buffers at once (~115 MB), which
+           is not an Android budget. The authority is `LABELING_AVAILABLE` in
+           src-tauri/src/lib.rs -- this only hides the button. -->
+      {#if musicDirConfigurable}
+        <button type="button" onclick={onToggleLabelingMode} disabled={labelingModeBusy}>
+          ラベリングモード: {store.labelingMode ? "ON" : "OFF"}{labelingModePending ? "（次回の再生開始から）" : ""}
+        </button>
+      {/if}
       <button type="button" onclick={onClearLabelsAndHistory} disabled={clearLabelsBusy}>
         ラベルと再生履歴を消す
       </button>
