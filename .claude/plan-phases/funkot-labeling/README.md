@@ -38,7 +38,7 @@
 | 05a | [phase-05a-cursor-phase-rule.md](phase-05a-cursor-phase-rule.md) | Cursor で phase を実行できるようにする | ワークスペースルート | — | 完了 |
 | 05b | [phase-05b-baseline-freeze.md](phase-05b-baseline-freeze.md) | 削除前に基準値を凍結する | funkot-autodj-for-ui | — | 完了 |
 | 05c | [phase-05c-test-residue-purge.md](phase-05c-test-residue-purge.md) | テスト残骸の一掃と再解析 | 両方 | **05b** | 完了 |
-| 05d | [phase-05d-agreement-harness.md](phase-05d-agreement-harness.md) | 自己一致率 30曲×2 の道具立て | funkot-player | — | 未着手 |
+| 05d | [phase-05d-agreement-harness.md](phase-05d-agreement-harness.md) | 自己一致率 30曲×2 の道具立て | funkot-player | — | 完了 |
 | 05e | [phase-05e-plan-facts-sync.md](phase-05e-plan-facts-sync.md) | 計画文書を実測へ合わせる | 両方 | — | 未着手 |
 | 06 | [phase-06-export-and-tuning.md](phase-06-export-and-tuning.md) | エクスポート・突合・しきい値調整 | 両方 | 01, 02, 05, 05a–05e | 未着手 |
 
