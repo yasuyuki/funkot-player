@@ -6,9 +6,10 @@
 行っておらず目標精度に届いていない。原因は**正解データが無いこと**。
 
 現状の「正解」である `funkot-autodj-for-ui/testdata/classify_*.txt` は
-仮実装の出力であり、正確でも完全でもない。`CHANGELOG` の「69/69・60/63・
-偽陽性 20/261」はこの corpus を正解として測った数字なので、**精度評価が循環して
-いる**。しきい値をどう動かしても改善したか判定できない。
+仮実装の出力であり、正確でも完全でもない。それ以前に、**corpus 自体が動作テストの
+産物で内容が誤っている。** `CHANGELOG` の「69/69・60/63・偽陽性 20/261」はこの
+corpus を正解として測った数字なので、**精度評価が循環している**うえ、測り直して
+も元データが誤っていれば救えない。しきい値をどう動かしても改善したか判定できない。
 
 手持ちライブラリ（`/mnt/oldpc/music`。曲数とトップディレクトリ数は `./scripts/labeling-facts.sh` を実行せよ）を人が
 聴いてラベル付けし、正解データにする。作業は Windows デスクトップの通常再生
@@ -16,8 +17,7 @@
 
 ```
 ライブラリ全曲を人が聴く → labels.json（正解データ）
-                    ├→ classify_*.txt を再生成 → 旧 corpus と diff = 仮実装の誤りの所在
-                    └→ キャッシュ済みスコアと突合 → しきい値を掃引して調整
+                         → キャッシュ済みスコアと突合 → しきい値を掃引して調整
 ```
 
 **ラベルを集めるだけでは精度は上がらない。** スコアとラベルが揃って初めて
@@ -39,8 +39,8 @@
 | 05b | [phase-05b-baseline-freeze.md](phase-05b-baseline-freeze.md) | 削除前に基準値を凍結する | funkot-autodj-for-ui | — | 完了 |
 | 05c | [phase-05c-test-residue-purge.md](phase-05c-test-residue-purge.md) | テスト残骸の一掃と再解析 | 両方 | **05b** | 完了 |
 | 05d | [phase-05d-agreement-harness.md](phase-05d-agreement-harness.md) | 自己一致率 30曲×2 の道具立て | funkot-player | — | 完了 |
-| 05e | [phase-05e-plan-facts-sync.md](phase-05e-plan-facts-sync.md) | 計画文書を実測へ合わせる | 両方 | — | 未着手 |
-| 06 | [phase-06-export-and-tuning.md](phase-06-export-and-tuning.md) | エクスポート・突合・しきい値調整 | 両方 | 01, 02, 05, 05a–05e | 未着手 |
+| 05e | [phase-05e-plan-facts-sync.md](phase-05e-plan-facts-sync.md) | 計画文書を実測へ合わせる | 両方 | — | 完了 |
+| 06 | [phase-06-export-and-tuning.md](phase-06-export-and-tuning.md) | エクスポート・突合・しきい値調整 | 両方 | 01, 02, 05, 05a–05e、全曲を聴き終えていること | 未着手 |
 
 ## 05a–05e — 人手パスを始める前の準備
 
@@ -53,8 +53,8 @@
 測定値の出どころを文書から外してからでないと、05e が数字を文書へ書き戻す。
 
 **旧 corpus（`funkot-autodj-for-ui/testdata/classify_*.txt`）は動作テストの
-過程で作られたもので、内容が誤っている。流用しない。** これは phase-06 の
-「旧 corpus との突合」が成立しないことを意味する（05e で記述を落とす）。
+過程で作られたもので、内容が誤っている。流用しない。** phase-06 の
+「旧 corpus との突合」は記述ごと落とした。ラベルの突合先はキャッシュ済みスコアだけ。
 
 ## 順序の制約（1つだけ、しかし重要）
 
@@ -86,7 +86,8 @@
    （`start_impl` / `scan_tracks`（`src-tauri/src/lib.rs`））。再スキャンしても切り替わらず、再起動が要る
 3. `MIN_DURATION_SECS = 30.0`（`MIN_DURATION_SECS`（`funkot-core/src/analysis.rs`））未満は解析がエラーになり、
    未解析扱いでゲートも掛からずスコアも出ない。手動ラベルは付くがしきい値調整
-   には使えない。ISSUES.md に既出
+   には使えない。一般論としては正しいが、**このライブラリでは発生しない**
+   （件数は `./scripts/labeling-facts.sh`）。ISSUES.md に既出
 4. player が参照する funkot-core は **`funkot-autodj-for-ui` 側**
    （`path`（`src-tauri/Cargo.toml`）依存）。`funkot-autodj` 本体ではない
 5. `/mnt/oldpc/music` は WSL 再起動でマウントが外れる。作業開始時に `oldpc-music`
