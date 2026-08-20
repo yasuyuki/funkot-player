@@ -35,7 +35,7 @@
 | 03 | [phase-03-play-history.md](phase-03-play-history.md) | 再生履歴 | funkot-player | — | 完了 |
 | 04 | [phase-04-labeling-mode.md](phase-04-labeling-mode.md) | ラベリングモード（head のみ伸長） | 両方 | — | 完了 |
 | 05 | [phase-05-labeling-ui.md](phase-05-labeling-ui.md) | ラベリング UI | funkot-player | 02 | 完了 |
-| 05a | [phase-05a-cursor-phase-rule.md](phase-05a-cursor-phase-rule.md) | Cursor で phase を実行できるようにする | ワークスペースルート | — | 未着手 |
+| 05a | [phase-05a-cursor-phase-rule.md](phase-05a-cursor-phase-rule.md) | Cursor で phase を実行できるようにする | ワークスペースルート | — | 完了 |
 | 05b | [phase-05b-baseline-freeze.md](phase-05b-baseline-freeze.md) | 削除前に基準値を凍結する | funkot-autodj-for-ui | — | 未着手 |
 | 05c | [phase-05c-test-residue-purge.md](phase-05c-test-residue-purge.md) | テスト残骸の一掃と再解析 | 両方 | **05b** | 未着手 |
 | 05d | [phase-05d-agreement-harness.md](phase-05d-agreement-harness.md) | 自己一致率 30曲×2 の道具立て | funkot-player | — | 未着手 |
