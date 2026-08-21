@@ -3245,6 +3245,12 @@ fn start_impl(
         Vec::new()
     });
     let restored = store::restored_pending(&session.in_flight, &saved, |p| p.exists());
+    let restored = apply_non_funkot_gate(
+        restored,
+        &cache,
+        &data,
+        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+    );
     queue::replace_pending(&state.queue, restored);
     // Mirror the restored queue to `queue.json` *before* clearing
     // `SESSION.in_flight` below, not after: from here until that clear,
@@ -4571,6 +4577,24 @@ fn gated_non_funkot(
     !store::effective_is_funkot(a.is_funkot, override_funkot)
 }
 
+/// Pending restore can include folder-drain `in_flight`; apply the same gate
+/// as enqueue / folder skip so analysed non-Funkot are not replayed when
+/// `allow` is off. Does not read `ALLOW_NON_FUNKOT` (caller passes it).
+fn apply_non_funkot_gate(
+    paths: Vec<PathBuf>,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    allow: bool,
+) -> Vec<PathBuf> {
+    if allow {
+        return paths;
+    }
+    paths
+        .into_iter()
+        .filter(|p| !gated_non_funkot(p, cache_dir, data_dir))
+        .collect()
+}
+
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.
 ///
 /// `hash` is resolved once by the caller (`resolve_content_hash` /
@@ -4903,6 +4927,62 @@ mod cache_state_tests {
         );
         store::save_overrides(&data.0, &overrides).unwrap();
         assert!(!gated_non_funkot(&track, &cache.0, &data.0));
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_keeps_analysed_non_funkot_when_allow() {
+        let cache = TempDir::new("gate-pending-allow-cache");
+        let data = TempDir::new("gate-pending-allow-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+
+        let out = apply_non_funkot_gate(vec![track.clone()], &cache.0, &data.0, true);
+        assert_eq!(out, vec![track]);
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_drops_analysed_non_funkot_keeps_unanalysed() {
+        let cache = TempDir::new("gate-pending-deny-cache");
+        let data = TempDir::new("gate-pending-deny-data");
+        let (non_funkot, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&non_funkot, &cache.0, &analysis);
+
+        // Second file: different bytes so a distinct hash; no cache entry.
+        let unanalysed = cache.0.join("unanalysed.wav");
+        std::fs::write(&unanalysed, vec![1u8; 4096]).unwrap();
+
+        let out = apply_non_funkot_gate(
+            vec![non_funkot.clone(), unanalysed.clone()],
+            &cache.0,
+            &data.0,
+            false,
+        );
+        assert_eq!(out, vec![unanalysed]);
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_honours_override_funkot_true() {
+        let cache = TempDir::new("gate-pending-override-cache");
+        let data = TempDir::new("gate-pending-override-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash,
+            store::BarOverride {
+                funkot: Some(true),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        let out = apply_non_funkot_gate(vec![track.clone()], &cache.0, &data.0, false);
+        assert_eq!(out, vec![track]);
     }
 
     /// Cancel/undo with `mark_manual = false` must clear the touched side's
@@ -6679,6 +6759,12 @@ pub fn run() {
                     });
                     let restored =
                         store::restored_pending(&session.in_flight, &saved, |p| p.exists());
+                    let restored = apply_non_funkot_gate(
+                        restored,
+                        Path::new(&dirs.cache_dir),
+                        &data,
+                        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+                    );
                     let state = app.state::<AppState>();
                     queue::replace_pending(&state.queue, restored);
                 }
