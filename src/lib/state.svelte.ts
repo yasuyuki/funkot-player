@@ -433,13 +433,19 @@ class PlayerStore {
     }
   }
 
-  /// Label the playing track (optionally) and skip. Extra F/J/Space while
-  /// skip is in flight are dropped — otherwise the progress index walks the
-  /// library on every keydown while `reserved_prepared` is still true.
+  /// Label the playing track (optionally). When `labelingMode` is on, also
+  /// skip (F/J = label+skip, Space = skip only). When off, F/J only set the
+  /// label; Space is a no-op. Extra F/J/Space while skip is in flight are
+  /// dropped — otherwise the progress index walks the library on every
+  /// keydown while `reserved_prepared` is still true.
   async doLabelAndSkip(verdict: boolean | null): Promise<void> {
-    if (this.#labelSkipBusy) return;
     const path = this.player?.now_playing ?? null;
     if (!path) return;
+    if (!this.labelingMode) {
+      if (verdict !== null) void this.doSetLabel(path, verdict);
+      return;
+    }
+    if (this.#labelSkipBusy) return;
     const phase = this.player?.phase ?? "idle";
     const auditioning = this.player?.auditioning ?? false;
     const prepared = this.queue?.reserved_prepared ?? false;

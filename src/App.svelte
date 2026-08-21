@@ -49,7 +49,8 @@
     }
   });
 
-  // Labeling shortcuts: F = Funkot+skip, J = non-Funkot+skip, Space = skip.
+  // Labeling shortcuts: F = Funkot (+skip when labeling mode on), J =
+  // non-Funkot (+skip when on), Space = skip only when labeling mode on.
   // Disabled while typing in inputs (covers Library search). No toast on the
   // keyboard path — click UI owns undo toasts.
   $effect(() => {
@@ -72,7 +73,7 @@
       } else if (key === "j" || key === "J") {
         e.preventDefault();
         void store.doLabelAndSkip(false);
-      } else if (key === " ") {
+      } else if (key === " " && store.labelingMode) {
         e.preventDefault();
         void store.doLabelAndSkip(null);
       }
