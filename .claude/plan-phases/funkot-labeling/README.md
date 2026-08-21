@@ -40,7 +40,7 @@ corpus を正解として測った数字なので、**精度評価が循環し�
 | 05c | [phase-05c-test-residue-purge.md](phase-05c-test-residue-purge.md) | テスト残骸の一掃と再解析 | 両方 | **05b** | 完了 |
 | 05d | [phase-05d-agreement-harness.md](phase-05d-agreement-harness.md) | 自己一致率 30曲×2 の道具立て | funkot-player | — | 完了 |
 | 05e | [phase-05e-plan-facts-sync.md](phase-05e-plan-facts-sync.md) | 計画文書を実測へ合わせる | 両方 | — | 完了 |
-| 06 | [phase-06-export-and-tuning.md](phase-06-export-and-tuning.md) | エクスポート・突合・しきい値調整 | 両方 | 01, 02, 05, 05a–05e、全曲を聴き終えていること | 未着手 |
+| 06 | [phase-06-export-and-tuning.md](phase-06-export-and-tuning.md) | エクスポート・突合・しきい値調整 | 両方 | 01, 02, 05, 05a–05e、全曲を聴き終えていること | 完了 |
 
 ## 05a–05e — 人手パスを始める前の準備
 
