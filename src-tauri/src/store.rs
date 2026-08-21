@@ -1,6 +1,7 @@
 //! Persistence for the playback queue (`queue.json`), the bar counts the
-//! user has corrected by hand (`library.json`), and transition flags the
-//! listener marked as bad (`flags.json`).
+//! user has corrected by hand (`library.json`), transition flags the
+//! listener marked as bad (`flags.json`), human Funkot / non-Funkot
+//! labels (`labels.json`), and play history (`history.json`).
 //!
 //! # Why the app keeps its own copy of the manual bars
 //!
@@ -21,32 +22,40 @@
 //!
 //! In `AppDirs::data_dir`, and deliberately *not* in the analysis cache.
 //! These files are the listener's own work — the queue they built, the
-//! corrections they made, and the transitions they flagged — whereas the
+//! corrections they made, the transitions they flagged, the Funkot
+//! labels they assigned, and the play history they accumulated — whereas the
 //! cache holds derived data that is meant to be disposable, and that the
 //! README tells people to delete outright when analysis misbehaves. User
 //! data under a directory whose published repair step is `rm -rf` does not
 //! survive the first repair. `data_dir` is still internal storage
-//! (`filesDir` on Android, the app data dir on desktop), so this asks for
-//! no new permission and stays out of the MTP-visible folder.
+//! (`filesDir` on Android, the app data dir on desktop), so this asks for no
+//! new permission and stays out of the MTP-visible folder. `labels.json` and
+//! `history.json` have never lived in the cache, so they are not part of
+//! [`migrate_from`].
 //!
 //! Early builds did keep queue/library in the cache; `migrate_from` moves
 //! anything still there (including `flags.json` if present).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::{MetadataOptions, StandardTag};
 
 const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
 const FLAGS_FILE: &str = "flags.json";
+const LABELS_FILE: &str = "labels.json";
+const HISTORY_FILE: &str = "history.json";
 const DISMISSED_FILE: &str = "dismissed.json";
 const META_FILE: &str = "meta.json";
 const SESSION_FILE: &str = "session.json";
-// Only referenced by `load_settings`/`save_settings`, which Android never
-// calls — see their doc comments for why the whole chain needs the attribute.
-#[cfg_attr(target_os = "android", allow(dead_code))]
 const SETTINGS_FILE: &str = "settings.json";
+const HASH_INDEX_FILE: &str = "hash-index.json";
 
 /// Metadata bundled with a feedback ZIP (`share_feedback`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -211,20 +220,31 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
     fs::write(dir.join(SESSION_FILE), json)
 }
 
-/// User-configurable app settings (desktop only). `music_dir`, when set, is
-/// the folder the listener picked via `set_music_dir`; `None` means no folder
-/// has been chosen yet (`music_dir_needed`). An unreadable configured path is
-/// left in this file — `resolve_music_dir` reports it as needed/unavailable
-/// without clearing the setting.
+/// User-configurable app settings (`settings.json`).
 ///
-/// `store` is a private module (`mod store;`, not `pub mod`), so these `pub`
-/// items are not part of the crate's public API and Android — which never
-/// calls any of them — would otherwise flag all four as dead code.
+/// `music_dir`, when set, is the folder the listener picked via
+/// `set_music_dir` (desktop only); `None` means no folder has been chosen
+/// yet (`music_dir_needed`). An unreadable configured path is left in this
+/// file — `resolve_music_dir` reports it as needed/unavailable without
+/// clearing the setting.
+///
+/// `allow_non_funkot` is read/written on every platform (library enqueue and
+/// folder-drain gate).
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(target_os = "android", allow(dead_code))]
 pub struct Settings {
     #[serde(default)]
     pub music_dir: Option<PathBuf>,
+    /// When `false` (default), analysed non-Funkot tracks cannot be enqueued
+    /// and are skipped by folder drain. Greying in the library is independent.
+    #[serde(default)]
+    pub allow_non_funkot: bool,
+    /// When `true`, prepare switches to a head-only (20s from first_downbeat)
+    /// stretch for every track so a labeler can move through the library
+    /// without waiting on a full-track stretch. See
+    /// `EngineOptions::head_only_secs`. Fixed at `Engine` construction — a
+    /// change here takes effect on the next Start, not the running session.
+    #[serde(default)]
+    pub labeling_mode: bool,
 }
 
 /// Load settings previously saved under `dir`.
@@ -233,7 +253,6 @@ pub struct Settings {
 /// [`load_session`] / [`load_flags`]): losing a folder choice is
 /// recoverable, refusing to launch is not. A missing file is expected on
 /// every first run and stays silent; a corrupt one logs a warning.
-#[cfg_attr(target_os = "android", allow(dead_code))]
 pub fn load_settings(dir: &Path) -> Settings {
     let bytes = match fs::read(dir.join(SETTINGS_FILE)) {
         Ok(b) => b,
@@ -249,7 +268,6 @@ pub fn load_settings(dir: &Path) -> Settings {
 }
 
 /// Persist `settings` under `dir`, overwriting any previous save.
-#[cfg_attr(target_os = "android", allow(dead_code))]
 pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(settings)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -355,6 +373,17 @@ pub struct BarOverride {
     /// `funkot_core::cache::set_manual_structure_bars`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outro_structure_bars: Option<u32>,
+    /// Manual Funkot / non-Funkot override. `None` follows analysis
+    /// `is_funkot`. One-way mirror of [`TrackLabel`] in `labels.json`
+    /// (label is source of truth); set by `set_label` / `set_folder_label`,
+    /// not by bar-edit UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funkot: Option<bool>,
+}
+
+/// Effective Funkot flag: `override.funkot` when set, else analysis.
+pub fn effective_is_funkot(analysis_is_funkot: bool, override_funkot: Option<bool>) -> bool {
+    override_funkot.unwrap_or(analysis_is_funkot)
 }
 
 /// Hand-corrected bars for the whole library, keyed by content hash.
@@ -385,6 +414,239 @@ pub fn save_overrides(dir: &Path, overrides: &Overrides) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(overrides)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(LIBRARY_FILE), json)
+}
+
+/// One file's content-hash cache entry, keyed by path in [`HashIndex`].
+///
+/// `mtime_ms` + `len` are a cheap fingerprint so a library rescan can skip
+/// re-reading file bytes when nothing has changed on disk.
+///
+/// When `tags_cached` is true, `title`/`artist` were probed (both `None` means
+/// the file has no usable tags). Older `hash-index.json` entries lack these
+/// fields and deserialize as `tags_cached: false`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HashIndexEntry {
+    pub mtime_ms: u64,
+    pub len: u64,
+    pub hash: String,
+    /// When true, `title`/`artist` were probed and may be stored (both None = no tags).
+    #[serde(default)]
+    pub tags_cached: bool,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
+}
+
+/// Path → content hash, with mtime/size so unchanged files skip re-hashing.
+pub type HashIndex = BTreeMap<String, HashIndexEntry>;
+
+/// Hash + embedded tags for one library file after [`resolve_library_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLibraryFile {
+    pub hash: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+}
+
+/// Load the content-hash index saved under `dir`.
+///
+/// Missing or corrupt → empty map (same policy as [`load_overrides`]).
+pub fn load_hash_index(dir: &Path) -> HashIndex {
+    let bytes = match fs::read(dir.join(HASH_INDEX_FILE)) {
+        Ok(b) => b,
+        Err(_) => return HashIndex::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(e) => {
+            log::warn!("{HASH_INDEX_FILE} is unreadable, starting empty: {e}");
+            HashIndex::new()
+        }
+    }
+}
+
+/// Persist `index` under `dir`, overwriting any previous save.
+pub fn save_hash_index(dir: &Path, index: &HashIndex) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(index)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(HASH_INDEX_FILE), json)
+}
+
+/// `metadata.modified()` as UNIX-epoch milliseconds, plus file length.
+///
+/// `None` when either side is unavailable — callers treat that as an index miss.
+fn file_mtime_ms_and_len(path: &Path) -> Option<(u64, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    let len = meta.len();
+    let mtime_ms = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    Some((mtime_ms, len))
+}
+
+/// Probe embedded title/artist via symphonia (open + metadata only).
+///
+/// Successful probes include "no tags" (`Ok((None, None))`). I/O / probe
+/// errors are `Err` so callers can avoid marking `tags_cached`.
+pub fn probe_audio_tags(path: &Path) -> Result<(Option<String>, Option<String>), String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut title = None;
+    let mut artist = None;
+    if let Some(rev) = format.metadata().skip_to_latest() {
+        for tag in &rev.media.tags {
+            match &tag.std {
+                Some(StandardTag::TrackTitle(s)) if title.is_none() => {
+                    let t = s.trim();
+                    if !t.is_empty() {
+                        title = Some(t.to_string());
+                    }
+                }
+                Some(StandardTag::Artist(s)) if artist.is_none() => {
+                    let a = s.trim();
+                    if !a.is_empty() {
+                        artist = Some(a.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((title, artist))
+}
+
+/// Return `path`'s content hash, reusing [`HashIndex`] when mtime+size match.
+///
+/// Does not probe or clear tags on a fingerprint hit. On miss, inserts with
+/// `tags_cached: false` (hash-only; library refresh fills tags later).
+// ponytail: mtime+size fingerprint can disagree after same-mtime overwrite; re-verify content if needed.
+pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<String> {
+    let key = path.to_string_lossy().into_owned();
+    let fingerprint = file_mtime_ms_and_len(path);
+
+    if let Some((mtime_ms, len)) = fingerprint {
+        if let Some(entry) = index.get(&key) {
+            if entry.mtime_ms == mtime_ms && entry.len == len {
+                return Ok(entry.hash.clone());
+            }
+        }
+    }
+
+    let hash = funkot_core::cache::content_hash(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    if let Some((mtime_ms, len)) = fingerprint {
+        index.insert(
+            key,
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: hash.clone(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+    }
+    Ok(hash)
+}
+
+/// Resolve content hash and embedded tags for a library scan, updating `index`
+/// in place. Does not persist to disk.
+///
+/// - Fingerprint miss → content-hash + tags probe → write full entry
+/// - Fingerprint hit + `tags_cached` → no file open; return stored hash/tags
+/// - Fingerprint hit + `!tags_cached` → skip content-hash; probe tags only
+pub fn resolve_library_file(
+    path: &Path,
+    index: &mut HashIndex,
+) -> io::Result<ResolvedLibraryFile> {
+    let key = path.to_string_lossy().into_owned();
+    let fingerprint = file_mtime_ms_and_len(path);
+
+    if let Some((mtime_ms, len)) = fingerprint {
+        if let Some(entry) = index.get(&key) {
+            if entry.mtime_ms == mtime_ms && entry.len == len {
+                if entry.tags_cached {
+                    return Ok(ResolvedLibraryFile {
+                        hash: entry.hash.clone(),
+                        title: entry.title.clone(),
+                        artist: entry.artist.clone(),
+                    });
+                }
+                let hash = entry.hash.clone();
+                match probe_audio_tags(path) {
+                    Ok((title, artist)) => {
+                        index.insert(
+                            key,
+                            HashIndexEntry {
+                                mtime_ms,
+                                len,
+                                hash: hash.clone(),
+                                tags_cached: true,
+                                title: title.clone(),
+                                artist: artist.clone(),
+                            },
+                        );
+                        return Ok(ResolvedLibraryFile {
+                            hash,
+                            title,
+                            artist,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(ResolvedLibraryFile {
+                            hash,
+                            title: None,
+                            artist: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let hash = funkot_core::cache::content_hash(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let (title, artist, tags_cached) = match probe_audio_tags(path) {
+        Ok((t, a)) => (t, a, true),
+        Err(_) => (None, None, false),
+    };
+
+    if let Some((mtime_ms, len)) = fingerprint {
+        index.insert(
+            key,
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: hash.clone(),
+                tags_cached,
+                title: title.clone(),
+                artist: artist.clone(),
+            },
+        );
+    }
+    Ok(ResolvedLibraryFile {
+        hash,
+        title,
+        artist,
+    })
 }
 
 /// One automatic transition pair the listener flagged as bad.
@@ -425,6 +687,89 @@ pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(flags)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(FLAGS_FILE), json)
+}
+
+/// Human Funkot / non-Funkot label for one track.
+///
+/// Keyed by content hash in [`Labels`]. Presence of a key means the listener
+/// has judged the track; `verdict == false` is distinct from "not yet labeled"
+/// (no key). [`BarOverride::funkot`] mirrors this one-way.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrackLabel {
+    pub verdict: bool,
+    pub labeled_at_ms: u64,
+}
+
+/// Hand-assigned Funkot labels for the whole library, keyed by content hash.
+pub type Labels = BTreeMap<String, TrackLabel>;
+
+/// Load human labels saved under `dir`.
+///
+/// Missing or corrupt → empty map (same policy as [`load_flags`]).
+pub fn load_labels(dir: &Path) -> Labels {
+    let bytes = match fs::read(dir.join(LABELS_FILE)) {
+        Ok(b) => b,
+        Err(_) => return Labels::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(e) => {
+            log::warn!("{LABELS_FILE} is unreadable, starting empty: {e}");
+            Labels::new()
+        }
+    }
+}
+
+/// Persist `labels` under `dir`, overwriting any previous save.
+pub fn save_labels(dir: &Path, labels: &Labels) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(labels)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(LABELS_FILE), json)
+}
+
+/// One play-history entry for a track (keyed by content hash in [`History`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlayRecord {
+    pub count: u32,
+    /// Unix epoch milliseconds of the most recent time this track became now.
+    pub last_played_ms: u64,
+}
+
+/// Play counts / last-played times for the whole library, keyed by content hash.
+pub type History = BTreeMap<String, PlayRecord>;
+
+/// Load play history saved under `dir`.
+///
+/// Missing or corrupt → empty map (same policy as [`load_flags`]).
+pub fn load_history(dir: &Path) -> History {
+    let bytes = match fs::read(dir.join(HISTORY_FILE)) {
+        Ok(b) => b,
+        Err(_) => return History::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(e) => {
+            log::warn!("{HISTORY_FILE} is unreadable, starting empty: {e}");
+            History::new()
+        }
+    }
+}
+
+/// Persist `history` under `dir`, overwriting any previous save.
+pub fn save_history(dir: &Path, history: &History) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(history)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(dir.join(HISTORY_FILE), json)
+}
+
+/// Increment play count and stamp `last_played_ms` for `hash`.
+pub fn record_play(history: &mut History, hash: &str, now_ms: u64) {
+    let entry = history.entry(hash.to_string()).or_insert(PlayRecord {
+        count: 0,
+        last_played_ms: 0,
+    });
+    entry.count = entry.count.saturating_add(1);
+    entry.last_played_ms = now_ms;
 }
 
 const EMPTY_JSON_OBJECT: &[u8] = b"{}";
@@ -827,14 +1172,14 @@ mod tests {
             "aaa".into(),
             BarOverride {
                 intro_bars: Some(32),
-                outro_structure_bars: None,
+                ..Default::default()
             },
         );
         o.insert(
             "bbb".into(),
             BarOverride {
-                intro_bars: None,
                 outro_structure_bars: Some(16),
+                ..Default::default()
             },
         );
 
@@ -861,6 +1206,325 @@ mod tests {
     }
 
     #[test]
+    fn hash_index_round_trip() {
+        let dir = TempDir::new("hash-index-roundtrip");
+        let mut index = HashIndex::new();
+        index.insert(
+            "/music/a.flac".into(),
+            HashIndexEntry {
+                mtime_ms: 1_700_000_000_000,
+                len: 4096,
+                hash: "abc".into(),
+                tags_cached: true,
+                title: Some("A".into()),
+                artist: Some("Artist".into()),
+            },
+        );
+        save_hash_index(&dir.0, &index).unwrap();
+        assert_eq!(load_hash_index(&dir.0), index);
+    }
+
+    #[test]
+    fn hash_index_old_entry_deserializes_without_tags() {
+        let dir = TempDir::new("hash-index-old-format");
+        fs::write(
+            dir.0.join(HASH_INDEX_FILE),
+            br#"{"/music/a.flac":{"mtime_ms":1,"len":10,"hash":"abc"}}"#,
+        )
+        .unwrap();
+        let loaded = load_hash_index(&dir.0);
+        let entry = &loaded["/music/a.flac"];
+        assert_eq!(entry.hash, "abc");
+        assert!(!entry.tags_cached);
+        assert!(entry.title.is_none());
+        assert!(entry.artist.is_none());
+    }
+
+    #[test]
+    fn missing_hash_index_file_is_empty() {
+        let dir = TempDir::new("hash-index-missing");
+        assert!(load_hash_index(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn corrupt_hash_index_file_is_empty_not_a_panic() {
+        let dir = TempDir::new("hash-index-corrupt");
+        fs::write(dir.0.join(HASH_INDEX_FILE), b"{not json").unwrap();
+        assert!(load_hash_index(&dir.0).is_empty());
+    }
+
+    /// Second resolve with unchanged mtime+len must not re-read file bytes.
+    #[test]
+    fn resolve_reuses_cached_hash_when_mtime_and_len_match() {
+        let dir = TempDir::new("hash-index-hit");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 256]).unwrap();
+
+        let mut index = HashIndex::new();
+        let first = resolve_content_hash(&path, &mut index).unwrap();
+        assert_eq!(index.len(), 1);
+
+        // Same size, different bytes; restore mtime so the fingerprint still hits.
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, vec![9u8; 256]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        let second = resolve_content_hash(&path, &mut index).unwrap();
+        assert_eq!(first, second);
+        // Fresh content_hash would see the new bytes — proves we skipped it.
+        let fresh = funkot_core::cache::content_hash(&path).unwrap();
+        assert_ne!(first, fresh);
+    }
+
+    #[test]
+    fn resolve_rehashes_when_len_changes() {
+        let dir = TempDir::new("hash-index-len");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 128]).unwrap();
+
+        let mut index = HashIndex::new();
+        let first = resolve_content_hash(&path, &mut index).unwrap();
+
+        fs::write(&path, vec![1u8; 256]).unwrap();
+        let second = resolve_content_hash(&path, &mut index).unwrap();
+        assert_ne!(first, second);
+        let key = path.to_string_lossy().into_owned();
+        assert_eq!(index[&key].len, 256);
+        assert_eq!(index[&key].hash, second);
+    }
+
+    #[test]
+    fn resolve_rehashes_when_mtime_changes() {
+        let dir = TempDir::new("hash-index-mtime");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 128]).unwrap();
+
+        let mut index = HashIndex::new();
+        let first = resolve_content_hash(&path, &mut index).unwrap();
+
+        // Same bytes, bumped mtime → miss → rehash; hash value stays equal but
+        // the index entry's mtime_ms must update.
+        let old_mtime_ms = index[&path.to_string_lossy().into_owned()].mtime_ms;
+        let later = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_millis(old_mtime_ms + 5_000);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let second = resolve_content_hash(&path, &mut index).unwrap();
+        assert_eq!(first, second);
+        let entry = &index[&path.to_string_lossy().into_owned()];
+        assert_eq!(entry.hash, second);
+        assert_eq!(entry.mtime_ms, old_mtime_ms + 5_000);
+    }
+
+    #[test]
+    fn save_hash_index_after_prune_drops_unseen_paths() {
+        let dir = TempDir::new("hash-index-prune");
+        let mut index = HashIndex::new();
+        index.insert(
+            "/music/kept.flac".into(),
+            HashIndexEntry {
+                mtime_ms: 1,
+                len: 10,
+                hash: "kept".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+        index.insert(
+            "/music/gone.flac".into(),
+            HashIndexEntry {
+                mtime_ms: 2,
+                len: 20,
+                hash: "gone".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+        index.retain(|path, _| path == "/music/kept.flac");
+        save_hash_index(&dir.0, &index).unwrap();
+        let loaded = load_hash_index(&dir.0);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains_key("/music/kept.flac"));
+        assert!(!loaded.contains_key("/music/gone.flac"));
+    }
+
+    /// Fingerprint + tags_cached hit must not open the file: changed bytes with
+    /// restored mtime still return the stored hash and title.
+    #[test]
+    fn resolve_library_reuses_tags_when_fingerprint_and_tags_cached() {
+        let dir = TempDir::new("hash-index-tags-hit");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 256]).unwrap();
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: "stale-hash".into(),
+                tags_cached: true,
+                title: Some("Cached Title".into()),
+                artist: Some("Cached Artist".into()),
+            },
+        );
+
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, vec![9u8; 256]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        let resolved = resolve_library_file(&path, &mut index).unwrap();
+        assert_eq!(resolved.hash, "stale-hash");
+        assert_eq!(resolved.title.as_deref(), Some("Cached Title"));
+        assert_eq!(resolved.artist.as_deref(), Some("Cached Artist"));
+        // Fresh content_hash would see the new bytes — proves we skipped open
+        // for hashing; stored title would be wiped by a real probe of this
+        // non-audio payload, so keeping it proves tags were not re-probed.
+        let fresh = funkot_core::cache::content_hash(&path).unwrap();
+        assert_ne!(resolved.hash, fresh);
+        assert_eq!(index[&key].title.as_deref(), Some("Cached Title"));
+    }
+
+    /// Tiny PCM WAV (no tags) so `probe_audio_tags` succeeds with both None.
+    fn write_silent_wav(path: &Path, fill: u8) {
+        let sample_rate = 8_000u32;
+        let channels = 1u16;
+        let bits = 16u16;
+        let n_samples = 64u32;
+        let data_size = n_samples * (bits as u32 / 8) * u32::from(channels);
+        let mut buf = Vec::with_capacity(44 + data_size as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * u32::from(channels) * (u32::from(bits) / 8);
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        let block_align = channels * bits / 8;
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        buf.extend(std::iter::repeat(fill).take(data_size as usize));
+        fs::write(path, buf).unwrap();
+    }
+
+    /// Pre-tags index entry: fingerprint hit still skips content_hash, probes
+    /// tags once, and upgrades the entry to `tags_cached`.
+    #[test]
+    fn resolve_library_upgrades_old_entry_tags_without_rehash() {
+        let dir = TempDir::new("hash-index-tags-upgrade");
+        let path = dir.0.join("track.wav");
+        write_silent_wav(&path, 1);
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: "kept-hash".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        write_silent_wav(&path, 9);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        let resolved = resolve_library_file(&path, &mut index).unwrap();
+        assert_eq!(resolved.hash, "kept-hash");
+        let fresh = funkot_core::cache::content_hash(&path).unwrap();
+        assert_ne!(resolved.hash, fresh);
+
+        let entry = &index[&key];
+        assert!(entry.tags_cached);
+        assert_eq!(entry.hash, "kept-hash");
+        // Tagless WAV: both None is still a successful probe.
+        assert!(entry.title.is_none());
+        assert!(entry.artist.is_none());
+    }
+
+    /// `resolve_content_hash` miss must not wipe a prior tags-cached entry's
+    /// fields only when fingerprint still hits — and on miss inserts
+    /// tags_cached: false without inventing tags.
+    #[test]
+    fn resolve_content_hash_miss_inserts_without_tags() {
+        let dir = TempDir::new("hash-index-hash-only-miss");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 128]).unwrap();
+
+        let mut index = HashIndex::new();
+        let hash = resolve_content_hash(&path, &mut index).unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let entry = &index[&key];
+        assert_eq!(entry.hash, hash);
+        assert!(!entry.tags_cached);
+        assert!(entry.title.is_none());
+        assert!(entry.artist.is_none());
+    }
+
+    /// Fingerprint hit on `resolve_content_hash` must leave tags fields alone.
+    #[test]
+    fn resolve_content_hash_hit_preserves_tags() {
+        let dir = TempDir::new("hash-index-hash-preserves-tags");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 128]).unwrap();
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: "h".into(),
+                tags_cached: true,
+                title: Some("T".into()),
+                artist: Some("A".into()),
+            },
+        );
+
+        assert_eq!(resolve_content_hash(&path, &mut index).unwrap(), "h");
+        let entry = &index[&key];
+        assert!(entry.tags_cached);
+        assert_eq!(entry.title.as_deref(), Some("T"));
+        assert_eq!(entry.artist.as_deref(), Some("A"));
+    }
+
+    #[test]
     fn migrate_moves_all_files_and_leaves_nothing_behind() {
         let old = TempDir::new("migrate-old");
         let new = TempDir::new("migrate-new");
@@ -869,7 +1533,13 @@ mod tests {
         queue.push_back(PathBuf::from("/music/a.flac"));
         save_queue(&old.0, &queue).unwrap();
         let mut o = Overrides::new();
-        o.insert("aaa".into(), BarOverride { intro_bars: Some(32), outro_structure_bars: None });
+        o.insert(
+            "aaa".into(),
+            BarOverride {
+                intro_bars: Some(32),
+                ..Default::default()
+            },
+        );
         save_overrides(&old.0, &o).unwrap();
         let mut flags = Flags::new();
         flags.insert(
@@ -971,6 +1641,58 @@ mod tests {
     }
 
     #[test]
+    fn missing_labels_file_is_empty() {
+        let dir = TempDir::new("labels-missing");
+        assert!(load_labels(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn corrupt_labels_file_is_empty_not_a_panic() {
+        let dir = TempDir::new("labels-corrupt");
+        fs::write(dir.0.join(LABELS_FILE), b"{not json").unwrap();
+        assert!(load_labels(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn labels_round_trip_verdict_and_timestamp() {
+        let dir = TempDir::new("labels-roundtrip");
+        let mut labels = Labels::new();
+        labels.insert(
+            "hash-true".into(),
+            TrackLabel {
+                verdict: true,
+                labeled_at_ms: 1_700_000_000_000,
+            },
+        );
+        labels.insert(
+            "hash-false".into(),
+            TrackLabel {
+                verdict: false,
+                labeled_at_ms: 1_700_000_000_100,
+            },
+        );
+        save_labels(&dir.0, &labels).unwrap();
+        assert_eq!(load_labels(&dir.0), labels);
+    }
+
+    #[test]
+    fn labels_false_verdict_distinct_from_unlabeled() {
+        let dir = TempDir::new("labels-false-vs-absent");
+        let mut labels = Labels::new();
+        labels.insert(
+            "labeled-false".into(),
+            TrackLabel {
+                verdict: false,
+                labeled_at_ms: 42,
+            },
+        );
+        save_labels(&dir.0, &labels).unwrap();
+        let loaded = load_labels(&dir.0);
+        assert_eq!(loaded.get("labeled-false").map(|l| l.verdict), Some(false));
+        assert!(!loaded.contains_key("never-labeled"));
+    }
+
+    #[test]
     fn flagging_same_key_twice_increments_count() {
         let dir = TempDir::new("flags-merge");
         let key = flag_key("from_hash", "to_hash");
@@ -997,6 +1719,44 @@ mod tests {
         let loaded = load_flags(&dir.0);
         assert_eq!(loaded[&key].count, 2);
         assert_eq!(loaded[&key].last_flagged_ms, 200);
+    }
+
+    #[test]
+    fn missing_history_file_is_empty() {
+        let dir = TempDir::new("history-missing");
+        assert!(load_history(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn corrupt_history_file_is_empty_not_a_panic() {
+        let dir = TempDir::new("history-corrupt");
+        fs::write(dir.0.join(HISTORY_FILE), b"{not json").unwrap();
+        assert!(load_history(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn history_round_trip_count_and_timestamp() {
+        let dir = TempDir::new("history-roundtrip");
+        let mut history = History::new();
+        history.insert(
+            "hash-a".into(),
+            PlayRecord {
+                count: 3,
+                last_played_ms: 1_700_000_000_000,
+            },
+        );
+        save_history(&dir.0, &history).unwrap();
+        assert_eq!(load_history(&dir.0), history);
+    }
+
+    #[test]
+    fn record_play_same_hash_twice_increments_count() {
+        let mut history = History::new();
+        record_play(&mut history, "same-hash", 100);
+        record_play(&mut history, "same-hash", 200);
+        let entry = &history["same-hash"];
+        assert_eq!(entry.count, 2);
+        assert_eq!(entry.last_played_ms, 200);
     }
 
     fn meta(
@@ -1385,9 +2145,66 @@ mod tests {
         let dir = TempDir::new("settings-roundtrip");
         let settings = Settings {
             music_dir: Some(PathBuf::from("/somewhere/Music")),
+            ..Default::default()
         };
         save_settings(&dir.0, &settings).unwrap();
         assert_eq!(load_settings(&dir.0), settings);
+    }
+
+    #[test]
+    fn settings_round_trip_allow_non_funkot() {
+        let dir = TempDir::new("settings-allow-non-funkot");
+        let settings = Settings {
+            allow_non_funkot: true,
+            ..Default::default()
+        };
+        save_settings(&dir.0, &settings).unwrap();
+        assert_eq!(load_settings(&dir.0), settings);
+        assert!(!Settings::default().allow_non_funkot);
+    }
+
+    #[test]
+    fn settings_old_json_without_allow_non_funkot_defaults_false() {
+        let dir = TempDir::new("settings-legacy");
+        fs::write(
+            dir.0.join(SETTINGS_FILE),
+            br#"{"music_dir":"/somewhere/Music"}"#,
+        )
+        .unwrap();
+        let loaded = load_settings(&dir.0);
+        assert_eq!(
+            loaded.music_dir.as_deref(),
+            Some(Path::new("/somewhere/Music"))
+        );
+        assert!(!loaded.allow_non_funkot);
+    }
+
+    #[test]
+    fn settings_round_trip_labeling_mode() {
+        let dir = TempDir::new("settings-labeling-mode");
+        let settings = Settings {
+            labeling_mode: true,
+            ..Default::default()
+        };
+        save_settings(&dir.0, &settings).unwrap();
+        assert_eq!(load_settings(&dir.0), settings);
+        assert!(!Settings::default().labeling_mode);
+    }
+
+    #[test]
+    fn settings_old_json_without_labeling_mode_defaults_false() {
+        let dir = TempDir::new("settings-legacy-labeling-mode");
+        fs::write(
+            dir.0.join(SETTINGS_FILE),
+            br#"{"music_dir":"/somewhere/Music"}"#,
+        )
+        .unwrap();
+        let loaded = load_settings(&dir.0);
+        assert_eq!(
+            loaded.music_dir.as_deref(),
+            Some(Path::new("/somewhere/Music"))
+        );
+        assert!(!loaded.labeling_mode);
     }
 
     #[test]
@@ -1395,6 +2212,27 @@ mod tests {
         let dir = TempDir::new("settings-corrupt");
         fs::write(dir.0.join(SETTINGS_FILE), b"{not json").unwrap();
         assert_eq!(load_settings(&dir.0), Settings::default());
+    }
+
+    #[test]
+    fn bar_override_funkot_round_trip() {
+        let dir = TempDir::new("override-funkot");
+        let mut o = Overrides::new();
+        o.insert(
+            "hash".into(),
+            BarOverride {
+                funkot: Some(false),
+                ..Default::default()
+            },
+        );
+        save_overrides(&dir.0, &o).unwrap();
+        let loaded = load_overrides(&dir.0);
+        assert_eq!(loaded["hash"].funkot, Some(false));
+        assert_eq!(
+            effective_is_funkot(true, loaded["hash"].funkot),
+            false
+        );
+        assert!(effective_is_funkot(true, None));
     }
 
     #[test]

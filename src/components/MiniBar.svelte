@@ -1,36 +1,33 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
+  import { primaryMode as resolvePrimaryMode, canSkipNext } from "../lib/transportMode";
 
   interface Props {
-    /// True while the transport sentinel is intersecting the viewport.
-    /// MiniBar only shows when this is false *and* playback is active.
-    transportVisible: boolean;
+    /// Whether the bar is up. Derived in App rather than here because Toast
+    /// docks directly on top of this bar and has to know the same answer;
+    /// deriving it twice would let the two disagree for a frame.
+    show: boolean;
   }
 
-  let { transportVisible }: Props = $props();
+  let { show }: Props = $props();
 
   let primaryBusy = $state(false);
   let nextBusy = $state(false);
 
   let phase = $derived(store.player?.phase ?? "idle");
+  let paused = $derived(store.player?.paused ?? false);
   let auditioning = $derived(store.player?.auditioning ?? false);
 
-  // No start mode here: idle/starting/failed/disconnected keep the bar
-  // hidden. Pause/resume/skip enablement matches Transport otherwise.
-  let active = $derived(
-    !auditioning && (phase === "playing" || phase === "paused" || phase === "stalled"),
+  let mode = $derived(resolvePrimaryMode(phase, paused, auditioning));
+  let primaryLabel = $derived(mode === "resume" ? "▶" : "⏸");
+  let primaryDisabled = $derived(mode === "off" || primaryBusy || auditioning);
+  let nextEnabled = $derived(
+    canSkipNext(phase, auditioning, store.queue?.reserved_prepared ?? false),
   );
-  let show = $derived(!transportVisible && active);
-
-  let primaryMode = $derived(
-    phase === "paused" ? "resume" : phase === "playing" || phase === "stalled" ? "pause" : "off",
-  );
-  let primaryLabel = $derived(primaryMode === "resume" ? "▶" : "⏸");
-  let primaryDisabled = $derived(primaryMode === "off" || primaryBusy || auditioning);
-  let nextDisabled = $derived(!active || nextBusy);
+  let nextDisabled = $derived(!nextEnabled || nextBusy);
 
   async function onPrimaryClick() {
-    if (primaryBusy || primaryMode === "off") return;
+    if (primaryBusy || mode === "off") return;
     primaryBusy = true;
     try {
       await store.doTogglePause();
@@ -40,7 +37,7 @@
   }
 
   async function onNextClick() {
-    if (nextBusy || !active) return;
+    if (nextBusy || !nextEnabled) return;
     nextBusy = true;
     try {
       await store.doSkipNext();
@@ -58,10 +55,10 @@
     <button
       type="button"
       class="ctrl"
-      class:resume={primaryMode === "resume"}
+      class:resume={mode === "resume"}
       disabled={primaryDisabled}
       onclick={onPrimaryClick}
-      aria-label={primaryMode === "resume" ? "再開" : "一時停止"}
+      aria-label={mode === "resume" ? "再開" : "一時停止"}
     >{primaryLabel}</button>
     <button
       type="button"

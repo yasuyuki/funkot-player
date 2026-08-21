@@ -1,32 +1,28 @@
 #!/bin/sh
 # Install a build's APK onto the device that role is pinned to.
 #
-# There are two real devices for this project, and each is pinned to one
-# role because debug and release are signed with different keys: installing
-# the wrong role over the other fails with INSTALL_FAILED_UPDATE_INCOMPATIBLE,
-# and the only way out is `adb uninstall`, which wipes the app's data
-# (queue, analysis cache, hand-corrected bar counts) with it. This script
-# exists to make that mix-up impossible rather than merely documented.
+# debug and release are signed with different keys, so each role is pinned to
+# its own phone: installing the wrong role over the other fails with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE, and the only way out is `adb uninstall`,
+# which wipes the app's data (queue, analysis cache, hand-corrected bar counts)
+# with it. This script exists to make that mix-up impossible rather than merely
+# documented.
 #
-# The key is the device's serial (ro.serialno), not the address you connect
-# to. Wireless debugging's IP:port changes every time it is re-enabled, but
-# the serial is fixed to the hardware, so the address is taken as an argument
-# every time while the serial is checked against a fixed table below.
+# Which phone is in which role is a property of the machine, not of this
+# repository, so it is not recorded here -- `adb-device` owns that table and
+# this script asks it by role. Nothing about anyone's hardware belongs in a
+# public repo. Install adb-device from the android-device skill.
 #
+# The identity checked is the serial (ro.serialno). Wireless debugging's
+# IP:port changes every time it is re-enabled; the serial does not.
 set -eu
 
 cd "$(dirname "$0")/.."
 
-# Update this table if a device is replaced or a role is reassigned:
-ROLE_release_MODEL="Pixel 10 Pro"
-ROLE_release_SERIAL="57301FDCH008G0"
-ROLE_debug_MODEL="Pixel 8 Pro"
-ROLE_debug_SERIAL="39181FDJG008C5"
-
 usage() {
-    echo "usage: $0 <debug|release> <adb-address>" >&2
-    echo "  <adb-address> can also come from \$FUNKOT_ADB_ADDR" >&2
-    echo "  example: $0 debug 192.168.10.129:35555" >&2
+    echo "usage: $0 <debug|release> [adb-address]" >&2
+    echo "  the address is found automatically; pass one only to override" >&2
+    echo "  (\$FUNKOT_ADB_ADDR works too). See \`adb-device --help\`" >&2
 }
 
 ROLE=${1:-}
@@ -37,42 +33,55 @@ if [ -z "$ROLE" ]; then
     exit 1
 fi
 
+if ! command -v adb-device >/dev/null 2>&1; then
+    echo "adb-device is not on PATH" >&2
+    echo "it holds this machine's device table (which phone is 'debug', which" >&2
+    echo "is 'release') and finds them over wireless debugging. Install it from" >&2
+    echo "the android-device skill, or pass an address and set it up later." >&2
+    exit 1
+fi
+
+MODEL=$(adb-device --model "$ROLE") || { usage; exit 1; }
+SERIAL=$(adb-device --serial "$ROLE")
+
 case "$ROLE" in
     debug)
-        MODEL=$ROLE_debug_MODEL
-        SERIAL=$ROLE_debug_SERIAL
         APK="src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
         BUILD_CMD="./dev.sh npx tauri android build --debug --target aarch64"
         ;;
     release)
-        MODEL=$ROLE_release_MODEL
-        SERIAL=$ROLE_release_SERIAL
         APK="src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk"
         BUILD_CMD="./dev.sh npx tauri android build --target aarch64"
         ;;
     *)
-        echo "unknown role '$ROLE' (expected debug or release)" >&2
-        usage
+        # adb-device's table can name roles this project has no build for.
+        echo "no APK in this project for role '$ROLE' (expected debug or release)" >&2
         exit 1
         ;;
 esac
 
-if [ -z "$ADDR" ]; then
-    usage
-    exit 1
-fi
-
+# Check the APK before hunting for the device: a missing build is the common
+# mistake, and finding a phone first can cost minutes.
 if [ ! -f "$APK" ]; then
     echo "no $ROLE APK at $APK" >&2
     echo "build it first: $BUILD_CMD" >&2
     exit 1
 fi
 
-# One ./dev.sh call for connect + serial check + install: ADB=1 shares the
-# host's port 5037, and a second container's adb server fighting the first
-# looks like a device fault ("protocol fault (couldn't read status length)").
-# Every container also gets a fresh adb server, so connect has to happen here
-# too, not in a prior invocation.
+if [ -z "$ADDR" ]; then
+    ADDR=$(adb-device "$ROLE") || exit 1
+fi
+
+# One ./dev.sh call for connect + serial check + install. ADB=1 uses the
+# persistent adb server (funkot-player-adb); connect here is idempotent and
+# ensures ADDR is on that server's device list (wireless debugging's IP:port
+# changes when re-enabled), not because each invocation used to wipe the
+# server.
+#
+# The serial is re-checked here even though adb-device already matched it,
+# because an address given by hand skips that resolution entirely -- and this
+# check is the one thing standing between a slip of the finger and a wiped
+# phone.
 #
 # The block below is deliberately single-quoted: it is a script for the
 # container's shell, and $1..$5 there are its own positional params (bound

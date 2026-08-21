@@ -27,7 +27,10 @@ export interface AppDirs {
   music_dir_configurable: boolean;
 }
 
-/// Matches `TransitionInfo`.
+/// Matches `TransitionInfo`. `from` / `to` are absolute paths, matching
+/// `TrackRow.path`'s format (tracks can share a basename across
+/// subdirectories now that scanning is recursive, so a bare file name is not
+/// enough to identify one).
 export interface TransitionInfo {
   from: string;
   to: string;
@@ -35,7 +38,9 @@ export interface TransitionInfo {
   seconds_ago: number;
 }
 
-/// Matches `PlayerState`.
+/// Matches `PlayerState`. `now_playing` / `previous` are absolute paths,
+/// matching `TrackRow.path`'s format (see `TransitionInfo`'s doc comment for
+/// why a bare file name would not be enough).
 export interface PlayerState {
   phase: string;
   paused: boolean;
@@ -49,15 +54,19 @@ export interface PlayerState {
   duration_secs: number | null;
 }
 
-/// Matches `TrackRow`. Stage 1 only reads `name` / `title` / `artist`, but
-/// every field is declared so later stages do not have to touch this file.
+/// Matches `TrackRow`. `path` is the identity the UI keys on (basenames can
+/// collide across subdirectories now that scanning is recursive).
 export interface TrackRow {
   path: string;
-  name: string;
   title: string;
   artist: string;
   duration_secs: number | null;
   analyzed: boolean;
+  /// Effective Funkot flag. Unanalysed rows are `true` (not greyed); grey
+  /// with `analyzed && !is_funkot`.
+  is_funkot: boolean;
+  /// Human Funkot / non-Funkot label (`labels.json`). Unlabeled is `null`.
+  label: boolean | null;
   intro_bars: number | null;
   outro_structure_bars: number | null;
   outro_bars: number | null;
@@ -65,14 +74,17 @@ export interface TrackRow {
   outro_manual: boolean;
   intro_low_confidence: boolean;
   outro_low_confidence: boolean;
+  /// `history.json` last_played_ms; null when never heard.
+  played_at_ms: number | null;
 }
 
 export function appDirs(): Promise<AppDirs> {
   return invoke<AppDirs>("app_dirs");
 }
 
-/// Opens the Music folder on desktop (explorer / xdg-open) and always returns
-/// its absolute path. On Android the folder is not opened — toast the path.
+/// Opens the Music folder (explorer / open / xdg-open) and returns its
+/// absolute path. Desktop only: the UI hides the menu item on Android, where
+/// the folder cannot be opened at all (see `open_music_dir` in `lib.rs`).
 export function openMusicDir(): Promise<string> {
   return invoke<string>("open_music_dir");
 }
@@ -137,6 +149,10 @@ export interface QueueSnapshot {
   /// Seconds until the engine's automatic transition may begin, or `null`
   /// when unknown (stopped, auditioning, or no active deck).
   transition_in_secs: number | null;
+  /// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
+  folder_pos: number;
+  /// Folder-track count for this playback session. `0` before first start.
+  folder_len: number;
 }
 
 /// Matches `AnalysisProgress`. Emitted as `analysis-progress`; `row` is the
@@ -148,12 +164,41 @@ export interface AnalysisProgress {
   row: TrackRow;
 }
 
+/// Matches `LibraryScanProgress`. Emitted as `library-scan` while
+/// `refresh_library` walks the music folder and content-hashes each track.
+export interface LibraryScanProgress {
+  phase: "walking" | "hashing";
+  found: number;
+  done: number;
+}
+
 export function queueState(): Promise<QueueSnapshot> {
   return invoke<QueueSnapshot>("queue_state");
 }
 
 export function enqueue(path: string): Promise<number> {
   return invoke<number>("enqueue", { path });
+}
+
+/// Current `settings.json` `allow_non_funkot` (also drives the live gate).
+export function getAllowNonFunkot(): Promise<boolean> {
+  return invoke<boolean>("get_allow_non_funkot");
+}
+
+/// Persist and apply `allow_non_funkot`. Returns the saved value.
+export function setAllowNonFunkot(allow: boolean): Promise<boolean> {
+  return invoke<boolean>("set_allow_non_funkot", { allow });
+}
+
+/// Current `settings.json` `labeling_mode`.
+export function getLabelingMode(): Promise<boolean> {
+  return invoke<boolean>("get_labeling_mode");
+}
+
+/// Persist `labeling_mode`. Fixed at engine construction (no live switch) —
+/// takes effect from the next engine startup, not the running session.
+export function setLabelingMode(on: boolean): Promise<boolean> {
+  return invoke<boolean>("set_labeling_mode", { on });
 }
 
 // `index`/`from`/`to` below are indices into the *displayed* queue list
@@ -259,6 +304,40 @@ export function setBars(
   });
 }
 
+/// Matches `LabelStats`.
+export interface LabelStats {
+  labeled: number;
+  total: number;
+  funkot: number;
+  not_funkot: number;
+}
+
+/// Set or clear one track's human Funkot label. `verdict: null` clears it.
+export function setLabel(path: string, verdict: boolean | null): Promise<TrackRow> {
+  return invoke<TrackRow>("set_label", { path, verdict });
+}
+
+/// Label every supported track under `dir` (recursive). Returns how many were
+/// labeled, and arms `undoLastFolderLabel`.
+export function setFolderLabel(dir: string, verdict: boolean): Promise<number> {
+  return invoke<number>("set_folder_label", { dir, verdict });
+}
+
+/// Restore what the last `setFolderLabel` overwrote (single-shot). Returns how
+/// many tracks were restored; rejects with `"nothing to undo"` once consumed.
+export function undoLastFolderLabel(): Promise<number> {
+  return invoke<number>("undo_last_folder_label");
+}
+
+export function labelStats(): Promise<LabelStats> {
+  return invoke<LabelStats>("label_stats");
+}
+
+/// Wipe all labels and play history (and `BarOverride.funkot` mirrors).
+export function clearLabelsAndHistory(): Promise<void> {
+  return invoke<void>("clear_labels_and_history");
+}
+
 export function auditionTransition(
   fromPath: string,
   toPath: string,
@@ -293,4 +372,27 @@ export interface ShareFeedbackResult {
 /// return the staged path (desktop).
 export function shareFeedback(): Promise<ShareFeedbackResult> {
   return invoke<ShareFeedbackResult>("share_feedback");
+}
+
+/// Matches `ImportResult`.
+export interface ImportResult {
+  /** Files copied into `music_dir`. */
+  tracks: number;
+  /** Staged files whose extension is not one the engine can decode. */
+  skipped: number;
+  /** Staged files that passed the extension check but whose copy failed. */
+  failed: number;
+  /**
+   * `true` when `Import.kt` is still copying a share-sheet file into the
+   * staging dir. The caller should retry shortly rather than treat this
+   * drain as final — see `doTakePendingImport` in `state.svelte.ts`.
+   */
+  in_flight: boolean;
+}
+
+/// Drains files staged by the Android share sheet (`Import.kt`) into
+/// `music_dir`. Always `{ tracks: 0, skipped: 0, failed: 0, in_flight: false }`
+/// on desktop, since nothing ever stages anything there.
+export function takePendingImport(): Promise<ImportResult> {
+  return invoke<ImportResult>("take_pending_import");
 }

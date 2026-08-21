@@ -14,20 +14,30 @@
 #   ./dev.sh cargo test --manifest-path src-tauri/Cargo.toml
 #
 # ADB=1 additionally shares the host network, for talking to a device over
-# wireless debugging:
+# wireless debugging. It first ensures the persistent adb server container
+# (`funkot-player-adb`, via ./scripts/adb-server.sh start) is running, then
+# runs as a client against that server on port 5037:
 #   ADB=1 ./dev.sh adb devices -l
+#
+# Connect once per session; later ADB=1 ./dev.sh adb ... calls reuse the same
+# device list. Multiple ADB=1 clients at once are fine (they share one server).
+# Commands that occupy the device (e.g. `android dev`) can still conflict with
+# each other. Do not `adb kill-server` casually — that stops the persistent
+# server; use ./scripts/adb-server.sh stop instead. Pairing keys live in the
+# funkot-player-android-home volume as before.
 #
 # Hot reload on the device needs BOTH --host 127.0.0.1 and adb reverse. Without
 # --host the Tauri CLI rewrites devUrl to WSL2's NAT address, which the phone
 # cannot reach, and the window comes up blank; setting TAURI_DEV_HOST first does
-# not help because the CLI overwrites it. 1421 is the HMR socket:
+# not help because the CLI overwrites it. 1421 is the HMR socket. If already
+# connected this session, the connect line can be omitted:
 #   ADB=1 ./dev.sh bash -c '
-#     adb connect <ip>:<port>
+#     adb connect <ip>:<port>   # skip if already connected
 #     adb reverse tcp:1420 tcp:1420; adb reverse tcp:1421 tcp:1421
 #     npx tauri android dev --host 127.0.0.1'
 # Note that `android dev` holds the device for as long as it runs, so nothing
-# else can use adb meanwhile -- to drive the UI yourself, install a debug APK
-# instead.
+# else can use that device meanwhile -- to drive the UI yourself, install a
+# debug APK instead.
 #
 # GUI=1 runs the desktop build on WSLg's display and sound card. --features
 # custom-protocol is what bakes dist/ into the binary; without it the build is a
@@ -60,6 +70,12 @@ if [ ! -d "$CORE_DIR/funkot-core" ]; then
     exit 1
 fi
 
+# A path dependency builds whatever is checked out over there, so the engine in
+# this build is decided by that tree's current state and nothing records it.
+# Say which one it was: -dirty means uncommitted engine changes are baked in,
+# and the describe relates it to the player/vX.Y.Z tags CI builds from.
+echo "engine: $(git -C "$CORE_DIR" describe --tags --always --dirty 2>/dev/null || echo '?') ($(git -C "$CORE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'))" >&2
+
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker build -t "$IMAGE" .
 fi
@@ -68,7 +84,12 @@ fi
 # gen/ and node_modules/ are written by the Tauri CLI on every build.
 CHOWN="chown -R \"\$HOST_UID:\$HOST_GID\" /work/funkot-player 2>/dev/null || true"
 
-[ "${ADB:-0}" = 1 ] && NET="--network host" || NET=""
+if [ "${ADB:-0}" = 1 ]; then
+    ./scripts/adb-server.sh start
+    NET="--network host"
+else
+    NET=""
+fi
 
 # GUI=1 runs the desktop build with a screen and a sound card: the X11 socket
 # and WSLg's PulseAudio socket are passed in, and cpal's ALSA host reaches the
@@ -87,6 +108,9 @@ if [ "${GUI:-0}" = 1 ]; then
         exit 1
     }
     mkdir -p "$PWD/.desktop-data/Music"
+    # Trixie zenity is GTK4. GSK's default GL/Vulkan path draws only the
+    # window chrome on WSLg; cairo is the software renderer. Do not put
+    # comments inside GUI_ARGS — it is word-split into docker argv.
     GUI_ARGS="--shm-size=1g
         -v /tmp/.X11-unix:/tmp/.X11-unix
         -v /mnt/wslg:/mnt/wslg
@@ -97,6 +121,7 @@ if [ "${GUI:-0}" = 1 ]; then
         -e PULSE_SERVER=unix:/mnt/wslg/PulseServer
         -e WEBKIT_DISABLE_COMPOSITING_MODE=1
         -e WEBKIT_DISABLE_DMABUF_RENDERER=1
+        -e GSK_RENDERER=cairo
         -e RUST_LOG=${RUST_LOG:-info}"
 fi
 

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { ui } from "./lib/ui.svelte";
   import { store } from "./lib/state.svelte";
+  import { sessionActive } from "./lib/transportMode";
+  import UiBoundary from "./components/UiBoundary.svelte";
   import NowCard from "./components/NowCard.svelte";
   import AuditionBanner from "./components/AuditionBanner.svelte";
   import TransitionStrip from "./components/TransitionStrip.svelte";
@@ -20,6 +22,15 @@
   let transportVisible = $state(true);
   let sentinelEl = $state<HTMLElement | null>(null);
 
+  /// Whether MiniBar is on screen. Derived here rather than inside MiniBar
+  /// because Toast docks on top of it and needs the same answer; the edit
+  /// tabs do not mount MiniBar at all, hence the mode test.
+  let miniBarVisible = $derived(
+    ui.mode === "play" &&
+      !transportVisible &&
+      sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false),
+  );
+
   $effect(() => {
     const el = sentinelEl;
     if (!el) return;
@@ -37,39 +48,92 @@
       void store.loadFlaggedTracks();
     }
   });
+
+  // Labeling shortcuts: F = Funkot (+skip when labeling mode on), J =
+  // non-Funkot (+skip when on), Space = skip only when labeling mode on.
+  // Disabled while typing in inputs (covers Library search). No toast on the
+  // keyboard path — click UI owns undo toasts.
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target;
+      if (
+        t instanceof HTMLInputElement ||
+        t instanceof HTMLTextAreaElement ||
+        t instanceof HTMLSelectElement ||
+        (t instanceof HTMLElement && t.isContentEditable)
+      ) {
+        return;
+      }
+      const key = e.key;
+      if (key === "f" || key === "F") {
+        e.preventDefault();
+        void store.doLabelAndSkip(true);
+      } else if (key === "j" || key === "J") {
+        e.preventDefault();
+        void store.doLabelAndSkip(false);
+      } else if (key === " " && store.labelingMode) {
+        e.preventDefault();
+        void store.doLabelAndSkip(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 </script>
 
 <div class="header">
   <h1 class="app-title">Funkot</h1>
-  <OverflowMenu />
+  <UiBoundary>
+    <OverflowMenu />
+  </UiBoundary>
 </div>
 
 {#if store.player?.auditioning}
-  <AuditionBanner />
+  <UiBoundary>
+    <AuditionBanner />
+  </UiBoundary>
 {:else}
-  <NowCard />
+  <UiBoundary>
+    <NowCard />
+  </UiBoundary>
 {/if}
 
 <div class="playback-blocks">
   <div class="transport-block">
-    <Transport />
+    <UiBoundary>
+      <Transport />
+    </UiBoundary>
     <!-- Tied to Transport, not the whole playback-blocks: scrolling transport
          away must still reveal MiniBar even when TransitionStrip follows. -->
     <div class="minibar-sentinel" bind:this={sentinelEl} aria-hidden="true"></div>
   </div>
   <div class="strip-block">
-    <TransitionStrip />
+    <UiBoundary>
+      <TransitionStrip />
+    </UiBoundary>
   </div>
 </div>
 
-<Toast />
+<UiBoundary>
+  <Toast raised={miniBarVisible} />
+</UiBoundary>
 
-<LogView />
+<UiBoundary>
+  <LogView />
+</UiBoundary>
 
 {#if ui.mode === "play"}
-  <Queue />
-  <Library />
-  <MiniBar {transportVisible} />
+  <UiBoundary>
+    <Queue />
+  </UiBoundary>
+  <UiBoundary>
+    <Library />
+  </UiBoundary>
+  <UiBoundary>
+    <MiniBar show={miniBarVisible} />
+  </UiBoundary>
 {:else}
   <div class="subtabs" role="tablist" aria-label="編集サブタブ">
     <button
@@ -92,12 +156,18 @@
 
   {#if ui.editSub === "flags"}
     {#if ui.flaggedDetailKey}
-      <FlaggedDetail />
+      <UiBoundary>
+        <FlaggedDetail />
+      </UiBoundary>
     {:else}
-      <FlaggedList />
+      <UiBoundary>
+        <FlaggedList />
+      </UiBoundary>
     {/if}
   {:else}
-    <AllTracks />
+    <UiBoundary>
+      <AllTracks />
+    </UiBoundary>
   {/if}
 {/if}
 

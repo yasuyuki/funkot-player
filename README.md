@@ -67,6 +67,15 @@ Linux: folder picking needs xdg-desktop-portal and a matching backend
 it the dialog may not open and the app only shows that nothing changed
 (zenity may be used as a fallback).
 
+**⋮ → 音楽フォルダを変更** で別のフォルダを指定できる（Windows/Mac/Linux のみ。
+Android は不可）。変更してもファイルは移動されない。解析結果と手動補正は内容
+ハッシュ管理なので同じファイルなら引き継がれる。自動選曲への反映は再起動後。
+
+Linux: 音楽フォルダの選択には xdg-desktop-portal と対応バックエンド
+（xdg-desktop-portal-gtk など）が要る。Flatpak/snap では自動的に揃う。無い環境
+では選択ダイアログが開かず「変更しませんでした」とだけ表示される（zenity が
+あればそれが代わりに使われる）。
+
 Privacy policy (Store): [docs/privacy.md](docs/privacy.md) /
 https://yasuyuki.github.io/funkot-player/privacy.html
 Store publishing checklist: [docs/store-submission.md](docs/store-submission.md).
@@ -75,9 +84,29 @@ To send feedback, use **⋮ → 意見を送る** — on Windows this saves a ZI
 shows its path (there is no system share sheet). Attach that file in email or
 chat.
 
-## Adding tracks (USB)
+## Adding tracks (Android)
 
-The app plays from its own Music folder. On a Pixel / stock Android device:
+### Share them to the app (no cable)
+
+Share the track files to **Funkot** from anywhere on the phone — a file
+manager, Google Drive, LINE, or a Quick Share transfer that just arrived from
+a PC. The app copies them into its Music folder and rescans on its own; there
+is no folder to find and nothing to press afterwards.
+
+This is how to get tracks across from a PC without a cable: send them to the
+phone by whatever you already use (Quick Share for Windows, Drive, email),
+then share them from the phone's Downloads into Funkot. Multi-select works.
+
+The share sheet offers Funkot for anything the system calls `audio/*`, which
+is wider than what the engine can decode — only `.wav` / `.mp3` / `.flac` /
+`.m4a` / `.ogg` are taken, and the app says so when it drops the rest. Some
+apps send audio as `application/octet-stream`; Funkot does not appear in the
+share sheet for those.
+
+### Or copy over USB
+
+The app also plays whatever is dropped straight into its Music folder. On a
+Pixel / stock Android device:
 
 ```
 phone → Android → data → jp.hatsuboshi.funkotplayer → files → Music
@@ -97,8 +126,12 @@ phone → Android → data → jp.hatsuboshi.funkotplayer → files → Music
 5. **In the app**, press **開始** the first time, or **⋮ → 再スキャン** after
    adding more tracks.
 
-Only the music shows up over MTP. Queue, analysis cache, and your bar-count
-corrections stay on the phone.
+Some devices hide `Android/data` from MTP entirely; on those, sharing is the
+only route. Only the music shows up over MTP either way — queue, analysis
+cache, and your bar-count corrections stay on the phone.
+
+Bulk / resume-safe push from WSL over wireless adb (hundreds of tracks): see
+[docs/adb-music-transfer.md](docs/adb-music-transfer.md).
 
 ## Using the app
 
@@ -114,8 +147,9 @@ corrections stay on the phone.
   folder is configured yet (Windows/Mac/Linux only). Files are not moved.
 - **⋮ → Musicフォルダを変更** — pick a different folder after one is set
   (desktop only). Analysis and manual corrections carry over by content hash.
-- **⋮ → Musicフォルダを開く** — open the current Music folder (desktop) or
-  show its path (Android toast). Hidden on desktop until a folder is chosen.
+- **⋮ → Musicフォルダを開く** — open the current Music folder (desktop).
+  Hidden until a folder is chosen, and hidden on Android (`Android/data` is
+  not reachable from a file manager).
 - **⋮ → 意見を送る** — share a small ZIP of your corrections. Android opens
   the system share sheet; Windows saves the ZIP and shows its path.
 - **⋮ → ログを表示** — diagnostic log for troubleshooting.
@@ -166,9 +200,35 @@ Release (signed; needs `src-tauri/gen/android/keystore.properties` +
 `.secrets/upload-keystore.jks`, both gitignored):
 
 ```sh
+./scripts/check-release-invariants.sh                 # see Invariant checks
 ./dev.sh npx tauri android build --target aarch64
 # → src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
+
+### Invariant checks
+
+```sh
+./scripts/check-release-invariants.sh
+```
+
+No Docker and no toolchain. CI runs it on every push
+(`.github/workflows/checks.yml`); run it yourself before building a release
+APK, because that build happens locally and never passes through CI.
+
+It exists for one shape of bug: **release-only, silent, and invisible to debug
+testing.** `isMinifyEnabled` is false for debug and true for release, so
+anything R8 shrinks away keeps working in every on-device check made with a
+debug APK, and no warning is printed at build time either. `Import.hasInFlight`
+shipped that way — share-sheet import was dead in every release build for as
+long as the feature existed, and nothing short of installing a release APK
+would have shown it.
+
+**When a bug turns out to have that shape, add a check to that script rather
+than only fixing the bug.** A rule that lives in a code comment gets skipped by
+the next person who adds a class; one that lives in the script cannot be. New
+checks go in as a `check_*` function called from the list at the bottom of the
+file. Keep the script toolchain-free: the moment it needs a build, it stops
+running on every push.
 
 ### Shipping a GitHub Release
 
@@ -196,33 +256,39 @@ by Smart App Control.
 Review assets on the draft, then **Publish release** (Android). Submit MSIX via
 Partner Center separately.
 
-Install and run on a device over wireless debugging:
+Install and run on a device over wireless debugging. Development uses two
+phones, one per role: `debug` and `release` are signed with different keys, so
+installing one over the other fails and forces a data-wiping `adb uninstall`.
+
+Devices are addressed by role, never by address. Which phone fills which role
+is a property of your machine, so it is configured there rather than in this
+repository — see `adb-device`, which finds whatever IP and port wireless
+debugging is using today and verifies the device's serial before handing it
+back:
+
+```sh
+adb-device                                            # roles, and where they are
+ADDR=$(adb-device debug)
+ADB=1 ./dev.sh adb -s "$ADDR" logcat -s funkot
+./scripts/install-apk.sh debug                        # finds the phone itself
+./scripts/install-apk.sh release
+```
+
+`install-apk.sh` refuses to install unless the serial it finds matches the role
+you asked for. Pass an address only to override the search
+(`./scripts/install-apk.sh debug <ip>:<port>`, or `$FUNKOT_ADB_ADDR`).
+
+Pairing is the one step that still needs the phone in your hand — the code and
+the pairing port are only on its Wireless debugging screen, and the pairing
+port is not the connect port:
 
 ```sh
 ADB=1 ./dev.sh adb pair <ip>:<pair-port> <code>       # once per device
-ADB=1 ./dev.sh adb connect <ip>:<connect-port>
-ADB=1 ./dev.sh adb install -r \
-    src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
-ADB=1 ./dev.sh adb logcat -s funkot
 ```
 
-The connect port differs from the pairing port; both are on the device's
-Wireless debugging screen.
-
-This project has two physical devices, each pinned to one role (debug and
-release are signed with different keys, so installing the wrong role over
-the other fails and forces a data-wiping `adb uninstall`). Use
-`scripts/install-apk.sh` instead of a raw `adb install` — the wireless
-debugging address changes every time it is re-enabled, but each device's
-`ro.serialno` does not, so the script connects to whatever address you give
-it and refuses to install unless the serial it finds there matches the role
-you asked for:
-
-```sh
-./scripts/install-apk.sh debug <ip>:<connect-port>
-./scripts/install-apk.sh release <ip>:<connect-port>
-# or: FUNKOT_ADB_ADDR=<ip>:<connect-port> ./scripts/install-apk.sh debug
-```
+`ADB=1` starts the persistent adb server (`./scripts/adb-server.sh start`) if
+needed. Stop it with `./scripts/adb-server.sh stop` (avoid `adb kill-server` —
+it tears down that persistent server).
 
 ### Running the desktop build
 
@@ -245,9 +311,13 @@ GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
   Wayland the window cannot be driven or captured from a second container;
   on X11 `xdotool` and `import` both work, and both are in the image:
   ```sh
-  ./dev.sh sh -c 'w=$(xdotool search --name "^funkot-player$" | tail -1);
-      xdotool mousemove --window $w 210 40 click 1'   # window-relative
+  GUI=1 ./dev.sh sh -c 'w=$(xdotool search --onlyvisible --name "^Funkot$" | tail -1);
+      xdotool windowactivate --sync "$w";
+      xdotool mousemove --sync --window "$w" 137 197 click 1'   # 「開始」@420x760
   ```
+  Search by `productName` (`Funkot`) or `--class funkot-player` — not the
+  binary name as `--name`. Use XTEST (`click` / `mousedown` without
+  `--window`); `click --window ID` is XSendEvent and GTK/WebKit ignore it.
   Screen-absolute coordinates are the wrong tool: the window manager offsets
   the frame, so `mousemove --window` is what lands on the button.
 - `⏸` and `⏭` come out as tofu in the container — it ships no font covering
@@ -279,15 +349,26 @@ Docker volume. Deleting it means re-pairing *and* a new signing key, which turns
 the next `adb install -r` into `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
 
 - **Finding the device.** Both its IP (DHCP) and its wireless-debugging port
-  change. mDNS does not cross the container boundary, so scan for it:
-  `nmap -sn 192.168.10.0/24`, then `nmap -Pn -p 1024-65535 --open -T4 <ip>`.
-  Several ports answer; only one of them is adb, the rest go `offline` on
-  `adb connect`. Do not narrow the range — ports above 50000 are common.
-- **Never run two `ADB=1 ./dev.sh` at once.** `--network host` means every
-  container shares the host's port 5037, and the adb servers fight. The symptom
-  is `protocol fault (couldn't read status length)`, which looks like a device
-  fault but is self-inflicted. Note also that each container gets a *fresh* adb
-  server, so every invocation must `adb connect` again.
+  change, so `adb-device <role>` rediscovers them from the serial rather than
+  anyone writing an address down. It tries the adb server's device list, then
+  the address it remembered last time (cached under `~/.cache`), then mDNS —
+  and verifies the serial before believing any of them.
+  **mDNS is the slow path**: after a cold adb server one phone here showed up in
+  about a second and the other took ~90 s, which is why the remembered address
+  is tried first and why the mDNS wait is generous (`ADB_DEVICE_WAIT`).
+  Discovery runs in the adb *server*, so it only works at all because that
+  server now has its own long-lived container — a server that dies with each
+  command never finishes discovering.
+- **Persistent adb server.** Wireless clients share `funkot-player-adb`
+  (`./scripts/adb-server.sh`), which holds port 5037 on the host network.
+  Multiple `ADB=1 ./dev.sh` clients at once are fine once the server is up;
+  connect once per session and later invocations keep the same device list.
+  (Two cold starts racing to create the container are handled, but prefer a
+  single `./scripts/adb-server.sh start` first.) Commands that occupy the
+  device (e.g. `android dev`) can still conflict with each other. Prefer
+  `./scripts/adb-server.sh stop` over `adb kill-server`. After rebuilding
+  `funkot-player-dev`, recreate the server container so it picks up the new
+  image: `./scripts/adb-server.sh stop && docker rm funkot-player-adb`.
 - **Every reconnect pops a heads-up notification** ("Wireless debugging
   connected") over the top of the screen, and it eats taps aimed at the controls
   underneath — the tap opens Developer options instead, and the app looks
@@ -369,8 +450,48 @@ place it matters, but they are easy to undo by accident:
   `android.app.Application`'s and therefore the boot loader. Getting this wrong
   costs the notification, the foreground service and the MediaSession, while
   leaving playback itself working, so it is easy to miss.
+- **A class Rust reaches over JNI needs a `-keep` rule in
+  `gen/android/app/proguard-rules.pro`,** with `{ *; }` rather than a narrower
+  member list. `load_class` and `call_static_method` take strings, so R8 sees no
+  reference and shrinks or renames the class away in release, where
+  `isMinifyEnabled` is true — while debug, where it is false, goes on working.
+  A missing rule for `Import` is what left share-sheet import dead in every
+  release build. `./scripts/check-release-invariants.sh` diffs the two lists;
+  see [Invariant checks](#invariant-checks).
 - The Tauri CLI must be a **project-local** npm install. A global one makes the
   generated Gradle task run `node tauri` and fail to resolve it.
+- **Share-sheet import keeps no in-process queue.** `Import.kt` stages a file
+  as `<name>.part` and renames it once the copy finishes; the staging
+  directory's own contents are what `take_pending_import` walks. An in-memory
+  list of "what was staged" looks simpler and is wrong twice over: it drops a
+  file that finishes copying between a status check and the read, and it
+  strands one permanently if the process dies before the read — the list does
+  not survive a restart, but the file on disk does.
+- **`Import.hasInFlight()` must be read *before* that walk, never after.**
+  Read after, a copy that lands between the walk and the read reports
+  `in_flight: false`, so the frontend never looks again — and post-cold-start
+  the `visibilitychange` path does not fire either, so the share is lost.
+- **`MainActivity.onCreate` guards on `savedInstanceState == null`.** A
+  configuration change this Activity does not declare in `android:configChanges`
+  (a system font-size change is enough) re-runs `onCreate` with the same
+  `ACTION_SEND` intent, and without the guard the file is imported twice.
+- **A hand-fired `ACTION_SEND` needs the URI in `-d` as well as in the extra.**
+  `ActivityManager` only grants read access to URIs it finds in the intent's
+  data and `ClipData`; one that exists solely in `EXTRA_STREAM` gets no grant,
+  and `openInputStream` then fails with `SecurityException` — the app opens and
+  silently imports nothing. Real senders avoid this because `startActivity`
+  runs `Intent.migrateExtraStreamToClipData()` in the *sending* process. So a
+  test intent has to name the URI twice:
+
+  ```
+  adb shell am start -a android.intent.action.SEND -t audio/mpeg \
+    -n jp.hatsuboshi.funkotplayer/.MainActivity --grant-read-uri-permission \
+    -d content://media/external/audio/media/<id> \
+    --eu android.intent.extra.STREAM content://media/external/audio/media/<id>
+  ```
+
+  `am` has no option that builds an `ArrayList<Uri>`, so `ACTION_SEND_MULTIPLE`
+  cannot be fired this way at all — it has to come from a real share sheet.
 
 ## Licence
 

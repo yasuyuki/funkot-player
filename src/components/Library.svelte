@@ -12,6 +12,7 @@
   let setMusicBusy = $state(false);
 
   let analysis = $derived(store.analysis);
+  let libraryScan = $derived(store.libraryScan);
   let libraryEmpty = $derived(store.libraryList.length === 0);
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
   let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
@@ -25,7 +26,7 @@
 
   function matches(row: TrackRow, q: string): boolean {
     if (!q) return true;
-    const hay = `${row.title}\n${row.artist}\n${row.name}`.toLowerCase();
+    const hay = `${row.title}\n${row.artist}\n${store.relName(row.path)}`.toLowerCase();
     return hay.includes(q);
   }
 
@@ -56,6 +57,14 @@
       delete next[path];
       busy = next;
     }
+  }
+
+  function isNonFunkot(row: TrackRow): boolean {
+    return row.analyzed && !row.is_funkot;
+  }
+
+  function addDisabled(row: TrackRow): boolean {
+    return !!busy[row.path] || (isNonFunkot(row) && !store.allowNonFunkot);
   }
 
   /// Error code (`set_music_dir`) → Japanese toast text. Keep in sync with
@@ -131,6 +140,15 @@
     </button>
   </div>
 
+  {#if libraryScan}
+    <p class="progress">
+      {#if libraryScan.phase === "walking"}
+        スキャン中…
+      {:else}
+        スキャン中 {libraryScan.found}曲を確認中 {libraryScan.done}/{libraryScan.found}
+      {/if}
+    </p>
+  {/if}
   {#if analysis}
     <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
   {/if}
@@ -152,28 +170,34 @@
   {:else if libraryEmpty}
     <div class="empty">
       <p class="empty-title">曲がありません</p>
-      <div class="empty-actions">
-        {#if musicDirConfigurable}
-          <button
-            type="button"
-            class="set-music"
-            disabled={setMusicBusy}
-            onclick={onSetMusicDir}
-          >Musicフォルダを選ぶ</button>
-        {/if}
+      <!-- Desktop only, same platform test as OverflowMenu's folder items:
+           Android's music folder is under `Android/data`, which no file
+           manager has been able to reach since Android 11, so `open_music_dir`
+           can only report the path there. Store requirement 10.1.2.10 is a
+           Microsoft Store rule, so hiding the button on Android costs nothing;
+           the path stays visible in ⋮ → ログを表示 (see LogView). -->
+      {#if musicDirConfigurable}
+        <p class="empty-hint">
+          Musicフォルダを開いて音声ファイルを入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。
+        </p>
         <button
           type="button"
           class="open-music"
           disabled={openMusicBusy}
           onclick={onOpenMusicDir}
         >Musicフォルダを開く</button>
-      </div>
+      {:else}
+        <p class="empty-hint">
+          音声ファイルをMusicフォルダへ入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。
+          フォルダの場所は ⋮ メニューの「ログを表示」に出ます。
+        </p>
+      {/if}
     </div>
   {:else}
     <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->
     <ul class="list">
       {#each rows as row (row.path)}
-        <li class="row">
+        <li class="row" class:non-funkot={isNonFunkot(row)}>
           <div class="text">
             <div class="title">{row.title}</div>
             <div class="sub">
@@ -185,7 +209,7 @@
           <button
             type="button"
             class="add"
-            disabled={!!busy[row.path]}
+            disabled={addDisabled(row)}
             onclick={() => onAdd(row.path)}
             aria-label={`${row.title} をキューに追加`}
           >+</button>
@@ -255,10 +279,15 @@
   }
 
   .empty-title {
-    margin: 0 0 var(--space-md);
+    margin: 0 0 var(--space-sm);
     font-size: var(--font-size-md);
     font-weight: 600;
     color: var(--color-text);
+  }
+
+  .empty-hint {
+    margin: 0 0 var(--space-md);
+    line-height: 1.4;
   }
 
   .empty-actions {
@@ -284,7 +313,6 @@
     color: var(--color-transport-secondary-text);
   }
 
-  .set-music:disabled,
   .open-music:disabled {
     background: var(--color-transport-disabled-bg);
     color: var(--color-transport-disabled-text);
@@ -302,6 +330,11 @@
     gap: var(--space-md);
     height: var(--library-row-height);
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .row.non-funkot {
+    opacity: 0.45;
+    color: var(--color-text-dim);
   }
 
   .text {

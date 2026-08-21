@@ -32,6 +32,13 @@
       : 0,
   );
 
+  let nowPath = $derived(store.player?.now_playing ?? null);
+  let nowRow = $derived(nowPath ? store.trackForPath(nowPath) : undefined);
+  let shownFunkot = $derived(
+    nowRow ? (nowRow.label ?? nowRow.is_funkot) : null,
+  );
+  let labelProgress = $derived(store.labelProgress);
+
   // `lastError` is included, not just `phase === "failed"`, because the
   // always-on `#log` from legacy/index.html is gone (behind the ⋮ menu
   // now): without this an `invoke` failure that does not also flip the
@@ -44,6 +51,7 @@
     store.lastError !== null && store.lastError.includes("need >= 2 tracks"),
   );
   let openMusicBusy = $state(false);
+  let labelBusy = $state(false);
 
   async function onOpenMusicDir() {
     if (openMusicBusy) return;
@@ -57,15 +65,43 @@
       openMusicBusy = false;
     }
   }
+
+  async function onToggleLabel() {
+    if (labelBusy || !nowPath || !nowRow || shownFunkot === null) return;
+    labelBusy = true;
+    const prevLabel = nowRow.label;
+    const next = !shownFunkot;
+    try {
+      const updated = await store.doSetLabel(nowPath, next);
+      if (!updated) return;
+      toast.show(next ? "Funkot に登録" : "非Funkot に登録", async () => {
+        const restored = await store.doSetLabel(nowPath!, prevLabel);
+        return restored !== null;
+      });
+    } finally {
+      labelBusy = false;
+    }
+  }
 </script>
 
 <div class="now-card">
-  <span class="badge" class:idle={phase === "idle"} class:starting={phase === "starting"}
-    class:playing={phase === "playing"} class:paused={phase === "paused"}
-    class:stalled={phase === "stalled"} class:failed={phase === "failed"}
-    class:disconnected={phase === "disconnected"}>
-    {phaseLabel}
-  </span>
+  <div class="badge-row">
+    <span class="badge" class:idle={phase === "idle"} class:starting={phase === "starting"}
+      class:playing={phase === "playing"} class:paused={phase === "paused"}
+      class:stalled={phase === "stalled"} class:failed={phase === "failed"}
+      class:disconnected={phase === "disconnected"}>
+      {phaseLabel}
+    </span>
+    {#if nowRow && shownFunkot !== null}
+      <button
+        type="button"
+        class="label-toggle"
+        disabled={labelBusy}
+        onclick={onToggleLabel}
+      >{shownFunkot ? "Funkot" : "非Funkot"}</button>
+    {/if}
+    <span class="progress">{labelProgress.current} / {labelProgress.total}</span>
+  </div>
 
   <!-- Reserved height on the title/artist block: the title/artist arrive a
        poll cycle after the phase does (they come from `now_playing` + a
@@ -107,10 +143,17 @@
     margin-bottom: var(--space-md);
   }
 
+  .badge-row {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-sm);
+  }
+
   .badge {
     display: inline-block;
     font-size: var(--font-size-sm);
-    margin-bottom: var(--space-sm);
   }
   .badge.idle { color: var(--color-status-idle); }
   .badge.starting { color: var(--color-status-starting); }
@@ -119,6 +162,24 @@
   .badge.stalled { color: var(--color-status-stalled); }
   .badge.failed { color: var(--color-status-failed); }
   .badge.disconnected { color: var(--color-status-disconnected); }
+
+  .label-toggle {
+    width: auto;
+    font-size: var(--font-size-sm);
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    color: var(--color-link);
+    text-decoration: underline;
+    border-radius: 0;
+  }
+
+  .progress {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-dim);
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+  }
 
   .title-block {
     /* Two lines' worth of reserved height -- see the comment in the markup. */

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
-
-  type PrimaryMode = "start" | "pause" | "resume" | "off";
+  import { primaryMode as resolvePrimaryMode, canSkipNext } from "../lib/transportMode";
 
   // Every command round-trips through the host, and `start`/`toggle_pause`
   // touch the filesystem or the audio thread; without a busy guard a second
@@ -12,32 +11,22 @@
   let nextBusy = $state(false);
 
   let phase = $derived(store.player?.phase ?? "idle");
+  let paused = $derived(store.player?.paused ?? false);
   let auditioning = $derived(store.player?.auditioning ?? false);
 
-  // Mirrors legacy/index.html's `applyPhase`: idle→開始, playing/stalled→
-  // 一時停止, paused→再開; starting/failed/disconnected leave the button off.
-  let primaryMode: PrimaryMode = $derived(
-    auditioning
-      ? "off"
-      : phase === "idle"
-        ? "start"
-        : phase === "playing" || phase === "stalled"
-          ? "pause"
-          : phase === "paused"
-            ? "resume"
-            : "off",
-  );
+  // Mapping lives in transportMode.ts (paused flag, not phase alone).
+  let mode = $derived(resolvePrimaryMode(phase, paused, auditioning));
 
   // ⏸ comes out as Android's colour emoji tile (orange, on the green button)
   // while ▶ and ⏭ get the monochrome text glyph. U+FE0E does not override it
   // — tried on the device — so fixing it needs a different glyph or an inline
   // SVG; left for stage 5 rather than spent a build cycle on here.
   let primaryLabel = $derived(
-    primaryMode === "start"
+    mode === "start"
       ? "開始"
-      : primaryMode === "pause"
+      : mode === "pause"
         ? "⏸ 一時停止"
-        : primaryMode === "resume"
+        : mode === "resume"
           ? "▶ 再開"
           : "開始",
   );
@@ -49,13 +38,13 @@
   // like it would retry -- see legacy/index.html's `applyPhase` comment,
   // which this rule is carried over from unchanged.
   let primaryDisabled = $derived(
-    primaryMode === "off" ||
+    mode === "off" ||
       primaryBusy ||
-      (primaryMode === "start" && !store.canStart),
+      (mode === "start" && !store.canStart),
   );
 
   let nextEnabled = $derived(
-    !auditioning && (phase === "playing" || phase === "paused" || phase === "stalled"),
+    canSkipNext(phase, auditioning, store.queue?.reserved_prepared ?? false),
   );
   let nextDisabled = $derived(!nextEnabled || nextBusy);
 
@@ -63,9 +52,9 @@
     if (primaryBusy) return;
     primaryBusy = true;
     try {
-      if (primaryMode === "start") {
+      if (mode === "start") {
         await store.doStart();
-      } else if (primaryMode === "pause" || primaryMode === "resume") {
+      } else if (mode === "pause" || mode === "resume") {
         await store.doTogglePause();
       }
     } finally {
@@ -88,7 +77,7 @@
   <button
     type="button"
     class="primary"
-    class:resume={primaryMode === "resume"}
+    class:resume={mode === "resume"}
     disabled={primaryDisabled}
     onclick={onPrimaryClick}
   >

@@ -1,6 +1,6 @@
 [package]
 name = "funkot-player"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 license = "MIT"
 description = "Auto-DJ music player for Funkot, built on funkot-core"
@@ -22,7 +22,9 @@ tauri-build = { version = "2", features = [] }
 custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `devtools` is the inspector API. We only *open* it in debug desktop
+# (see `run` setup). Release Store builds must not auto-open it.
+tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 cpal = "0.18"

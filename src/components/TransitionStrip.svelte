@@ -23,8 +23,8 @@
   // skip reads as "this is what would be flagged", not as an error.
   let flagEnabled = $derived(transition !== null && !auditioning);
 
-  let fromTitle = $derived(transition ? store.titleFor(transition.from) : "");
-  let toTitle = $derived(transition ? store.titleFor(transition.to) : "");
+  let fromTitle = $derived(transition ? store.titleForPath(transition.from) : "");
+  let toTitle = $derived(transition ? store.titleForPath(transition.to) : "");
 
   function formatAgo(secondsAgo: number): string {
     const s = Math.max(0, Math.floor(secondsAgo));

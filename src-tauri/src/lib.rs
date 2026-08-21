@@ -7,17 +7,11 @@ mod queue;
 mod store;
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::formats::probe::Hint;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataOptions, StandardTag};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use funkot_core::engine::{
@@ -55,6 +49,57 @@ static PLAYBACK: OnceLock<Playback> = OnceLock::new();
 /// that runs before either has (there should be none, but nothing enforces
 /// it) finds this empty and just skips saving; see `persist_session`.
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Live copy of `settings.json`'s `allow_non_funkot`. Folder drain reads this
+/// on the loader thread; `set_allow_non_funkot` updates it without restart.
+static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(false);
+
+/// Labeling mode's head window length (seconds), input-side, per the
+/// confirmed design: kept at the same 20s already used for the first-live
+/// preview.
+const LABELING_HEAD_SECS: f64 = 20.0;
+
+/// ラベリングモードの先読みは 20 秒 head を最大 `HEAD_ONLY_PREFETCH + 3` 本
+/// 同時に保持する（48 kHz ステレオ f32 で約 115 MB）。Android の予算ではない。
+/// ⋮ のトグルは `OverflowMenu.svelte` 側で隠すが、それは表示の話でしかない。
+/// これは `settings.json` に居座った `labeling_mode: true` が先読みを起動して
+/// しまわないための、唯一の実効的な関門。
+const LABELING_AVAILABLE: bool = !cfg!(target_os = "android");
+
+/// `settings.json`'s raw `labeling_mode` gated by platform availability. The
+/// mode is fixed at `Engine` construction (no live switch — see
+/// `EngineOptions::head_only_secs`), so this is the one place that decides
+/// whether a session actually runs with labeling prefetch on.
+fn effective_labeling_mode(setting: bool) -> bool {
+    setting && LABELING_AVAILABLE
+}
+
+#[cfg(test)]
+mod labeling_mode_tests {
+    use super::*;
+
+    #[test]
+    fn labeling_mode_is_desktop_only() {
+        assert!(!effective_labeling_mode(false));
+        #[cfg(not(target_os = "android"))]
+        assert!(effective_labeling_mode(true));
+        #[cfg(target_os = "android")]
+        assert!(!effective_labeling_mode(true));
+        // `LABELING_AVAILABLE` is the only gate: `true` gated by it must
+        // match `effective_labeling_mode(true)` exactly.
+        assert_eq!(effective_labeling_mode(true), LABELING_AVAILABLE);
+    }
+}
+
+/// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
+/// Written from `start_impl` before spawn and from the loader's
+/// `on_folder_pos` observer; read by `queue_state` for the labeling UI.
+static FOLDER_POS: AtomicUsize = AtomicUsize::new(0);
+
+/// Folder-track count for the current playback session (`paths.len()` at
+/// `start_impl`). Written before spawn so the UI does not flash `0/0`
+/// while Starting.
+static FOLDER_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// True while an audition `Engine` is installed in [`RenderState::audition`].
 /// `events_thread` uses this only to drop stale audition-tagged events after
@@ -210,12 +255,12 @@ fn pack_native_control_state(paused: bool, phase: Phase) -> i32 {
 /// Where the app keeps music, the analysis cache, and its own data, as
 /// absolute paths.
 ///
-/// `cache_dir` and `data_dir` always exist when this is returned. `music_dir`
-/// is empty (and not created) on desktop while `music_dir_needed` is `true`.
+/// Cache and data exist by the time this is returned. `music_dir` is empty
+/// (and not created) on desktop while `music_dir_needed` is `true`.
 #[derive(serde::Serialize, Clone, Debug)]
 struct AppDirs {
     /// Drop tracks here. On Android this is the app's external files dir, which
-    /// shows up over MTP so a PC can copy into it. On desktop this is empty
+    /// shows up over MTP so a PC can copy into it. Empty on desktop
     /// when `music_dir_needed` is `true` (no usable configured folder yet).
     music_dir: String,
     /// `EngineOptions::cache_dir`. Must be absolute: the default in funkot-core
@@ -519,127 +564,6 @@ mod music_dir_tests {
     }
 }
 
-/// Windows-only: seed two bundled demo WAVs into Music on first empty launch.
-/// Kept for tests / possible manual use; desktop startup no longer calls this
-/// (`music_dir_needed` requires an explicit folder pick instead).
-/// Failures are logged and ignored so directory resolution still succeeds.
-#[cfg(target_os = "windows")]
-#[allow(dead_code)]
-fn seed_demo_tracks_best_effort(music_dir: &Path, data_dir: &Path) {
-    const DEMO_01: &[u8] = include_bytes!("../resources/demo/01-demo.wav");
-    const DEMO_02: &[u8] = include_bytes!("../resources/demo/02-demo.wav");
-    match seed_demo_tracks_if_needed(
-        music_dir,
-        data_dir,
-        &[("01-demo.wav", DEMO_01), ("02-demo.wav", DEMO_02)],
-    ) {
-        Ok(true) => log::info!("seeded demo tracks into {}", music_dir.display()),
-        Ok(false) => {}
-        Err(e) => log::warn!("demo seed skipped: {e}"),
-    }
-}
-
-/// If `data_dir/demo_seeded` is absent and Music has zero supported tracks,
-/// write `demos` into Music and create the sentinel. Returns `Ok(true)` when
-/// both files and the sentinel were written. On mid-write failure, already
-/// written demo files are removed so a later launch can retry. Available
-/// under `cfg(test)` so non-Windows CI can exercise it.
-#[cfg(any(test, target_os = "windows"))]
-fn seed_demo_tracks_if_needed(
-    music_dir: &Path,
-    data_dir: &Path,
-    demos: &[(&str, &[u8])],
-) -> Result<bool, String> {
-    let sentinel = data_dir.join("demo_seeded");
-    if sentinel.exists() {
-        return Ok(false);
-    }
-    let track_count = match std::fs::read_dir(music_dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| is_supported_track(p))
-            .count(),
-        Err(e) => return Err(format!("cannot read {}: {e}", music_dir.display())),
-    };
-    if track_count > 0 {
-        return Ok(false);
-    }
-    // Roll back partial demo writes so a mid-loop failure cannot leave a
-    // single track behind (that would block retry: track_count > 0 and no
-    // sentinel, so Start still sees need >= 2).
-    let mut written: Vec<PathBuf> = Vec::new();
-    for (name, bytes) in demos {
-        let dest = music_dir.join(name);
-        if let Err(e) = std::fs::write(&dest, bytes) {
-            for w in &written {
-                let _ = std::fs::remove_file(w);
-            }
-            return Err(format!("cannot write {}: {e}", dest.display()));
-        }
-        written.push(dest);
-    }
-    if let Err(e) = std::fs::write(&sentinel, b"") {
-        for w in &written {
-            let _ = std::fs::remove_file(w);
-        }
-        return Err(format!("cannot create {}: {e}", sentinel.display()));
-    }
-    Ok(true)
-}
-
-#[cfg(test)]
-mod demo_seed_tests {
-    use super::*;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_pair() -> (PathBuf, PathBuf) {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("funkot-demo-seed-{stamp}"));
-        let music = root.join("Music");
-        let data = root.join("data");
-        fs::create_dir_all(&music).unwrap();
-        fs::create_dir_all(&data).unwrap();
-        (music, data)
-    }
-
-    #[test]
-    fn empty_music_seeds_two_tracks_and_sentinel() {
-        let (music, data) = temp_pair();
-        let demos: &[(&str, &[u8])] = &[
-            ("01-demo.wav", include_bytes!("../resources/demo/01-demo.wav")),
-            ("02-demo.wav", include_bytes!("../resources/demo/02-demo.wav")),
-        ];
-        assert_eq!(seed_demo_tracks_if_needed(&music, &data, demos).unwrap(), true);
-        assert!(data.join("demo_seeded").is_file());
-        assert!(music.join("01-demo.wav").is_file());
-        assert!(music.join("02-demo.wav").is_file());
-        let count = fs::read_dir(&music)
-            .unwrap()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| is_supported_track(p))
-            .count();
-        assert_eq!(count, 2);
-        // Sentinel present: do not seed again.
-        assert_eq!(seed_demo_tracks_if_needed(&music, &data, demos).unwrap(), false);
-        let _ = fs::remove_dir_all(music.parent().unwrap());
-    }
-
-    #[test]
-    fn existing_track_skips_seed() {
-        let (music, data) = temp_pair();
-        fs::write(music.join("already.wav"), b"RIFF").unwrap();
-        let demos: &[(&str, &[u8])] = &[("01-demo.wav", b"a"), ("02-demo.wav", b"b")];
-        assert_eq!(seed_demo_tracks_if_needed(&music, &data, demos).unwrap(), false);
-        assert!(!data.join("demo_seeded").exists());
-        assert!(!music.join("01-demo.wav").exists());
-        let _ = fs::remove_dir_all(music.parent().unwrap());
-    }
-}
-
 /// Runs `store::migrate_from` once per process rather than once per call.
 /// Only the first caller can find anything to move; the rest would race it and
 /// log a failure for a rename whose source another thread just consumed.
@@ -684,8 +608,15 @@ fn app_dirs(app: tauri::AppHandle) -> Result<AppDirs, String> {
 }
 
 /// Resolve (and create) the Music folder, open it on desktop, and return its
-/// absolute path. Android cannot reliably open an app-private folder in a
-/// file manager Intent, so it returns the path only for a UI toast.
+/// absolute path.
+///
+/// Desktop only in practice: the Android music folder sits under
+/// `Android/data`, which no file manager can reach since Android 11 (both
+/// `ACTION_VIEW` and `ACTION_OPEN_DOCUMENT_TREE` are refused there), so the
+/// UI hides the menu item and shows the path in the log panel instead. The
+/// Android arm is left as a path-returning no-op rather than an error: it
+/// stays honest if something else ever calls it, and the folder is created
+/// by `ensure_dirs` on every launch regardless.
 #[tauri::command(async)]
 fn open_music_dir(app: tauri::AppHandle) -> Result<String, String> {
     let dirs = resolve_dirs(&app)?;
@@ -893,8 +824,147 @@ fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> 
     }
 }
 
-/// Serialises writes under `data_dir` (`queue.json`, `flags.json`, and
-/// `session.json`).
+/// Outcome of [`take_pending_import`].
+#[derive(serde::Serialize, Clone, Debug, Default)]
+struct ImportResult {
+    /// Files copied into `music_dir`.
+    tracks: u32,
+    /// Staged files whose extension `is_supported_track` does not recognise.
+    skipped: u32,
+    /// Staged files that passed `classify_import` but whose copy into
+    /// `music_dir` failed (`copy_atomic`), plus URIs that failed even
+    /// earlier, during staging itself (`Import.kt`'s `onIntent` — see
+    /// `Import.takeFailed`), before a file ever reached this walk.
+    failed: u32,
+    /// `true` when `Import.kt` is still copying a file into the staging
+    /// dir. `Import.onIntent`'s copy runs on a background thread and this
+    /// command can easily win the race against it — a multi-MB share is
+    /// still copying by the time the cold-start `take_pending_import` call
+    /// runs. Without this, that call sees an empty (or partial) staging dir
+    /// and never retries: the app is already foregrounded by then, so the
+    /// `visibilitychange` path never fires again either, and the share is
+    /// silently lost. The frontend polls again shortly while this is `true`
+    /// (see `doTakePendingImport` in `state.svelte.ts`). Always `false` on
+    /// desktop.
+    in_flight: bool,
+}
+
+/// The receiving half of [`share_feedback`]'s ZIP-out path: walks files
+/// `Import.kt` staged from the system share sheet (`getCacheDir()/
+/// funkot-import/`, filled by `Import.onIntent` — see `AndroidManifest.xml`'s
+/// `ACTION_SEND` / `ACTION_SEND_MULTIPLE` intent filters) into `music_dir`.
+///
+/// Desktop is always a no-op: nothing ever stages anything there, since
+/// those intent filters only exist on Android.
+///
+/// The staging directory's actual contents are the source of truth here —
+/// there is deliberately no separate in-process queue of what was staged
+/// (an earlier version of this command had one; it could both drop a file
+/// that finished copying in the gap between a status check and the drain,
+/// and permanently strand one if the process died between the copy
+/// finishing and the next drain, since the queue does not survive a
+/// restart but the file on disk does).
+///
+/// Every staged file this walk actually looks at (i.e. not a `.part` still
+/// being written) is removed regardless of outcome — copied, skipped for an
+/// unsupported extension, or a failed copy — so `funkot-import/` never
+/// accumulates leftovers across calls.
+#[tauri::command(async)]
+fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = &app;
+        Ok(ImportResult::default())
+    }
+    #[cfg(target_os = "android")]
+    {
+        let dirs = resolve_dirs(&app)?;
+        let music_dir = Path::new(&dirs.music_dir);
+
+        // Read before the walk below, never after: `Import.kt` only ever
+        // creates a `<name>.part` file while a copy thread owns it, and
+        // renames it to its final name once the copy finishes. If a copy
+        // finishes *after* this read but the `<name>.part` -> `<name>` rename
+        // still lands inside the `read_dir` snapshot below, this being read
+        // first means it is still `true`, so the frontend retries and picks
+        // the file up on the next call. Reading it after the walk instead
+        // would let that same file slip through as `in_flight: false` with
+        // nothing telling the frontend to look again.
+        let in_flight = android_import_has_in_flight()?;
+
+        let staging_dir = android_cache_dir()?.join("funkot-import");
+
+        // Must be read after `in_flight` above, never before: an increment
+        // of `Import`'s `failed` counter always completes, inside the copy
+        // thread's loop, before that thread's `finally` decrements
+        // `inFlight`. So once `in_flight` reads `false`, every failure from
+        // that run is already reflected here. Reading this first instead
+        // risks a failure landing in between the two reads: `in_flight`
+        // would then still report `false` (nothing tells the frontend to
+        // poll again) while the failure that just happened is lost.
+        //
+        // Read after `android_cache_dir()?` above (rather than right after
+        // `in_flight`) so that if that call fails, this destructive read
+        // (see `Import.takeFailed`'s doc comment) never happens and the
+        // failure count survives to be picked up on the next poll instead
+        // of being reset and lost. A later `read_dir` I/O error below can
+        // still lose an already-taken count, but that path returns `Err`
+        // and surfaces to the frontend as `lastError`, unlike a silently
+        // dropped toast.
+        let failed = android_import_take_failed()?;
+
+        let mut result = ImportResult {
+            in_flight,
+            failed,
+            ..ImportResult::default()
+        };
+        let entries = match std::fs::read_dir(&staging_dir) {
+            Ok(entries) => entries,
+            // Nothing has ever been shared yet — not an error.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+            Err(e) => return Err(format!("cannot read {}: {e}", staging_dir.display())),
+        };
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("part") {
+                // A `.part` file only exists while `Import.onIntent`'s copy
+                // thread owns it (see `copy_atomic`'s Kotlin counterpart).
+                // `in_flight` was read above, before this snapshot, so `false`
+                // here means no such thread was running even before this walk
+                // started -- this one was abandoned (most likely the process
+                // died mid-copy) and will never be finished or claimed.
+                if !in_flight {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            match classify_import(&path, music_dir, |p| p.exists()) {
+                ImportDecision::Skip => result.skipped += 1,
+                ImportDecision::CopyTo(dest) => match copy_atomic(&path, &dest) {
+                    Ok(()) => result.tracks += 1,
+                    Err(e) => {
+                        result.failed += 1;
+                        log::warn!(
+                            "cannot import {} to {}: {e}",
+                            path.display(),
+                            dest.display()
+                        );
+                    }
+                },
+            }
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("cannot remove staged import {}: {e}", path.display());
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// Serialises writes under `data_dir` (`queue.json`, `flags.json`,
+/// `labels.json`, `history.json`, and `session.json`).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
 /// really do overlap — tapping ✕ on one row and ↑ on another in quick
@@ -916,6 +986,33 @@ static LAST_FLAG_UNDO: Mutex<Option<String>> = Mutex::new(None);
 
 /// Dismiss key last written by `dismiss_flags`, for a single-shot undo.
 static LAST_DISMISS_UNDO: Mutex<Option<String>> = Mutex::new(None);
+
+/// One track's label state as it stood immediately before a
+/// `set_folder_label` wrote over it. `None` means "there was no entry", which
+/// undo restores by removing rather than by writing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FolderLabelUndo {
+    hash: String,
+    label: Option<store::TrackLabel>,
+    funkot: Option<bool>,
+}
+
+/// What `set_folder_label` overwrote, for a single-shot undo — the bulk
+/// counterpart of [`LAST_FLAG_UNDO`].
+///
+/// The webview used to undo a folder label by replaying `set_label` once per
+/// track, which meant one round trip (and one `labels.json` + `library.json`
+/// rewrite) per track, and could only ever restore the rows the *listing*
+/// knew about. `set_folder_label` walks the folder on *disk*, so anything on
+/// disk but not yet in the listing was labeled and then left labeled.
+/// Snapshotting here keeps what undo touches identical to what the write
+/// touched.
+///
+/// In memory only. The 取消 that reaches this does not outlive the toast
+/// offering it, so there is nothing for a persisted token to be useful for,
+/// and a token reloaded next launch would name a folder that may since have
+/// changed on disk.
+static LAST_FOLDER_LABEL_UNDO: Mutex<Option<Vec<FolderLabelUndo>>> = Mutex::new(None);
 
 /// What the next launch will restore (see `store::Session`). Mutated by its
 /// three save sites directly (each takes only this mutex, the same pattern
@@ -1618,6 +1715,11 @@ static MAIN_FRAMES: AtomicU64 = AtomicU64::new(0);
 /// `RenderState` and `open_output_stream`'s `try_lock`.
 static NEXT_PREPARED: AtomicBool = AtomicBool::new(false);
 
+/// Analysis worker yields while this is true: set at Start (`Phase::Starting`),
+/// cleared in the cpal callback once the main engine's next slot is filled
+/// (`NEXT_PREPARED`). Atomic-only so the callback never takes a lock.
+static YIELD_FOR_LOADER: AtomicBool = AtomicBool::new(false);
+
 /// Mirrors `Engine::frames_until_transition()` for the main engine, same
 /// publish site and same audition-freezes caveat as `NEXT_PREPARED` above.
 /// `u64::MAX` is the sentinel for "unknown" (covers both `Engine`'s own
@@ -1750,14 +1852,21 @@ fn resolve_nav_origin() -> Origin {
     nav_origin(marked, now_ms())
 }
 
-/// Display name only — paths themselves stay in `NowTracker`, because the ⚑
-/// flag work (S5) needs to match on the path. MediaSession title/artist are
-/// resolved separately from embedded tags ([`session_metadata_for`]).
+/// Basename only: title fallback in [`session_metadata_for`] when tags are
+/// missing. Not used for anything that needs to identify a track uniquely —
+/// use [`path_str`] for that.
 fn file_name_str(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("?")
         .to_string()
+}
+
+/// UI-facing key for a track. Must stay in sync with `TrackRow::path` /
+/// `QueueSnapshot`'s `to_string_lossy().into_owned()`, since the frontend
+/// treats the two as the same map key.
+fn path_str(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// Raw embedded tags cached per path (probe once; sync/pause must not reopen).
@@ -1796,41 +1905,7 @@ fn session_metadata_for(now: Option<&Path>, tags: &CachedTags) -> (String, Strin
 }
 
 fn probe_tags_inner(path: &Path) -> Result<CachedTags, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let mut format = symphonia::default::get_probe()
-        .probe(
-            &hint,
-            mss,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        )
-        .map_err(|e| e.to_string())?;
-    let mut title = None;
-    let mut artist = None;
-    if let Some(rev) = format.metadata().skip_to_latest() {
-        for tag in &rev.media.tags {
-            match &tag.std {
-                Some(StandardTag::TrackTitle(s)) if title.is_none() => {
-                    let t = s.trim();
-                    if !t.is_empty() {
-                        title = Some(t.to_string());
-                    }
-                }
-                Some(StandardTag::Artist(s)) if artist.is_none() => {
-                    let a = s.trim();
-                    if !a.is_empty() {
-                        artist = Some(a.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    let (title, artist) = store::probe_audio_tags(path)?;
     Ok(CachedTags { title, artist })
 }
 
@@ -2021,6 +2096,33 @@ fn retire_in_flight_up_to(now: Option<&Path>) {
     persist_session();
 }
 
+/// Heard = this path just became `NowTracker::now`. No duration threshold
+/// (labeling skips too fast for one). Audition is not heard.
+fn record_heard(path: &Path) {
+    let Some(data_dir) = DATA_DIR.get() else {
+        log::warn!("record_heard: DATA_DIR not resolved yet");
+        return;
+    };
+    // Hash outside SAVE_LOCK (same as gated_non_funkot): index is read-only
+    // here — never save. Persist of hash-index is `refresh_library` only.
+    let mut index = store::load_hash_index(data_dir);
+    let hash = match store::resolve_content_hash(path, &mut index) {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!("record_heard: cannot hash {}: {e}", path.display());
+            return;
+        }
+    };
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut history = store::load_history(data_dir);
+    store::record_play(&mut history, &hash, now_ms());
+    if let Err(e) = store::save_history(data_dir, &history) {
+        log::warn!("cannot persist history: {e}");
+    }
+}
+
 fn events_thread(rx: Receiver<PlaybackEvent>) {
     for ev in rx {
         match ev {
@@ -2058,6 +2160,11 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 // Never for an audition event — see `retire_in_flight_up_to`.
                 if changed && !audition {
                     retire_in_flight_up_to(now_path.as_deref());
+                    // Interrupt fold assigned `now` — record heard (tracker
+                    // guard already dropped).
+                    if let Some(ref p) = now_path {
+                        record_heard(p);
+                    }
                 }
             }
             PlaybackEvent::Engine {
@@ -2080,6 +2187,10 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
                 if changed && !audition {
                     retire_in_flight_up_to(now_path.as_deref());
+                    // `on_track_started` assigned `now` (in_progress was none).
+                    if let Some(ref p) = now_path {
+                        record_heard(p);
+                    }
                 }
             }
             PlaybackEvent::Engine {
@@ -2104,6 +2215,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     let changed = tracker.now != before;
                     (completed, changed, tracker.now.clone())
                 };
+                let heard = completed.is_some() && !audition;
                 if let Some((from, to, origin)) = completed {
                     log::info!(
                         "transition: {} -> {} ({})",
@@ -2117,6 +2229,14 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
                 if changed && !audition {
                     retire_in_flight_up_to(now_path.as_deref());
+                }
+                // Record even when path is unchanged (same-track restart:
+                // `changed` is false but `now = to` was assigned). Skip
+                // no-op TransitionEnded (`completed` is None).
+                if heard {
+                    if let Some(ref p) = now_path {
+                        record_heard(p);
+                    }
                 }
             }
         }
@@ -2218,7 +2338,13 @@ fn open_output_stream(
                         // See `NEXT_PREPARED` / `FRAMES_UNTIL_TRANSITION`'s
                         // doc comments: atomic publish only, no lock, since
                         // this callback must never block on one.
-                        NEXT_PREPARED.store(engine.next_track_path().is_some(), Ordering::Relaxed);
+                        let next_ready = engine.next_track_path().is_some();
+                        NEXT_PREPARED.store(next_ready, Ordering::Relaxed);
+                        if next_ready {
+                            // First next-slot fill ends the Start→loader yield
+                            // window; analysis may resume. Atomic only.
+                            YIELD_FOR_LOADER.store(false, Ordering::Relaxed);
+                        }
                         FRAMES_UNTIL_TRANSITION.store(
                             engine.frames_until_transition().unwrap_or(u64::MAX),
                             Ordering::Relaxed,
@@ -2306,6 +2432,10 @@ fn audio_thread(
     // moves in here) rather than here, since the restored session's
     // `in_flight` it depends on lives there.
     folder_pos: usize,
+    // Already gated by `effective_labeling_mode` in `start_impl`. Fixed for
+    // the life of this `Engine` — there is no live switch (see
+    // `EngineOptions::head_only_secs`); changing it requires a restart.
+    labeling_mode: bool,
 ) {
     macro_rules! say {
         ($($a:tt)*) => {{ let m = format!($($a)*); log::info!("{m}"); let _ = log.send(m); }};
@@ -2359,6 +2489,7 @@ fn audio_thread(
     // reserved was already analyzed.
     let cache_dir_for_log = cache_dir.clone();
     options.cache_dir = cache_dir;
+    options.head_only_secs = labeling_mode.then_some(LABELING_HEAD_SECS);
 
     // `options.loop_playlist` is not set here: `Engine::new_with_source`
     // never reads it (only `Engine::new`'s internal `PlaylistSource` does).
@@ -2370,7 +2501,9 @@ fn audio_thread(
     // than from `queue_state` is what makes it survive backgrounding: that
     // command only runs while the webview is polling, and the whole point of
     // this app is to keep playing with the screen off.
-    let queue_dir = data_dir;
+    let queue_dir = data_dir.clone();
+    let cache_dir_for_skip = cache_dir_for_log.clone();
+    let data_dir_for_skip = data_dir;
     // Cloned before `queue` moves into `HostSource::new` below: the
     // `on_pending_consumed` closure needs its own handle so it can re-read
     // the queue under `SAVE_LOCK` (see the closure body).
@@ -2382,6 +2515,12 @@ fn audio_thread(
             pos: folder_pos,
         },
     )
+        .skip_folder_entry(Box::new(move |path| {
+            if ALLOW_NON_FUNKOT.load(Ordering::Relaxed) {
+                return false;
+            }
+            gated_non_funkot(path, &cache_dir_for_skip, &data_dir_for_skip)
+        }))
         .on_pending_consumed(Box::new(move |_pending| {
             // Ignore the slice this observer is handed — it is a snapshot
             // `HostSource::next` took *after releasing the queue lock*
@@ -2415,17 +2554,19 @@ fn audio_thread(
             }
         }))
         .on_reserved(Box::new(move |path| {
-            let name = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?")
-                .to_string();
-            let analysis = if analyzed_cache_entry(path, &cache_dir_for_log).is_some() {
+            let analysis = funkot_core::cache::content_hash(path)
+                .ok()
+                .and_then(|h| analyzed_cache_entry(&cache_dir_for_log, &h))
+                .is_some();
+            let analysis = if analysis {
                 "cached"
             } else {
                 "missing"
             };
-            log::info!("loader: preparing {name} (analysis: {analysis})");
+            log::info!(
+                "loader: preparing {} (analysis: {analysis})",
+                path.display()
+            );
             // Record this as in-flight the moment it leaves `pending` (or
             // the folder-drain fallback), so a process death before it ever
             // finishes playing does not lose it — see `store::Session` and
@@ -2441,6 +2582,9 @@ fn audio_thread(
                 session.in_flight.push(path.to_path_buf());
             }
             persist_session();
+        }))
+        .on_folder_pos(Box::new(|pos| {
+            FOLDER_POS.store(pos, Ordering::Relaxed);
         }));
     let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
@@ -2668,6 +2812,350 @@ fn is_supported_track(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// What `take_pending_import` should do with one candidate path found in the
+/// staging dir (`getCacheDir()/funkot-import/`).
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+enum ImportDecision {
+    /// `is_supported_track` does not recognise the extension — count towards
+    /// `ImportResult::skipped`, do not copy.
+    Skip,
+    /// Copy the candidate to this path under `music_dir` (already resolved
+    /// past any name collision).
+    CopyTo(PathBuf),
+}
+
+/// Decides what to do with one path found in the staging dir, without
+/// touching the filesystem beyond the injected `exists` check (same pattern
+/// as `resolve_music_dir`'s `readable`).
+///
+/// Only `candidate`'s file name is used to build the destination — even if it
+/// carries directory separators or `..` segments (defense in depth:
+/// `Import.kt` already sanitises the display name it copies into the
+/// cache-staged file, but this must not trust that unconditionally) — so the
+/// result can never leave `music_dir`. A `candidate` with no file name at all
+/// (e.g. `..` or `/`) is treated as unsupported.
+///
+/// Strips any leading dots from the stem before building the destination
+/// name: `scan_tracks_into` skips dot-prefixed entries unconditionally, but
+/// `is_supported_track` does not reject a dot-prefixed name (`.hidden.mp3`
+/// still has a recognised `mp3` extension) — without this, such a file would
+/// report as imported (`ImportResult::tracks`) and then never appear in the
+/// library. If stripping leaves nothing before the extension, the candidate
+/// is treated as unsupported.
+///
+/// On a name collision, appends a `" (2)"`, `" (3)"`, … suffix before the
+/// extension, same convention as most desktop file managers, and never
+/// overwrites an existing file.
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn classify_import(
+    candidate: &Path,
+    music_dir: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> ImportDecision {
+    if !is_supported_track(candidate) {
+        return ImportDecision::Skip;
+    }
+    let Some(file_name) = candidate.file_name().and_then(|n| n.to_str()) else {
+        return ImportDecision::Skip;
+    };
+    // Both `unwrap_or_default` fallbacks are unreachable in practice:
+    // `is_supported_track` above only returns `true` once `Path::extension`
+    // already did, and `Path::file_stem` returns `None` under the exact same
+    // condition `extension` does (a name that is only a leading dot, e.g.
+    // `.mp3`) — so once `is_supported_track` holds, both are `Some`. Kept as
+    // fallbacks rather than an `unwrap`/`expect` purely to avoid a panic if
+    // that invariant is ever wrong.
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    let visible_stem = stem.trim_start_matches('.');
+    if visible_stem.is_empty() {
+        return ImportDecision::Skip;
+    }
+    let mut n: u32 = 1;
+    loop {
+        let name = if n == 1 {
+            format!("{visible_stem}.{ext}")
+        } else {
+            format!("{visible_stem} ({n}).{ext}")
+        };
+        let dest = music_dir.join(&name);
+        if !exists(&dest) {
+            return ImportDecision::CopyTo(dest);
+        }
+        n += 1;
+    }
+}
+
+/// Copies `src` into `music_dir` at `dest` atomically, through injected
+/// `copy` / `rename` / `remove_tmp` operations so the failure path (the temp
+/// file cleaned up, not left behind) is testable without touching the
+/// filesystem — same pattern as `classify_import`'s `exists`. The real
+/// [`copy_atomic`] is this wired to `std::fs`.
+///
+/// The temp file lives in `dest`'s own parent (i.e. inside `music_dir`), not
+/// the staging dir: `fs::rename` is only atomic within one filesystem, and
+/// `music_dir` (external storage) and the staging dir (`getCacheDir()`,
+/// internal storage) are different mounts on Android.
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn copy_atomic_with(
+    src: &Path,
+    dest: &Path,
+    copy: impl FnOnce(&Path, &Path) -> std::io::Result<u64>,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    remove_tmp: impl FnOnce(&Path),
+) -> std::io::Result<()> {
+    let Some(parent) = dest.parent() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "dest has no parent",
+        ));
+    };
+    let tmp = parent.join(".funkot-import.part");
+    let result = copy(src, &tmp).and_then(|_bytes| rename(&tmp, dest));
+    if result.is_err() {
+        remove_tmp(&tmp);
+    }
+    result
+}
+
+/// Copies `src` into `music_dir` at `dest`. See [`copy_atomic_with`] for why
+/// this goes through a temp file rather than `fs::copy` straight to `dest`:
+/// a `fs::copy` that fails partway (or a concurrent `refresh_library` walk)
+/// must never see a truncated file directly at `dest`, which
+/// `scan_tracks_into` would otherwise pick up as a broken track to analyse,
+/// or the library-list dedup keys off half-written bytes.
+#[cfg(target_os = "android")]
+fn copy_atomic(src: &Path, dest: &Path) -> std::io::Result<()> {
+    // Wrapped in closures rather than passed as `std::fs::copy` /
+    // `std::fs::rename` directly: a bare generic fn item only monomorphizes
+    // to one concrete lifetime, which fails `copy_atomic_with`'s `for<'a>
+    // FnOnce(&'a Path, ...)` bound ("implementation of `FnOnce` is not
+    // general enough"); a closure lets inference produce the higher-ranked
+    // signature instead.
+    copy_atomic_with(
+        src,
+        dest,
+        |from, to| std::fs::copy(from, to),
+        |from, to| std::fs::rename(from, to),
+        |tmp| {
+            let _ = std::fs::remove_file(tmp);
+        },
+    )
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn classify_import_skips_an_unsupported_extension() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/photo.jpg"), music_dir, |_| false);
+        assert_eq!(decision, ImportDecision::Skip);
+    }
+
+    #[test]
+    fn classify_import_avoids_overwriting_an_existing_file() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/song.mp3"), music_dir, |p| {
+            p == Path::new("/music/song.mp3")
+        });
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/song (2).mp3"))
+        );
+    }
+
+    /// A second collision (both the plain name and the first `(2)` suffix
+    /// already taken) must keep counting up rather than overwrite either.
+    #[test]
+    fn classify_import_keeps_counting_up_past_the_first_collision() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/song.mp3"), music_dir, |p| {
+            p == Path::new("/music/song.mp3") || p == Path::new("/music/song (2).mp3")
+        });
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/song (3).mp3"))
+        );
+    }
+
+    /// The destination must never leave `music_dir`, even if the candidate
+    /// path carries directory separators or `..` segments — only the file
+    /// name is ever used to build it.
+    #[test]
+    fn classify_import_keeps_the_destination_inside_music_dir() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("../../etc/song.mp3"), music_dir, |_| false);
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/song.mp3"))
+        );
+    }
+
+    /// `.hidden.mp3` must lose its leading dot in `music_dir`, or
+    /// `scan_tracks_into` would silently hide the "imported" file forever.
+    #[test]
+    fn classify_import_strips_a_leading_dot() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/.hidden.mp3"), music_dir, |_| false);
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/hidden.mp3"))
+        );
+    }
+
+    /// Extension matching is case-insensitive (`is_supported_track`), and the
+    /// destination keeps the candidate's original casing.
+    #[test]
+    fn classify_import_accepts_an_uppercase_extension() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/SONG.MP3"), music_dir, |_| false);
+        assert_eq!(
+            decision,
+            ImportDecision::CopyTo(PathBuf::from("/music/SONG.MP3"))
+        );
+    }
+
+    /// `.mp3` alone is a dotfile with no extension by `Path::extension`'s own
+    /// rule (a name that is only a leading dot never has one) — must not be
+    /// mistaken for a bare "mp3" file.
+    #[test]
+    fn classify_import_skips_a_bare_dotfile_extension() {
+        let music_dir = Path::new("/music");
+        let decision = classify_import(Path::new("/cache/.mp3"), music_dir, |_| false);
+        assert_eq!(decision, ImportDecision::Skip);
+    }
+
+    /// Paths with no file name at all must not panic and must be treated as
+    /// unsupported.
+    #[test]
+    fn classify_import_skips_paths_with_no_file_name() {
+        let music_dir = Path::new("/music");
+        assert_eq!(
+            classify_import(Path::new("/"), music_dir, |_| false),
+            ImportDecision::Skip
+        );
+        assert_eq!(
+            classify_import(Path::new(".."), music_dir, |_| false),
+            ImportDecision::Skip
+        );
+    }
+
+    #[test]
+    fn copy_atomic_with_removes_the_temp_file_on_copy_failure() {
+        let removed = std::cell::Cell::new(None);
+        let result = copy_atomic_with(
+            Path::new("/staging/song.mp3"),
+            Path::new("/music/song.mp3"),
+            |_from, _to| {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
+            },
+            |_from, _to| Ok(()),
+            |tmp| removed.set(Some(tmp.to_path_buf())),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            removed.into_inner(),
+            Some(PathBuf::from("/music/.funkot-import.part"))
+        );
+    }
+
+    #[test]
+    fn copy_atomic_with_removes_the_temp_file_on_rename_failure() {
+        let removed = std::cell::Cell::new(None);
+        let result = copy_atomic_with(
+            Path::new("/staging/song.mp3"),
+            Path::new("/music/song.mp3"),
+            |_from, _to| Ok(0),
+            |_from, _to| Err(std::io::Error::new(std::io::ErrorKind::Other, "boom")),
+            |tmp| removed.set(Some(tmp.to_path_buf())),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            removed.into_inner(),
+            Some(PathBuf::from("/music/.funkot-import.part"))
+        );
+    }
+
+    #[test]
+    fn copy_atomic_with_leaves_the_temp_file_alone_on_success() {
+        let removed = std::cell::Cell::new(false);
+        let result = copy_atomic_with(
+            Path::new("/staging/song.mp3"),
+            Path::new("/music/song.mp3"),
+            |_from, _to| Ok(0),
+            |_from, _to| Ok(()),
+            |_tmp| removed.set(true),
+        );
+        assert!(result.is_ok());
+        assert!(!removed.get());
+    }
+}
+
+/// Recursively walk `dir` for supported track files, sorted.
+///
+/// Symlinks (file or directory) are never followed — `DirEntry::file_type()`
+/// reports the link itself rather than its target, so this is a plain
+/// membership check rather than a stat of whatever the link points at. That
+/// sidesteps having to detect symlink cycles, at the cost of not following
+/// tracks or subfolders reached only via a link.
+///
+/// Dot-prefixed names (files and directories alike) are skipped, since
+/// Android's MTP / thumbnail bookkeeping directories can end up inside the
+/// Music folder.
+///
+/// The top-level `dir` itself must be readable, or this fails outright. A
+/// subdirectory discovered during the walk that fails to read is instead
+/// logged and skipped, so one broken subfolder cannot take the whole library
+/// down with it.
+fn scan_tracks(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    scan_tracks_into(entries, &mut paths);
+    paths.sort();
+    Ok(paths)
+}
+
+/// Walk one already-opened directory's entries into `paths`, recursing into
+/// subdirectories. Read failures on a subdirectory are logged and skipped
+/// rather than propagated — see [`scan_tracks`].
+fn scan_tracks_into(entries: std::fs::ReadDir, paths: &mut Vec<PathBuf>) {
+    for entry in entries.filter_map(|e| e.ok()) {
+        let is_dotted = entry
+            .file_name()
+            .to_str()
+            .map(|s| s.starts_with('.'))
+            .unwrap_or(false);
+        if is_dotted {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            match std::fs::read_dir(&path) {
+                Ok(sub_entries) => scan_tracks_into(sub_entries, paths),
+                Err(e) => log::warn!("cannot read {}: {e}", path.display()),
+            }
+        } else if file_type.is_file() && is_supported_track(&path) {
+            paths.push(path);
+        }
+    }
+}
+
 /// `start_impl`'s "the audio thread is already up" error. Named because
 /// `audition_transition` singles it out to fall through on, so it must not be
 /// spelled out at both ends.
@@ -2693,8 +3181,9 @@ const ALREADY_STARTED: &str = "already started";
 ///
 /// Idempotent by construction: `replace_pending` overwrites rather than
 /// appends, so a caller that runs this twice back-to-back (the startup
-/// preload in `run()`'s `setup`, then this same restore again) just
-/// re-applies the same restored list, not a duplicate of it.
+/// preload in `run()`'s `setup`, then this restore) does not duplicate
+/// the queue. The preload skips music-folder I/O; this path still
+/// `exists`-filters and applies the strict gate.
 fn start_impl(
     music_dir: &str,
     cache_dir: &str,
@@ -2712,12 +3201,7 @@ fn start_impl(
     }
 
     let dir = PathBuf::from(music_dir);
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| is_supported_track(p))
-        .collect();
-    paths.sort();
+    let paths: Vec<PathBuf> = scan_tracks(&dir)?;
 
     if paths.len() < 2 {
         // Early error: nothing has been set up yet, so the phase is left at
@@ -2738,6 +3222,14 @@ fn start_impl(
     // runs first only when it succeeds (best-effort; Android's JNI context
     // may not be ready that early), so this is not redundant.
     let _ = DATA_DIR.set(data.clone());
+    // Fixed for the life of this `Engine` — there is no live labeling switch
+    // (see `EngineOptions::head_only_secs`), so `effective_labeling_mode` is
+    // resolved once here and carried straight into `audio_thread`.
+    let labeling_mode = {
+        let settings = store::load_settings(&data);
+        ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
+        effective_labeling_mode(settings.labeling_mode)
+    };
 
     // Restore whatever was still mid-flight or pending from a previous run
     // before the engine starts pulling from the queue. `in_flight` (tracks
@@ -2754,6 +3246,12 @@ fn start_impl(
         Vec::new()
     });
     let restored = store::restored_pending(&session.in_flight, &saved, |p| p.exists());
+    let restored = apply_non_funkot_gate(
+        restored,
+        &cache,
+        &data,
+        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+    );
     queue::replace_pending(&state.queue, restored);
     // Mirror the restored queue to `queue.json` *before* clearing
     // `SESSION.in_flight` below, not after: from here until that clear,
@@ -2775,14 +3273,14 @@ fn start_impl(
     // `in_flight` has now been folded back into `pending` above, so the
     // in-memory session starts this run with none still outstanding;
     // `on_reserved` repopulates it as the loader takes tracks back out.
-    // `paused` carries over as-is — a restart should not silently start
-    // playing if the listener left it paused.
+    // Start means "play": do not carry over a previous run's pause. In-process
+    // pause still goes through `flip_paused` → SESSION as before.
     {
         let mut s = SESSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         s.in_flight = Vec::new();
-        s.paused = session.paused;
+        s.paused = false;
     }
     persist_session();
     // Where `DrainPolicy::ContinueFolder` resumes folder cycling — see
@@ -2793,24 +3291,28 @@ fn start_impl(
         store::restored_folder_pos(&paths, session.in_flight.last().map(PathBuf::as_path));
     let queue = Arc::clone(&state.queue);
 
-    // Before `analyze_missing`, not after: the worker holds off while the
-    // phase says `Starting`, and it can only see that if it is already set.
+    // Set before the audio thread starts: any in-flight analysis worker
+    // (from `refresh_library`) holds off while the phase says `Starting`.
     set_phase(Phase::Starting);
+    // Prefer playback/loader over background decode until the first next
+    // slot is prepared (cleared in the cpal callback via `NEXT_PREPARED`).
+    YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
 
-    // Kick off analysis for anything the folder holds that the cache does not
-    // already have a complete entry for, so the loader thread never has to
-    // run a synchronous analysis mid-playback (see `analyze_missing`).
-    analyze_missing(app, &paths, &cache, &data);
-
-    // `session.paused` folds into `initial_paused` (never the other way
-    // round): cold-start audition's own `true` must never be undone by a
-    // restored `paused == false`.
-    let initial_paused = initial_paused || session.paused;
+    // Use the caller's `initial_paused` only (normal Start: false; cold
+    // audition: true). Do not OR in disk `session.paused` — Start is a play
+    // intent, and cold audition mute is already expressed by the caller flag.
+    // Publish folder cursor before spawn so Starting-phase polls do not see
+    // a stale 0/0 while the audio thread is still coming up.
+    FOLDER_LEN.store(paths.len(), Ordering::Relaxed);
+    FOLDER_POS.store(folder_pos, Ordering::Relaxed);
     if let Err(e) = std::thread::Builder::new()
         .name("funkot-audio".into())
-        .spawn(move || audio_thread(paths, cache, data, tx, queue, initial_paused, folder_pos))
+        .spawn(move || {
+            audio_thread(paths, cache, data, tx, queue, initial_paused, folder_pos, labeling_mode)
+        })
     {
         set_phase(Phase::Idle);
+        YIELD_FOR_LOADER.store(false, Ordering::Relaxed);
         return Err(format!("spawn audio thread: {e}"));
     }
 
@@ -3144,7 +3646,9 @@ fn is_paused() -> bool {
 /// for why this is only ever the last *automatic* one.
 #[derive(serde::Serialize, Clone)]
 struct TransitionInfo {
+    /// Absolute path, same format as `TrackRow::path`.
     from: String,
+    /// Absolute path, same format as `TrackRow::path`.
     to: String,
     automatic: bool,
     seconds_ago: f64,
@@ -3155,7 +3659,9 @@ struct TransitionInfo {
 struct PlayerState {
     phase: &'static str,
     paused: bool,
+    /// Absolute path, same format as `TrackRow::path`.
     now_playing: Option<String>,
+    /// Absolute path, same format as `TrackRow::path`.
     previous: Option<String>,
     last_transition: Option<TransitionInfo>,
     auditioning: bool,
@@ -3243,6 +3749,7 @@ mod played_duration_secs_tests {
             outro_structure_bars_manual: false,
             needs_reanalysis: false,
             is_funkot: true,
+            classify_scores: None,
             rms_dbfs: -14.0,
             gain_db: 0.0,
         }
@@ -3290,8 +3797,8 @@ mod played_duration_secs_tests {
 static PLAYED_DURATION: Mutex<Option<(PathBuf, Option<f64>)>> = Mutex::new(None);
 
 /// `played_duration_secs` for `now` (its *full* path — `NOW` holds full
-/// paths, unlike `PlayerState::now_playing`, which is a file name; do not mix
-/// the two up here), memoised in `PLAYED_DURATION` so repeated polls of the
+/// paths, and `PlayerState::now_playing` is now a full path too), memoised
+/// in `PLAYED_DURATION` so repeated polls of the
 /// same track cost nothing after the first. Only a track change pays for the
 /// content hash + cache read (and, on Android, the JNI round trip inside
 /// `resolve_dirs` that a per-poll call would otherwise incur).
@@ -3309,7 +3816,10 @@ fn played_duration_for(app: &tauri::AppHandle, now: &Path) -> Option<f64> {
     }
     let dirs = resolve_dirs(app).ok()?;
     let cache_dir = PathBuf::from(dirs.cache_dir);
-    let secs = analyzed_cache_entry(now, &cache_dir).and_then(|a| played_duration_secs(&a));
+    let secs = funkot_core::cache::content_hash(now)
+        .ok()
+        .and_then(|h| analyzed_cache_entry(&cache_dir, &h))
+        .and_then(|a| played_duration_secs(&a));
     *PLAYED_DURATION.lock().unwrap() = Some((now.to_path_buf(), secs));
     secs
 }
@@ -3325,8 +3835,8 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
             now.now.clone(),
             now.previous.clone(),
             now.last_transition.as_ref().map(|t| TransitionInfo {
-                from: file_name_str(&t.from),
-                to: file_name_str(&t.to),
+                from: path_str(&t.from),
+                to: path_str(&t.to),
                 automatic: t.origin == Origin::Automatic,
                 seconds_ago: t.at.elapsed().as_secs_f64(),
             }),
@@ -3374,8 +3884,8 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
     PlayerState {
         phase: get_phase().as_str(),
         paused: is_paused(),
-        now_playing: now_playing.as_deref().map(file_name_str),
-        previous: previous.as_deref().map(file_name_str),
+        now_playing: now_playing.as_deref().map(path_str),
+        previous: previous.as_deref().map(path_str),
         last_transition,
         auditioning,
         audition_from,
@@ -3489,14 +3999,11 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
     let paths: Vec<PathBuf> = if dirs.music_dir_needed {
         Vec::new()
     } else {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(&music_dir)
-            .map_err(|e| format!("cannot read {}: {e}", music_dir.display()))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| is_supported_track(p))
-            .collect();
-        paths.sort();
-        paths
+        scan_tracks(&music_dir)?
     };
+    let overrides = store::load_overrides(&data_dir);
+    let labels = store::load_labels(&data_dir);
+    let history = store::load_history(&data_dir);
 
     let mut meta_by_hash = std::collections::BTreeMap::new();
     for path in &paths {
@@ -3504,7 +4011,15 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
             continue;
         };
         // Same path/bars/manual/analyzed sources as the library table.
-        let row = track_row(path, &cache_dir);
+        let row = track_row(
+            path,
+            &cache_dir,
+            &overrides,
+            &labels,
+            &history,
+            Some(&hash),
+            None,
+        );
         meta_by_hash.insert(
             hash,
             store::FlagTrackMeta {
@@ -3677,6 +4192,11 @@ struct QueueSnapshot {
     /// `null` when unknown: stopped, auditioning/preparing an audition, or no
     /// active deck yet.
     transition_in_secs: Option<f64>,
+    /// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
+    folder_pos: usize,
+    /// Folder-track count for this playback session (`scan_tracks` length at
+    /// start). `0` before the first successful `start`.
+    folder_len: usize,
 }
 
 /// Save the queue's current pending contents to `queue.json`. Failure is
@@ -3707,11 +4227,69 @@ fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
 
 /// Append `path` to the tail of the pending queue. Returns the pending
 /// queue's length after the insert.
+///
+/// Rejects with `"non_funkot"` when the track is analysed, effectively
+/// non-Funkot, and `allow_non_funkot` is false. Unanalysed tracks always
+/// pass. Tracks already in the queue are never removed by this gate.
 #[tauri::command(async)]
 fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
-    let len = queue::enqueue(&state.queue, PathBuf::from(path));
+    let dirs = resolve_dirs(&app)?;
+    let path_buf = PathBuf::from(&path);
+    if !ALLOW_NON_FUNKOT.load(Ordering::Relaxed)
+        && gated_non_funkot(
+            &path_buf,
+            Path::new(&dirs.cache_dir),
+            Path::new(&dirs.data_dir),
+        )
+    {
+        return Err("non_funkot".into());
+    }
+    let len = queue::enqueue(&state.queue, path_buf);
     persist_queue(&app, &state);
     Ok(len)
+}
+
+/// Current `allow_non_funkot` setting (also mirrors [`ALLOW_NON_FUNKOT`]).
+#[tauri::command(async)]
+fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
+    let dirs = resolve_dirs(&app)?;
+    let allow = store::load_settings(Path::new(&dirs.data_dir)).allow_non_funkot;
+    ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
+    Ok(allow)
+}
+
+/// Persist `allow_non_funkot` and update the live atomic used by folder drain.
+#[tauri::command(async)]
+fn set_allow_non_funkot(app: tauri::AppHandle, allow: bool) -> Result<bool, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data = Path::new(&dirs.data_dir);
+    let mut settings = store::load_settings(data);
+    settings.allow_non_funkot = allow;
+    store::save_settings(data, &settings)
+        .map_err(|e| format!("cannot save settings: {e}"))?;
+    ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
+    Ok(allow)
+}
+
+/// Current `settings.json` `labeling_mode` (raw, pre-platform-gate).
+#[tauri::command(async)]
+fn get_labeling_mode(app: tauri::AppHandle) -> Result<bool, String> {
+    let dirs = resolve_dirs(&app)?;
+    Ok(store::load_settings(Path::new(&dirs.data_dir)).labeling_mode)
+}
+
+/// Persist `labeling_mode`. Fixed at `Engine` construction (no live switch —
+/// see `EngineOptions::head_only_secs`), so a running session keeps whatever
+/// mode it started with; the new value takes effect on the next Start.
+#[tauri::command(async)]
+fn set_labeling_mode(app: tauri::AppHandle, on: bool) -> Result<bool, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data = Path::new(&dirs.data_dir);
+    let mut settings = store::load_settings(data);
+    settings.labeling_mode = on;
+    store::save_settings(data, &settings)
+        .map_err(|e| format!("cannot save settings: {e}"))?;
+    Ok(on)
 }
 
 /// `queue::edit_displayed`'s `revoke` argument for the main engine: hands
@@ -3904,6 +4482,8 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
         reserved_swappable,
         reserved_prepared,
         transition_in_secs,
+        folder_pos: FOLDER_POS.load(Ordering::Relaxed),
+        folder_len: FOLDER_LEN.load(Ordering::Relaxed),
     })
 }
 
@@ -3913,8 +4493,6 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
 struct TrackRow {
     /// Absolute path. Used as the UI's key.
     path: String,
-    /// Display name (file name). Edit tab uses this.
-    name: String,
     /// Tag TITLE, or file name when absent (same resolution as session metadata).
     title: String,
     /// Tag ARTIST, or `""` when absent.
@@ -3923,6 +4501,13 @@ struct TrackRow {
     duration_secs: Option<u32>,
     /// Whether a cached analysis exists. If false, the bar fields are null.
     analyzed: bool,
+    /// Effective Funkot flag (`override.funkot` ?? analysis). Unanalysed rows
+    /// are `true` so the library does not grey them; the enqueue gate still
+    /// lets unanalysed tracks through separately.
+    is_funkot: bool,
+    /// Human Funkot / non-Funkot label from `labels.json`. Unlabeled is `None`
+    /// (distinct from effective [`Self::is_funkot`]).
+    label: Option<bool>,
     intro_bars: Option<u32>,
     /// The structural outro boundary — where the track collapses. This is the
     /// number the UI shows and edits.
@@ -3934,6 +4519,18 @@ struct TrackRow {
     outro_manual: bool,
     intro_low_confidence: bool,
     outro_low_confidence: bool,
+    /// `history.json` `last_played_ms` for this track's content hash; `None`
+    /// when never heard (count is not exposed on the row).
+    played_at_ms: Option<u64>,
+}
+
+/// Counts of human labels vs library size for the labeling UI.
+#[derive(serde::Serialize, Clone)]
+struct LabelStats {
+    labeled: usize,
+    total: usize,
+    funkot: usize,
+    not_funkot: usize,
 }
 
 /// Guards against starting a second analysis worker while one is running.
@@ -3945,53 +4542,183 @@ static ANALYZING: AtomicBool = AtomicBool::new(false);
 /// the loader thread would have to run a fresh analysis on it before playback
 /// could use it, which is exactly the synchronous-analysis stall this exists
 /// to keep out of the audio path. Centralised so the library listing
-/// (`track_row`), the pick of what to hand the background worker
-/// (`analyze_missing`), and the loader-status log in `audio_thread` cannot
-/// drift on what "still needs analysis" means.
+/// (`track_row`), `refresh_library`'s pending pick, and the loader-status log in
+/// `audio_thread` cannot drift on what "still needs analysis" means.
 ///
-/// A hashing failure (unreadable file, etc.) reads the same as "not cached".
+/// `hash` is the caller's already-resolved content hash — this never opens the
+/// audio file. A missing / incomplete cache entry reads the same as "not cached".
 fn analyzed_cache_entry(
-    path: &std::path::Path,
     cache_dir: &std::path::Path,
+    hash: &str,
 ) -> Option<funkot_core::TrackAnalysis> {
-    funkot_core::cache::content_hash(path)
-        .ok()
-        .and_then(|hash| funkot_core::cache::load(cache_dir, &hash))
-        .filter(|a| !a.needs_reanalysis)
+    funkot_core::cache::load(cache_dir, hash).filter(|a| !a.needs_reanalysis)
 }
 
-/// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `path`.
-fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
-    let name = file_name_str(path);
-    let tags = cached_tags_for(path);
+/// `true` when the track is analysed and effectively non-Funkot — the gate
+/// condition shared by enqueue reject and folder-drain skip. Unanalysed
+/// tracks are never gated. Does not consult `allow_non_funkot` (caller does).
+fn gated_non_funkot(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> bool {
+    // Read-only use of the index: never save here. Persist is `refresh_library`
+    // only — otherwise folder-drain / enqueue races with refresh and can
+    // overwrite a pruned index with a stale map.
+    let mut index = store::load_hash_index(data_dir);
+    let Ok(hash) = store::resolve_content_hash(path, &mut index) else {
+        return false;
+    };
+    let Some(a) = analyzed_cache_entry(cache_dir, &hash) else {
+        return false;
+    };
+    let override_funkot = store::load_overrides(data_dir)
+        .get(&hash)
+        .and_then(|o| o.funkot);
+    !store::effective_is_funkot(a.is_funkot, override_funkot)
+}
+
+/// Pending restore can include folder-drain `in_flight`; apply the same gate
+/// as enqueue / folder skip so analysed non-Funkot are not replayed when
+/// `allow` is off. Does not read `ALLOW_NON_FUNKOT` (caller passes it).
+fn apply_non_funkot_gate(
+    paths: Vec<PathBuf>,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    allow: bool,
+) -> Vec<PathBuf> {
+    if allow {
+        return paths;
+    }
+    paths
+        .into_iter()
+        .filter(|p| !gated_non_funkot(p, cache_dir, data_dir))
+        .collect()
+}
+
+/// Setup-only gate: hash-index + analysis cache + overrides, no music-file I/O.
+/// Path missing from the index, or cache miss, → not gated (same as
+/// `gated_non_funkot` when hash fails / cache misses).
+fn gated_non_funkot_from_index(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    index: &store::HashIndex,
+    overrides: &store::Overrides,
+) -> bool {
+    let Some(entry) = index.get(path.to_string_lossy().as_ref()) else {
+        return false;
+    };
+    let Some(a) = analyzed_cache_entry(cache_dir, &entry.hash) else {
+        return false;
+    };
+    let override_funkot = overrides.get(&entry.hash).and_then(|o| o.funkot);
+    !store::effective_is_funkot(a.is_funkot, override_funkot)
+}
+
+/// Like [`apply_non_funkot_gate`], but never stats/hashes/exists music files.
+/// Loads hash-index and overrides once. Used by setup preload only;
+/// `start_impl` keeps the strict gate.
+fn apply_non_funkot_gate_from_index(
+    paths: Vec<PathBuf>,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    allow: bool,
+) -> Vec<PathBuf> {
+    if allow {
+        return paths;
+    }
+    let index = store::load_hash_index(data_dir);
+    let overrides = store::load_overrides(data_dir);
+    paths
+        .into_iter()
+        .filter(|p| !gated_non_funkot_from_index(p, cache_dir, &index, &overrides))
+        .collect()
+}
+
+/// Queue-tab preload shared by desktop and Android setup. Does not touch
+/// music files (`exists` is always true; gate is index-only).
+fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
+    use tauri::Manager;
+    let _ = DATA_DIR.set(data.clone());
+    let session = store::load_session(&data);
+    let settings = store::load_settings(&data);
+    ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
+    let saved = store::load_queue(&data).unwrap_or_else(|e| {
+        log::warn!("setup: load_queue({}): {e}", data.display());
+        Vec::new()
+    });
+    let restored = store::restored_pending(&session.in_flight, &saved, |_| true);
+    let restored = apply_non_funkot_gate_from_index(
+        restored,
+        cache_dir,
+        &data,
+        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+    );
+    let state = app.state::<AppState>();
+    queue::replace_pending(&state.queue, restored);
+}
+
+/// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.
+///
+/// `hash` is resolved once by the caller (`resolve_content_hash` /
+/// `resolve_library_file` / `content_hash`) so this path never content-hashes
+/// the file again.
+///
+/// `tags: Some` uses the caller's tags (library refresh after hash-index
+/// resolve). `tags: None` falls back to [`cached_tags_for`] (analysis worker
+/// and other call sites).
+///
+/// `label` comes from `labels` (content-hash key), not from `overrides.funkot`.
+/// `played_at_ms` comes from `history` (same key).
+fn track_row(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    overrides: &store::Overrides,
+    labels: &store::Labels,
+    history: &store::History,
+    hash: Option<&str>,
+    tags: Option<CachedTags>,
+) -> TrackRow {
+    let tags = match tags {
+        Some(t) => t,
+        None => cached_tags_for(path),
+    };
     let (title, artist) = session_metadata_for(Some(path), &tags);
-    match analyzed_cache_entry(path, cache_dir) {
-        Some(a) => TrackRow {
-            path: path.to_string_lossy().into_owned(),
-            name,
-            title,
-            artist,
-            duration_secs: if a.sample_rate == 0 {
-                None
-            } else {
-                Some(((a.total_frames as f64) / (a.sample_rate as f64)).round() as u32)
-            },
-            analyzed: true,
-            intro_bars: Some(a.intro_bars),
-            outro_structure_bars: Some(a.outro_structure_bars),
-            outro_bars: Some(a.outro_bars),
-            intro_manual: a.intro_bars_manual,
-            outro_manual: a.outro_structure_bars_manual || a.outro_bars_manual,
-            intro_low_confidence: a.intro_bars_low_confidence,
-            outro_low_confidence: a.outro_bars_low_confidence,
-        },
+    let label = hash.and_then(|h| labels.get(h).map(|l| l.verdict));
+    let played_at_ms = hash.and_then(|h| history.get(h).map(|r| r.last_played_ms));
+    match hash.and_then(|h| analyzed_cache_entry(cache_dir, h).map(|a| (h, a))) {
+        Some((hash, a)) => {
+            let override_funkot = overrides.get(hash).and_then(|o| o.funkot);
+            TrackRow {
+                path: path.to_string_lossy().into_owned(),
+                title,
+                artist,
+                duration_secs: if a.sample_rate == 0 {
+                    None
+                } else {
+                    Some(((a.total_frames as f64) / (a.sample_rate as f64)).round() as u32)
+                },
+                analyzed: true,
+                is_funkot: store::effective_is_funkot(a.is_funkot, override_funkot),
+                label,
+                intro_bars: Some(a.intro_bars),
+                outro_structure_bars: Some(a.outro_structure_bars),
+                outro_bars: Some(a.outro_bars),
+                intro_manual: a.intro_bars_manual,
+                outro_manual: a.outro_structure_bars_manual || a.outro_bars_manual,
+                intro_low_confidence: a.intro_bars_low_confidence,
+                outro_low_confidence: a.outro_bars_low_confidence,
+                played_at_ms,
+            }
+        }
         None => TrackRow {
             path: path.to_string_lossy().into_owned(),
-            name,
             title,
             artist,
             duration_secs: None,
             analyzed: false,
+            is_funkot: true,
+            label,
             intro_bars: None,
             outro_structure_bars: None,
             outro_bars: None,
@@ -3999,6 +4726,7 @@ fn track_row(path: &std::path::Path, cache_dir: &std::path::Path) -> TrackRow {
             outro_manual: false,
             intro_low_confidence: false,
             outro_low_confidence: false,
+            played_at_ms,
         },
     }
 }
@@ -4055,8 +4783,18 @@ mod cache_state_tests {
     fn no_cache_entry_reads_as_unanalyzed() {
         let dir = TempDir::new("none");
         let (track, _) = track_with_analysis(&dir.0);
-        assert!(analyzed_cache_entry(&track, &dir.0).is_none());
-        assert!(!track_row(&track, &dir.0).analyzed);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        assert!(analyzed_cache_entry(&dir.0, &hash).is_none());
+        assert!(!track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &store::History::new(),
+            Some(&hash),
+            None
+        )
+        .analyzed);
     }
 
     #[test]
@@ -4064,16 +4802,26 @@ mod cache_state_tests {
         let dir = TempDir::new("complete");
         let (track, analysis) = track_with_analysis(&dir.0);
         store_for(&track, &dir.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
 
-        assert!(analyzed_cache_entry(&track, &dir.0).is_some());
-        let row = track_row(&track, &dir.0);
+        assert!(analyzed_cache_entry(&dir.0, &hash).is_some());
+        let row = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &store::History::new(),
+            Some(&hash),
+            None,
+        );
         assert!(row.analyzed);
         assert_eq!(row.intro_bars, Some(analysis.intro_bars));
         // Tagless fixture: title falls back to file name, artist empty;
         // duration comes from provisional frames / sample_rate (200s).
-        assert_eq!(row.title, row.name);
+        assert_eq!(row.title, file_name_str(&track));
         assert_eq!(row.artist, "");
         assert_eq!(row.duration_secs, Some(200));
+        assert_eq!(row.is_funkot, analysis.is_funkot);
     }
 
     /// The regression this whole change turns on. An entry that loads but has
@@ -4087,20 +4835,281 @@ mod cache_state_tests {
         let (track, mut analysis) = track_with_analysis(&dir.0);
         analysis.needs_reanalysis = true;
         store_for(&track, &dir.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
 
-        assert!(analyzed_cache_entry(&track, &dir.0).is_none());
-        let row = track_row(&track, &dir.0);
+        assert!(analyzed_cache_entry(&dir.0, &hash).is_none());
+        let row = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &store::History::new(),
+            Some(&hash),
+            None,
+        );
         assert!(!row.analyzed);
         // And the numbers are withheld too: showing bars the engine is about
         // to recompute invites hand-correcting a value that is on its way out.
         assert_eq!(row.intro_bars, None);
         assert_eq!(row.outro_structure_bars, None);
+        assert!(row.is_funkot);
     }
 
     #[test]
-    fn an_unreadable_file_reads_as_unanalyzed_rather_than_erroring() {
-        let dir = TempDir::new("missing-file");
-        assert!(analyzed_cache_entry(&dir.0.join("nope.wav"), &dir.0).is_none());
+    fn a_missing_hash_reads_as_unanalyzed_rather_than_erroring() {
+        let dir = TempDir::new("missing-hash");
+        let track = dir.0.join("nope.wav");
+        assert!(analyzed_cache_entry(&dir.0, "deadbeef").is_none());
+        assert!(!track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &store::History::new(),
+            None,
+            None
+        )
+        .analyzed);
+    }
+
+    /// `track_row` must honour the hash the caller already resolved — no second
+    /// `content_hash` — so an override keyed by that hash is applied.
+    #[test]
+    fn track_row_uses_passed_hash_for_override_without_rehash() {
+        let cache = TempDir::new("row-hash-cache");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash.clone(),
+            store::BarOverride {
+                funkot: Some(true),
+                ..Default::default()
+            },
+        );
+        let row = track_row(
+            &track,
+            &cache.0,
+            &overrides,
+            &store::Labels::new(),
+            &store::History::new(),
+            Some(&hash),
+            None,
+        );
+        assert!(row.analyzed);
+        assert!(row.is_funkot);
+    }
+
+    /// `tags: Some` must be used as-is — no `cached_tags_for` / file open.
+    /// A missing path would fail probe; passed tags still win.
+    #[test]
+    fn track_row_uses_passed_tags_without_probe() {
+        let dir = TempDir::new("row-tags");
+        let track = dir.0.join("does-not-exist.wav");
+        let tags = CachedTags {
+            title: Some("From Index".into()),
+            artist: Some("Cached Artist".into()),
+        };
+        let row = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &store::History::new(),
+            None,
+            Some(tags),
+        );
+        assert_eq!(row.title, "From Index");
+        assert_eq!(row.artist, "Cached Artist");
+        assert!(!row.analyzed);
+    }
+
+    #[test]
+    fn track_row_maps_history_last_played_ms_to_played_at_ms() {
+        let dir = TempDir::new("row-history");
+        let (track, _) = track_with_analysis(&dir.0);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+
+        let row_absent = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &store::History::new(),
+            Some(&hash),
+            None,
+        );
+        assert_eq!(row_absent.played_at_ms, None);
+
+        let mut history = store::History::new();
+        history.insert(
+            hash.clone(),
+            store::PlayRecord {
+                count: 2,
+                last_played_ms: 1_700_000_000_123,
+            },
+        );
+        let row_present = track_row(
+            &track,
+            &dir.0,
+            &store::Overrides::new(),
+            &store::Labels::new(),
+            &history,
+            Some(&hash),
+            None,
+        );
+        assert_eq!(row_present.played_at_ms, Some(1_700_000_000_123));
+    }
+
+    #[test]
+    fn gated_non_funkot_skips_only_analysed_non_funkot() {
+        let cache = TempDir::new("gate-cache");
+        let data = TempDir::new("gate-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+
+        assert!(gated_non_funkot(&track, &cache.0, &data.0));
+        assert!(!gated_non_funkot(
+            &cache.0.join("missing.wav"),
+            &cache.0,
+            &data.0
+        ));
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash,
+            store::BarOverride {
+                funkot: Some(true),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+        assert!(!gated_non_funkot(&track, &cache.0, &data.0));
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_keeps_analysed_non_funkot_when_allow() {
+        let cache = TempDir::new("gate-pending-allow-cache");
+        let data = TempDir::new("gate-pending-allow-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+
+        let out = apply_non_funkot_gate(vec![track.clone()], &cache.0, &data.0, true);
+        assert_eq!(out, vec![track]);
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_drops_analysed_non_funkot_keeps_unanalysed() {
+        let cache = TempDir::new("gate-pending-deny-cache");
+        let data = TempDir::new("gate-pending-deny-data");
+        let (non_funkot, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&non_funkot, &cache.0, &analysis);
+
+        // Second file: different bytes so a distinct hash; no cache entry.
+        let unanalysed = cache.0.join("unanalysed.wav");
+        std::fs::write(&unanalysed, vec![1u8; 4096]).unwrap();
+
+        let out = apply_non_funkot_gate(
+            vec![non_funkot.clone(), unanalysed.clone()],
+            &cache.0,
+            &data.0,
+            false,
+        );
+        assert_eq!(out, vec![unanalysed]);
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_honours_override_funkot_true() {
+        let cache = TempDir::new("gate-pending-override-cache");
+        let data = TempDir::new("gate-pending-override-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash,
+            store::BarOverride {
+                funkot: Some(true),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        let out = apply_non_funkot_gate(vec![track.clone()], &cache.0, &data.0, false);
+        assert_eq!(out, vec![track]);
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_from_index_drops_without_file_on_disk() {
+        let cache = TempDir::new("gate-index-no-file-cache");
+        let data = TempDir::new("gate-index-no-file-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            track.to_string_lossy().into_owned(),
+            store::HashIndexEntry {
+                mtime_ms: 0,
+                len: 0,
+                hash,
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+        std::fs::remove_file(&track).unwrap();
+        assert!(!track.exists());
+
+        let out = apply_non_funkot_gate_from_index(vec![track.clone()], &cache.0, &data.0, false);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_from_index_keeps_path_absent_from_index() {
+        let cache = TempDir::new("gate-index-miss-cache");
+        let data = TempDir::new("gate-index-miss-data");
+        let missing = cache.0.join("not-in-index.wav");
+
+        let out = apply_non_funkot_gate_from_index(vec![missing.clone()], &cache.0, &data.0, false);
+        assert_eq!(out, vec![missing]);
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_from_index_keeps_analysed_non_funkot_when_allow() {
+        let cache = TempDir::new("gate-index-allow-cache");
+        let data = TempDir::new("gate-index-allow-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            track.to_string_lossy().into_owned(),
+            store::HashIndexEntry {
+                mtime_ms: 0,
+                len: 0,
+                hash,
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        let out = apply_non_funkot_gate_from_index(vec![track.clone()], &cache.0, &data.0, true);
+        assert_eq!(out, vec![track]);
     }
 
     /// Cancel/undo with `mark_manual = false` must clear the touched side's
@@ -4174,31 +5183,448 @@ mod cache_state_tests {
             Some(analysis.intro_bars + 4)
         );
     }
+
+    /// `path_str` is what `PlayerState` now uses to identify a track; it must
+    /// agree with `TrackRow::path` or the frontend's map-key lookups break.
+    #[test]
+    fn path_str_matches_track_row_path() {
+        let cache = TempDir::new("path-str-cache");
+        let (track, _) = track_with_analysis(&cache.0);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        assert_eq!(
+            path_str(&track),
+            track_row(
+                &track,
+                &cache.0,
+                &store::Overrides::new(),
+                &store::Labels::new(),
+                &store::History::new(),
+                Some(&hash),
+                None,
+            )
+            .path
+        );
+    }
+
+    #[test]
+    fn set_label_impl_true_writes_labels_and_mirrors_override() {
+        let cache = TempDir::new("label-true-cache");
+        let data = TempDir::new("label-true-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        let row = set_label_impl(&cache.0, &data.0, &track, Some(true)).unwrap();
+        assert_eq!(row.label, Some(true));
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let labels = store::load_labels(&data.0);
+        let entry = labels.get(&hash).expect("label present");
+        assert!(entry.verdict);
+        assert!(entry.labeled_at_ms > 0);
+        assert_eq!(
+            store::load_overrides(&data.0)
+                .get(&hash)
+                .and_then(|o| o.funkot),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn set_label_impl_false_is_distinct_from_unlabeled() {
+        let cache = TempDir::new("label-false-cache");
+        let data = TempDir::new("label-false-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        set_label_impl(&cache.0, &data.0, &track, Some(false)).unwrap();
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let labels = store::load_labels(&data.0);
+        assert_eq!(labels.get(&hash).map(|l| l.verdict), Some(false));
+        assert!(!labels.contains_key("never-labeled"));
+    }
+
+    #[test]
+    fn set_label_impl_none_clears_label_and_removes_empty_override() {
+        let cache = TempDir::new("label-clear-cache");
+        let data = TempDir::new("label-clear-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        set_label_impl(&cache.0, &data.0, &track, Some(true)).unwrap();
+        let row = set_label_impl(&cache.0, &data.0, &track, None).unwrap();
+        assert_eq!(row.label, None);
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        assert!(!store::load_labels(&data.0).contains_key(&hash));
+        assert!(!store::load_overrides(&data.0).contains_key(&hash));
+    }
+
+    #[test]
+    fn set_label_impl_none_keeps_override_when_intro_bars_remain() {
+        let cache = TempDir::new("label-keep-intro-cache");
+        let data = TempDir::new("label-keep-intro-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash.clone(),
+            store::BarOverride {
+                intro_bars: Some(8),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        set_label_impl(&cache.0, &data.0, &track, Some(false)).unwrap();
+        set_label_impl(&cache.0, &data.0, &track, None).unwrap();
+
+        let entry = store::load_overrides(&data.0)
+            .get(&hash)
+            .cloned()
+            .expect("override entry kept");
+        assert_eq!(entry.intro_bars, Some(8));
+        assert_eq!(entry.funkot, None);
+        assert!(!store::load_labels(&data.0).contains_key(&hash));
+    }
+
+    #[test]
+    fn clear_labels_and_history_impl_empties_labels_and_history() {
+        let data = TempDir::new("clear-lh-data");
+        let mut labels = store::Labels::new();
+        labels.insert(
+            "hash-a".into(),
+            store::TrackLabel {
+                verdict: true,
+                labeled_at_ms: 1,
+            },
+        );
+        store::save_labels(&data.0, &labels).unwrap();
+        let mut history = store::History::new();
+        history.insert(
+            "hash-a".into(),
+            store::PlayRecord {
+                count: 3,
+                last_played_ms: 99,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+
+        clear_labels_and_history_impl(&data.0);
+
+        assert!(store::load_labels(&data.0).is_empty());
+        assert!(store::load_history(&data.0).is_empty());
+    }
+
+    #[test]
+    fn clear_labels_and_history_impl_keeps_intro_bars() {
+        let data = TempDir::new("clear-lh-keep-intro");
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            "hash-b".into(),
+            store::BarOverride {
+                intro_bars: Some(8),
+                funkot: Some(false),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        clear_labels_and_history_impl(&data.0);
+
+        let entry = store::load_overrides(&data.0)
+            .get("hash-b")
+            .cloned()
+            .expect("override kept");
+        assert_eq!(entry.intro_bars, Some(8));
+        assert_eq!(entry.funkot, None);
+    }
+
+    #[test]
+    fn clear_labels_and_history_impl_removes_funkot_only_override() {
+        let data = TempDir::new("clear-lh-funkot-only");
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            "hash-c".into(),
+            store::BarOverride {
+                funkot: Some(false),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        clear_labels_and_history_impl(&data.0);
+
+        assert!(!store::load_overrides(&data.0).contains_key("hash-c"));
+    }
+
+    #[test]
+    fn set_folder_label_impl_recurses_and_skips_non_audio() {
+        let data = TempDir::new("folder-label-data");
+        let music = TempDir::new("folder-label-music");
+        // Distinct bytes so content hashes differ (keys are hashes, not paths).
+        std::fs::write(music.0.join("a.wav"), vec![1u8; 4096]).unwrap();
+        std::fs::create_dir_all(music.0.join("sub").join("nested")).unwrap();
+        std::fs::write(music.0.join("sub").join("b.wav"), vec![2u8; 4096]).unwrap();
+        std::fs::write(music.0.join("sub").join("nested").join("c.mp3"), vec![3u8; 4096])
+            .unwrap();
+        std::fs::write(music.0.join("readme.txt"), b"not audio").unwrap();
+        std::fs::write(music.0.join("sub").join("notes.md"), b"skip").unwrap();
+
+        let scanned = scan_tracks(&music.0).unwrap();
+        assert_eq!(scanned.len(), 3, "scan_tracks paths: {scanned:?}");
+        let (count, undo) = set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(undo.len(), 3);
+        assert_eq!(store::load_labels(&data.0).len(), 3);
+        assert!(store::load_labels(&data.0).values().all(|l| l.verdict));
+    }
+
+    /// Undo puts every track back where it was, including the distinction
+    /// between "was labeled the other way" and "was never labeled".
+    #[test]
+    fn undo_folder_label_restores_previous_state() {
+        let cache = TempDir::new("folder-undo-cache");
+        let data = TempDir::new("folder-undo-data");
+        let music = TempDir::new("folder-undo-music");
+        std::fs::write(music.0.join("a.wav"), vec![1u8; 4096]).unwrap();
+        std::fs::write(music.0.join("b.wav"), vec![2u8; 4096]).unwrap();
+        std::fs::write(music.0.join("c.mp3"), vec![3u8; 4096]).unwrap();
+
+        // a was already non-Funkot; b and c were never judged.
+        let a = music.0.join("a.wav");
+        set_label_impl(&cache.0, &data.0, &a, Some(false)).unwrap();
+        let before = store::load_labels(&data.0);
+        assert_eq!(before.len(), 1);
+
+        let (count, undo) = set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(store::load_labels(&data.0).len(), 3);
+
+        assert_eq!(undo_folder_label_impl(&data.0, &undo).unwrap(), 3);
+        let after = store::load_labels(&data.0);
+        assert_eq!(after.len(), 1, "b and c must go back to unlabeled");
+        let hash = store::resolve_content_hash(&a, &mut store::load_hash_index(&data.0)).unwrap();
+        assert_eq!(after.get(&hash).map(|l| l.verdict), Some(false));
+        assert_eq!(
+            store::load_overrides(&data.0).get(&hash).and_then(|o| o.funkot),
+            Some(false),
+            "the library.json mirror must follow the label back"
+        );
+    }
+
+    /// Undo clears the `funkot` mirror without taking hand-set bars with it.
+    #[test]
+    fn undo_folder_label_keeps_manual_bars() {
+        let data = TempDir::new("folder-undo-bars-data");
+        let music = TempDir::new("folder-undo-bars-music");
+        std::fs::write(music.0.join("a.wav"), vec![7u8; 4096]).unwrap();
+
+        let (_, undo) = set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        assert_eq!(undo.len(), 1);
+
+        // A bar edit lands after the bulk label, before 取消 is pressed.
+        let mut overrides = store::load_overrides(&data.0);
+        overrides.get_mut(&undo[0].hash).unwrap().intro_bars = Some(32);
+        store::save_overrides(&data.0, &overrides).unwrap();
+
+        undo_folder_label_impl(&data.0, &undo).unwrap();
+        let after = store::load_overrides(&data.0);
+        let entry = after.get(&undo[0].hash).expect("entry kept for the bars");
+        assert_eq!(entry.intro_bars, Some(32));
+        assert_eq!(entry.funkot, None);
+        assert!(store::load_labels(&data.0).is_empty());
+    }
+
+    #[test]
+    fn label_stats_impl_matches_music_dir_and_verdicts() {
+        let data = TempDir::new("label-stats-data");
+        let music = TempDir::new("label-stats-music");
+        std::fs::write(music.0.join("a.wav"), vec![10u8; 4096]).unwrap();
+        std::fs::write(music.0.join("b.wav"), vec![20u8; 4096]).unwrap();
+        std::fs::write(music.0.join("c.mp3"), vec![30u8; 4096]).unwrap();
+
+        set_folder_label_impl(&data.0, &music.0, true).unwrap();
+        let a = music.0.join("a.wav");
+        // Relabel one track as non-Funkot via path hash (no cache needed).
+        let cache = TempDir::new("label-stats-cache");
+        set_label_impl(&cache.0, &data.0, &a, Some(false)).unwrap();
+
+        let stats = label_stats_impl(&data.0, Some(music.0.as_path()));
+        let expected_total = scan_tracks(&music.0).unwrap().len();
+        assert_eq!(stats.total, expected_total);
+        assert_eq!(stats.labeled, 3);
+        assert_eq!(stats.funkot, 2);
+        assert_eq!(stats.not_funkot, 1);
+        assert_eq!(label_stats_impl(&data.0, None).total, 0);
+    }
+
+    #[test]
+    fn set_label_survives_reload() {
+        let cache = TempDir::new("label-reload-cache");
+        let data = TempDir::new("label-reload-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        set_label_impl(&cache.0, &data.0, &track, Some(false)).unwrap();
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let reloaded = store::load_labels(&data.0);
+        assert_eq!(reloaded.get(&hash).map(|l| l.verdict), Some(false));
+        assert!(reloaded[&hash].labeled_at_ms > 0);
+        assert_eq!(
+            store::load_overrides(&data.0)
+                .get(&hash)
+                .and_then(|o| o.funkot),
+            Some(false)
+        );
+    }
 }
 
-/// Kick off a background analysis worker for whatever in `paths` the cache
-/// does not already have a complete entry for (see `analyzed_cache_entry`).
-/// Shared by `refresh_library`, which wants the listing to fill in live, and
-/// `start`, which wants it so the loader thread is never the one running a
-/// fresh analysis while it is also the only thing feeding the engine.
-///
-/// A no-op (and silent) when nothing is missing.
-fn analyze_missing(app: &tauri::AppHandle, paths: &[PathBuf], cache_dir: &Path, data_dir: &Path) {
-    // Hand the worker only what is actually missing. `fill_missing` checks the
-    // cache *after* it is given a decoded buffer, so passing an already-analysed
-    // track still costs a full decode — adding one file to a large library would
-    // otherwise re-decode the whole library, which is the same heat and battery
-    // cost the serial worker exists to avoid.
-    let pending: Vec<PathBuf> = paths
-        .iter()
-        .filter(|p| analyzed_cache_entry(p, cache_dir).is_none())
-        .cloned()
-        .collect();
-    analyze_these(app, pending, cache_dir, data_dir);
+#[cfg(test)]
+mod scan_tracks_tests {
+    use super::*;
+
+    /// Fresh temp dir per test, cleaned up on drop. Same shape as the one in
+    /// `cache_state_tests`; not shared for the same reason given there.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "funkot-player-scan-tracks-test-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn finds_tracks_in_nested_subdirectories() {
+        let dir = TempDir::new("nested");
+        touch(&dir.0.join("top.wav"));
+        touch(&dir.0.join("a").join("mid.mp3"));
+        touch(&dir.0.join("a").join("b").join("deep.flac"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(
+            found,
+            vec![
+                dir.0.join("a").join("b").join("deep.flac"),
+                dir.0.join("a").join("mid.mp3"),
+                dir.0.join("top.wav"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_dot_prefixed_directories() {
+        let dir = TempDir::new("dot-dir");
+        touch(&dir.0.join(".hidden").join("track.wav"));
+        touch(&dir.0.join("visible.wav"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(found, vec![dir.0.join("visible.wav")]);
+    }
+
+    #[test]
+    fn ignores_dot_prefixed_files() {
+        let dir = TempDir::new("dot-file");
+        touch(&dir.0.join(".track.wav"));
+        touch(&dir.0.join("track.wav"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(found, vec![dir.0.join("track.wav")]);
+    }
+
+    #[test]
+    fn ignores_unsupported_extensions() {
+        let dir = TempDir::new("unsupported");
+        touch(&dir.0.join("notes.txt"));
+        touch(&dir.0.join("track.wav"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(found, vec![dir.0.join("track.wav")]);
+    }
+
+    #[test]
+    fn result_is_sorted() {
+        let dir = TempDir::new("sorted");
+        touch(&dir.0.join("z.wav"));
+        touch(&dir.0.join("m.wav"));
+        touch(&dir.0.join("a.wav"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        let mut expected = found.clone();
+        expected.sort();
+        assert_eq!(found, expected);
+        assert_eq!(
+            found,
+            vec![
+                dir.0.join("a.wav"),
+                dir.0.join("m.wav"),
+                dir.0.join("z.wav"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_follow_symlinked_directories() {
+        let dir = TempDir::new("symlink");
+        let real = TempDir::new("symlink-target");
+        touch(&real.0.join("outside.wav"));
+        touch(&dir.0.join("inside.wav"));
+
+        std::os::unix::fs::symlink(&real.0, dir.0.join("linked")).unwrap();
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(found, vec![dir.0.join("inside.wav")]);
+    }
+
+    /// Recursive scanning can surface the same file name in different
+    /// subfolders; both must survive as distinct entries, and only their
+    /// full paths (not `file_name_str`) tell them apart — this is the
+    /// reasoning behind keying `PlayerState` on `path_str` rather than the
+    /// file name.
+    #[test]
+    fn same_basename_in_different_subdirs_both_survive() {
+        let dir = TempDir::new("same-basename");
+        touch(&dir.0.join("a").join("01.mp3"));
+        touch(&dir.0.join("b").join("01.mp3"));
+
+        let found = scan_tracks(&dir.0).unwrap();
+        assert_eq!(
+            found,
+            vec![dir.0.join("a").join("01.mp3"), dir.0.join("b").join("01.mp3"),]
+        );
+        assert_eq!(
+            file_name_str(&found[0]),
+            file_name_str(&found[1]),
+            "file names collide, which is exactly why PlayerState must key on path_str instead"
+        );
+    }
 }
 
-/// As [`analyze_missing`], for a caller that has already worked out which
-/// tracks are unanalysed and should not pay to hash them all over again.
+/// Kick off a background analysis worker for a caller-supplied list of tracks
+/// that still need analysis. `refresh_library` builds this list from `track_row`
+/// so each file is content-hashed only once.
 fn analyze_these(
     app: &tauri::AppHandle,
     pending: Vec<PathBuf>,
@@ -4210,11 +5636,33 @@ fn analyze_these(
     }
     log::info!("{} track(s) need analysis", pending.len());
     let overrides = store::load_overrides(data_dir);
-    spawn_analysis_worker(app.clone(), pending, cache_dir.to_path_buf(), overrides);
+    let labels = store::load_labels(data_dir);
+    let history = store::load_history(data_dir);
+    spawn_analysis_worker(
+        app.clone(),
+        pending,
+        cache_dir.to_path_buf(),
+        overrides,
+        labels,
+        history,
+    );
 }
 
-/// Scan `music_dir` (top-level only) for supported tracks and report what the
-/// analysis cache already knows about each.
+/// Progress payload for the `library-scan` event.
+///
+/// Emitted while `refresh_library` walks the music folder and content-hashes
+/// each track — especially useful over SMB where hashing can take a long time
+/// and the UI would otherwise keep showing the previous library with no feedback.
+#[derive(serde::Serialize, Clone)]
+struct LibraryScanProgress {
+    /// `"walking"` while collecting paths; `"hashing"` while building rows.
+    phase: String,
+    found: usize,
+    done: usize,
+}
+
+/// Scan `music_dir` (recursively, subfolders included) for supported tracks
+/// and report what the analysis cache already knows about each.
 ///
 /// When `kick_analysis` is true, starts a background analysis worker for any
 /// unanalyzed tracks (startup / manual 再スキャン). When false, returns the
@@ -4222,6 +5670,8 @@ fn analyze_these(
 /// (e.g. silent files) cannot re-queue forever via refresh → analyze → done.
 #[tauri::command(async)]
 fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<TrackRow>, String> {
+    use tauri::Emitter;
+
     let dirs = resolve_dirs(&app)?;
     if dirs.music_dir_needed {
         return Ok(Vec::new());
@@ -4230,19 +5680,87 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let cache_dir = PathBuf::from(&dirs.cache_dir);
     let data_dir = PathBuf::from(&dirs.data_dir);
 
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&music_dir)
-        .map_err(|e| format!("cannot read {}: {e}", music_dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| is_supported_track(p))
-        .collect();
-    paths.sort();
+    let _ = app.emit(
+        "library-scan",
+        LibraryScanProgress {
+            phase: "walking".into(),
+            found: 0,
+            done: 0,
+        },
+    );
 
-    let rows: Vec<TrackRow> = paths.iter().map(|p| track_row(p, &cache_dir)).collect();
+    let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
+    let overrides = store::load_overrides(&data_dir);
+    let labels = store::load_labels(&data_dir);
+    let history = store::load_history(&data_dir);
+    let mut hash_index = store::load_hash_index(&data_dir);
+    let found = paths.len();
+
+    let _ = app.emit(
+        "library-scan",
+        LibraryScanProgress {
+            phase: "hashing".into(),
+            found,
+            done: 0,
+        },
+    );
+
+    // Explicit loop (not `.map`) so we can emit progress after each resolve.
+    let mut rows: Vec<TrackRow> = Vec::with_capacity(found);
+    let mut seen_paths = std::collections::BTreeSet::new();
+    for path in &paths {
+        let path_key = path.to_string_lossy().into_owned();
+        seen_paths.insert(path_key.clone());
+        let (hash, tags) = match store::resolve_library_file(path, &mut hash_index) {
+            Ok(resolved) => {
+                let tags = CachedTags {
+                    title: resolved.title,
+                    artist: resolved.artist,
+                };
+                // Seed TAG_CACHE from the index whenever tags are known so
+                // later cached_tags_for callers (MediaSession, analysis rows)
+                // neither re-open on hit nor keep stale tags after a re-probe.
+                if hash_index
+                    .get(&path_key)
+                    .is_some_and(|e| e.tags_cached)
+                {
+                    TAG_CACHE
+                        .lock()
+                        .unwrap()
+                        .insert(path.to_path_buf(), tags.clone());
+                }
+                (Some(resolved.hash), Some(tags))
+            }
+            Err(_) => (None, None),
+        };
+        rows.push(track_row(
+            path,
+            &cache_dir,
+            &overrides,
+            &labels,
+            &history,
+            hash.as_deref(),
+            tags,
+        ));
+        let _ = app.emit(
+            "library-scan",
+            LibraryScanProgress {
+                phase: "hashing".into(),
+                found,
+                done: rows.len(),
+            },
+        );
+    }
+
+    hash_index.retain(|path, _| seen_paths.contains(path));
+    if let Err(e) = store::save_hash_index(&data_dir, &hash_index) {
+        log::warn!("cannot save hash-index.json: {e}");
+    }
 
     if kick_analysis {
-        // Reuse what `track_row` already worked out rather than calling
-        // `analyze_missing`, which would hash every file a second time: `analyzed`
-        // is exactly `analyzed_cache_entry(...).is_some()`.
+        // Reuse what `track_row` already worked out so we do not hash every
+        // file a second time: `analyzed` is exactly
+        // `analyzed_cache_entry(...).is_some()`.
         let pending: Vec<PathBuf> = paths
             .iter()
             .zip(&rows)
@@ -4326,6 +5844,7 @@ fn set_bars_impl(
     let edit = store::BarOverride {
         intro_bars,
         outro_structure_bars,
+        funkot: None,
     };
     // The cache write comes first: if the track has no analysis yet there is
     // nothing to edit, and storing the override anyway would leave the app
@@ -4365,7 +5884,10 @@ fn set_bars_impl(
         if outro_structure_bars.is_some() {
             entry.outro_structure_bars = None;
         }
-        if entry.intro_bars.is_none() && entry.outro_structure_bars.is_none() {
+        if entry.intro_bars.is_none()
+            && entry.outro_structure_bars.is_none()
+            && entry.funkot.is_none()
+        {
             overrides.remove(&hash);
         }
     }
@@ -4376,7 +5898,322 @@ fn set_bars_impl(
         log::warn!("cannot persist manual bars: {e}");
     }
 
-    Ok(track_row(track, cache_dir))
+    let labels = store::load_labels(data_dir);
+    let history = store::load_history(data_dir);
+    Ok(track_row(
+        track,
+        cache_dir,
+        &overrides,
+        &labels,
+        &history,
+        Some(&hash),
+        None,
+    ))
+}
+
+/// Set or clear the human Funkot label for one track.
+///
+/// `verdict: Some(true/false)` writes `labels.json` and mirrors into
+/// `BarOverride.funkot`. `None` removes the label and clears the mirror.
+#[tauri::command(async)]
+fn set_label(
+    app: tauri::AppHandle,
+    path: String,
+    verdict: Option<bool>,
+) -> Result<TrackRow, String> {
+    let dirs = resolve_dirs(&app)?;
+    let cache_dir = PathBuf::from(&dirs.cache_dir);
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_label_impl(&cache_dir, &data_dir, Path::new(&path), verdict)
+}
+
+/// Core of [`set_label`], split out so unit tests can drive labels + library
+/// without an `AppHandle` / global lock.
+fn set_label_impl(
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    track: &std::path::Path,
+    verdict: Option<bool>,
+) -> Result<TrackRow, String> {
+    let mut index = store::load_hash_index(data_dir);
+    let hash = store::resolve_content_hash(track, &mut index)
+        .map_err(|e| format!("cannot hash {}: {e}", track.display()))?;
+
+    let mut labels = store::load_labels(data_dir);
+    match verdict {
+        Some(v) => {
+            labels.insert(
+                hash.clone(),
+                store::TrackLabel {
+                    verdict: v,
+                    labeled_at_ms: now_ms(),
+                },
+            );
+        }
+        None => {
+            labels.remove(&hash);
+        }
+    }
+    if let Err(e) = store::save_labels(data_dir, &labels) {
+        log::warn!("cannot persist labels: {e}");
+    }
+
+    let mut overrides = store::load_overrides(data_dir);
+    match verdict {
+        Some(v) => {
+            overrides.entry(hash.clone()).or_default().funkot = Some(v);
+        }
+        None => {
+            if let Some(entry) = overrides.get_mut(&hash) {
+                entry.funkot = None;
+                if entry.intro_bars.is_none()
+                    && entry.outro_structure_bars.is_none()
+                    && entry.funkot.is_none()
+                {
+                    overrides.remove(&hash);
+                }
+            }
+        }
+    }
+    if let Err(e) = store::save_overrides(data_dir, &overrides) {
+        log::warn!("cannot persist manual bars: {e}");
+    }
+
+    let history = store::load_history(data_dir);
+    Ok(track_row(
+        track,
+        cache_dir,
+        &overrides,
+        &labels,
+        &history,
+        Some(&hash),
+        None,
+    ))
+}
+
+/// Label every supported track under `dir` (recursive) with the same verdict.
+///
+/// Returns how many tracks were labeled (hash successes, including relabels).
+/// There is no bulk-clear: `verdict` is always a concrete bool.
+///
+/// Arms [`undo_last_folder_label`] with what this overwrote.
+#[tauri::command(async)]
+fn set_folder_label(
+    app: tauri::AppHandle,
+    dir: String,
+    verdict: bool,
+) -> Result<usize, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (count, undo) = set_folder_label_impl(&data_dir, Path::new(&dir), verdict)?;
+    *LAST_FOLDER_LABEL_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(undo);
+    Ok(count)
+}
+
+/// Core of [`set_folder_label`], split for unit tests without `AppHandle`.
+///
+/// Returns `(labeled count, undo snapshot)`. The count is per *path* (what
+/// the toast reports as 曲数); the snapshot is per *content hash*, which is
+/// what the label files are keyed by.
+fn set_folder_label_impl(
+    data_dir: &std::path::Path,
+    dir: &std::path::Path,
+    verdict: bool,
+) -> Result<(usize, Vec<FolderLabelUndo>), String> {
+    let paths = scan_tracks(dir)?;
+    let mut index = store::load_hash_index(data_dir);
+    let mut labels = store::load_labels(data_dir);
+    let mut overrides = store::load_overrides(data_dir);
+    let labeled_at_ms = now_ms();
+    let mut count = 0usize;
+    let mut undo: Vec<FolderLabelUndo> = Vec::new();
+    let mut snapshotted = std::collections::HashSet::new();
+
+    for path in &paths {
+        let Ok(hash) = store::resolve_content_hash(path, &mut index) else {
+            continue;
+        };
+        // Snapshot before the write, and at most once per hash: the same
+        // track copied into two subfolders resolves to one hash, and the
+        // second visit would otherwise record the verdict written moments
+        // ago as if it were the previous state.
+        if snapshotted.insert(hash.clone()) {
+            undo.push(FolderLabelUndo {
+                hash: hash.clone(),
+                label: labels.get(&hash).cloned(),
+                funkot: overrides.get(&hash).and_then(|o| o.funkot),
+            });
+        }
+        labels.insert(
+            hash.clone(),
+            store::TrackLabel {
+                verdict,
+                labeled_at_ms,
+            },
+        );
+        overrides.entry(hash).or_default().funkot = Some(verdict);
+        count += 1;
+    }
+
+    if let Err(e) = store::save_labels(data_dir, &labels) {
+        log::warn!("cannot persist labels: {e}");
+    }
+    if let Err(e) = store::save_overrides(data_dir, &overrides) {
+        log::warn!("cannot persist manual bars: {e}");
+    }
+    Ok((count, undo))
+}
+
+/// Restore what the most recent [`set_folder_label`] overwrote (single-shot).
+///
+/// Returns how many tracks were restored.
+#[tauri::command(async)]
+fn undo_last_folder_label(app: tauri::AppHandle) -> Result<usize, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entries = {
+        let slot = LAST_FOLDER_LABEL_UNDO
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.clone().ok_or_else(|| "nothing to undo".to_string())?
+    };
+
+    let restored = undo_folder_label_impl(&data_dir, &entries)?;
+    // Only consume the token after both writes land, so a failed save leaves
+    // the toast's 取消 usable — same rule as [`undo_last_flag`].
+    *LAST_FOLDER_LABEL_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    Ok(restored)
+}
+
+/// Core of [`undo_last_folder_label`], split for unit tests without `AppHandle`.
+fn undo_folder_label_impl(
+    data_dir: &std::path::Path,
+    entries: &[FolderLabelUndo],
+) -> Result<usize, String> {
+    let mut labels = store::load_labels(data_dir);
+    let mut overrides = store::load_overrides(data_dir);
+
+    for entry in entries {
+        match &entry.label {
+            Some(label) => {
+                labels.insert(entry.hash.clone(), label.clone());
+            }
+            None => {
+                labels.remove(&entry.hash);
+            }
+        }
+        match entry.funkot {
+            Some(v) => {
+                overrides.entry(entry.hash.clone()).or_default().funkot = Some(v);
+            }
+            None => {
+                // Restore only `funkot`. A `set_bars` edit may have landed on
+                // this entry since the bulk write, and removing the entry
+                // outright would take those hand-set bars with it. Drop it
+                // only once nothing is left — same rule as `set_label_impl`'s
+                // `None` branch.
+                if let Some(o) = overrides.get_mut(&entry.hash) {
+                    o.funkot = None;
+                    if o.intro_bars.is_none() && o.outro_structure_bars.is_none() {
+                        overrides.remove(&entry.hash);
+                    }
+                }
+            }
+        }
+    }
+
+    store::save_labels(data_dir, &labels).map_err(|e| format!("cannot persist labels: {e}"))?;
+    store::save_overrides(data_dir, &overrides)
+        .map_err(|e| format!("cannot persist manual bars: {e}"))?;
+    Ok(entries.len())
+}
+
+/// Summarise human labels vs the current music library size.
+#[tauri::command(async)]
+fn label_stats(app: tauri::AppHandle) -> Result<LabelStats, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let music_dir = if dirs.music_dir_needed {
+        None
+    } else {
+        Some(Path::new(dirs.music_dir.as_str()))
+    };
+    Ok(label_stats_impl(&data_dir, music_dir))
+}
+
+/// Core of [`label_stats`], split for unit tests without `AppHandle`.
+fn label_stats_impl(data_dir: &std::path::Path, music_dir: Option<&Path>) -> LabelStats {
+    let labels = store::load_labels(data_dir);
+    let labeled = labels.len();
+    let funkot = labels.values().filter(|l| l.verdict).count();
+    let not_funkot = labels.values().filter(|l| !l.verdict).count();
+    let total = match music_dir {
+        Some(dir) => scan_tracks(dir).map(|p| p.len()).unwrap_or(0),
+        None => 0,
+    };
+    LabelStats {
+        labeled,
+        total,
+        funkot,
+        not_funkot,
+    }
+}
+
+/// Wipe all human labels and play history, and clear `BarOverride.funkot` mirrors.
+///
+/// Intro/outro hand edits are kept. Empty override entries (no intro, outro, or
+/// funkot) are removed — same rule as [`set_label_impl`]'s `None` branch.
+#[tauri::command(async)]
+fn clear_labels_and_history(app: tauri::AppHandle) -> Result<(), String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_labels_and_history_impl(&data_dir);
+    // A folder-label undo armed before the wipe would put part of the labels
+    // back, which is the opposite of what the user just confirmed.
+    *LAST_FOLDER_LABEL_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    Ok(())
+}
+
+/// Core of [`clear_labels_and_history`], split for unit tests without `AppHandle`.
+fn clear_labels_and_history_impl(data_dir: &std::path::Path) {
+    if let Err(e) = store::save_labels(data_dir, &store::Labels::new()) {
+        log::warn!("cannot persist labels: {e}");
+    }
+    if let Err(e) = store::save_history(data_dir, &store::History::new()) {
+        log::warn!("cannot persist history: {e}");
+    }
+    let mut overrides = store::load_overrides(data_dir);
+    for entry in overrides.values_mut() {
+        entry.funkot = None;
+    }
+    overrides.retain(|_, entry| {
+        entry.intro_bars.is_some() || entry.outro_structure_bars.is_some()
+    });
+    if let Err(e) = store::save_overrides(data_dir, &overrides) {
+        log::warn!("cannot persist manual bars: {e}");
+    }
 }
 
 /// Progress payload for the `analysis-progress` event.
@@ -4419,28 +6256,41 @@ fn reapply_overrides(path: &std::path::Path, cache_dir: &std::path::Path, o: &st
 /// better than analysing nothing.
 const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Block until the first track is actually making sound.
+/// Block while Start / loader work should own decode CPU and disk.
+///
+/// Called by the analysis worker before each track, not once at thread entry:
+/// a worker started while Idle (refresh-before-start) would otherwise keep
+/// decoding other files after Start flips the phase to `Starting`, and steal
+/// CPU/disk from the loader. Mid-decode of the current file is not cancelled;
+/// yielding happens before the next track.
+///
+/// Waits while any of:
+/// - `Phase::Starting` — first non-silent buffer not yet reached
+/// - `Phase::Stalled` — silence; stop competing so the loader can recover
+/// - `Phase::Playing` and `YIELD_FOR_LOADER` — after first sound, still cover
+///   first-track Upgrade and the first next-slot prepare (`get_or_analyze` on
+///   cache miss). Cleared when the cpal callback sees `next_track_path()`.
 ///
 /// The engine's loader analyses a track itself when the cache has no complete
 /// entry for it (`funkot-core` `cache::get_or_analyze`, reached from
 /// `prepare_track` and from the first track's Upgrade). That analysis is what
-/// this worker exists to do ahead of time — but for the *first* track the
-/// loader is already doing it, on the one thread feeding the engine, and
-/// piling on there is how a press of start turns into a wait for silence.
+/// this worker exists to do ahead of time — but overlapping it on Start is
+/// how a press of start turns into a wait for silence.
 ///
-/// Note what this does **not** wait for. `Starting` ends at the first
-/// non-silent buffer, which the loader reaches on a ~20 s head preview
-/// (`prepare_first_live`) — its full analysis of that same first track is
-/// still running afterwards. So this buys the decode-and-first-sound burst,
-/// not the whole of track one, and the worker can still briefly overlap the
-/// loader on that file. The per-track cache re-check in the worker loop is
-/// what keeps that overlap from costing a second full analysis.
-///
-/// Idle (nothing playing) does not wait at all, which is the plain
+/// If the next slot never fills while still Playing (drain empty, prepare
+/// stuck, …), `YIELD_FOR_LOADER` stays true and each subsequent track wait
+/// can re-arm up to `STARTUP_WAIT`. Idle / Paused / Failed / Disconnected
+/// (or Playing with the flag cleared) does not wait — the plain
 /// press-scan-before-start case.
 fn wait_out_startup() {
     let until = std::time::Instant::now() + STARTUP_WAIT;
-    while get_phase() == Phase::Starting && std::time::Instant::now() < until {
+    while std::time::Instant::now() < until {
+        let phase = get_phase();
+        let hold = matches!(phase, Phase::Starting | Phase::Stalled)
+            || (phase == Phase::Playing && YIELD_FOR_LOADER.load(Ordering::Relaxed));
+        if !hold {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
@@ -4456,6 +6306,8 @@ fn spawn_analysis_worker(
     paths: Vec<PathBuf>,
     cache_dir: PathBuf,
     overrides: store::Overrides,
+    labels: store::Labels,
+    history: store::History,
 ) {
     if ANALYZING.swap(true, Ordering::SeqCst) {
         // Already running; refresh_library's caller will see progress events
@@ -4468,15 +6320,14 @@ fn spawn_analysis_worker(
         .spawn(move || {
             use tauri::Emitter;
 
-            wait_out_startup();
-
             let total = paths.len();
             for (i, path) in paths.iter().enumerate() {
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("?")
-                    .to_string();
+                // Yield before starting the next track so Start's
+                // `prepare_first_live` is not fighting an in-flight library
+                // decode. See `wait_out_startup`.
+                wait_out_startup();
+
+                let name = file_name_str(path);
 
                 // Re-checked here, not just when the list was built: the
                 // engine's loader analyses whatever it prepares, so by the
@@ -4484,15 +6335,31 @@ fn spawn_analysis_worker(
                 // have done it. `fill_missing` would notice too, but only
                 // after a full decode — and it is the decode, tens of MB and
                 // seconds of CPU, that is worth not repeating on a phone.
-                if analyzed_cache_entry(path, &cache_dir).is_some() {
-                    log::info!("analysis: {name} was done elsewhere, skipping");
+                let hash = funkot_core::cache::content_hash(path).ok();
+                if hash
+                    .as_deref()
+                    .and_then(|h| analyzed_cache_entry(&cache_dir, h))
+                    .is_some()
+                {
+                    log::info!(
+                        "analysis: {} was done elsewhere, skipping",
+                        path.display()
+                    );
                     let _ = app.emit(
                         "analysis-progress",
                         AnalysisProgress {
                             done: i + 1,
                             total,
                             name,
-                            row: track_row(path, &cache_dir),
+                            row: track_row(
+                                path,
+                                &cache_dir,
+                                &overrides,
+                                &labels,
+                                &history,
+                                hash.as_deref(),
+                                None,
+                            ),
                         },
                     );
                     continue;
@@ -4516,7 +6383,15 @@ fn spawn_analysis_worker(
 
                 // Built after `reapply_overrides` so a successful run's row
                 // reflects the corrected numbers, not the analyzer's raw ones.
-                let row = track_row(path, &cache_dir);
+                let row = track_row(
+                    path,
+                    &cache_dir,
+                    &overrides,
+                    &labels,
+                    &history,
+                    hash.as_deref(),
+                    None,
+                );
                 let _ = app.emit(
                     "analysis-progress",
                     AnalysisProgress {
@@ -4773,6 +6648,99 @@ fn feedback_share(absolute_path: &str) -> Result<(), String> {
     result.map_err(|e| format!("FeedbackShare.shareFrom: {e}"))
 }
 
+/// `Import.hasInFlight()` — whether an `Import.onIntent` copy thread is still
+/// running. See [`ImportResult::in_flight`]'s doc comment for why
+/// `take_pending_import` needs this at all, and its own call site for why the
+/// order relative to its staging-dir walk matters.
+///
+/// Same classloader routing as [`feedback_share`] / [`service_call`]: this
+/// runs on Tauri's blocking pool, so the system classloader cannot see app
+/// classes.
+#[cfg(target_os = "android")]
+fn android_import_has_in_flight() -> Result<bool, String> {
+    use jni::objects::{JClassLoader, JObject};
+    use jni::refs::LoaderContext;
+    use jni::strings::JNIString;
+    use jni::{errors::Result as JResult, Env, JavaVM};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    let raw_context = ctx.context() as jni::sys::jobject;
+
+    let result: JResult<bool> = vm.attach_current_thread(|env: &mut Env<'_>| {
+        let context = unsafe { JObject::from_raw(env, raw_context) };
+        let loader = env
+            .call_method(
+                &context,
+                jni::jni_str!("getClassLoader"),
+                jni::jni_sig!("()Ljava/lang/ClassLoader;"),
+                &[],
+            )?
+            .l()?;
+        let loader = env.cast_local::<JClassLoader>(loader)?;
+        let class = LoaderContext::Loader(&loader).load_class(
+            env,
+            jni::jni_str!("jp.hatsuboshi.funkotplayer.Import"),
+            true,
+        )?;
+        env.call_static_method(
+            &class,
+            JNIString::new("hasInFlight"),
+            jni::jni_sig!("()Z"),
+            &[],
+        )?
+        .z()
+    });
+    result.map_err(|e| format!("Import.hasInFlight: {e}"))
+}
+
+/// `Import.takeFailed()` — number of URIs that failed to stage since the
+/// last call (a destructive read: the Kotlin side resets its counter to
+/// zero). Must be called *after* [`android_import_has_in_flight`] on each
+/// poll — see [`ImportResult::failed`]'s doc comment and this function's own
+/// call site in `take_pending_import` for why that order matters.
+///
+/// Same classloader routing as [`android_import_has_in_flight`].
+#[cfg(target_os = "android")]
+fn android_import_take_failed() -> Result<u32, String> {
+    use jni::objects::{JClassLoader, JObject};
+    use jni::refs::LoaderContext;
+    use jni::strings::JNIString;
+    use jni::{errors::Result as JResult, Env, JavaVM};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    let raw_context = ctx.context() as jni::sys::jobject;
+
+    let result: JResult<i32> = vm.attach_current_thread(|env: &mut Env<'_>| {
+        let context = unsafe { JObject::from_raw(env, raw_context) };
+        let loader = env
+            .call_method(
+                &context,
+                jni::jni_str!("getClassLoader"),
+                jni::jni_sig!("()Ljava/lang/ClassLoader;"),
+                &[],
+            )?
+            .l()?;
+        let loader = env.cast_local::<JClassLoader>(loader)?;
+        let class = LoaderContext::Loader(&loader).load_class(
+            env,
+            jni::jni_str!("jp.hatsuboshi.funkotplayer.Import"),
+            true,
+        )?;
+        env.call_static_method(
+            &class,
+            JNIString::new("takeFailed"),
+            jni::jni_sig!("()I"),
+            &[],
+        )?
+        .i()
+    });
+    result
+        .map(|n| n as u32)
+        .map_err(|e| format!("Import.takeFailed: {e}"))
+}
+
 /// Outcome of the most recent notification ⚑ (`CONTROL_FLAG` = 3).
 #[cfg(target_os = "android")]
 static LAST_FLAG_OK: AtomicBool = AtomicBool::new(false);
@@ -4892,10 +6860,10 @@ pub fn run() {
             // Preload the queue tab before ▶ is pressed: `start_impl` is
             // otherwise the only place `queue.json` / `session.json` get
             // read, so without this the queue screen shows nothing until
-            // the listener starts playback at least once. Whatever this
-            // restores here, `start_impl` restores again — identically,
-            // and idempotently (see its doc comment) — so this is a pure
-            // head start, not a second source of truth.
+            // the listener starts playback at least once. `start_impl`
+            // restores again (`exists` + strict gate) and overwrites;
+            // this preload skips music-folder I/O so the GUI thread
+            // does not stall on SMB.
             //
             // Best-effort end to end: on Android, the JNI context
             // `platform_dirs` needs may not be ready this early in the
@@ -4905,23 +6873,36 @@ pub fn run() {
             // about playback depends on this succeeding.
             use tauri::Manager;
             let handle = app.handle().clone();
-            match resolve_dirs(&handle) {
-                Ok(dirs) => {
-                    let data = PathBuf::from(dirs.data_dir);
-                    let _ = DATA_DIR.set(data.clone());
-                    let session = store::load_session(&data);
-                    let saved = store::load_queue(&data).unwrap_or_else(|e| {
-                        log::warn!("setup: load_queue({}): {e}", data.display());
-                        Vec::new()
-                    });
-                    let restored =
-                        store::restored_pending(&session.in_flight, &saved, |p| p.exists());
-                    let state = app.state::<AppState>();
-                    queue::replace_pending(&state.queue, restored);
+            // Desktop: do not call `resolve_dirs` here — its music_dir probe
+            // (`read_dir` on SMB/UNC) can freeze the GUI thread (~10s). File
+            // existence and the strict gate run later in `start_impl`.
+            #[cfg(not(target_os = "android"))]
+            match handle.path().app_data_dir() {
+                Ok(data) => {
+                    let cache = data.join("funkot-cache");
+                    preload_queue_tab(&handle, data, &cache);
                 }
                 Err(e) => {
                     log::warn!("setup: cannot resolve dirs, queue preload skipped: {e}");
                 }
+            }
+            #[cfg(target_os = "android")]
+            match resolve_dirs(&handle) {
+                Ok(dirs) => {
+                    let data = PathBuf::from(dirs.data_dir);
+                    let cache = PathBuf::from(dirs.cache_dir);
+                    preload_queue_tab(&handle, data, &cache);
+                }
+                Err(e) => {
+                    log::warn!("setup: cannot resolve dirs, queue preload skipped: {e}");
+                }
+            }
+            // Linux GUI debug: open the WebKit inspector with the window so a
+            // render throw is visible. Svelte 5 does not catch throws during
+            // an effect flush; production minifies the message to a URL.
+            #[cfg(all(debug_assertions, not(target_os = "android")))]
+            if let Some(w) = app.get_webview_window("main") {
+                w.open_devtools();
             }
             Ok(())
         })
@@ -4945,11 +6926,21 @@ pub fn run() {
             undo_last_dismiss,
             refresh_library,
             set_bars,
+            set_label,
+            set_folder_label,
+            undo_last_folder_label,
+            label_stats,
+            clear_labels_and_history,
             enqueue,
             reorder,
             dequeue,
             queue_state,
-            share_feedback
+            get_allow_non_funkot,
+            set_allow_non_funkot,
+            get_labeling_mode,
+            set_labeling_mode,
+            share_feedback,
+            take_pending_import
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

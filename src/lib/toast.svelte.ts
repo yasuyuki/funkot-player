@@ -6,6 +6,13 @@
 // toast, so two of them can never stack on screen at once.
 const AUTO_DISMISS_MS = 8000;
 
+/// For actions whose 取消 is the only way back and which touch many tracks at
+/// once (folder labeling). The toast is docked to the bottom edge while the
+/// user is reading rows in the middle of an 800-row table, so the default
+/// window is easy to miss entirely — and a bulk label missed here costs a
+/// folder's worth of judgements to redo, not one.
+export const BULK_DISMISS_MS = 20000;
+
 class ToastStore {
   message = $state<string | null>(null);
   /// Disabled while an undo is in flight, same reasoning as Transport's
@@ -22,14 +29,18 @@ class ToastStore {
   /// the toast, whose 取消 the user has not used yet.
   #generation = 0;
 
-  show(message: string, onUndo: () => Promise<boolean>): void {
+  show(
+    message: string,
+    onUndo: () => Promise<boolean>,
+    dismissMs: number = AUTO_DISMISS_MS,
+  ): void {
     this.#clearTimer();
     this.#generation += 1;
     this.message = message;
     this.#onUndo = onUndo;
     this.undoable = true;
     this.busy = false;
-    this.#timer = setTimeout(() => this.dismiss(), AUTO_DISMISS_MS);
+    this.#timer = setTimeout(() => this.dismiss(), dismissMs);
   }
 
   /// Notify-only toast: no 取消, auto-dismisses like `show`.

@@ -57,10 +57,14 @@
     </div>
     {#if store.dirs}
       <!-- Same paths legacy/index.html printed at startup -- lets a tester
-           confirm the app is reading/writing where they expect. -->
+           confirm the app is reading/writing where they expect. On Android
+           this is also the only place the music folder's path appears (the
+           ⋮ menu has no "開く" item there), and it is what someone about to
+           copy files over MTP needs to read, hence Japanese labels rather
+           than the bare `music:` / `cache:` keys. -->
       <div class="dirs">
-        <div>music: {store.dirs.music_dir}</div>
-        <div>cache: {store.dirs.cache_dir}</div>
+        <div>音楽フォルダ: {store.dirs.music_dir}</div>
+        <div>キャッシュ: {store.dirs.cache_dir}</div>
       </div>
     {/if}
     {#if store.lastError}

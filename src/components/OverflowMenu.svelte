@@ -1,16 +1,31 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
-  import { ui } from "../lib/ui.svelte";
-  import { toast } from "../lib/toast.svelte";
   import { openMusicDir, shareFeedback } from "../lib/tauri";
+  import { toast } from "../lib/toast.svelte";
+  import { ui } from "../lib/ui.svelte";
+  import { sessionActive } from "../lib/transportMode";
 
   let scanBusy = $state(false);
   let openMusicBusy = $state(false);
-  let musicDirBusy = $state(false);
   let feedbackBusy = $state(false);
+  let musicDirBusy = $state(false);
+  let allowNonFunkotBusy = $state(false);
+  let labelingModeBusy = $state(false);
+  let clearLabelsBusy = $state(false);
 
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
   let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
+  // Labeling mode is fixed at engine construction (no live switch — see
+  // `EngineOptions::head_only_secs`), so a toggle only takes effect the next
+  // time ▶ is pressed (`doStart`), not merely "while a session happens to be
+  // running" -- a session already running WITH the current setting must not
+  // show this. Compare against `activeLabelingMode` (captured at the running
+  // session's own `doStart`), not just `sessionActive`.
+  let labelingModePending = $derived(
+    sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false) &&
+      store.activeLabelingMode !== null &&
+      store.activeLabelingMode !== store.labelingMode,
+  );
 
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
@@ -18,8 +33,8 @@
   }
 
   function onShowLog() {
-    ui.menuOpen = false;
     ui.logOpen = true;
+    ui.menuOpen = false;
   }
 
   async function onRescan() {
@@ -27,7 +42,15 @@
     scanBusy = true;
     ui.menuOpen = false;
     try {
-      await store.doRefreshLibrary();
+      const result = await store.doRefreshLibrary();
+      // Check `ok` first so the busy/error arms narrow cleanly (both are `ok: false`).
+      if (result.ok) {
+        toast.notify(`${result.count}曲見つかりました`);
+      } else if ("busy" in result) {
+        toast.notify("スキャン中です");
+      } else {
+        toast.notify(result.error);
+      }
     } finally {
       scanBusy = false;
     }
@@ -38,12 +61,10 @@
     openMusicBusy = true;
     ui.menuOpen = false;
     try {
-      // Desktop opens Explorer / the file manager; Android only returns the
-      // path (the private Music folder is not reliably openable via Intent).
       const path = await openMusicDir();
-      // Always toast the path: Android has no Explorer, and desktop has
-      // already opened Explorer / the file manager — still show the path so
-      // Windows Store users can confirm where files go.
+      // The file manager is already up by now; the toast rides on top of it
+      // so Windows Store users can confirm where files go. Desktop only —
+      // see the guard on the menu item.
       toast.notify(path);
     } catch (err) {
       toast.notify(String(err));
@@ -96,6 +117,63 @@
     }
   }
 
+  async function onToggleAllowNonFunkot() {
+    if (allowNonFunkotBusy) return;
+    allowNonFunkotBusy = true;
+    ui.menuOpen = false;
+    try {
+      await store.doSetAllowNonFunkot(!store.allowNonFunkot);
+      toast.notify(
+        store.allowNonFunkot
+          ? "非Funkotも追加・自動選曲できます"
+          : "非Funkotは追加・自動選曲から除外します",
+      );
+    } finally {
+      allowNonFunkotBusy = false;
+    }
+  }
+
+  async function onToggleLabelingMode() {
+    if (labelingModeBusy) return;
+    labelingModeBusy = true;
+    ui.menuOpen = false;
+    try {
+      await store.doSetLabelingMode(!store.labelingMode);
+      if (labelingModePending) {
+        toast.notify(
+          store.labelingMode
+            ? "ラベリングモード: ON（次回の再生開始から有効）"
+            : "ラベリングモード: OFF（次回の再生開始から有効）",
+        );
+      } else {
+        toast.notify(
+          store.labelingMode
+            ? "ラベリングモード: ON（頭20秒だけ再生）"
+            : "ラベリングモード: OFF",
+        );
+      }
+    } finally {
+      labelingModeBusy = false;
+    }
+  }
+
+  async function onClearLabelsAndHistory() {
+    if (clearLabelsBusy) return;
+    if (!window.confirm("ラベルと再生履歴を全部消しますか？")) return;
+    clearLabelsBusy = true;
+    ui.menuOpen = false;
+    try {
+      const ok = await store.doClearLabelsAndHistory();
+      if (ok) {
+        toast.notify("ラベルと再生履歴を消しました");
+      } else {
+        toast.notify(store.lastError ?? "ラベルと再生履歴を消せませんでした");
+      }
+    } finally {
+      clearLabelsBusy = false;
+    }
+  }
+
   async function onShareFeedback() {
     if (feedbackBusy) return;
     feedbackBusy = true;
@@ -140,10 +218,23 @@
       {/if}
       {#if musicDirConfigurable && !musicDirNeeded}
         <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>Musicフォルダを変更</button>
-      {/if}
-      {#if !musicDirNeeded}
         <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
       {/if}
+      <button type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
+        非Funkotも再生: {store.allowNonFunkot ? "ON" : "OFF"}
+      </button>
+      <!-- Desktop only, same platform test as the folder items above: labeling
+           mode prefetches a dozen stretched head buffers at once (~115 MB), which
+           is not an Android budget. The authority is `LABELING_AVAILABLE` in
+           src-tauri/src/lib.rs -- this only hides the button. -->
+      {#if musicDirConfigurable}
+        <button type="button" onclick={onToggleLabelingMode} disabled={labelingModeBusy}>
+          ラベリングモード: {store.labelingMode ? "ON" : "OFF"}{labelingModePending ? "（次回の再生開始から）" : ""}
+        </button>
+      {/if}
+      <button type="button" onclick={onClearLabelsAndHistory} disabled={clearLabelsBusy}>
+        ラベルと再生履歴を消す
+      </button>
       <button type="button" onclick={onShowLog}>ログを表示</button>
       <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>意見を送る</button>
     </div>
