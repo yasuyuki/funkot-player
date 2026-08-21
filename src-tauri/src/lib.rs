@@ -3181,8 +3181,9 @@ const ALREADY_STARTED: &str = "already started";
 ///
 /// Idempotent by construction: `replace_pending` overwrites rather than
 /// appends, so a caller that runs this twice back-to-back (the startup
-/// preload in `run()`'s `setup`, then this same restore again) just
-/// re-applies the same restored list, not a duplicate of it.
+/// preload in `run()`'s `setup`, then this restore) does not duplicate
+/// the queue. The preload skips music-folder I/O; this path still
+/// `exists`-filters and applies the strict gate.
 fn start_impl(
     music_dir: &str,
     cache_dir: &str,
@@ -4595,6 +4596,68 @@ fn apply_non_funkot_gate(
         .collect()
 }
 
+/// Setup-only gate: hash-index + analysis cache + overrides, no music-file I/O.
+/// Path missing from the index, or cache miss, → not gated (same as
+/// `gated_non_funkot` when hash fails / cache misses).
+fn gated_non_funkot_from_index(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    index: &store::HashIndex,
+    overrides: &store::Overrides,
+) -> bool {
+    let Some(entry) = index.get(path.to_string_lossy().as_ref()) else {
+        return false;
+    };
+    let Some(a) = analyzed_cache_entry(cache_dir, &entry.hash) else {
+        return false;
+    };
+    let override_funkot = overrides.get(&entry.hash).and_then(|o| o.funkot);
+    !store::effective_is_funkot(a.is_funkot, override_funkot)
+}
+
+/// Like [`apply_non_funkot_gate`], but never stats/hashes/exists music files.
+/// Loads hash-index and overrides once. Used by setup preload only;
+/// `start_impl` keeps the strict gate.
+fn apply_non_funkot_gate_from_index(
+    paths: Vec<PathBuf>,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    allow: bool,
+) -> Vec<PathBuf> {
+    if allow {
+        return paths;
+    }
+    let index = store::load_hash_index(data_dir);
+    let overrides = store::load_overrides(data_dir);
+    paths
+        .into_iter()
+        .filter(|p| !gated_non_funkot_from_index(p, cache_dir, &index, &overrides))
+        .collect()
+}
+
+/// Queue-tab preload shared by desktop and Android setup. Does not touch
+/// music files (`exists` is always true; gate is index-only).
+fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
+    use tauri::Manager;
+    let _ = DATA_DIR.set(data.clone());
+    let session = store::load_session(&data);
+    let settings = store::load_settings(&data);
+    ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
+    let saved = store::load_queue(&data).unwrap_or_else(|e| {
+        log::warn!("setup: load_queue({}): {e}", data.display());
+        Vec::new()
+    });
+    let restored = store::restored_pending(&session.in_flight, &saved, |_| true);
+    let restored = apply_non_funkot_gate_from_index(
+        restored,
+        cache_dir,
+        &data,
+        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+    );
+    let state = app.state::<AppState>();
+    queue::replace_pending(&state.queue, restored);
+}
+
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.
 ///
 /// `hash` is resolved once by the caller (`resolve_content_hash` /
@@ -4982,6 +5045,70 @@ mod cache_state_tests {
         store::save_overrides(&data.0, &overrides).unwrap();
 
         let out = apply_non_funkot_gate(vec![track.clone()], &cache.0, &data.0, false);
+        assert_eq!(out, vec![track]);
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_from_index_drops_without_file_on_disk() {
+        let cache = TempDir::new("gate-index-no-file-cache");
+        let data = TempDir::new("gate-index-no-file-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            track.to_string_lossy().into_owned(),
+            store::HashIndexEntry {
+                mtime_ms: 0,
+                len: 0,
+                hash,
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+        std::fs::remove_file(&track).unwrap();
+        assert!(!track.exists());
+
+        let out = apply_non_funkot_gate_from_index(vec![track.clone()], &cache.0, &data.0, false);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_from_index_keeps_path_absent_from_index() {
+        let cache = TempDir::new("gate-index-miss-cache");
+        let data = TempDir::new("gate-index-miss-data");
+        let missing = cache.0.join("not-in-index.wav");
+
+        let out = apply_non_funkot_gate_from_index(vec![missing.clone()], &cache.0, &data.0, false);
+        assert_eq!(out, vec![missing]);
+    }
+
+    #[test]
+    fn apply_non_funkot_gate_from_index_keeps_analysed_non_funkot_when_allow() {
+        let cache = TempDir::new("gate-index-allow-cache");
+        let data = TempDir::new("gate-index-allow-data");
+        let (track, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            track.to_string_lossy().into_owned(),
+            store::HashIndexEntry {
+                mtime_ms: 0,
+                len: 0,
+                hash,
+                tags_cached: false,
+                title: None,
+                artist: None,
+            },
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        let out = apply_non_funkot_gate_from_index(vec![track.clone()], &cache.0, &data.0, true);
         assert_eq!(out, vec![track]);
     }
 
@@ -6733,10 +6860,10 @@ pub fn run() {
             // Preload the queue tab before ▶ is pressed: `start_impl` is
             // otherwise the only place `queue.json` / `session.json` get
             // read, so without this the queue screen shows nothing until
-            // the listener starts playback at least once. Whatever this
-            // restores here, `start_impl` restores again — identically,
-            // and idempotently (see its doc comment) — so this is a pure
-            // head start, not a second source of truth.
+            // the listener starts playback at least once. `start_impl`
+            // restores again (`exists` + strict gate) and overwrites;
+            // this preload skips music-folder I/O so the GUI thread
+            // does not stall on SMB.
             //
             // Best-effort end to end: on Android, the JNI context
             // `platform_dirs` needs may not be ready this early in the
@@ -6746,27 +6873,25 @@ pub fn run() {
             // about playback depends on this succeeding.
             use tauri::Manager;
             let handle = app.handle().clone();
+            // Desktop: do not call `resolve_dirs` here — its music_dir probe
+            // (`read_dir` on SMB/UNC) can freeze the GUI thread (~10s). File
+            // existence and the strict gate run later in `start_impl`.
+            #[cfg(not(target_os = "android"))]
+            match handle.path().app_data_dir() {
+                Ok(data) => {
+                    let cache = data.join("funkot-cache");
+                    preload_queue_tab(&handle, data, &cache);
+                }
+                Err(e) => {
+                    log::warn!("setup: cannot resolve dirs, queue preload skipped: {e}");
+                }
+            }
+            #[cfg(target_os = "android")]
             match resolve_dirs(&handle) {
                 Ok(dirs) => {
                     let data = PathBuf::from(dirs.data_dir);
-                    let _ = DATA_DIR.set(data.clone());
-                    let session = store::load_session(&data);
-                    let settings = store::load_settings(&data);
-                    ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
-                    let saved = store::load_queue(&data).unwrap_or_else(|e| {
-                        log::warn!("setup: load_queue({}): {e}", data.display());
-                        Vec::new()
-                    });
-                    let restored =
-                        store::restored_pending(&session.in_flight, &saved, |p| p.exists());
-                    let restored = apply_non_funkot_gate(
-                        restored,
-                        Path::new(&dirs.cache_dir),
-                        &data,
-                        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
-                    );
-                    let state = app.state::<AppState>();
-                    queue::replace_pending(&state.queue, restored);
+                    let cache = PathBuf::from(dirs.cache_dir);
+                    preload_queue_tab(&handle, data, &cache);
                 }
                 Err(e) => {
                     log::warn!("setup: cannot resolve dirs, queue preload skipped: {e}");
