@@ -239,6 +239,8 @@ Release for the tag before publishing:
    not pin it in `Cargo.lock`).
 2. `./dev.sh npx tauri android build --target aarch64`
 3. Upload `app-universal-release.apk` to the draft release for the tag.
+   **Release notes (the GitHub Release body) are English**, even if the chat is
+   Japanese. Partner Center listing copy stays Japanese.
 
 **Windows (Microsoft Store / MSIX).** Preferred path. Human steps (Partner
 Center, Pages, submit, device check):

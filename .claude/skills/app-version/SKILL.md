@@ -93,6 +93,8 @@ description: funkot-player の版数（アプリのバージョン）を上げ�
    この PC の設定側にあり、リポジトリには持たせない。端末まわりの正本は
    skill `android-device`
 4. Play Console は未使用。Android 側に提出作業は無い
+5. GitHub Release を切るなら **説明文（release body）は英語**。チャットが日本語でも
+   本文は英語。Partner Center の「このバージョンの新機能」は日本語のまま
 
 ## 版数の食い違いを疑うとき
 
