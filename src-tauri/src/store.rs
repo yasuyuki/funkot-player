@@ -230,13 +230,14 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
 ///
 /// `allow_non_funkot` is read/written on every platform (library enqueue and
 /// folder-drain gate).
-#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub music_dir: Option<PathBuf>,
-    /// When `false` (default), analysed non-Funkot tracks cannot be enqueued
-    /// and are skipped by folder drain. Greying in the library is independent.
-    #[serde(default)]
+    /// When `false`, analysed non-Funkot tracks cannot be enqueued and are
+    /// skipped by folder drain. Default is `true` (missing key / file / corrupt
+    /// → allow). Greying in the library is independent.
+    #[serde(default = "default_allow_non_funkot")]
     pub allow_non_funkot: bool,
     /// When `true`, prepare switches to a head-only (20s from first_downbeat)
     /// stretch for every track so a labeler can move through the library
@@ -245,6 +246,20 @@ pub struct Settings {
     /// change here takes effect on the next Start, not the running session.
     #[serde(default)]
     pub labeling_mode: bool,
+}
+
+fn default_allow_non_funkot() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            music_dir: None,
+            allow_non_funkot: default_allow_non_funkot(),
+            labeling_mode: false,
+        }
+    }
 }
 
 /// Load settings previously saved under `dir`.
@@ -2160,11 +2175,24 @@ mod tests {
         };
         save_settings(&dir.0, &settings).unwrap();
         assert_eq!(load_settings(&dir.0), settings);
-        assert!(!Settings::default().allow_non_funkot);
+        assert!(Settings::default().allow_non_funkot);
     }
 
     #[test]
-    fn settings_old_json_without_allow_non_funkot_defaults_false() {
+    fn settings_round_trip_allow_non_funkot_explicit_false() {
+        let dir = TempDir::new("settings-allow-non-funkot-false");
+        let settings = Settings {
+            allow_non_funkot: false,
+            ..Default::default()
+        };
+        save_settings(&dir.0, &settings).unwrap();
+        let loaded = load_settings(&dir.0);
+        assert_eq!(loaded, settings);
+        assert!(!loaded.allow_non_funkot);
+    }
+
+    #[test]
+    fn settings_old_json_without_allow_non_funkot_defaults_true() {
         let dir = TempDir::new("settings-legacy");
         fs::write(
             dir.0.join(SETTINGS_FILE),
@@ -2176,7 +2204,7 @@ mod tests {
             loaded.music_dir.as_deref(),
             Some(Path::new("/somewhere/Music"))
         );
-        assert!(!loaded.allow_non_funkot);
+        assert!(loaded.allow_non_funkot);
     }
 
     #[test]

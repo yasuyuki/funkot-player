@@ -52,7 +52,7 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Live copy of `settings.json`'s `allow_non_funkot`. Folder drain reads this
 /// on the loader thread; `set_allow_non_funkot` updates it without restart.
-static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(false);
+static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 
 /// Labeling mode's head window length (seconds), input-side, per the
 /// confirmed design: kept at the same 20s already used for the first-live

@@ -90,7 +90,7 @@ class PlayerStore {
   /// Edit-tab flagged list (`list_flagged_tracks`). Empty until first load.
   flaggedRows = $state<FlaggedTrackRow[]>([]);
   /// `settings.json` `allow_non_funkot`. Grey styling is independent of this.
-  allowNonFunkot = $state(false);
+  allowNonFunkot = $state(true);
   /// `settings.json` `labeling_mode`: every prepare uses a 20s head-only
   /// stretch instead of the full track, and skip becomes a hard cut.
   labelingMode = $state(false);
