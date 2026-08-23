@@ -26,6 +26,35 @@ for arg in "$@"; do
 	esac
 done
 
+# /mnt/c is drvfs with automount fmask=11 and uid of the WSL default user.
+# Cursor/SSH as another user can *see* Windows but cannot exec powershell or
+# write C:\src — rsync then dumps hundreds of Permission denied lines that
+# look like a broken mount. Fail before syncing.
+require_windows_host() {
+	c_owner=$(stat -c '%U' /mnt/c 2>/dev/null || echo 'the /mnt/c owner')
+	me=$(id -un)
+	if [ ! -e "$PS" ]; then
+		echo "win-run: Windows is not mounted ($PS missing)." >&2
+		exit 1
+	fi
+	if [ ! -x "$PS" ]; then
+		echo "win-run: cannot execute powershell.exe as $me (file owned by $c_owner)." >&2
+		echo "This is not a disconnected mount. Open a WSL terminal as $c_owner" >&2
+		echo "(Windows Terminal / Ubuntu; not this Cursor SSH session) and run:" >&2
+		echo "  cd $ROOT && ./scripts/win-run.sh" >&2
+		exit 1
+	fi
+	if [ ! -d "$WIN_PLAYER" ] || [ ! -w "$WIN_PLAYER" ] || [ ! -w "$WIN_ENGINE" ]; then
+		echo "win-run: cannot write Windows mirrors as $me:" >&2
+		echo "  $WIN_PLAYER" >&2
+		echo "  $WIN_ENGINE" >&2
+		echo "Run the same command from a WSL terminal as $c_owner." >&2
+		exit 1
+	fi
+}
+
+require_windows_host
+
 run_ps() {
 	"$PS" -NoProfile -ExecutionPolicy Bypass \
 		-File 'C:\src\funkot-player\scripts\win-build.ps1' "$@"
