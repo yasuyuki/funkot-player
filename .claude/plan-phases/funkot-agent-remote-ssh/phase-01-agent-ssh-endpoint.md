@@ -68,7 +68,7 @@ distro.
 cd /home/yasuyuki/releases/foundation-n-plus-17/funkot-player
 tools/agent-isolation/verify-isolation.sh "$PWD"
 sudo systemctl is-active ssh
-sudo ss -ltnp | grep ':22'
+sudo ss -ltnp | grep ':2222'
 ~~~
 
 ## Report format
