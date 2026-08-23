@@ -22,8 +22,31 @@ if [ "$#" -eq 0 ]; then
 	exit 1
 fi
 
+ensure_wsl_interop() {
+	if [ -n "${WSL_INTEROP:-}" ] && [ -S "$WSL_INTEROP" ]; then
+		return 0
+	fi
+	sock=
+	for s in $(ls -t /run/WSL/*_interop 2>/dev/null); do
+		[ -L "$s" ] && continue
+		[ -S "$s" ] || continue
+		pid=${s##*/}
+		pid=${pid%_interop}
+		[ -d "/proc/$pid" ] || continue
+		sock=$s
+		break
+	done
+	if [ -z "$sock" ]; then
+		echo "win-profile-guard: no live WSL interop socket in /run/WSL." >&2
+		exit 1
+	fi
+	WSL_INTEROP=$sock
+	export WSL_INTEROP
+}
+
+ensure_wsl_interop
 mkdir -p "$WIN_PLAYER/scripts"
 rsync -a "$ROOT/scripts/win-profile-guard.ps1" "$WIN_PLAYER/scripts/win-profile-guard.ps1"
-
-exec "$PS" -NoProfile -ExecutionPolicy Bypass \
+cd /mnt/c
+exec /init "$PS" -NoProfile -ExecutionPolicy Bypass \
 	-File 'C:\src\funkot-player\scripts\win-profile-guard.ps1' "$@"
