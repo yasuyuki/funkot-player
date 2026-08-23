@@ -45,7 +45,7 @@ They are already produced by `tauri icon`. If missing, regenerate icons from
 
 3. Upload the unsigned package:
 
-   `packaging\msix\out\Funkot_0.1.6.0_x64.msix`
+   `packaging\msix\out\Funkot_0.1.7.0_x64.msix`
 
 Partner Center signs Store submissions; you normally submit the **unsigned**
 MSIX produced here.
@@ -77,7 +77,7 @@ explorer.exe \\wsl.localhost\Ubuntu\home\yasuyuki\Projects\funkot-player\packagi
 
 ```sh
 mkdir -p packaging/msix/out/run
-unzip -o packaging/msix/out/Funkot_0.1.6.0_x64.msix -d packaging/msix/out/run
+unzip -o packaging/msix/out/Funkot_0.1.7.0_x64.msix -d packaging/msix/out/run
 ```
 
 Smart App Control が未署名 exe を止める場合だけ、NSIS Release や自己署名 MSIX
@@ -96,10 +96,10 @@ Smart App Control が未署名 exe を止める場合だけ、NSIS Release や�
 Windows PowerShell（管理者で後半の Import を実行）:
 
 ```powershell
-$msixSrc = "\\wsl.localhost\Ubuntu\home\yasuyuki\Projects\funkot-player\packaging\msix\out\Funkot_0.1.6.0_x64.msix"
+$msixSrc = "\\wsl.localhost\Ubuntu\home\yasuyuki\Projects\funkot-player\packaging\msix\out\Funkot_0.1.7.0_x64.msix"
 # または Windows 側にコピーしたパス
 $dir = Split-Path $msixSrc
-$msix = Join-Path $dir "Funkot_0.1.6.0_x64.sideload.msix"
+$msix = Join-Path $dir "Funkot_0.1.7.0_x64.sideload.msix"
 Copy-Item $msixSrc $msix -Force
 
 $publisher = "CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64"
@@ -127,5 +127,5 @@ Add-AppxPackage -Path $msix
 # または署名済み .sideload.msix をダブルクリック
 ```
 
-Partner Center には **未署名の元ファイル**（`Funkot_0.1.6.0_x64.msix`）を上げる。
+Partner Center には **未署名の元ファイル**（`Funkot_0.1.7.0_x64.msix`）を上げる。
 `.sideload.msix` は提出に使わない。
