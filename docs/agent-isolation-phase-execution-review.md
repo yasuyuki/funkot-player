@@ -174,6 +174,64 @@ crossed once through a short command.
 - Which automated test proves that chat line wrapping cannot alter a required
   command?
 
+## Remote SSH endpoint phase observations
+
+### The Windows launcher phase was marked complete before its implementation existed
+
+The Windows controller phase for the Cursor Remote SSH launcher was initially
+marked complete even though it still contained no SSH authority, configuration
+field, launcher implementation, or test. Static inspection later established
+that it remained pending and the index was corrected.
+
+A phase status must be backed by the phase's own acceptance evidence. Endpoint
+provisioning alone is not evidence that the separate Windows launcher phase is
+complete.
+
+### Port 22 was treated as a fixed assumption instead of an environment input
+
+The endpoint plan originally verified port 22. Windows sshd already occupied
+that port, so the approved endpoint uses port 2222 and listens only on
+127.0.0.1 and ::1. The required verification was corrected after the endpoint
+was complete.
+
+The environment-specific authority and port need to be discoverable before a
+phase declares its required verification, while retaining the loopback-only
+constraint.
+
+### The completion report named the wrong state location
+
+The first endpoint report said that no phase index or HANDOFF existed in the
+agent checkout. The phase index and operational HANDOFF are instead in the
+owner checkout, where the phase was authored. They therefore remained pending
+until the owner checkout was updated.
+
+A subject clone is not automatically the record location for a phase that
+changes host-level configuration. The phase metadata and handoff policy need
+to identify the authoritative repository and state file explicitly.
+
+### The initial commit reference did not identify this phase completion
+
+The endpoint report cited db69c0c, which is the earlier isolation-tool
+introduction commit. The endpoint plan itself was introduced in c9d4591, and
+the subsequent completed-status record is 0bcaa55. The mismatch made it harder
+to identify what evidence the reported SHA represented.
+
+Reports should distinguish an implementation/configuration change outside the
+repository from a commit that records the phase state, rather than using an
+unrelated historical SHA as completion evidence.
+
+### Questions specific to the Remote SSH review
+
+- What preflight proves that a controller phase's declared launcher artifacts
+  exist and satisfy its own acceptance criteria before its index can be marked
+  complete?
+- How should the selected loopback SSH authority and non-default port be
+  discovered and passed from WSL endpoint setup to the Windows launcher without
+  storing credentials or raw SSH configuration?
+- How should phase metadata declare the authoritative state repository and
+  distinguish host-level configuration evidence from the commit that records
+  phase completion?
+
 ## Constraints the improvement plan must preserve
 
 - The agent remains non-sudo and cannot access the owner Docker socket or
