@@ -82,7 +82,19 @@ fi
 
 # The container runs as root; hand back ownership of anything it wrote here.
 # gen/ and node_modules/ are written by the Tauri CLI on every build.
-CHOWN="chown -R \"\$HOST_UID:\$HOST_GID\" /work/funkot-player 2>/dev/null || true"
+#
+# Only do this under rootful Docker. Under rootless Docker, container UID 0
+# already *is* the invoking host user, and any other container UID (such as
+# $HOST_UID) is remapped through /etc/subuid to a disjoint high host UID
+# range -- chown-ing to "$HOST_UID:$HOST_GID" there does not restore the
+# invoking user's ownership, it reassigns everything to that subuid-mapped
+# id and locks the invoking user out instead.
+if docker info --format '{{range .SecurityOptions}}{{.}}{{"\n"}}{{end}}' 2>/dev/null \
+    | grep -qx 'name=rootless'; then
+    CHOWN=':'
+else
+    CHOWN="chown -R \"\$HOST_UID:\$HOST_GID\" /work/funkot-player 2>/dev/null || true"
+fi
 
 if [ "${ADB:-0}" = 1 ]; then
     ./scripts/adb-server.sh start
