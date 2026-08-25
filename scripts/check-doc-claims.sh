@@ -1,5 +1,5 @@
 #!/bin/sh
-# Check that plan-phase citations still point at something real.
+# Check that documentation citations still point at something real.
 #
 # Line numbers rot: a `lib.rs:2394` that was true when written becomes a lie
 # that later phases copy. Symbol citations (`symbol`（`path`）) rot when the
@@ -26,6 +26,21 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 status=0
 
+# Directories whose Markdown makes claims about the code. A phase document is
+# deleted once its acceptance condition passes, so .claude/plan-phases is empty
+# -- or absent -- whenever nothing is open; probe each directory instead of
+# handing a missing path to find under `set -e`.
+DOC_CLAIM_DIRS="docs .claude/plan-phases"
+
+collect_md_files() {
+    : > "$TMP/md_files"
+    for _dir in $DOC_CLAIM_DIRS; do
+        [ -d "$_dir" ] || continue
+        find "$_dir" -name '*.md' -type f >> "$TMP/md_files"
+    done
+    sort -o "$TMP/md_files" "$TMP/md_files"
+}
+
 # Detection is extension:[digits]; the path stem is included so -o reports the
 # full citation (lib.rs:2394), not a bare .rs:2394.
 LINE_CITE_RE='[[:alnum:]_./-]*(\.gitignore|\.(rs|ts|svelte|toml|sh|py|json|md)):[0-9]+'
@@ -38,7 +53,7 @@ SYMBOL_FILE_RE='^[A-Za-z0-9_.-]+\.(rs|ts|svelte|toml|sh|py|json|md)$'
 # them is the fix (see doc-claim-checks README).
 check_no_line_citations() {
     failed=0
-    find .claude/plan-phases -name '*.md' -type f | sort > "$TMP/md_files"
+    collect_md_files
     while IFS= read -r f; do
         # grep exits 1 on no match under set -e; keep going.
         grep -nEo "$LINE_CITE_RE" "$f" > "$TMP/hits" 2>/dev/null || true
@@ -151,7 +166,7 @@ collect_chain_symbols() {
 check_symbols_resolve() {
     failed=0
     deferred=0
-    find .claude/plan-phases -name '*.md' -type f | sort > "$TMP/md_files"
+    collect_md_files
     while IFS= read -r f; do
         lineno=0
         while IFS= read -r line || [ -n "$line" ]; do

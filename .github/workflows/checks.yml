@@ -37,5 +37,5 @@ jobs:
       # written becomes a lie that later phases copy. Same script a developer
       # runs; also needs no toolchain. Sibling repos are not checked out here,
       # so symbol resolution against them is deferred and counted, never silent.
-      - name: Check plan-phase doc claims
+      - name: Check doc claims
         run: ./scripts/check-doc-claims.sh

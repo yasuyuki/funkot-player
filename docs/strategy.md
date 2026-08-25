@@ -75,13 +75,13 @@ rekordbox 書き出しはいずれもその出力口であり、それ自体が�
 ### 項目2の例外 — funkot 判定の手動 override
 
 `Settings.allow_non_funkot` は既定 `false` で、解析が非 Funkot と判定した曲は
-**enqueue もフォルダ drain も拒否される**（`store.rs:230-233`）。判定を誤ると曲が
+**enqueue もフォルダ drain も拒否される**（`allow_non_funkot`（`src-tauri/src/store.rs`））。判定を誤ると曲が
 丸ごと消える、あるいは混ざるはずのない曲が混ざる。小節数の誤りは1回のつなぎが
 悪くなるだけだが、こちらは母集合そのものが壊れる。
 
 逃げ道は用意されていない。`BarOverride.funkot` と `effective_is_funkot` は
 実装済みだが **"Not written by the current UI (data model only)"**
-（`store.rs:362-370`）。ゲートが実際に効くようになった分、override UI の不在は
+（`BarOverride::funkot` / `effective_is_funkot`（`src-tauri/src/store.rs`））。ゲートが実際に効くようになった分、override UI の不在は
 以前より重い。実使用を待つ理由が無い唯一の UI 項目。
 
 ### 項目3の読み替え — プレイリストではなく「ブリーフ」
@@ -97,7 +97,7 @@ rekordbox 書き出しはいずれもその出力口であり、それ自体が�
 どのツールも自動化していないのはここである。
 
 既存のキュー（`次に再生`）は既に「次はこれ」を担っている。足りないのはこちら側。
-受け皿もある: `queue.rs:311` の `DrainPolicy` は現在 `ContinueFolder` の1ヴァリアント
+受け皿もある: `DrainPolicy`（`src-tauri/src/queue.rs`）は現在 `ContinueFolder` の1ヴァリアント
 のみで、明らかに拡張前提で書かれている。
 
 ### 項目7の技術的な弱さ
@@ -147,8 +147,8 @@ rekordbox 書き出しはいずれもその出力口であり、それ自体が�
 | TransitionStrip（うち予約 min-height 50px） | 120px |
 
 **ボタンは 90px、予約された min-height が 226px。** 予約は 500ms ポーリングで値が
-遅れて届いてもレイアウトが跳ねないためにある（`NowCard.svelte:92,114`、
-`TransitionStrip.svelte:109,115`）。**ボタンだけ縮めても取り返せない。**
+遅れて届いてもレイアウトが跳ねないためにある（`nowTitle` / `nowArtist`（`src/components/NowCard.svelte`）、
+`fromTitle` / `toTitle`（`src/components/TransitionStrip.svelte`）の予約領域）。**ボタンだけ縮めても取り返せない。**
 
 ライブラリ1行目は画面上端から約 589px（**画面の 64%**）に出る。見える行は6行。
 
@@ -172,14 +172,14 @@ TransitionStrip / LogView を**無条件に**描き、モード分岐は 69 行�
 `{#if ui.mode === "play"}` から始まる。**つなぎ修正画面は約 400px の
 トランスポートの下にぶら下がっている。**
 
-モード切替は `TransitionStrip.svelte:84-92` の `flag-row` 内のボタン一つで、
+モード切替は `onFlagClick`（`src/components/TransitionStrip.svelte`）と同じ `flag-row` 内のボタン一つで、
 タブもナビも戻る操作も無い。ナビゲーションは作り直すのではなく**新設**が要る。
 
 ### 項目8/9 はエンジン案件
 
 `NavAction` は5種が実装済み（`RestartCurrent` / `TransitionToPrev` /
 `JumpToPrevIntro` / `TransitionToNext` / `JumpToNextIntro`）だが、プレイヤーが
-使うのは `lib.rs:1730` の `TransitionToNext` **1種だけ**。残り4種は配線するだけ。
+使うのは `NavAction::TransitionToNext`（`src-tauri/src/lib.rs`）**1種だけ**。残り4種は配線するだけ。
 
 「前半終了の検出」は `funkot-core/src/structure.rs` の Foote checkerboard novelty
 （`:97`）/ ループ性 / 前置モデルからのマハラノビス距離（`:137`）を、イントロ・
@@ -188,7 +188,7 @@ TransitionStrip / LogView を**無条件に**描き、モード分岐は 69 行�
 
 ### 永続データの構成
 
-`data_dir` に8ファイル（`store.rs:45-52`）。**性質が2種類混ざっている**:
+`data_dir` の JSON 一式（`QUEUE_FILE` / `SETTINGS_FILE`（`src-tauri/src/store.rs`）とその並び）。**性質が2種類混ざっている**:
 
 | 分類 | ファイル | 失うと |
 |---|---|---|
@@ -197,17 +197,17 @@ TransitionStrip / LogView を**無条件に**描き、モード分岐は 69 行�
 
 **版数フィールドはユーザー所有側に一つも無い。** 前方互換の手当ては
 `#[serde(default)]` と「壊れていたら空で起動」だけ。エンジン側は
-`funkot-core/src/cache.rs:21` の `CACHE_VERSION: u32 = 13` を持つが、方針は
+`CACHE_VERSION`（`funkot-core/src/cache.rs`）を持つが、方針は
 「移行せず破棄・再解析」であり、ユーザー所有データには使えない。
 
 ### 識別子は二層になっている（衝突ではない）
 
-- `library.json`（`Overrides`）は **content hash キー**（`store.rs:374`）。
-  ハッシュは `(長さ ‖ 先頭64KiB ‖ 末尾64KiB)` の SHA-256（`cache.rs:26`）で、
+- `library.json` は **content hash キー**（`Overrides`（`src-tauri/src/store.rs`））。
+  ハッシュは `(長さ ‖ 先頭64KiB ‖ 末尾64KiB)` の SHA-256（`content_hash`（`funkot-core/src/cache.rs`））で、
   **リネーム・移動に耐える** — 可搬なプレイリストの資産
 - ライブラリ／UI 側のトラック同一性は**フルパス**
 - `hash-index.json` が **path → hash** を橋渡しする。mtime + len の指紋で
-  再ハッシュを省く（`store.rs:405-426`）
+  再ハッシュを省く（`resolve_content_hash`（`src-tauri/src/store.rs`））
 
 つまり手直しはハッシュに、表示はパスに紐づいており、両者は共存している。
 **足りないのは逆引き（hash → path）だけ**で、材料は既にある。
