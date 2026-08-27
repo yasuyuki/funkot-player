@@ -8,11 +8,6 @@ on:
         required: true
         default: player/v0.1.1
         type: string
-      skip_build:
-        description: If true, fail unless a prior artifact path exists (unused; always builds)
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
