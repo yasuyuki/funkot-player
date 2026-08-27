@@ -1,7 +1,0 @@
-{
-  "name": "opencode-policy",
-  "private": true,
-  "description": "Credential-free local OpenCode CLI definition.",
-  "dependencies": { "opencode-ai": "1.18.21" },
-  "allowScripts": { "opencode-ai@1.18.21": true }
-}
