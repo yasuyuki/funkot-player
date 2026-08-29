@@ -6,6 +6,7 @@
   const POLL_INTERVAL_MS = 500;
 
   let lines = $state<string[]>([]);
+  let arrivalsInspect = $derived(store.arrivalsInspect);
 
   // This poll loop is owned by this component, not `state.svelte.ts`: the
   // log is diagnostic output, not playback state, and unlike `player_state`
@@ -67,6 +68,24 @@
         <div>キャッシュ: {store.dirs.cache_dir}</div>
       </div>
     {/if}
+    <div class="dirs">
+      <div>
+        新着: 抽出 {arrivalsInspect.listed} / gate後 {arrivalsInspect.gated} / バナー {arrivalsInspect.banner}
+        （空pull破棄 {arrivalsInspect.emptySkipped}）
+      </div>
+      <div>
+        history rev {arrivalsInspect.historyRevision ?? "—"} / 適用 {arrivalsInspect.processedRevision ?? "—"}
+        / 表示 {arrivalsInspect.shownRevision ?? "—"}
+      </div>
+      <div>
+        now {arrivalsInspect.nowPlaying ? store.relName(arrivalsInspect.nowPlaying) : "—"}
+        / reserved {arrivalsInspect.reserved ? store.relName(arrivalsInspect.reserved) : "—"}
+        / pending {arrivalsInspect.pending}
+      </div>
+      {#if arrivalsInspect.names.length > 0}
+        <div>新着path: {arrivalsInspect.names.join(" · ")}</div>
+      {/if}
+    </div>
     {#if store.lastError}
       <p class="error">{store.lastError}</p>
     {/if}

@@ -54,6 +54,7 @@ import {
   actionableArrivals,
   arrivalPathSet,
   arrivalsPullDecision,
+  gatedArrivals,
   nextLibraryRefreshOwed,
   shouldReplaceArrivals,
   type RefreshAttempt,
@@ -170,6 +171,8 @@ class PlayerStore {
   /// Single-flight for `#pullArrivals` so a 500ms poll cannot stack invokes
   /// and mark every response stale.
   #arrivalsPullBusy = false;
+  /// Same-rev empty pulls discarded (banner flicker guard). Shown in ログ.
+  #arrivalsEmptySkipped = 0;
   /// Generation guard for `loadFlaggedTracks` (legacy `flaggedLoadGen`).
   #flaggedGen = 0;
   /// Drops overlapping F/J/Space while a skip invoke is in flight, so the
@@ -319,6 +322,7 @@ class PlayerStore {
           d.processedRevision,
         )
       ) {
+        this.#arrivalsEmptySkipped += 1;
         this.#processedHistoryRevision = d.processedRevision;
         return;
       }
@@ -393,6 +397,37 @@ class PlayerStore {
 
   isNewArrival(path: string): boolean {
     return this.newArrivalPaths.has(path);
+  }
+
+  /// Snapshot for ⋮ → ログを表示. Badge count is `listed`, banner is `banner`.
+  get arrivalsInspect(): {
+    historyRevision: number | null;
+    processedRevision: number | null;
+    shownRevision: number | null;
+    listed: number;
+    gated: number;
+    banner: number;
+    emptySkipped: number;
+    nowPlaying: string | null;
+    reserved: string | null;
+    pending: number;
+    names: string[];
+  } {
+    const listed = this.arrivals;
+    return {
+      historyRevision: this.player?.history_revision ?? null,
+      processedRevision: this.#processedHistoryRevision,
+      shownRevision: this.#shownArrivalsRevision,
+      listed: listed.length,
+      gated: gatedArrivals(listed, this.library, this.allowNonFunkot)
+        .length,
+      banner: this.actionableNewArrivalCount,
+      emptySkipped: this.#arrivalsEmptySkipped,
+      nowPlaying: this.player?.now_playing ?? null,
+      reserved: this.queue?.reserved ?? null,
+      pending: this.queue?.pending?.length ?? 0,
+      names: listed.map((a) => this.relName(a.path)),
+    };
   }
 
   /// Path the labeling shortcuts / AllTracks highlight target: the track
