@@ -1,8 +1,11 @@
 # AI workspace boundary
 
-Claude Code, Codex, Cursor, and OpenCode must run only as `funkot-agent` in
-`/srv/funkot-agent/funkot-player`. The owner checkout is signing-only: do not
-open it in an AI tool, copy its configuration or authentication, or access its
-`.secrets/` directory. Agent changes are reviewed by the owner and transferred
-by patch, cherry-pick, or merge. Android builds, signing, Docker operations,
-and releases are owner-only.
+AI tools may change only the `funkot-player` member declared by the selected
+`funkot-dev` working set's common-parent `WORKING-SET.json`. Resolve the member
+from that manifest; do not hard-code an absolute path or substitute another
+checkout. Start tool entry points from the common parent and read this file
+before changing the member.
+
+This interactive working-set boundary is separate from isolated
+`wsl-agent-lifecycle` clone management. Do not access `.secrets/`, copy
+authentication, or handle signing material. Android builds, signing, Docker
