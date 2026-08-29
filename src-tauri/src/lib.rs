@@ -5597,6 +5597,72 @@ mod cache_state_tests {
     }
 
     #[test]
+    fn list_new_arrivals_impl_errs_when_index_missing() {
+        let data = TempDir::new("list-arrivals-missing");
+        store::save_settings(
+            &data.0,
+            &store::Settings {
+                arrivals_baseline_done: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // No hash-index.json → Missing provenance.
+        let err = list_new_arrivals_impl(&data.0).unwrap_err();
+        assert!(
+            err.contains("arrivals_index_unavailable"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn list_new_arrivals_impl_errs_when_baseline_not_done() {
+        let data = TempDir::new("list-arrivals-no-baseline");
+        store::save_settings(
+            &data.0,
+            &store::Settings {
+                arrivals_baseline_done: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/a.flac".into(),
+            arrivals_entry("hash-a", Some("2026-01-01T00:00:00Z")),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        let err = list_new_arrivals_impl(&data.0).unwrap_err();
+        assert!(
+            err.contains("arrivals_index_unavailable"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn list_new_arrivals_impl_ok_empty_when_no_stamps() {
+        let data = TempDir::new("list-arrivals-empty");
+        store::save_settings(
+            &data.0,
+            &store::Settings {
+                arrivals_baseline_done: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/a.flac".into(),
+            arrivals_entry("hash-a", None),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        let got = list_new_arrivals_impl(&data.0).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
     fn queue_new_arrivals_with_orders_and_releases_save_lock() {
         let data = TempDir::new("queue-arrivals-order-data");
         let cache = TempDir::new("queue-arrivals-order-cache");
@@ -6872,6 +6938,11 @@ fn clear_labels_and_history_with_index_save(
 /// Reads settings + hash-index + history only (no Music I/O). Holds
 /// `INDEX_LOCK` → `SAVE_LOCK` for the whole command; does not call
 /// [`persist_queue`].
+///
+/// `Err("arrivals_index_unavailable")` when the index is not authoritative
+/// (`!baseline_done` or provenance is not [`store::HashIndexProvenance::Loaded`])
+/// so the front end cannot treat a miss as an empty list. Authoritative
+/// absence of stamps is `Ok([])`.
 #[tauri::command(async)]
 fn list_new_arrivals(app: tauri::AppHandle) -> Result<Vec<store::NewArrival>, String> {
     let dirs = resolve_dirs(&app)?;
@@ -6888,6 +6959,11 @@ fn list_new_arrivals(app: tauri::AppHandle) -> Result<Vec<store::NewArrival>, St
 fn list_new_arrivals_impl(data_dir: &std::path::Path) -> Result<Vec<store::NewArrival>, String> {
     let settings = store::load_settings(data_dir);
     let loaded = store::load_hash_index(data_dir);
+    if !settings.arrivals_baseline_done
+        || loaded.provenance != store::HashIndexProvenance::Loaded
+    {
+        return Err("arrivals_index_unavailable".to_string());
+    }
     let mut index = loaded.index;
     let history = store::load_history(data_dir);
     if store::fold_played_arrivals(&mut index, &history) {

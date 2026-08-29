@@ -56,7 +56,6 @@ import {
   arrivalsPullDecision,
   gatedArrivals,
   nextLibraryRefreshOwed,
-  shouldReplaceArrivals,
   type RefreshAttempt,
 } from "./arrivals";
 import { canSkipNext } from "./transportMode";
@@ -165,14 +164,9 @@ class PlayerStore {
   /// until the first successful pull (so revision 0 still pulls once) and
   /// after a library walk (stamp is not a revision bump).
   #processedHistoryRevision: number | null = null;
-  /// Revision of the arrivals list currently on screen. Same-rev empty
-  /// pulls must not replace a non-empty list (banner flicker after enqueue).
-  #shownArrivalsRevision: number | null = null;
   /// Single-flight for `#pullArrivals` so a 500ms poll cannot stack invokes
   /// and mark every response stale.
   #arrivalsPullBusy = false;
-  /// Same-rev empty pulls discarded (banner flicker guard). Shown in ログ.
-  #arrivalsEmptySkipped = 0;
   /// Generation guard for `loadFlaggedTracks` (legacy `flaggedLoadGen`).
   #flaggedGen = 0;
   /// Drops overlapping F/J/Space while a skip invoke is in flight, so the
@@ -314,24 +308,14 @@ class PlayerStore {
       const list = await listNewArrivalsCmd();
       const d = arrivalsPullDecision(gen, this.#arrivalsGen, true, revision);
       if (!d.apply) return;
-      if (
-        !shouldReplaceArrivals(
-          this.arrivals,
-          list,
-          this.#shownArrivalsRevision,
-          d.processedRevision,
-        )
-      ) {
-        this.#arrivalsEmptySkipped += 1;
-        this.#processedHistoryRevision = d.processedRevision;
-        return;
-      }
       this.arrivals = list;
       this.#processedHistoryRevision = d.processedRevision;
-      this.#shownArrivalsRevision = d.processedRevision;
     } catch (e) {
       arrivalsPullDecision(gen, this.#arrivalsGen, false, revision);
-      this.lastError = String(e);
+      const msg = String(e);
+      if (!msg.includes("arrivals_index_unavailable")) {
+        this.lastError = msg;
+      }
     } finally {
       this.#arrivalsPullBusy = false;
     }
@@ -403,11 +387,9 @@ class PlayerStore {
   get arrivalsInspect(): {
     historyRevision: number | null;
     processedRevision: number | null;
-    shownRevision: number | null;
     listed: number;
     gated: number;
     banner: number;
-    emptySkipped: number;
     nowPlaying: string | null;
     reserved: string | null;
     pending: number;
@@ -417,12 +399,10 @@ class PlayerStore {
     return {
       historyRevision: this.player?.history_revision ?? null,
       processedRevision: this.#processedHistoryRevision,
-      shownRevision: this.#shownArrivalsRevision,
       listed: listed.length,
       gated: gatedArrivals(listed, this.library, this.allowNonFunkot)
         .length,
       banner: this.actionableNewArrivalCount,
-      emptySkipped: this.#arrivalsEmptySkipped,
       nowPlaying: this.player?.now_playing ?? null,
       reserved: this.queue?.reserved ?? null,
       pending: this.queue?.pending?.length ?? 0,

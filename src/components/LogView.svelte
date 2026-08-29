@@ -71,11 +71,9 @@
     <div class="dirs">
       <div>
         新着: 抽出 {arrivalsInspect.listed} / gate後 {arrivalsInspect.gated} / バナー {arrivalsInspect.banner}
-        （空pull破棄 {arrivalsInspect.emptySkipped}）
       </div>
       <div>
         history rev {arrivalsInspect.historyRevision ?? "—"} / 適用 {arrivalsInspect.processedRevision ?? "—"}
-        / 表示 {arrivalsInspect.shownRevision ?? "—"}
       </div>
       <div>
         now {arrivalsInspect.nowPlaying ? store.relName(arrivalsInspect.nowPlaying) : "—"}
