@@ -2,11 +2,13 @@
   import { store } from "../lib/state.svelte";
   import { openMusicDir, type TrackRow } from "../lib/tauri";
   import { toast } from "../lib/toast.svelte";
+  import NewArrivalsBanner from "./NewArrivalsBanner.svelte";
 
   type SortKey = "title" | "artist";
 
   let query = $state("");
   let sortKey = $state<SortKey>("title");
+  let newOnly = $state(false);
   let busy = $state<Record<string, boolean>>({});
   let openMusicBusy = $state(false);
   let setMusicBusy = $state(false);
@@ -32,7 +34,11 @@
 
   let rows = $derived.by(() => {
     const q = query.trim().toLowerCase();
-    const filtered = store.libraryList.filter((r) => matches(r, q));
+    const arrivalPaths = store.newArrivalPaths;
+    const filtered = store.libraryList.filter((r) => {
+      if (newOnly && !arrivalPaths.has(r.path)) return false;
+      return matches(r, q);
+    });
     const sorted = filtered.slice().sort((a, b) => {
       if (sortKey === "artist") {
         const byArtist = a.artist.localeCompare(b.artist, "ja");
@@ -45,6 +51,10 @@
 
   function toggleSort() {
     sortKey = sortKey === "title" ? "artist" : "title";
+  }
+
+  function toggleNewOnly() {
+    newOnly = !newOnly;
   }
 
   async function onAdd(path: string) {
@@ -135,6 +145,13 @@
       bind:value={query}
       aria-label="ライブラリを検索"
     />
+    <button
+      type="button"
+      class="filter"
+      class:on={newOnly}
+      aria-pressed={newOnly}
+      onclick={toggleNewOnly}
+    >新着のみ</button>
     <button type="button" class="sort" onclick={toggleSort}>
       {sortKey === "title" ? "曲名順▾" : "アーティスト順▾"}
     </button>
@@ -152,6 +169,8 @@
   {#if analysis}
     <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
   {/if}
+
+  <NewArrivalsBanner />
 
   {#if musicDirNeeded}
     <div class="empty">
@@ -199,7 +218,12 @@
       {#each rows as row (row.path)}
         <li class="row" class:non-funkot={isNonFunkot(row)}>
           <div class="text">
-            <div class="title">{row.title}</div>
+            <div class="title">
+              <span class="title-text">{row.title}</span>
+              {#if store.isNewArrival(row.path)}
+                <span class="new-badge">NEW</span>
+              {/if}
+            </div>
             <div class="sub">
               <span class="artist">{row.artist || "—"}</span>
               <span class="dur">{formatDuration(row.duration_secs)}</span>
@@ -254,6 +278,7 @@
     color: var(--color-text);
   }
 
+  .filter,
   .sort {
     width: auto;
     flex: 0 0 auto;
@@ -261,6 +286,11 @@
     padding: var(--space-sm) var(--space-md);
     background: var(--color-transport-secondary-bg);
     color: var(--color-transport-secondary-text);
+  }
+
+  .filter.on {
+    outline: 2px solid var(--color-accent-text);
+    outline-offset: -2px;
   }
 
   .progress {
@@ -343,11 +373,30 @@
   }
 
   .title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
     font-size: var(--font-size-md);
+    line-height: 1.3;
+    min-width: 0;
+  }
+
+  .title-text {
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    line-height: 1.3;
+  }
+
+  .new-badge {
+    flex: 0 0 auto;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.35rem;
+    border-radius: var(--radius-sm);
+    background: var(--color-new-arrival-badge-bg);
+    color: var(--color-new-arrival-badge-text);
   }
 
   .sub {

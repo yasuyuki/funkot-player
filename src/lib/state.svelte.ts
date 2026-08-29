@@ -35,6 +35,8 @@ import {
   setFolderLabel as setFolderLabelCmd,
   undoLastFolderLabel as undoLastFolderLabelCmd,
   clearLabelsAndHistory as clearLabelsAndHistoryCmd,
+  listNewArrivals as listNewArrivalsCmd,
+  queueNewArrivals as queueNewArrivalsCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -43,10 +45,18 @@ import type {
   FlagResult,
   ImportResult,
   LibraryScanProgress,
+  NewArrival,
   PlayerState,
   QueueSnapshot,
   TrackRow,
 } from "./tauri";
+import {
+  actionableArrivals,
+  arrivalPathSet,
+  arrivalsPullDecision,
+  nextLibraryRefreshOwed,
+  type RefreshAttempt,
+} from "./arrivals";
 import { canSkipNext } from "./transportMode";
 import { toast } from "./toast.svelte";
 
@@ -103,6 +113,10 @@ class PlayerStore {
   /// without affecting anything until the next Start. Compare the two (see
   /// `OverflowMenu.svelte`) to know whether a toggle is still pending.
   activeLabelingMode = $state<boolean | null>(null);
+  /// New arrivals from `list_new_arrivals`. Re-pulled when
+  /// `PlayerState.history_revision` changes (fold; not on now-playing
+  /// alone) and after a successful library walk (stamp).
+  arrivals = $state<NewArrival[]>([]);
 
   /// Wall-clock time (`Date.now()`) the current `player.position_secs` was
   /// read at, so `elapsed` can add "how long ago was that" on top of it
@@ -128,16 +142,30 @@ class PlayerStore {
   /// drain is still running is not lost until the next unrelated trigger
   /// (`visibilitychange`, the `in_flight` retry, …).
   #importPending = false;
-  /// Set when `doTakePendingImport` imported something but the follow-up
-  /// `doRefreshLibrary()` was bounced by `#libraryBusy` (typically the
-  /// startup walk still running) -- the newly-copied file may have appeared
-  /// too late for that walk to see it, so a refresh is still owed even once
-  /// a later `doTakePendingImport` call finds nothing new left to import.
-  #importRefreshOwed = false;
+  /// Auto library refresh still owed (startup / Music-folder change /
+  /// Android import). Cleared only when the walk that started as the owed
+  /// consumer succeeds without a newer mark mid-walk. Busy / error / stale
+  /// keep it. Manual ⋮ rescan and analysis-done quiet reload do not set
+  /// this; they also do not clear a concurrent owed (epoch).
+  #libraryRefreshOwed = false;
+  /// Bumped each time owed is marked, so an in-flight walk cannot clear a
+  /// newer music-dir / import owed that landed while it was running.
+  #libraryRefreshOwedEpoch = 0;
+  /// Generation guard for library refresh writers (same shape as `#queueGen`).
+  #refreshGen = 0;
   /// Bumped on every immediate queue refresh after enqueue/dequeue/reorder.
   /// Poll / refresh responses whose captured gen no longer matches are
   /// discarded so a slow poll cannot overwrite a fresher post-mutation snapshot.
   #queueGen = 0;
+  /// Generation guard for `#pullArrivals` (stale responses discarded).
+  #arrivalsGen = 0;
+  /// Last `history_revision` successfully applied to `arrivals`. `null`
+  /// until the first successful pull (so revision 0 still pulls once) and
+  /// after a library walk (stamp is not a revision bump).
+  #processedHistoryRevision: number | null = null;
+  /// Single-flight for `#pullArrivals` so a 500ms poll cannot stack invokes
+  /// and mark every response stale.
+  #arrivalsPullBusy = false;
   /// Generation guard for `loadFlaggedTracks` (legacy `flaggedLoadGen`).
   #flaggedGen = 0;
   /// Drops overlapping F/J/Space while a skip invoke is in flight, so the
@@ -208,6 +236,7 @@ class PlayerStore {
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
         void this.doTakePendingImport();
+        if (this.#libraryRefreshOwed) void this.doRefreshLibrary();
       }
     });
 
@@ -224,19 +253,10 @@ class PlayerStore {
     // Startup walk: title/artist resolve against `library` (`TrackRow` by
     // path), and `refresh_library(true)` also kicks analysis of unanalysed
     // tracks — wanted here so the loader does not analyse mid-playback
-    // (`stalled`). Takes `#libraryBusy` so a slow SMB walk cannot race
-    // ⋮ 再スキャン (which would clear `libraryScan` from the first
-    // finisher's `finally`).
-    this.#libraryBusy = true;
-    try {
-      const rows = await refreshLibrary(true);
-      this.library = new Map(rows.map((r) => [r.path, r]));
-    } catch (e) {
-      this.lastError = String(e);
-    } finally {
-      this.libraryScan = null;
-      this.#libraryBusy = false;
-    }
+    // (`stalled`). Uses `doRefreshLibrary` so owed / gen rules apply; failure
+    // leaves `#libraryRefreshOwed` set for visibilitychange / later retry.
+    this.#markLibraryRefreshOwed();
+    await this.doRefreshLibrary();
   }
 
   async #poll() {
@@ -244,6 +264,10 @@ class PlayerStore {
       const state = await playerState();
       this.player = state;
       this.#polledAt = Date.now();
+      const rev = state.history_revision;
+      if (this.#processedHistoryRevision !== rev) {
+        void this.#pullArrivals(rev);
+      }
     } catch (e) {
       this.lastError = String(e);
     }
@@ -261,15 +285,51 @@ class PlayerStore {
     setTimeout(() => this.#poll(), POLL_INTERVAL_MS);
   }
 
+  #markLibraryRefreshOwed(): void {
+    this.#libraryRefreshOwed = true;
+    this.#libraryRefreshOwedEpoch += 1;
+  }
+
+  /// Stamp (library walk) is not a history-revision bump, so invalidate and
+  /// pull again. Bump gen so an in-flight pull cannot apply the pre-walk
+  /// list. Failure / busy leaves processed null so the next poll retries.
+  #requestArrivalsPull(): void {
+    this.#processedHistoryRevision = null;
+    this.#arrivalsGen += 1;
+    void this.#pullArrivals(this.player?.history_revision ?? 0);
+  }
+
+  async #pullArrivals(revision: number): Promise<void> {
+    if (this.#arrivalsPullBusy) return;
+    this.#arrivalsPullBusy = true;
+    const gen = ++this.#arrivalsGen;
+    try {
+      const list = await listNewArrivalsCmd();
+      const d = arrivalsPullDecision(gen, this.#arrivalsGen, true, revision);
+      if (!d.apply) return;
+      this.arrivals = list;
+      this.#processedHistoryRevision = d.processedRevision;
+    } catch (e) {
+      arrivalsPullDecision(gen, this.#arrivalsGen, false, revision);
+      this.lastError = String(e);
+    } finally {
+      this.#arrivalsPullBusy = false;
+    }
+  }
+
   async #reloadLibraryQuiet(): Promise<void> {
     // Single-flight with ⋮ 再スキャン: if a walk is already running, that
-    // result is enough — do not stack a second `refresh_library`.
+    // result is enough — do not stack a second `refresh_library`. Does not
+    // set or clear `#libraryRefreshOwed` (analysis-done must not erase a
+    // concurrent music-dir / import owed).
     if (this.#libraryBusy) return;
     this.#libraryBusy = true;
+    let applied = false;
     try {
       // List only — do not re-queue analysis (would loop on permanent failures).
       const rows = await refreshLibrary(false);
       this.library = new Map(rows.map((r) => [r.path, r]));
+      applied = true;
     } catch (e) {
       // Ignore on analysis-done the same way legacy did: a stray error here
       // shouldn't disrupt the UI after the worker itself has finished.
@@ -277,6 +337,10 @@ class PlayerStore {
     } finally {
       this.libraryScan = null;
       this.#libraryBusy = false;
+      if (applied) this.#requestArrivalsPull();
+      if (this.#libraryRefreshOwed) {
+        queueMicrotask(() => void this.doRefreshLibrary());
+      }
     }
   }
 
@@ -292,6 +356,27 @@ class PlayerStore {
   /// follows the last full refresh; progress splices update values in place.
   get libraryList(): TrackRow[] {
     return Array.from(this.library.values());
+  }
+
+  /// Paths currently marked new-arrival (badge / filter). Gate-independent.
+  get newArrivalPaths(): Set<string> {
+    return arrivalPathSet(this.arrivals);
+  }
+
+  /// Banner count: gate + now/reserved/pending excluded.
+  get actionableNewArrivalCount(): number {
+    return actionableArrivals(
+      this.arrivals,
+      this.library,
+      this.allowNonFunkot,
+      this.player?.now_playing ?? null,
+      this.queue?.reserved ?? null,
+      this.queue?.pending ?? [],
+    ).length;
+  }
+
+  isNewArrival(path: string): boolean {
+    return this.newArrivalPaths.has(path);
   }
 
   /// Path the labeling shortcuts / AllTracks highlight target: the track
@@ -676,22 +761,75 @@ class PlayerStore {
   }
 
   /// ⋮ 再スキャン. Refuses a second call while one is already in flight.
+  /// Auto callers mark owed before invoking. This walk clears owed only if
+  /// it started as the owed consumer and no newer mark landed mid-walk.
   async doRefreshLibrary(): Promise<
     { ok: true; count: number } | { ok: false; error: string } | { ok: false; busy: true }
   > {
     if (this.#libraryBusy) return { ok: false, busy: true };
     this.#libraryBusy = true;
+    let attempt: RefreshAttempt = "error";
+    const consume = this.#libraryRefreshOwed;
+    const owedEpoch = this.#libraryRefreshOwedEpoch;
+    const gen = ++this.#refreshGen;
     try {
       const rows = await refreshLibrary();
+      if (gen !== this.#refreshGen) {
+        attempt = "stale";
+        this.#libraryRefreshOwed = nextLibraryRefreshOwed(
+          this.#libraryRefreshOwed,
+          "stale",
+          consume,
+          owedEpoch,
+          this.#libraryRefreshOwedEpoch,
+        );
+        return { ok: false, error: "stale" };
+      }
       this.library = new Map(rows.map((r) => [r.path, r]));
+      attempt = "success";
+      this.#libraryRefreshOwed = nextLibraryRefreshOwed(
+        this.#libraryRefreshOwed,
+        "success",
+        consume,
+        owedEpoch,
+        this.#libraryRefreshOwedEpoch,
+      );
+      this.#requestArrivalsPull();
       return { ok: true, count: rows.length };
     } catch (e) {
       const error = String(e);
       this.lastError = error;
+      attempt = "error";
+      this.#libraryRefreshOwed = nextLibraryRefreshOwed(
+        this.#libraryRefreshOwed,
+        "error",
+        consume,
+        owedEpoch,
+        this.#libraryRefreshOwedEpoch,
+      );
       return { ok: false, error };
     } finally {
       this.libraryScan = null;
       this.#libraryBusy = false;
+      // Retry owed after busy clears, but not after error (avoids tight loop;
+      // visibilitychange / next auto path picks error owed back up).
+      if (attempt !== "error" && this.#libraryRefreshOwed) {
+        queueMicrotask(() => void this.doRefreshLibrary());
+      }
+    }
+  }
+
+  /// Prepend new arrivals to the queue (server re-evaluates gate / exclusions).
+  ///
+  /// Queuing an unanalysed arrival can stall playback: the loader may run a
+  /// synchronous analysis. The banner button stays enabled; kick-less paths
+  /// (quiet reload / after clearing history) do not start background analysis.
+  async doQueueNewArrivals(): Promise<void> {
+    try {
+      await queueNewArrivalsCmd();
+      await this.#refreshQueueNow();
+    } catch (e) {
+      this.lastError = String(e);
     }
   }
 
@@ -736,11 +874,11 @@ class PlayerStore {
         toast.notify(notes.join("、"));
       }
       // Only worth attempting when something actually landed this call, or
-      // an earlier call's attempt was itself bounced (`#importRefreshOwed`)
-      // -- otherwise there is nothing new for a walk to find.
-      if (result.tracks > 0 || this.#importRefreshOwed) {
-        const refreshed = await this.doRefreshLibrary();
-        this.#importRefreshOwed = !refreshed.ok && "busy" in refreshed;
+      // an earlier auto refresh is still owed -- otherwise there is nothing
+      // new for a walk to find.
+      if (result.tracks > 0 || this.#libraryRefreshOwed) {
+        this.#markLibraryRefreshOwed();
+        await this.doRefreshLibrary();
       }
     } catch (e) {
       this.lastError = String(e);
@@ -751,15 +889,15 @@ class PlayerStore {
       this.#importBusy = false;
       if (this.#importPending) {
         // A call landed while this one was running -- run it once more
-        // immediately, not on `IMPORT_RETRY_MS`: unlike the two cases
+        // immediately, not on `IMPORT_RETRY_MS`: unlike the case
         // below, that caller is not waiting on a timer of its own.
         this.#importPending = false;
         void this.doTakePendingImport();
-      } else if (result?.in_flight || this.#importRefreshOwed) {
-        // `in_flight`: `Import.kt`'s copy thread had not finished yet (see
-        // `ImportResult.in_flight` in `tauri.ts`). `#importRefreshOwed`: the
-        // library walk that would have shown an already-imported track was
-        // busy; see its own doc comment.
+      } else if (result?.in_flight) {
+        // `Import.kt`'s copy thread had not finished yet (see
+        // `ImportResult.in_flight` in `tauri.ts`). Library refresh owed is
+        // retried by `doRefreshLibrary`'s finally / visibilitychange, not
+        // via this timer (error owed must not tight-loop here).
         setTimeout(() => void this.doTakePendingImport(), IMPORT_RETRY_MS);
       }
     }
@@ -908,14 +1046,18 @@ class PlayerStore {
   /// Opens the native folder picker (⋮ Musicフォルダを選ぶ / 変更) and applies the
   /// result. `changed: false` covers a cancelled dialog. Reuses
   /// `doRefreshLibrary` for the post-change rescan rather than starting a
-  /// second, parallel library walk.
+  /// second, parallel library walk. Sets `#libraryRefreshOwed` before the
+  /// refresh so a busy bounce still gets a baseline scan when the walk ends.
   async doSetMusicDir(): Promise<
     { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
   > {
     try {
       const result = await setMusicDirCmd();
       this.dirs = result.dirs;
-      if (result.changed) await this.doRefreshLibrary();
+      if (result.changed) {
+        this.#markLibraryRefreshOwed();
+        await this.doRefreshLibrary();
+      }
       return { ok: true, changed: result.changed, restartRequired: result.restart_required };
     } catch (e) {
       const message = String(e);

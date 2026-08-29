@@ -60,6 +60,10 @@
   /* Audition banner (takes NowCard's slot while auditioning) */
   --color-audition-banner-bg: #332;
 
+  /* New-arrival row badge (gate-independent NEW chip) */
+  --color-new-arrival-badge-bg: var(--color-accent-bg);
+  --color-new-arrival-badge-text: var(--color-accent-text);
+
   /* Chip / flagged edit accents */
   --color-chip-current-bg: var(--color-accent-bg);
   --color-chip-current-text: var(--color-accent-text);

@@ -52,6 +52,9 @@ export interface PlayerState {
   audition_to: string | null;
   position_secs: number | null;
   duration_secs: number | null;
+  /// Monotonic counter bumped after a successful history persist. UI re-pulls
+  /// new arrivals when this changes (not on now-playing alone).
+  history_revision: number;
 }
 
 /// Matches `TrackRow`. `path` is the identity the UI keys on (basenames can
@@ -336,6 +339,22 @@ export function labelStats(): Promise<LabelStats> {
 /// Wipe all labels and play history (and `BarOverride.funkot` mirrors).
 export function clearLabelsAndHistory(): Promise<void> {
   return invoke<void>("clear_labels_and_history");
+}
+
+/// Matches `store::NewArrival`.
+export interface NewArrival {
+  path: string;
+  first_seen: string;
+}
+
+export function listNewArrivals(): Promise<NewArrival[]> {
+  return invoke<NewArrival[]>("list_new_arrivals");
+}
+
+/// Prepends gated new arrivals to the queue (after reserved). Returns how
+/// many tracks were actually added.
+export function queueNewArrivals(): Promise<number> {
+  return invoke<number>("queue_new_arrivals");
 }
 
 export function auditionTransition(
