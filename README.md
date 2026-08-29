@@ -309,11 +309,12 @@ GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
   host is ALSA, the container has no device, and `/etc/asound.conf` in the image
   points `default` at PulseAudio. Two `snd_pcm_avail_delay` I/O errors at stream
   start are the plugin settling and do not repeat.
-- **The window is X11 on purpose** (`GDK_BACKEND=x11` in `dev.sh`). Under
-  Wayland the window cannot be driven or captured from a second container;
-  on X11 `xdotool` and `import` both work, and both are in the image:
+- **The window is Wayland by default** so WSLg can put a real Win32 window
+  on the Windows taskbar. Container root + X11 is what produced a taskbar
+  button with no window. For xdotool/import from a second container, add
+  `GUI_X11=1` (`GDK_BACKEND=x11`); that path can ghost on Windows again:
   ```sh
-  GUI=1 ./dev.sh sh -c 'w=$(xdotool search --onlyvisible --name "^Funkot$" | tail -1);
+  GUI=1 GUI_X11=1 ./dev.sh sh -c 'w=$(xdotool search --onlyvisible --name "^Funkot$" | tail -1);
       xdotool windowactivate --sync "$w";
       xdotool mousemove --sync --window "$w" 137 197 click 1'   # 「開始」@420x760
   ```

@@ -103,13 +103,15 @@ else
     NET=""
 fi
 
-# GUI=1 runs the desktop build with a screen and a sound card: the X11 socket
-# and WSLg's PulseAudio socket are passed in, and cpal's ALSA host reaches the
-# latter through the pulse plugin (see /etc/asound.conf in the Dockerfile).
+# GUI=1 runs the desktop build with a screen and a sound card: the Wayland
+# and PulseAudio sockets from WSLg are passed in, and cpal's ALSA host
+# reaches Pulse through the pulse plugin (see /etc/asound.conf in the Dockerfile).
 #
-# GDK_BACKEND=x11 is not cosmetic. Left to itself GDK connects to the wayland-0
-# socket in XDG_RUNTIME_DIR, and a Wayland window cannot be driven or captured
-# from a second container -- xdotool and import both work on X11 only.
+# The container must run as the WSLg session user (the wayland-0 owner) with
+# host PID/IPC. Root in a PID namespace is what produced a Windows taskbar
+# button and no window (weston ClientGetAppidReq pid:0). Default backend is
+# Wayland so RAIL binds a real Win32 window. GUI_X11=1 restores GDK_BACKEND=x11
+# for xdotool/import from a second container; that path can ghost again.
 #
 # The app's data lives on the host so the analysis cache and the queue survive a
 # restart; drop the tracks to play into .desktop-data/Music.
@@ -119,16 +121,29 @@ if [ "${GUI:-0}" = 1 ]; then
         echo "GUI=1 expects WSLg's PulseServer socket at /mnt/wslg/PulseServer" >&2
         exit 1
     }
+    [ -S /mnt/wslg/runtime-dir/wayland-0 ] || {
+        echo "GUI=1 expects WSLg's Wayland socket at /mnt/wslg/runtime-dir/wayland-0" >&2
+        exit 1
+    }
     mkdir -p "$PWD/.desktop-data/Music"
+    chmod -R a+rwX "$PWD/.desktop-data" 2>/dev/null || true
+    WSLG_UID=$(stat -c %u /mnt/wslg/runtime-dir/wayland-0)
+    WSLG_GID=$(stat -c %g /mnt/wslg/runtime-dir/wayland-0)
+    GDK_BACKEND_ARGS=""
+    if [ "${GUI_X11:-0}" = 1 ]; then
+        GDK_BACKEND_ARGS="-e GDK_BACKEND=x11"
+    fi
     # Trixie zenity is GTK4. GSK's default GL/Vulkan path draws only the
     # window chrome on WSLg; cairo is the software renderer. Do not put
     # comments inside GUI_ARGS — it is word-split into docker argv.
-    GUI_ARGS="--shm-size=1g
+    GUI_ARGS="--pid=host --ipc=host --user ${WSLG_UID}:${WSLG_GID} --shm-size=1g
         -v /tmp/.X11-unix:/tmp/.X11-unix
         -v /mnt/wslg:/mnt/wslg
-        -v $PWD/.desktop-data:/root/.local/share/jp.hatsuboshi.funkotplayer
+        -v $PWD/.desktop-data:/tmp/.local/share/jp.hatsuboshi.funkotplayer
+        -e HOME=/tmp
         -e DISPLAY=${DISPLAY:-:0}
-        -e GDK_BACKEND=x11
+        -e WAYLAND_DISPLAY=wayland-0
+        ${GDK_BACKEND_ARGS}
         -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
         -e PULSE_SERVER=unix:/mnt/wslg/PulseServer
         -e WEBKIT_DISABLE_COMPOSITING_MODE=1
