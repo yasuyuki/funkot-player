@@ -25,8 +25,9 @@
 //!
 //! # Lock ordering
 //!
-//! The fixed order across this codebase is **`SAVE_LOCK` → `SESSION` → queue
-//! → render**, never the reverse. `SESSION` (`src-tauri/src/lib.rs`) is the
+//! The fixed order across this codebase is **`INDEX_LOCK` → `SAVE_LOCK` →
+//! `SESSION` → queue → render**, never the reverse. `INDEX_LOCK` and
+//! `SAVE_LOCK` / `SESSION` live in `src-tauri/src/lib.rs`. `SESSION` is the
 //! restart-persistence counterpart to this module's queue; it only ever
 //! nests under `SAVE_LOCK` inside `persist_session`, and never nests with
 //! this module's queue lock at all — the two are independent saves that
@@ -42,8 +43,9 @@
 //! acyclic: the loader thread (`next`, above) only ever takes the queue lock,
 //! and the cpal audio callback only ever takes the render lock (with
 //! `try_lock`, so it cannot block on this module at all). Keep it that way —
-//! taking the queue lock and then reaching for `SAVE_LOCK`, or taking `render`
-//! and then reaching for the queue lock, is what would close the cycle.
+//! taking the queue lock and then reaching for `SAVE_LOCK` / `INDEX_LOCK`, or
+//! taking `render` and then reaching for the queue lock, is what would close
+//! the cycle.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -391,8 +393,8 @@ impl HostSource {
     /// An observer that does take the queue lock must not already hold a lock
     /// that anything else takes *after* the queue lock, or the two orders can
     /// deadlock. The host's `SAVE_LOCK` is fine: the fixed order there is
-    /// `SAVE_LOCK` → queue → render, and nothing takes the queue lock and
-    /// then reaches for `SAVE_LOCK`.
+    /// `INDEX_LOCK` → `SAVE_LOCK` → queue → render, and nothing takes the
+    /// queue lock and then reaches for `SAVE_LOCK` / `INDEX_LOCK`.
     ///
     /// Not called when the queue was empty and [`DrainPolicy`] supplied the
     /// track: nothing was consumed, so there is nothing new to report.

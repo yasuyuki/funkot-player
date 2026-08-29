@@ -739,8 +739,19 @@ fn set_music_dir(
         }
 
         let data = Path::new(&dirs.data_dir);
+        // Folder picker is done; take locks only for the Settings RMW.
+        let _index = INDEX_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _saving = SAVE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut settings = store::load_settings(data);
+        let path_changed = settings.music_dir.as_deref() != Some(path.as_path());
         settings.music_dir = Some(path);
+        if path_changed {
+            settings.arrivals_baseline_done = false;
+        }
         store::save_settings(data, &settings)
             .map_err(|e| format!("cannot save settings: {e}"))?;
 
@@ -963,22 +974,36 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
     }
 }
 
+/// Serializes hash-index load–mutate–save and the arrivals-baseline Settings
+/// commit that accompanies a refresh. Held across the music-folder walk so a
+/// concurrent `set_music_dir` cannot swap folders mid-refresh. Does **not**
+/// wrap every hash-index *read* — `load_hash_index` itself takes no lock;
+/// orchestration decides when to hold this.
+///
+/// Lock order (fixed, never reversed): `INDEX_LOCK` → [`SAVE_LOCK`] →
+/// [`SESSION`] → queue (`src-tauri/src/queue.rs`) → render.
+static INDEX_LOCK: Mutex<()> = Mutex::new(());
+
 /// Serialises writes under `data_dir` (`queue.json`, `flags.json`,
-/// `labels.json`, `history.json`, and `session.json`).
+/// `labels.json`, `history.json`, `session.json`, and Settings RMW).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
 /// really do overlap — tapping ✕ on one row and ↑ on another in quick
 /// succession is enough. Each takes its snapshot *inside* this lock, so the
 /// last write is always the latest state; without it the two snapshots can
-/// reach `fs::write` in the opposite order and leave the file a revision
-/// behind, or interleave inside the truncate-then-write and leave it torn.
+/// reach disk in the opposite order and leave the file a revision behind, or
+/// interleave inside a non-atomic write and leave it torn. Settings and
+/// hash-index saves use tmp+rename; this lock still prevents lost updates
+/// across read-modify-write writers.
 ///
 /// Process-wide (not on `AppState`) so Android notification JNI can share the
 /// same lock without a Tauri handle.
 ///
-/// Lock order (fixed, never reversed): `SAVE_LOCK` → [`SESSION`] → queue
-/// (`src-tauri/src/queue.rs`) → render. `persist_session` is the only place
-/// `SAVE_LOCK` and `SESSION` nest; see its doc comment.
+/// Lock order (fixed, never reversed): [`INDEX_LOCK`] → `SAVE_LOCK` →
+/// [`SESSION`] → queue (`src-tauri/src/queue.rs`) → render. `persist_session`
+/// is the only place `SAVE_LOCK` and `SESSION` nest; see its doc comment.
+/// Refresh holds `INDEX_LOCK` across the scan and only takes `SAVE_LOCK` at
+/// commit time for the baseline flag — never for the whole walk.
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Key last written by `flag_last_transition`, for a single-shot undo.
@@ -2105,7 +2130,7 @@ fn record_heard(path: &Path) {
     };
     // Hash outside SAVE_LOCK (same as gated_non_funkot): index is read-only
     // here — never save. Persist of hash-index is `refresh_library` only.
-    let mut index = store::load_hash_index(data_dir);
+    let mut index = store::load_hash_index(data_dir).index;
     let hash = match store::resolve_content_hash(path, &mut index) {
         Ok(h) => h,
         Err(e) => {
@@ -3114,22 +3139,36 @@ mod import_tests {
 ///
 /// The top-level `dir` itself must be readable, or this fails outright. A
 /// subdirectory discovered during the walk that fails to read is instead
-/// logged and skipped, so one broken subfolder cannot take the whole library
-/// down with it.
-fn scan_tracks(dir: &Path) -> Result<Vec<PathBuf>, String> {
+/// logged and skipped, and marks the scan **incomplete** so callers can avoid
+/// pruning / baseline-commit on a partial walk. Entry / `file_type` errors
+/// also set incomplete; dotted / symlink / unsupported-extension skips do not.
+fn scan_tracks(dir: &Path) -> Result<(Vec<PathBuf>, bool), String> {
     let mut paths = Vec::new();
+    let mut complete = true;
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
-    scan_tracks_into(entries, &mut paths);
+    scan_tracks_into(entries, &mut paths, &mut complete);
     paths.sort();
-    Ok(paths)
+    Ok((paths, complete))
 }
 
 /// Walk one already-opened directory's entries into `paths`, recursing into
-/// subdirectories. Read failures on a subdirectory are logged and skipped
-/// rather than propagated — see [`scan_tracks`].
-fn scan_tracks_into(entries: std::fs::ReadDir, paths: &mut Vec<PathBuf>) {
-    for entry in entries.filter_map(|e| e.ok()) {
+/// subdirectories. Read failures on a subdirectory are logged, skipped, and
+/// mark `*complete = false` — see [`scan_tracks`].
+fn scan_tracks_into(
+    entries: std::fs::ReadDir,
+    paths: &mut Vec<PathBuf>,
+    complete: &mut bool,
+) {
+    for entry_result in entries {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(_) => {
+                // Err from ReadDir → incomplete (do not silently drop via ok()).
+                *complete = false;
+                continue;
+            }
+        };
         let is_dotted = entry
             .file_name()
             .to_str()
@@ -3138,8 +3177,12 @@ fn scan_tracks_into(entries: std::fs::ReadDir, paths: &mut Vec<PathBuf>) {
         if is_dotted {
             continue;
         }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => {
+                *complete = false;
+                continue;
+            }
         };
         if file_type.is_symlink() {
             continue;
@@ -3147,8 +3190,11 @@ fn scan_tracks_into(entries: std::fs::ReadDir, paths: &mut Vec<PathBuf>) {
         let path = entry.path();
         if file_type.is_dir() {
             match std::fs::read_dir(&path) {
-                Ok(sub_entries) => scan_tracks_into(sub_entries, paths),
-                Err(e) => log::warn!("cannot read {}: {e}", path.display()),
+                Ok(sub_entries) => scan_tracks_into(sub_entries, paths, complete),
+                Err(e) => {
+                    log::warn!("cannot read {}: {e}", path.display());
+                    *complete = false;
+                }
             }
         } else if file_type.is_file() && is_supported_track(&path) {
             paths.push(path);
@@ -3201,7 +3247,7 @@ fn start_impl(
     }
 
     let dir = PathBuf::from(music_dir);
-    let paths: Vec<PathBuf> = scan_tracks(&dir)?;
+    let (paths, _complete): (Vec<PathBuf>, bool) = scan_tracks(&dir)?;
 
     if paths.len() < 2 {
         // Early error: nothing has been set up yet, so the phase is left at
@@ -3999,7 +4045,7 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
     let paths: Vec<PathBuf> = if dirs.music_dir_needed {
         Vec::new()
     } else {
-        scan_tracks(&music_dir)?
+        scan_tracks(&music_dir)?.0
     };
     let overrides = store::load_overrides(&data_dir);
     let labels = store::load_labels(&data_dir);
@@ -4259,16 +4305,21 @@ fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 /// Persist `allow_non_funkot` and update the live atomic used by folder drain.
+/// The atomic is stored **before** `SAVE_LOCK` is released.
 #[tauri::command(async)]
 fn set_allow_non_funkot(app: tauri::AppHandle, allow: bool) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
     let data = Path::new(&dirs.data_dir);
-    let mut settings = store::load_settings(data);
-    settings.allow_non_funkot = allow;
-    store::save_settings(data, &settings)
-        .map_err(|e| format!("cannot save settings: {e}"))?;
-    ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
-    Ok(allow)
+    with_settings_rmw_then(
+        data,
+        |settings| {
+            settings.allow_non_funkot = allow;
+        },
+        |_| {
+            ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
+            allow
+        },
+    )
 }
 
 /// Current `settings.json` `labeling_mode` (raw, pre-platform-gate).
@@ -4285,11 +4336,35 @@ fn get_labeling_mode(app: tauri::AppHandle) -> Result<bool, String> {
 fn set_labeling_mode(app: tauri::AppHandle, on: bool) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
     let data = Path::new(&dirs.data_dir);
+    with_settings_rmw(data, |settings| {
+        settings.labeling_mode = on;
+    })?;
+    Ok(on)
+}
+
+/// `SAVE_LOCK`-scoped Settings read-modify-write: reload, mutate, atomic save.
+fn with_settings_rmw(
+    data: &Path,
+    mutate: impl FnOnce(&mut store::Settings),
+) -> Result<(), String> {
+    with_settings_rmw_then(data, mutate, |_| ())
+}
+
+/// Like [`with_settings_rmw`], but runs `after_save` **before** releasing
+/// `SAVE_LOCK` (e.g. update `ALLOW_NON_FUNKOT` after a successful persist).
+fn with_settings_rmw_then<R>(
+    data: &Path,
+    mutate: impl FnOnce(&mut store::Settings),
+    after_save: impl FnOnce(&store::Settings) -> R,
+) -> Result<R, String> {
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut settings = store::load_settings(data);
-    settings.labeling_mode = on;
+    mutate(&mut settings);
     store::save_settings(data, &settings)
         .map_err(|e| format!("cannot save settings: {e}"))?;
-    Ok(on)
+    Ok(after_save(&settings))
 }
 
 /// `queue::edit_displayed`'s `revoke` argument for the main engine: hands
@@ -4565,7 +4640,7 @@ fn gated_non_funkot(
     // Read-only use of the index: never save here. Persist is `refresh_library`
     // only — otherwise folder-drain / enqueue races with refresh and can
     // overwrite a pruned index with a stale map.
-    let mut index = store::load_hash_index(data_dir);
+    let mut index = store::load_hash_index(data_dir).index;
     let Ok(hash) = store::resolve_content_hash(path, &mut index) else {
         return false;
     };
@@ -4627,7 +4702,7 @@ fn apply_non_funkot_gate_from_index(
     if allow {
         return paths;
     }
-    let index = store::load_hash_index(data_dir);
+    let index = store::load_hash_index(data_dir).index;
     let overrides = store::load_overrides(data_dir);
     paths
         .into_iter()
@@ -5066,6 +5141,7 @@ mod cache_state_tests {
                 tags_cached: false,
                 title: None,
                 artist: None,
+                first_seen: None,
             },
         );
         store::save_hash_index(&data.0, &index).unwrap();
@@ -5104,6 +5180,7 @@ mod cache_state_tests {
                 tags_cached: false,
                 title: None,
                 artist: None,
+                first_seen: None,
             },
         );
         store::save_hash_index(&data.0, &index).unwrap();
@@ -5372,7 +5449,7 @@ mod cache_state_tests {
         std::fs::write(music.0.join("readme.txt"), b"not audio").unwrap();
         std::fs::write(music.0.join("sub").join("notes.md"), b"skip").unwrap();
 
-        let scanned = scan_tracks(&music.0).unwrap();
+        let (scanned, _) = scan_tracks(&music.0).unwrap();
         assert_eq!(scanned.len(), 3, "scan_tracks paths: {scanned:?}");
         let (count, undo) = set_folder_label_impl(&data.0, &music.0, true).unwrap();
         assert_eq!(count, 3);
@@ -5405,7 +5482,7 @@ mod cache_state_tests {
         assert_eq!(undo_folder_label_impl(&data.0, &undo).unwrap(), 3);
         let after = store::load_labels(&data.0);
         assert_eq!(after.len(), 1, "b and c must go back to unlabeled");
-        let hash = store::resolve_content_hash(&a, &mut store::load_hash_index(&data.0)).unwrap();
+        let hash = store::resolve_content_hash(&a, &mut store::load_hash_index(&data.0).index).unwrap();
         assert_eq!(after.get(&hash).map(|l| l.verdict), Some(false));
         assert_eq!(
             store::load_overrides(&data.0).get(&hash).and_then(|o| o.funkot),
@@ -5452,7 +5529,7 @@ mod cache_state_tests {
         set_label_impl(&cache.0, &data.0, &a, Some(false)).unwrap();
 
         let stats = label_stats_impl(&data.0, Some(music.0.as_path()));
-        let expected_total = scan_tracks(&music.0).unwrap().len();
+        let expected_total = scan_tracks(&music.0).unwrap().0.len();
         assert_eq!(stats.total, expected_total);
         assert_eq!(stats.labeled, 3);
         assert_eq!(stats.funkot, 2);
@@ -5522,7 +5599,7 @@ mod scan_tracks_tests {
         touch(&dir.0.join("a").join("mid.mp3"));
         touch(&dir.0.join("a").join("b").join("deep.flac"));
 
-        let found = scan_tracks(&dir.0).unwrap();
+        let (found, _) = scan_tracks(&dir.0).unwrap();
         assert_eq!(
             found,
             vec![
@@ -5539,7 +5616,7 @@ mod scan_tracks_tests {
         touch(&dir.0.join(".hidden").join("track.wav"));
         touch(&dir.0.join("visible.wav"));
 
-        let found = scan_tracks(&dir.0).unwrap();
+        let (found, _) = scan_tracks(&dir.0).unwrap();
         assert_eq!(found, vec![dir.0.join("visible.wav")]);
     }
 
@@ -5549,7 +5626,7 @@ mod scan_tracks_tests {
         touch(&dir.0.join(".track.wav"));
         touch(&dir.0.join("track.wav"));
 
-        let found = scan_tracks(&dir.0).unwrap();
+        let (found, _) = scan_tracks(&dir.0).unwrap();
         assert_eq!(found, vec![dir.0.join("track.wav")]);
     }
 
@@ -5559,7 +5636,7 @@ mod scan_tracks_tests {
         touch(&dir.0.join("notes.txt"));
         touch(&dir.0.join("track.wav"));
 
-        let found = scan_tracks(&dir.0).unwrap();
+        let (found, _) = scan_tracks(&dir.0).unwrap();
         assert_eq!(found, vec![dir.0.join("track.wav")]);
     }
 
@@ -5570,7 +5647,7 @@ mod scan_tracks_tests {
         touch(&dir.0.join("m.wav"));
         touch(&dir.0.join("a.wav"));
 
-        let found = scan_tracks(&dir.0).unwrap();
+        let (found, _) = scan_tracks(&dir.0).unwrap();
         let mut expected = found.clone();
         expected.sort();
         assert_eq!(found, expected);
@@ -5594,7 +5671,7 @@ mod scan_tracks_tests {
 
         std::os::unix::fs::symlink(&real.0, dir.0.join("linked")).unwrap();
 
-        let found = scan_tracks(&dir.0).unwrap();
+        let (found, _) = scan_tracks(&dir.0).unwrap();
         assert_eq!(found, vec![dir.0.join("inside.wav")]);
     }
 
@@ -5609,7 +5686,7 @@ mod scan_tracks_tests {
         touch(&dir.0.join("a").join("01.mp3"));
         touch(&dir.0.join("b").join("01.mp3"));
 
-        let found = scan_tracks(&dir.0).unwrap();
+        let (found, _) = scan_tracks(&dir.0).unwrap();
         assert_eq!(
             found,
             vec![dir.0.join("a").join("01.mp3"), dir.0.join("b").join("01.mp3"),]
@@ -5619,6 +5696,188 @@ mod scan_tracks_tests {
             file_name_str(&found[1]),
             "file names collide, which is exactly why PlayerState must key on path_str instead"
         );
+    }
+}
+
+#[cfg(test)]
+mod arrivals_settings_rmw_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "funkot-player-arrivals-rmw-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn refresh_baseline_commit_and_allow_false_both_orders() {
+        for setter_first in [true, false] {
+            let dir = TempDir::new(&format!("baseline-allow-{setter_first}"));
+            let mut settings = store::Settings::default();
+            settings.arrivals_baseline_done = false;
+            settings.allow_non_funkot = true;
+            store::save_settings(&dir.0, &settings).unwrap();
+
+            let barrier = Arc::new(Barrier::new(2));
+            let data_a = dir.0.clone();
+            let data_b = dir.0.clone();
+            let b1 = barrier.clone();
+            let b2 = barrier.clone();
+
+            let commit = std::thread::spawn(move || {
+                if setter_first {
+                    b1.wait();
+                }
+                mark_arrivals_baseline_done(&data_a).unwrap();
+                if !setter_first {
+                    b1.wait();
+                }
+            });
+            let setter = std::thread::spawn(move || {
+                if !setter_first {
+                    b2.wait();
+                }
+                with_settings_rmw_then(
+                    &data_b,
+                    |s| s.allow_non_funkot = false,
+                    |_| {
+                        ALLOW_NON_FUNKOT.store(false, Ordering::Relaxed);
+                    },
+                )
+                .unwrap();
+                if setter_first {
+                    b2.wait();
+                }
+            });
+            commit.join().unwrap();
+            setter.join().unwrap();
+
+            let final_s = store::load_settings(&dir.0);
+            assert!(
+                final_s.arrivals_baseline_done,
+                "setter_first={setter_first}"
+            );
+            assert!(!final_s.allow_non_funkot, "setter_first={setter_first}");
+        }
+    }
+
+    #[test]
+    fn refresh_baseline_commit_and_labeling_mode_both_kept() {
+        let dir = TempDir::new("baseline-labeling");
+        let mut settings = store::Settings::default();
+        settings.arrivals_baseline_done = false;
+        settings.labeling_mode = false;
+        store::save_settings(&dir.0, &settings).unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let data_a = dir.0.clone();
+        let data_b = dir.0.clone();
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+
+        let commit = std::thread::spawn(move || {
+            b1.wait();
+            mark_arrivals_baseline_done(&data_a).unwrap();
+        });
+        let setter = std::thread::spawn(move || {
+            b2.wait();
+            with_settings_rmw(&data_b, |s| s.labeling_mode = true).unwrap();
+        });
+        commit.join().unwrap();
+        setter.join().unwrap();
+
+        let final_s = store::load_settings(&dir.0);
+        assert!(final_s.arrivals_baseline_done);
+        assert!(final_s.labeling_mode);
+    }
+
+    #[test]
+    fn consecutive_allow_setters_match_disk_and_atomic() {
+        let dir = TempDir::new("allow-consecutive");
+        store::save_settings(&dir.0, &store::Settings::default()).unwrap();
+        for allow in [false, true, false, true, false] {
+            with_settings_rmw_then(
+                &dir.0,
+                |s| s.allow_non_funkot = allow,
+                |_| {
+                    ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
+                },
+            )
+            .unwrap();
+            assert_eq!(store::load_settings(&dir.0).allow_non_funkot, allow);
+            assert_eq!(ALLOW_NON_FUNKOT.load(Ordering::Relaxed), allow);
+        }
+    }
+
+    #[test]
+    fn baseline_flag_save_failure_makes_commit_fail() {
+        let dir = TempDir::new("baseline-save-fail");
+        let index = store::HashIndex::new();
+        let plan = store::ArrivalsCommitPlan {
+            save_index: true,
+            mark_baseline_done: true,
+        };
+        let err = commit_arrivals_after_scan(
+            &dir.0,
+            &index,
+            plan,
+            store::save_hash_index,
+            |_data| Err("injected baseline save failure".into()),
+        );
+        assert!(err.is_err());
+        // Index was written; baseline flag must not be treated as success.
+        assert!(store::load_hash_index(&dir.0).provenance == store::HashIndexProvenance::Loaded);
+        assert!(!store::load_settings(&dir.0).arrivals_baseline_done);
+    }
+
+    #[test]
+    fn incomplete_recovery_commit_does_not_save_index() {
+        let dir = TempDir::new("incomplete-no-save");
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/partial.flac".into(),
+            store::HashIndexEntry {
+                mtime_ms: 1,
+                len: 1,
+                hash: "p".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+                first_seen: None,
+            },
+        );
+        let plan = store::arrivals_commit_plan(store::ArrivalsKind::Recovery, false);
+        commit_arrivals_after_scan(
+            &dir.0,
+            &index,
+            plan,
+            store::save_hash_index,
+            mark_arrivals_baseline_done,
+        )
+        .unwrap();
+        assert_eq!(
+            store::load_hash_index(&dir.0).provenance,
+            store::HashIndexProvenance::Missing
+        );
+        assert!(!store::load_settings(&dir.0).arrivals_baseline_done);
     }
 }
 
@@ -5668,9 +5927,17 @@ struct LibraryScanProgress {
 /// unanalyzed tracks (startup / manual 再スキャン). When false, returns the
 /// listing only — used after `analysis-done` so permanent analysis failures
 /// (e.g. silent files) cannot re-queue forever via refresh → analyze → done.
+///
+/// Holds [`INDEX_LOCK`] for the whole resolve → stamp/baseline → commit
+/// transaction. Takes [`SAVE_LOCK`] only at commit when marking the arrivals
+/// baseline done (after a successful index save).
 #[tauri::command(async)]
 fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<TrackRow>, String> {
     use tauri::Emitter;
+
+    let _index_guard = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let dirs = resolve_dirs(&app)?;
     if dirs.music_dir_needed {
@@ -5679,6 +5946,8 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let music_dir = PathBuf::from(&dirs.music_dir);
     let cache_dir = PathBuf::from(&dirs.cache_dir);
     let data_dir = PathBuf::from(&dirs.data_dir);
+
+    let baseline_done = store::load_settings(&data_dir).arrivals_baseline_done;
 
     let _ = app.emit(
         "library-scan",
@@ -5689,11 +5958,15 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
         },
     );
 
-    let paths: Vec<PathBuf> = scan_tracks(&music_dir)?;
+    let (paths, complete) = scan_tracks(&music_dir)?;
     let overrides = store::load_overrides(&data_dir);
     let labels = store::load_labels(&data_dir);
     let history = store::load_history(&data_dir);
-    let mut hash_index = store::load_hash_index(&data_dir);
+    let loaded_index = store::load_hash_index(&data_dir);
+    let provenance = loaded_index.provenance;
+    let mut hash_index = loaded_index.index;
+    let original_keys: std::collections::BTreeSet<String> =
+        hash_index.keys().cloned().collect();
     let found = paths.len();
 
     let _ = app.emit(
@@ -5752,10 +6025,35 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
         );
     }
 
-    hash_index.retain(|path, _| seen_paths.contains(path));
-    if let Err(e) = store::save_hash_index(&data_dir, &hash_index) {
-        log::warn!("cannot save hash-index.json: {e}");
+    if complete {
+        hash_index.retain(|path, _| seen_paths.contains(path));
     }
+
+    let kind = store::arrivals_kind(baseline_done, provenance);
+    match kind {
+        store::ArrivalsKind::Normal => {
+            let now = store::utc_rfc3339_now();
+            store::stamp_new_paths(&mut hash_index, &original_keys, &now);
+        }
+        store::ArrivalsKind::Baseline | store::ArrivalsKind::Recovery => {
+            if matches!(kind, store::ArrivalsKind::Recovery) {
+                log::warn!(
+                    "arrivals recovery baseline (provenance={provenance:?}); \
+                     not stamping new paths"
+                );
+            }
+            store::apply_baseline_markers(&mut hash_index, &seen_paths);
+        }
+    }
+
+    let plan = store::arrivals_commit_plan(kind, complete);
+    commit_arrivals_after_scan(
+        &data_dir,
+        &hash_index,
+        plan,
+        store::save_hash_index,
+        mark_arrivals_baseline_done,
+    )?;
 
     if kick_analysis {
         // Reuse what `track_row` already worked out so we do not hash every
@@ -5771,6 +6069,37 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     }
 
     Ok(rows)
+}
+
+/// Persist hash-index / baseline flag per [`store::ArrivalsCommitPlan`].
+/// Injected save ops make baseline-flag failure testable without mock crates.
+fn commit_arrivals_after_scan(
+    data_dir: &Path,
+    index: &store::HashIndex,
+    plan: store::ArrivalsCommitPlan,
+    save_index: impl FnOnce(&Path, &store::HashIndex) -> std::io::Result<()>,
+    mark_baseline: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if plan.save_index {
+        save_index(data_dir, index)
+            .map_err(|e| format!("cannot save hash-index.json: {e}"))?;
+    }
+    if plan.mark_baseline_done {
+        mark_baseline(data_dir)?;
+    }
+    Ok(())
+}
+
+/// Reload Settings under `SAVE_LOCK` and set `arrivals_baseline_done = true`.
+/// Caller must already hold [`INDEX_LOCK`].
+fn mark_arrivals_baseline_done(data_dir: &Path) -> Result<(), String> {
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = store::load_settings(data_dir);
+    settings.arrivals_baseline_done = true;
+    store::save_settings(data_dir, &settings)
+        .map_err(|e| format!("cannot save settings: {e}"))
 }
 
 /// Push stored corrections into the engine's analysis cache for one track.
@@ -5938,7 +6267,7 @@ fn set_label_impl(
     track: &std::path::Path,
     verdict: Option<bool>,
 ) -> Result<TrackRow, String> {
-    let mut index = store::load_hash_index(data_dir);
+    let mut index = store::load_hash_index(data_dir).index;
     let hash = store::resolve_content_hash(track, &mut index)
         .map_err(|e| format!("cannot hash {}: {e}", track.display()))?;
 
@@ -6028,8 +6357,8 @@ fn set_folder_label_impl(
     dir: &std::path::Path,
     verdict: bool,
 ) -> Result<(usize, Vec<FolderLabelUndo>), String> {
-    let paths = scan_tracks(dir)?;
-    let mut index = store::load_hash_index(data_dir);
+    let (paths, _complete) = scan_tracks(dir)?;
+    let mut index = store::load_hash_index(data_dir).index;
     let mut labels = store::load_labels(data_dir);
     let mut overrides = store::load_overrides(data_dir);
     let labeled_at_ms = now_ms();
@@ -6165,7 +6494,7 @@ fn label_stats_impl(data_dir: &std::path::Path, music_dir: Option<&Path>) -> Lab
     let funkot = labels.values().filter(|l| l.verdict).count();
     let not_funkot = labels.values().filter(|l| !l.verdict).count();
     let total = match music_dir {
-        Some(dir) => scan_tracks(dir).map(|p| p.len()).unwrap_or(0),
+        Some(dir) => scan_tracks(dir).map(|(p, _)| p.len()).unwrap_or(0),
         None => 0,
     };
     LabelStats {

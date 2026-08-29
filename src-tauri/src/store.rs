@@ -246,6 +246,11 @@ pub struct Settings {
     /// change here takes effect on the next Start, not the running session.
     #[serde(default)]
     pub labeling_mode: bool,
+    /// Whether the first (or post–music-dir-change) arrivals baseline has
+    /// finished a complete scan and index save. Missing key / [`Default`] =
+    /// `false`.
+    #[serde(default)]
+    pub arrivals_baseline_done: bool,
 }
 
 fn default_allow_non_funkot() -> bool {
@@ -258,6 +263,7 @@ impl Default for Settings {
             music_dir: None,
             allow_non_funkot: default_allow_non_funkot(),
             labeling_mode: false,
+            arrivals_baseline_done: false,
         }
     }
 }
@@ -283,10 +289,13 @@ pub fn load_settings(dir: &Path) -> Settings {
 }
 
 /// Persist `settings` under `dir`, overwriting any previous save.
+///
+/// Writes through a uniquely named temp file in the same directory, then
+/// renames into place so lock-free readers never observe a torn JSON.
 pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(settings)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(SETTINGS_FILE), json)
+    write_atomic(&dir.join(SETTINGS_FILE), &json)
 }
 
 /// Build the pending queue to restore after a restart: `in_flight` first (the
@@ -451,10 +460,29 @@ pub struct HashIndexEntry {
     pub title: Option<String>,
     #[serde(default)]
     pub artist: Option<String>,
+    /// RFC3339 UTC. `None` = present since baseline (legacy missing field → `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<String>,
 }
 
 /// Path → content hash, with mtime/size so unchanged files skip re-hashing.
 pub type HashIndex = BTreeMap<String, HashIndexEntry>;
+
+/// How [`load_hash_index`] obtained its map. Distinguishes a legitimate empty
+/// index (`Loaded` of `{}`) from a missing or unreadable file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashIndexProvenance {
+    Loaded,
+    Missing,
+    Corrupt,
+}
+
+/// Result of loading `hash-index.json` without taking any lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedHashIndex {
+    pub index: HashIndex,
+    pub provenance: HashIndexProvenance,
+}
 
 /// Hash + embedded tags for one library file after [`resolve_library_file`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -466,26 +494,184 @@ pub struct ResolvedLibraryFile {
 
 /// Load the content-hash index saved under `dir`.
 ///
-/// Missing or corrupt → empty map (same policy as [`load_overrides`]).
-pub fn load_hash_index(dir: &Path) -> HashIndex {
+/// Does not take any lock — callers that mutate and save must serialize at
+/// the orchestration layer. Missing file → empty + [`HashIndexProvenance::Missing`];
+/// other I/O / JSON errors → empty + [`HashIndexProvenance::Corrupt`];
+/// successful parse (including `{}`) → [`HashIndexProvenance::Loaded`].
+pub fn load_hash_index(dir: &Path) -> LoadedHashIndex {
     let bytes = match fs::read(dir.join(HASH_INDEX_FILE)) {
         Ok(b) => b,
-        Err(_) => return HashIndex::new(),
-    };
-    match serde_json::from_slice(&bytes) {
-        Ok(map) => map,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return LoadedHashIndex {
+                index: HashIndex::new(),
+                provenance: HashIndexProvenance::Missing,
+            };
+        }
         Err(e) => {
             log::warn!("{HASH_INDEX_FILE} is unreadable, starting empty: {e}");
-            HashIndex::new()
+            return LoadedHashIndex {
+                index: HashIndex::new(),
+                provenance: HashIndexProvenance::Corrupt,
+            };
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => LoadedHashIndex {
+            index: map,
+            provenance: HashIndexProvenance::Loaded,
+        },
+        Err(e) => {
+            log::warn!("{HASH_INDEX_FILE} is unreadable, starting empty: {e}");
+            LoadedHashIndex {
+                index: HashIndex::new(),
+                provenance: HashIndexProvenance::Corrupt,
+            }
         }
     }
 }
 
 /// Persist `index` under `dir`, overwriting any previous save.
+///
+/// Same atomic write policy as [`save_settings`].
 pub fn save_hash_index(dir: &Path, index: &HashIndex) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(index)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(HASH_INDEX_FILE), json)
+    write_atomic(&dir.join(HASH_INDEX_FILE), &json)
+}
+
+/// Arrivals handling mode derived from the baseline flag and index provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrivalsKind {
+    Baseline,
+    Recovery,
+    Normal,
+}
+
+/// Decide arrivals mode: not done → Baseline; done + Loaded (incl. empty) →
+/// Normal; done + Missing/Corrupt → Recovery.
+pub fn arrivals_kind(baseline_done: bool, provenance: HashIndexProvenance) -> ArrivalsKind {
+    if !baseline_done {
+        ArrivalsKind::Baseline
+    } else if provenance == HashIndexProvenance::Loaded {
+        ArrivalsKind::Normal
+    } else {
+        ArrivalsKind::Recovery
+    }
+}
+
+/// Stamp `first_seen` on keys that were not in `original_keys` and still have
+/// `None`. Keys present in `original_keys` with `None` are never touched.
+pub fn stamp_new_paths(index: &mut HashIndex, original_keys: &BTreeSet<String>, now: &str) {
+    for (key, entry) in index.iter_mut() {
+        if !original_keys.contains(key) && entry.first_seen.is_none() {
+            entry.first_seen = Some(now.to_string());
+        }
+    }
+}
+
+/// Clear `first_seen` on every entry whose key is in `scan_keys`.
+pub fn apply_baseline_markers(index: &mut HashIndex, scan_keys: &BTreeSet<String>) {
+    for key in scan_keys {
+        if let Some(entry) = index.get_mut(key) {
+            entry.first_seen = None;
+        }
+    }
+}
+
+/// What a refresh commit should write after stamping / baseline markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArrivalsCommitPlan {
+    pub save_index: bool,
+    /// After a successful index save, reload Settings and set
+    /// `arrivals_baseline_done = true`.
+    pub mark_baseline_done: bool,
+}
+
+/// Commit plan for arrivals after a scan. Normal always saves the index and
+/// never touches the baseline flag. Baseline/Recovery save and mark done only
+/// when the scan was complete.
+pub fn arrivals_commit_plan(kind: ArrivalsKind, complete: bool) -> ArrivalsCommitPlan {
+    match kind {
+        ArrivalsKind::Normal => ArrivalsCommitPlan {
+            save_index: true,
+            mark_baseline_done: false,
+        },
+        ArrivalsKind::Baseline | ArrivalsKind::Recovery => {
+            if complete {
+                ArrivalsCommitPlan {
+                    save_index: true,
+                    mark_baseline_done: true,
+                }
+            } else {
+                ArrivalsCommitPlan {
+                    save_index: false,
+                    mark_baseline_done: false,
+                }
+            }
+        }
+    }
+}
+
+/// Unique temp path next to `dest` (`.<name>.<pid>.<nanos>.part`).
+fn unique_tmp_beside(dest: &Path) -> PathBuf {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(".{name}.{}.{nanos}.part", std::process::id()))
+}
+
+/// Write `bytes` to `dest` via a same-directory temp file + rename.
+///
+/// Injected ops mirror [`crate`]'s `copy_atomic_with`: failure paths must
+/// remove the temp file. On Windows, `rename` replaces by removing `dest`
+/// first (no extra crate); on Unix/Android, `rename` overwrites.
+pub fn write_atomic_with(
+    dest: &Path,
+    bytes: &[u8],
+    write_tmp: impl FnOnce(&Path, &[u8]) -> io::Result<()>,
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    remove_tmp: impl FnOnce(&Path),
+) -> io::Result<()> {
+    if dest.parent().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "dest has no parent",
+        ));
+    }
+    let tmp = unique_tmp_beside(dest);
+    let result = write_tmp(&tmp, bytes).and_then(|()| rename(&tmp, dest));
+    if result.is_err() {
+        remove_tmp(&tmp);
+    }
+    result
+}
+
+fn write_atomic(dest: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with(
+        dest,
+        bytes,
+        |tmp, b| fs::write(tmp, b),
+        |from, to| {
+            #[cfg(windows)]
+            {
+                match fs::remove_file(to) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            fs::rename(from, to)
+        },
+        |tmp| {
+            let _ = fs::remove_file(tmp);
+        },
+    )
 }
 
 /// `metadata.modified()` as UNIX-epoch milliseconds, plus file length.
@@ -548,8 +734,10 @@ pub fn probe_audio_tags(path: &Path) -> Result<(Option<String>, Option<String>),
 
 /// Return `path`'s content hash, reusing [`HashIndex`] when mtime+size match.
 ///
-/// Does not probe or clear tags on a fingerprint hit. On miss, inserts with
-/// `tags_cached: false` (hash-only; library refresh fills tags later).
+/// Does not probe or clear tags on a fingerprint hit. On miss:
+/// - no prior entry → insert with `first_seen: None` (stamping is refresh's job)
+/// - same hash → keep `first_seen` and tags fields
+/// - different hash → new identity: stamp `first_seen` now, tags cleared
 // ponytail: mtime+size fingerprint can disagree after same-mtime overwrite; re-verify content if needed.
 pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<String> {
     let key = path.to_string_lossy().into_owned();
@@ -567,15 +755,24 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     if let Some((mtime_ms, len)) = fingerprint {
+        let prior = index.get(&key).cloned();
+        let (first_seen, tags_cached, title, artist) = match prior {
+            None => (None, false, None, None),
+            Some(old) if old.hash == hash => {
+                (old.first_seen, old.tags_cached, old.title, old.artist)
+            }
+            Some(_) => (Some(utc_rfc3339_now()), false, None, None),
+        };
         index.insert(
             key,
             HashIndexEntry {
                 mtime_ms,
                 len,
                 hash: hash.clone(),
-                tags_cached: false,
-                title: None,
-                artist: None,
+                tags_cached,
+                title,
+                artist,
+                first_seen,
             },
         );
     }
@@ -587,7 +784,11 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
 ///
 /// - Fingerprint miss → content-hash + tags probe → write full entry
 /// - Fingerprint hit + `tags_cached` → no file open; return stored hash/tags
-/// - Fingerprint hit + `!tags_cached` → skip content-hash; probe tags only
+/// - Fingerprint hit + `!tags_cached` → skip content-hash; probe tags only;
+///   `first_seen` unchanged
+///
+/// Carry-forward on miss: no prior entry → `first_seen: None`; same hash →
+/// keep `first_seen`; different hash → stamp now and use probe results for tags.
 pub fn resolve_library_file(
     path: &Path,
     index: &mut HashIndex,
@@ -606,6 +807,7 @@ pub fn resolve_library_file(
                     });
                 }
                 let hash = entry.hash.clone();
+                let first_seen = entry.first_seen.clone();
                 match probe_audio_tags(path) {
                     Ok((title, artist)) => {
                         index.insert(
@@ -617,6 +819,7 @@ pub fn resolve_library_file(
                                 tags_cached: true,
                                 title: title.clone(),
                                 artist: artist.clone(),
+                                first_seen,
                             },
                         );
                         return Ok(ResolvedLibraryFile {
@@ -645,6 +848,12 @@ pub fn resolve_library_file(
     };
 
     if let Some((mtime_ms, len)) = fingerprint {
+        let prior = index.get(&key).cloned();
+        let first_seen = match &prior {
+            None => None,
+            Some(old) if old.hash == hash => old.first_seen.clone(),
+            Some(_) => Some(utc_rfc3339_now()),
+        };
         index.insert(
             key,
             HashIndexEntry {
@@ -654,6 +863,7 @@ pub fn resolve_library_file(
                 tags_cached,
                 title: title.clone(),
                 artist: artist.clone(),
+                first_seen,
             },
         );
     }
@@ -1233,10 +1443,11 @@ mod tests {
                 tags_cached: true,
                 title: Some("A".into()),
                 artist: Some("Artist".into()),
+                first_seen: None,
             },
         );
         save_hash_index(&dir.0, &index).unwrap();
-        assert_eq!(load_hash_index(&dir.0), index);
+        assert_eq!(load_hash_index(&dir.0).index, index);
     }
 
     #[test]
@@ -1248,24 +1459,39 @@ mod tests {
         )
         .unwrap();
         let loaded = load_hash_index(&dir.0);
-        let entry = &loaded["/music/a.flac"];
+        assert_eq!(loaded.provenance, HashIndexProvenance::Loaded);
+        let entry = &loaded.index["/music/a.flac"];
         assert_eq!(entry.hash, "abc");
         assert!(!entry.tags_cached);
         assert!(entry.title.is_none());
         assert!(entry.artist.is_none());
+        assert!(entry.first_seen.is_none());
     }
 
     #[test]
     fn missing_hash_index_file_is_empty() {
         let dir = TempDir::new("hash-index-missing");
-        assert!(load_hash_index(&dir.0).is_empty());
+        let loaded = load_hash_index(&dir.0);
+        assert!(loaded.index.is_empty());
+        assert_eq!(loaded.provenance, HashIndexProvenance::Missing);
     }
 
     #[test]
     fn corrupt_hash_index_file_is_empty_not_a_panic() {
         let dir = TempDir::new("hash-index-corrupt");
         fs::write(dir.0.join(HASH_INDEX_FILE), b"{not json").unwrap();
-        assert!(load_hash_index(&dir.0).is_empty());
+        let loaded = load_hash_index(&dir.0);
+        assert!(loaded.index.is_empty());
+        assert_eq!(loaded.provenance, HashIndexProvenance::Corrupt);
+    }
+
+    #[test]
+    fn empty_object_hash_index_is_loaded_not_missing() {
+        let dir = TempDir::new("hash-index-empty-object");
+        fs::write(dir.0.join(HASH_INDEX_FILE), b"{}").unwrap();
+        let loaded = load_hash_index(&dir.0);
+        assert!(loaded.index.is_empty());
+        assert_eq!(loaded.provenance, HashIndexProvenance::Loaded);
     }
 
     /// Second resolve with unchanged mtime+len must not re-read file bytes.
@@ -1354,6 +1580,7 @@ mod tests {
                 tags_cached: false,
                 title: None,
                 artist: None,
+                first_seen: None,
             },
         );
         index.insert(
@@ -1365,11 +1592,12 @@ mod tests {
                 tags_cached: false,
                 title: None,
                 artist: None,
+                first_seen: None,
             },
         );
         index.retain(|path, _| path == "/music/kept.flac");
         save_hash_index(&dir.0, &index).unwrap();
-        let loaded = load_hash_index(&dir.0);
+        let loaded = load_hash_index(&dir.0).index;
         assert_eq!(loaded.len(), 1);
         assert!(loaded.contains_key("/music/kept.flac"));
         assert!(!loaded.contains_key("/music/gone.flac"));
@@ -1395,6 +1623,7 @@ mod tests {
                 tags_cached: true,
                 title: Some("Cached Title".into()),
                 artist: Some("Cached Artist".into()),
+                first_seen: None,
             },
         );
 
@@ -1466,6 +1695,7 @@ mod tests {
                 tags_cached: false,
                 title: None,
                 artist: None,
+                first_seen: None,
             },
         );
 
@@ -1529,6 +1759,7 @@ mod tests {
                 tags_cached: true,
                 title: Some("T".into()),
                 artist: Some("A".into()),
+                first_seen: None,
             },
         );
 
@@ -2398,5 +2629,393 @@ mod tests {
         let mut in_flight = vec![PathBuf::from("/music/a.flac")];
         retire_revoked(&mut in_flight, Path::new("/music/a.flac"));
         assert!(in_flight.is_empty());
+    }
+
+    #[test]
+    fn settings_old_json_without_arrivals_baseline_done_defaults_false() {
+        let dir = TempDir::new("settings-legacy-arrivals");
+        fs::write(
+            dir.0.join(SETTINGS_FILE),
+            br#"{"music_dir":"/somewhere/Music"}"#,
+        )
+        .unwrap();
+        let loaded = load_settings(&dir.0);
+        assert!(!loaded.arrivals_baseline_done);
+        assert!(!Settings::default().arrivals_baseline_done);
+    }
+
+    #[test]
+    fn arrivals_kind_covers_all_decision_2_branches() {
+        assert_eq!(
+            arrivals_kind(false, HashIndexProvenance::Loaded),
+            ArrivalsKind::Baseline
+        );
+        assert_eq!(
+            arrivals_kind(false, HashIndexProvenance::Missing),
+            ArrivalsKind::Baseline
+        );
+        assert_eq!(
+            arrivals_kind(true, HashIndexProvenance::Loaded),
+            ArrivalsKind::Normal
+        );
+        assert_eq!(
+            arrivals_kind(true, HashIndexProvenance::Missing),
+            ArrivalsKind::Recovery
+        );
+        assert_eq!(
+            arrivals_kind(true, HashIndexProvenance::Corrupt),
+            ArrivalsKind::Recovery
+        );
+    }
+
+    #[test]
+    fn arrivals_commit_plan_branches() {
+        assert_eq!(
+            arrivals_commit_plan(ArrivalsKind::Normal, true),
+            ArrivalsCommitPlan {
+                save_index: true,
+                mark_baseline_done: false,
+            }
+        );
+        assert_eq!(
+            arrivals_commit_plan(ArrivalsKind::Normal, false),
+            ArrivalsCommitPlan {
+                save_index: true,
+                mark_baseline_done: false,
+            }
+        );
+        assert_eq!(
+            arrivals_commit_plan(ArrivalsKind::Baseline, true),
+            ArrivalsCommitPlan {
+                save_index: true,
+                mark_baseline_done: true,
+            }
+        );
+        assert_eq!(
+            arrivals_commit_plan(ArrivalsKind::Baseline, false),
+            ArrivalsCommitPlan {
+                save_index: false,
+                mark_baseline_done: false,
+            }
+        );
+        assert_eq!(
+            arrivals_commit_plan(ArrivalsKind::Recovery, true),
+            ArrivalsCommitPlan {
+                save_index: true,
+                mark_baseline_done: true,
+            }
+        );
+        assert_eq!(
+            arrivals_commit_plan(ArrivalsKind::Recovery, false),
+            ArrivalsCommitPlan {
+                save_index: false,
+                mark_baseline_done: false,
+            }
+        );
+    }
+
+    /// Empty Loaded index + baseline done, then a later path is stamped; a
+    /// pre-existing None stays None.
+    #[test]
+    fn empty_baseline_then_new_path_is_stamped() {
+        let dir = TempDir::new("arrivals-empty-baseline");
+        save_hash_index(&dir.0, &HashIndex::new()).unwrap();
+        let loaded = load_hash_index(&dir.0);
+        assert_eq!(loaded.provenance, HashIndexProvenance::Loaded);
+        assert!(loaded.index.is_empty());
+        assert_eq!(
+            arrivals_kind(true, loaded.provenance),
+            ArrivalsKind::Normal
+        );
+
+        let mut index = HashIndex::new();
+        index.insert(
+            "/music/old.flac".into(),
+            HashIndexEntry {
+                mtime_ms: 1,
+                len: 1,
+                hash: "old".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+                first_seen: None,
+            },
+        );
+        let original_keys: BTreeSet<String> = index.keys().cloned().collect();
+        index.insert(
+            "/music/new.flac".into(),
+            HashIndexEntry {
+                mtime_ms: 2,
+                len: 2,
+                hash: "new".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+                first_seen: None,
+            },
+        );
+        stamp_new_paths(&mut index, &original_keys, "2026-08-30T00:00:00Z");
+        assert!(index["/music/old.flac"].first_seen.is_none());
+        assert_eq!(
+            index["/music/new.flac"].first_seen.as_deref(),
+            Some("2026-08-30T00:00:00Z")
+        );
+    }
+
+    /// Incomplete recovery must not save; a later complete baseline must not
+    /// stamp paths that were already in the (unsaved) reconstructed index as NEW.
+    #[test]
+    fn incomplete_recovery_skips_save_and_complete_does_not_false_stamp() {
+        let plan = arrivals_commit_plan(ArrivalsKind::Recovery, false);
+        assert!(!plan.save_index);
+        assert!(!plan.mark_baseline_done);
+
+        let mut index = HashIndex::new();
+        index.insert(
+            "/music/existing.flac".into(),
+            HashIndexEntry {
+                mtime_ms: 1,
+                len: 1,
+                hash: "e".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+                first_seen: None,
+            },
+        );
+        // Incomplete: do not save. Next complete recovery applies baseline markers.
+        let scan_keys: BTreeSet<String> = ["/music/existing.flac".into()].into_iter().collect();
+        apply_baseline_markers(&mut index, &scan_keys);
+        let original_keys = scan_keys.clone();
+        // Normal would stamp only keys absent from original_keys — existing stays None.
+        stamp_new_paths(&mut index, &original_keys, "2026-08-30T00:00:00Z");
+        assert!(index["/music/existing.flac"].first_seen.is_none());
+    }
+
+    #[test]
+    fn stamp_new_paths_never_touches_original_none() {
+        let mut index = HashIndex::new();
+        index.insert(
+            "/music/a.flac".into(),
+            HashIndexEntry {
+                mtime_ms: 1,
+                len: 1,
+                hash: "a".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+                first_seen: None,
+            },
+        );
+        let original: BTreeSet<String> = ["/music/a.flac".into()].into_iter().collect();
+        stamp_new_paths(&mut index, &original, "NOW");
+        assert!(index["/music/a.flac"].first_seen.is_none());
+    }
+
+    #[test]
+    fn resolve_content_hash_same_hash_keeps_legacy_none_first_seen() {
+        let dir = TempDir::new("resolve-same-hash-none");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 128]).unwrap();
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let hash = funkot_core::cache::content_hash(&path).unwrap();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms: mtime_ms.saturating_sub(1),
+                len,
+                hash: hash.clone(),
+                tags_cached: true,
+                title: Some("T".into()),
+                artist: Some("A".into()),
+                first_seen: None,
+            },
+        );
+        // Bump mtime → miss → same content hash.
+        let later = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_millis(mtime_ms + 5_000);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        assert_eq!(resolve_content_hash(&path, &mut index).unwrap(), hash);
+        let entry = &index[&key];
+        assert!(entry.first_seen.is_none());
+        assert!(entry.tags_cached);
+        assert_eq!(entry.title.as_deref(), Some("T"));
+    }
+
+    #[test]
+    fn resolve_content_hash_hash_change_stamps_first_seen() {
+        let dir = TempDir::new("resolve-hash-change");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 128]).unwrap();
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: "old-hash".into(),
+                tags_cached: true,
+                title: Some("T".into()),
+                artist: Some("A".into()),
+                first_seen: None,
+            },
+        );
+        fs::write(&path, vec![2u8; 256]).unwrap();
+
+        let new_hash = resolve_content_hash(&path, &mut index).unwrap();
+        assert_ne!(new_hash, "old-hash");
+        let entry = &index[&key];
+        assert!(entry.first_seen.is_some());
+        assert!(!entry.tags_cached);
+        assert!(entry.title.is_none());
+    }
+
+    #[test]
+    fn resolve_library_tags_upgrade_preserves_first_seen() {
+        let dir = TempDir::new("resolve-lib-keep-first-seen");
+        let path = dir.0.join("track.wav");
+        write_silent_wav(&path, 1);
+        let (mtime_ms, len) = file_mtime_ms_and_len(&path).unwrap();
+        let key = path.to_string_lossy().into_owned();
+
+        let mut index = HashIndex::new();
+        index.insert(
+            key.clone(),
+            HashIndexEntry {
+                mtime_ms,
+                len,
+                hash: "kept-hash".into(),
+                tags_cached: false,
+                title: None,
+                artist: None,
+                first_seen: Some("2020-01-01T00:00:00Z".into()),
+            },
+        );
+
+        resolve_library_file(&path, &mut index).unwrap();
+        assert_eq!(
+            index[&key].first_seen.as_deref(),
+            Some("2020-01-01T00:00:00Z")
+        );
+        assert!(index[&key].tags_cached);
+    }
+
+    #[test]
+    fn write_atomic_with_removes_tmp_on_write_failure() {
+        let dir = TempDir::new("atomic-write-fail");
+        let dest = dir.0.join("settings.json");
+        let result = write_atomic_with(
+            &dest,
+            b"{}",
+            |_tmp, _b| Err(io::Error::new(io::ErrorKind::Other, "write fail")),
+            |_from, _to| Ok(()),
+            |tmp| {
+                let _ = fs::remove_file(tmp);
+            },
+        );
+        assert!(result.is_err());
+        let leftovers: Vec<_> = fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains(".part")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "tmp left behind: {leftovers:?}");
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn write_atomic_with_removes_tmp_on_rename_failure() {
+        let dir = TempDir::new("atomic-rename-fail");
+        let dest = dir.0.join("settings.json");
+        let result = write_atomic_with(
+            &dest,
+            b"{}",
+            |tmp, b| fs::write(tmp, b),
+            |_from, _to| Err(io::Error::new(io::ErrorKind::Other, "rename fail")),
+            |tmp| {
+                let _ = fs::remove_file(tmp);
+            },
+        );
+        assert!(result.is_err());
+        let leftovers: Vec<_> = fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains(".part")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "tmp left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn settings_atomic_save_reader_sees_only_complete_json() {
+        let dir = TempDir::new("settings-atomic-reader");
+        let old = Settings {
+            allow_non_funkot: true,
+            arrivals_baseline_done: false,
+            ..Default::default()
+        };
+        save_settings(&dir.0, &old).unwrap();
+        let new = Settings {
+            allow_non_funkot: false,
+            arrivals_baseline_done: true,
+            labeling_mode: true,
+            ..Default::default()
+        };
+        // Concurrent readers during rename must not fall to defaults via corrupt JSON.
+        let dir_path = dir.0.clone();
+        let old_r = old.clone();
+        let new_r = new.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let b2 = barrier.clone();
+        let reader = std::thread::spawn(move || {
+            b2.wait();
+            let mut saw_old = false;
+            let mut saw_new = false;
+            for _ in 0..200 {
+                let s = load_settings(&dir_path);
+                if s == old_r {
+                    saw_old = true;
+                } else if s == new_r {
+                    saw_new = true;
+                } else {
+                    panic!("corrupt/default mid-write: {s:?}");
+                }
+            }
+            (saw_old, saw_new)
+        });
+        barrier.wait();
+        save_settings(&dir.0, &new).unwrap();
+        let (_saw_old, _saw_new) = reader.join().unwrap();
+        assert_eq!(load_settings(&dir.0), new);
+    }
+
+    #[test]
+    fn new_path_insert_leaves_first_seen_none_for_refresh_stamp() {
+        let dir = TempDir::new("resolve-new-path-none");
+        let path = dir.0.join("track.wav");
+        fs::write(&path, vec![1u8; 64]).unwrap();
+        let mut index = HashIndex::new();
+        resolve_content_hash(&path, &mut index).unwrap();
+        let key = path.to_string_lossy().into_owned();
+        assert!(index[&key].first_seen.is_none());
     }
 }
