@@ -80,3 +80,24 @@ export function arrivalsPullDecision(
   if (!ok) return { apply: false };
   return { apply: true, processedRevision: revision };
 }
+
+/**
+ * Same-revision empty over a list we already showed is a racy miss (library
+ * walk holding the index lock, or a pull that raced a stamp), not a fold.
+ * Fold follows a history-revision bump (decision 10).
+ */
+export function shouldReplaceArrivals(
+  current: readonly NewArrival[],
+  incoming: readonly NewArrival[],
+  shownRevision: number | null,
+  pullRevision: number,
+): boolean {
+  if (
+    incoming.length === 0 &&
+    current.length > 0 &&
+    shownRevision === pullRevision
+  ) {
+    return false;
+  }
+  return true;
+}

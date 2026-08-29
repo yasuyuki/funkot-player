@@ -55,6 +55,7 @@ import {
   arrivalPathSet,
   arrivalsPullDecision,
   nextLibraryRefreshOwed,
+  shouldReplaceArrivals,
   type RefreshAttempt,
 } from "./arrivals";
 import { canSkipNext } from "./transportMode";
@@ -163,6 +164,9 @@ class PlayerStore {
   /// until the first successful pull (so revision 0 still pulls once) and
   /// after a library walk (stamp is not a revision bump).
   #processedHistoryRevision: number | null = null;
+  /// Revision of the arrivals list currently on screen. Same-rev empty
+  /// pulls must not replace a non-empty list (banner flicker after enqueue).
+  #shownArrivalsRevision: number | null = null;
   /// Single-flight for `#pullArrivals` so a 500ms poll cannot stack invokes
   /// and mark every response stale.
   #arrivalsPullBusy = false;
@@ -307,8 +311,20 @@ class PlayerStore {
       const list = await listNewArrivalsCmd();
       const d = arrivalsPullDecision(gen, this.#arrivalsGen, true, revision);
       if (!d.apply) return;
+      if (
+        !shouldReplaceArrivals(
+          this.arrivals,
+          list,
+          this.#shownArrivalsRevision,
+          d.processedRevision,
+        )
+      ) {
+        this.#processedHistoryRevision = d.processedRevision;
+        return;
+      }
       this.arrivals = list;
       this.#processedHistoryRevision = d.processedRevision;
+      this.#shownArrivalsRevision = d.processedRevision;
     } catch (e) {
       arrivalsPullDecision(gen, this.#arrivalsGen, false, revision);
       this.lastError = String(e);
