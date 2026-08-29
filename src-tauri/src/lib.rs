@@ -54,6 +54,10 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// on the loader thread; `set_allow_non_funkot` updates it without restart.
 static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 
+/// Bumped after a successful `history.json` persist (`record_heard`, history
+/// wipe). `player_state` exposes it so the UI can re-pull arrivals.
+static HISTORY_REVISION: AtomicU64 = AtomicU64::new(0);
+
 /// Labeling mode's head window length (seconds), input-side, per the
 /// confirmed design: kept at the same 20s already used for the first-live
 /// preview.
@@ -2143,8 +2147,13 @@ fn record_heard(path: &Path) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut history = store::load_history(data_dir);
     store::record_play(&mut history, &hash, now_ms());
-    if let Err(e) = store::save_history(data_dir, &history) {
-        log::warn!("cannot persist history: {e}");
+    match store::save_history(data_dir, &history) {
+        Ok(()) => {
+            HISTORY_REVISION.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(e) => {
+            log::warn!("cannot persist history: {e}");
+        }
     }
 }
 
@@ -3729,6 +3738,9 @@ struct PlayerState {
     /// shorter than what is actually heard, at which point `position_secs`
     /// would overtake it well before the track actually ends.
     duration_secs: Option<f64>,
+    /// Monotonic counter bumped after a successful history persist. The UI
+    /// re-pulls new arrivals when this changes (not on now-playing alone).
+    history_revision: u64,
 }
 
 fn audition_display_title(path: &Path) -> String {
@@ -3938,6 +3950,7 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
         audition_to,
         position_secs,
         duration_secs,
+        history_revision: HISTORY_REVISION.load(Ordering::Relaxed),
     }
 }
 
@@ -4809,6 +4822,7 @@ fn track_row(
 #[cfg(test)]
 mod cache_state_tests {
     use super::*;
+    use funkot_core::engine::TrackSource;
 
     /// Fresh temp dir per test, cleaned up on drop. Same shape as the one in
     /// `store`'s tests; not shared because neither module should have to
@@ -5388,7 +5402,7 @@ mod cache_state_tests {
         );
         store::save_history(&data.0, &history).unwrap();
 
-        clear_labels_and_history_impl(&data.0);
+        clear_labels_and_history_impl(&data.0).unwrap();
 
         assert!(store::load_labels(&data.0).is_empty());
         assert!(store::load_history(&data.0).is_empty());
@@ -5408,7 +5422,7 @@ mod cache_state_tests {
         );
         store::save_overrides(&data.0, &overrides).unwrap();
 
-        clear_labels_and_history_impl(&data.0);
+        clear_labels_and_history_impl(&data.0).unwrap();
 
         let entry = store::load_overrides(&data.0)
             .get("hash-b")
@@ -5431,9 +5445,291 @@ mod cache_state_tests {
         );
         store::save_overrides(&data.0, &overrides).unwrap();
 
-        clear_labels_and_history_impl(&data.0);
+        clear_labels_and_history_impl(&data.0).unwrap();
 
         assert!(!store::load_overrides(&data.0).contains_key("hash-c"));
+    }
+
+    fn arrivals_entry(hash: &str, first_seen: Option<&str>) -> store::HashIndexEntry {
+        store::HashIndexEntry {
+            mtime_ms: 0,
+            len: 0,
+            hash: hash.into(),
+            tags_cached: false,
+            title: None,
+            artist: None,
+            first_seen: first_seen.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn clear_labels_and_history_folds_played_keeps_unplayed_stamp() {
+        let data = TempDir::new("clear-lh-fold-ab");
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/a.flac".into(),
+            arrivals_entry("hash-a", Some("2026-01-01T00:00:00Z")),
+        );
+        index.insert(
+            "/music/b.flac".into(),
+            arrivals_entry("hash-b", Some("2026-01-02T00:00:00Z")),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+        let mut history = store::History::new();
+        history.insert(
+            "hash-a".into(),
+            store::PlayRecord {
+                count: 1,
+                last_played_ms: 1,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+
+        // No list/pull: revision stale, but fold still clears A's stamp.
+        clear_labels_and_history_impl(&data.0).unwrap();
+
+        let loaded = store::load_hash_index(&data.0).index;
+        assert!(loaded["/music/a.flac"].first_seen.is_none());
+        assert_eq!(
+            loaded["/music/b.flac"].first_seen.as_deref(),
+            Some("2026-01-02T00:00:00Z")
+        );
+        assert!(store::load_history(&data.0).is_empty());
+        // Without pull, A must not reappear as NEW after history wipe.
+        let settings = store::Settings {
+            arrivals_baseline_done: true,
+            ..Default::default()
+        };
+        store::save_settings(&data.0, &settings).unwrap();
+        let after = list_new_arrivals_impl(&data.0).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].path, "/music/b.flac");
+    }
+
+    #[test]
+    fn clear_labels_and_history_keeps_history_when_index_save_fails() {
+        let data = TempDir::new("clear-lh-index-fail");
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/a.flac".into(),
+            arrivals_entry("hash-a", Some("2026-01-01T00:00:00Z")),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+        let mut history = store::History::new();
+        history.insert(
+            "hash-a".into(),
+            store::PlayRecord {
+                count: 1,
+                last_played_ms: 1,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+
+        let err = clear_labels_and_history_with_index_save(
+            &data.0,
+            |_dir, _idx| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "injected index save failure",
+                ))
+            },
+            &HISTORY_REVISION,
+        )
+        .unwrap_err();
+        assert!(err.contains("hash-index"), "{err}");
+        assert!(store::load_history(&data.0).contains_key("hash-a"));
+        assert_eq!(
+            store::load_hash_index(&data.0).index["/music/a.flac"]
+                .first_seen
+                .as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn clear_labels_and_history_bumps_history_revision_on_success() {
+        let data = TempDir::new("clear-lh-rev");
+        let revision = AtomicU64::new(7);
+        clear_labels_and_history_with_index_save(&data.0, store::save_hash_index, &revision)
+            .unwrap();
+        assert_eq!(revision.load(Ordering::Relaxed), 8);
+    }
+
+    #[test]
+    fn list_new_arrivals_impl_folds_and_returns_unplayed() {
+        let data = TempDir::new("list-arrivals");
+        store::save_settings(
+            &data.0,
+            &store::Settings {
+                arrivals_baseline_done: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/a.flac".into(),
+            arrivals_entry("hash-a", Some("2026-01-02T00:00:00Z")),
+        );
+        index.insert(
+            "/music/b.flac".into(),
+            arrivals_entry("hash-b", Some("2026-01-01T00:00:00Z")),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+        let mut history = store::History::new();
+        history.insert(
+            "hash-a".into(),
+            store::PlayRecord {
+                count: 1,
+                last_played_ms: 1,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+
+        let got = list_new_arrivals_impl(&data.0).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, "/music/b.flac");
+        assert!(
+            store::load_hash_index(&data.0).index["/music/a.flac"]
+                .first_seen
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn queue_new_arrivals_with_orders_and_releases_save_lock() {
+        let data = TempDir::new("queue-arrivals-order-data");
+        let cache = TempDir::new("queue-arrivals-order-cache");
+        store::save_settings(
+            &data.0,
+            &store::Settings {
+                arrivals_baseline_done: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/z.flac".into(),
+            arrivals_entry("hz", Some("2026-01-01T00:00:00Z")),
+        );
+        index.insert(
+            "/music/a.flac".into(),
+            arrivals_entry("ha", Some("2026-01-01T00:00:00Z")),
+        );
+        index.insert(
+            "/music/m.flac".into(),
+            arrivals_entry("hm", Some("2026-01-02T00:00:00Z")),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        let q = queue::new_shared_queue();
+        queue::enqueue(&q, PathBuf::from("/music/r.flac"));
+        queue::enqueue(&q, PathBuf::from("/music/old.flac"));
+        let mut source = queue::HostSource::new(
+            Arc::clone(&q),
+            queue::DrainPolicy::ContinueFolder {
+                tracks: Vec::new(),
+                pos: 0,
+            },
+        );
+        assert_eq!(
+            source.next(),
+            Some((0, PathBuf::from("/music/r.flac")))
+        );
+
+        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, true).unwrap();
+        assert_eq!(added, 3);
+        // `queue_new_arrivals` calls `persist_queue` only after this returns
+        // (INDEX/SAVE/queue guards dropped). Do not try_lock process-wide
+        // mutexes here — other tests share them.
+
+        let (reserved, pending) = queue::state_snapshot(&q);
+        assert_eq!(reserved, Some(PathBuf::from("/music/r.flac")));
+        assert_eq!(
+            pending,
+            vec![
+                PathBuf::from("/music/a.flac"),
+                PathBuf::from("/music/z.flac"),
+                PathBuf::from("/music/m.flac"),
+                PathBuf::from("/music/old.flac"),
+            ]
+        );
+        assert_eq!(queue_new_arrivals_with(&data.0, &cache.0, &q, true).unwrap(), 0);
+    }
+
+    #[test]
+    fn queue_new_arrivals_with_applies_non_funkot_gate() {
+        let data = TempDir::new("queue-arrivals-gate-data");
+        let cache = TempDir::new("queue-arrivals-gate-cache");
+        store::save_settings(
+            &data.0,
+            &store::Settings {
+                arrivals_baseline_done: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let (non_funkot, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&non_funkot, &cache.0, &analysis);
+        let nf_hash = funkot_core::cache::content_hash(&non_funkot).unwrap();
+        let nf_path = non_funkot.to_string_lossy().into_owned();
+
+        let unanalysed = cache.0.join("unanalysed.wav");
+        std::fs::write(&unanalysed, vec![9u8; 4096]).unwrap();
+        let ua_path = unanalysed.to_string_lossy().into_owned();
+
+        let mut index = store::HashIndex::new();
+        index.insert(
+            nf_path.clone(),
+            arrivals_entry(&nf_hash, Some("2026-01-01T00:00:00Z")),
+        );
+        index.insert(
+            ua_path.clone(),
+            arrivals_entry("hash-unanalysed", Some("2026-01-02T00:00:00Z")),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        let q = queue::new_shared_queue();
+        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, false).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(queue::snapshot(&q), vec![PathBuf::from(&ua_path)]);
+    }
+
+    #[test]
+    fn queue_new_arrivals_with_excludes_now_playing() {
+        let data = TempDir::new("queue-arrivals-now-data");
+        let cache = TempDir::new("queue-arrivals-now-cache");
+        store::save_settings(
+            &data.0,
+            &store::Settings {
+                arrivals_baseline_done: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/now.flac".into(),
+            arrivals_entry("hn", Some("2026-01-01T00:00:00Z")),
+        );
+        index.insert(
+            "/music/new.flac".into(),
+            arrivals_entry("hx", Some("2026-01-02T00:00:00Z")),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        {
+            let mut now = NOW.lock().unwrap();
+            now.now = Some(PathBuf::from("/music/now.flac"));
+        }
+        let q = queue::new_shared_queue();
+        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, true).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(queue::snapshot(&q), vec![PathBuf::from("/music/new.flac")]);
+        NOW.lock().unwrap().now = None;
     }
 
     #[test]
@@ -6509,14 +6805,20 @@ fn label_stats_impl(data_dir: &std::path::Path, music_dir: Option<&Path>) -> Lab
 ///
 /// Intro/outro hand edits are kept. Empty override entries (no intro, outro, or
 /// funkot) are removed — same rule as [`set_label_impl`]'s `None` branch.
+///
+/// Before wiping history, folds played arrivals in the hash index (decision 8).
+/// Index save failure aborts the command and leaves history intact.
 #[tauri::command(async)]
 fn clear_labels_and_history(app: tauri::AppHandle) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
     let data_dir = PathBuf::from(&dirs.data_dir);
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _saving = SAVE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    clear_labels_and_history_impl(&data_dir);
+    clear_labels_and_history_impl(&data_dir)?;
     // A folder-label undo armed before the wipe would put part of the labels
     // back, which is the opposite of what the user just confirmed.
     *LAST_FOLDER_LABEL_UNDO
@@ -6526,12 +6828,31 @@ fn clear_labels_and_history(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Core of [`clear_labels_and_history`], split for unit tests without `AppHandle`.
-fn clear_labels_and_history_impl(data_dir: &std::path::Path) {
+///
+/// Caller must hold `INDEX_LOCK` → `SAVE_LOCK` (or be single-threaded in tests).
+fn clear_labels_and_history_impl(data_dir: &std::path::Path) -> Result<(), String> {
+    clear_labels_and_history_with_index_save(data_dir, store::save_hash_index, &HISTORY_REVISION)
+}
+
+/// Same as [`clear_labels_and_history_impl`], with injectable index save and
+/// revision counter so tests can prove history is kept on index-save failure
+/// and that revision bumps without racing the process-wide atomic.
+fn clear_labels_and_history_with_index_save(
+    data_dir: &std::path::Path,
+    save_index: impl FnOnce(&std::path::Path, &store::HashIndex) -> std::io::Result<()>,
+    revision: &AtomicU64,
+) -> Result<(), String> {
+    let history = store::load_history(data_dir);
+    let mut index = store::load_hash_index(data_dir).index;
+    if store::fold_played_arrivals(&mut index, &history) {
+        save_index(data_dir, &index).map_err(|e| format!("cannot save hash-index: {e}"))?;
+    }
+    store::save_history(data_dir, &store::History::new())
+        .map_err(|e| format!("cannot persist history: {e}"))?;
+    revision.fetch_add(1, Ordering::Relaxed);
+
     if let Err(e) = store::save_labels(data_dir, &store::Labels::new()) {
         log::warn!("cannot persist labels: {e}");
-    }
-    if let Err(e) = store::save_history(data_dir, &store::History::new()) {
-        log::warn!("cannot persist history: {e}");
     }
     let mut overrides = store::load_overrides(data_dir);
     for entry in overrides.values_mut() {
@@ -6543,6 +6864,129 @@ fn clear_labels_and_history_impl(data_dir: &std::path::Path) {
     if let Err(e) = store::save_overrides(data_dir, &overrides) {
         log::warn!("cannot persist manual bars: {e}");
     }
+    Ok(())
+}
+
+/// Fold played arrivals if needed, then list every new arrival (gate-agnostic).
+///
+/// Reads settings + hash-index + history only (no Music I/O). Holds
+/// `INDEX_LOCK` → `SAVE_LOCK` for the whole command; does not call
+/// [`persist_queue`].
+#[tauri::command(async)]
+fn list_new_arrivals(app: tauri::AppHandle) -> Result<Vec<store::NewArrival>, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = Path::new(&dirs.data_dir);
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    list_new_arrivals_impl(data_dir)
+}
+
+fn list_new_arrivals_impl(data_dir: &std::path::Path) -> Result<Vec<store::NewArrival>, String> {
+    let settings = store::load_settings(data_dir);
+    let loaded = store::load_hash_index(data_dir);
+    let mut index = loaded.index;
+    let history = store::load_history(data_dir);
+    if store::fold_played_arrivals(&mut index, &history) {
+        store::save_hash_index(data_dir, &index)
+            .map_err(|e| format!("cannot save hash-index: {e}"))?;
+    }
+    Ok(store::extract_new_arrivals(
+        &index,
+        &history,
+        loaded.provenance,
+        settings.arrivals_baseline_done,
+    ))
+}
+
+/// Queue every current new arrival at the front of pending (explicit action).
+///
+/// Locking / persist split: [`queue_new_arrivals_locked`] holds
+/// `INDEX_LOCK` → `SAVE_LOCK` → queue, then drops all three before
+/// [`persist_queue`] (which takes `SAVE_LOCK` → queue again).
+#[tauri::command(async)]
+fn queue_new_arrivals(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<u32, String> {
+    let added = queue_new_arrivals_locked(&app, &state)?;
+    persist_queue(&app, &state);
+    Ok(added)
+}
+
+/// Extract / gate / prepend under INDEX → SAVE → queue, then release all
+/// guards before returning so the caller can safely call [`persist_queue`].
+fn queue_new_arrivals_locked(app: &tauri::AppHandle, state: &AppState) -> Result<u32, String> {
+    let dirs = resolve_dirs(app)?;
+    queue_new_arrivals_with(
+        Path::new(&dirs.data_dir),
+        Path::new(&dirs.cache_dir),
+        &state.queue,
+        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+    )
+}
+
+/// Testable body of [`queue_new_arrivals_locked`]: no `AppHandle`.
+///
+/// After return, `SAVE_LOCK` and the queue lock are free (so
+/// [`persist_queue`] can re-acquire them).
+fn queue_new_arrivals_with(
+    data_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
+    queue: &SharedQueue,
+    allow_non_funkot: bool,
+) -> Result<u32, String> {
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let settings = store::load_settings(data_dir);
+    let loaded = store::load_hash_index(data_dir);
+    let mut index = loaded.index;
+    let history = store::load_history(data_dir);
+    if store::fold_played_arrivals(&mut index, &history) {
+        store::save_hash_index(data_dir, &index)
+            .map_err(|e| format!("cannot save hash-index: {e}"))?;
+    }
+    let arrivals = store::extract_new_arrivals(
+        &index,
+        &history,
+        loaded.provenance,
+        settings.arrivals_baseline_done,
+    );
+    let candidates: Vec<PathBuf> = arrivals
+        .into_iter()
+        .map(|a| PathBuf::from(a.path))
+        .collect();
+    let candidates = if allow_non_funkot {
+        candidates
+    } else {
+        // Same policy as enqueue / `apply_non_funkot_gate_from_index`, using
+        // the already-loaded index (no Music file I/O).
+        let overrides = store::load_overrides(data_dir);
+        candidates
+            .into_iter()
+            .filter(|p| !gated_non_funkot_from_index(p, cache_dir, &index, &overrides))
+            .collect()
+    };
+
+    // NOW while holding SAVE is allowed; NOW → SAVE is not.
+    let now_playing = {
+        let now = NOW
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        now.now.clone()
+    };
+
+    let added = queue::prepend_pending_filtered(queue, &candidates, now_playing.as_deref());
+    // `_saving` / `_index` / queue guard (inside prepend) drop here.
+    Ok(added as u32)
 }
 
 /// Progress payload for the `analysis-progress` event.
@@ -7260,6 +7704,8 @@ pub fn run() {
             undo_last_folder_label,
             label_stats,
             clear_labels_and_history,
+            list_new_arrivals,
+            queue_new_arrivals,
             enqueue,
             reorder,
             dequeue,

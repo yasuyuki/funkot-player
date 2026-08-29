@@ -10,8 +10,7 @@ Start 時のスナップショットで固定され再起動まで更新され�
 
 後段は前段の完了を前提条件とする。独立には実行できない。
 
-1. `phase-02-queue-new-tracks.md` — 抽出・消し込み・キュー投入
-2. `phase-03-ui-new-arrivals.md` — 表示と操作（phase-02 が前提）
+1. `phase-03-ui-new-arrivals.md` — 表示と操作
 
 ## 決定事項
 

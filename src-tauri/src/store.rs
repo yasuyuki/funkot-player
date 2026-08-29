@@ -578,6 +578,66 @@ pub fn apply_baseline_markers(index: &mut HashIndex, scan_keys: &BTreeSet<String
     }
 }
 
+/// A new-arrival row: path plus its first-seen stamp (always `Some` in extract
+/// results — entries without a stamp are not arrivals).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NewArrival {
+    pub path: String,
+    /// RFC3339. Only entries with `Some` first_seen are extracted.
+    pub first_seen: String,
+}
+
+/// Extract new arrivals from a committed hash index.
+///
+/// Returns empty when baseline is not done or provenance is Missing/Corrupt
+/// (only a Loaded committed index is authoritative). Otherwise: entries with
+/// `first_seen.is_some()` whose content hash is absent from `history`.
+/// Order: first_seen ascending, then path ascending. No Music file I/O.
+pub fn extract_new_arrivals(
+    index: &HashIndex,
+    history: &History,
+    provenance: HashIndexProvenance,
+    baseline_done: bool,
+) -> Vec<NewArrival> {
+    if !baseline_done || provenance != HashIndexProvenance::Loaded {
+        return Vec::new();
+    }
+    let mut out: Vec<NewArrival> = index
+        .iter()
+        .filter_map(|(path, entry)| {
+            let first_seen = entry.first_seen.as_ref()?;
+            if history.contains_key(&entry.hash) {
+                return None;
+            }
+            Some(NewArrival {
+                path: path.clone(),
+                first_seen: first_seen.clone(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.first_seen
+            .cmp(&b.first_seen)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    out
+}
+
+/// Clear `first_seen` on entries whose content hash is present in `history`.
+///
+/// Returns `true` if any entry changed (caller should persist). Does not fold
+/// stamps whose hash is absent from history.
+pub fn fold_played_arrivals(index: &mut HashIndex, history: &History) -> bool {
+    let mut changed = false;
+    for entry in index.values_mut() {
+        if entry.first_seen.is_some() && history.contains_key(&entry.hash) {
+            entry.first_seen = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// What a refresh commit should write after stamping / baseline markers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArrivalsCommitPlan {
@@ -3017,5 +3077,85 @@ mod tests {
         resolve_content_hash(&path, &mut index).unwrap();
         let key = path.to_string_lossy().into_owned();
         assert!(index[&key].first_seen.is_none());
+    }
+
+    fn entry(hash: &str, first_seen: Option<&str>) -> HashIndexEntry {
+        HashIndexEntry {
+            mtime_ms: 0,
+            len: 0,
+            hash: hash.into(),
+            tags_cached: false,
+            title: None,
+            artist: None,
+            first_seen: first_seen.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn extract_new_arrivals_empty_when_baseline_not_done_or_not_loaded() {
+        let mut index = HashIndex::new();
+        index.insert("/a".into(), entry("h1", Some("2026-01-01T00:00:00Z")));
+        let history = History::new();
+        assert!(extract_new_arrivals(&index, &history, HashIndexProvenance::Loaded, false).is_empty());
+        assert!(extract_new_arrivals(&index, &history, HashIndexProvenance::Missing, true).is_empty());
+        assert!(extract_new_arrivals(&index, &history, HashIndexProvenance::Corrupt, true).is_empty());
+    }
+
+    #[test]
+    fn extract_new_arrivals_orders_by_first_seen_then_path() {
+        let mut index = HashIndex::new();
+        index.insert("/z".into(), entry("hz", Some("2026-01-01T00:00:00Z")));
+        index.insert("/a".into(), entry("ha", Some("2026-01-01T00:00:00Z")));
+        index.insert("/m".into(), entry("hm", Some("2026-01-02T00:00:00Z")));
+        index.insert("/old".into(), entry("ho", None));
+        let history = History::new();
+        let got = extract_new_arrivals(&index, &history, HashIndexProvenance::Loaded, true);
+        assert_eq!(
+            got.iter().map(|a| a.path.as_str()).collect::<Vec<_>>(),
+            vec!["/a", "/z", "/m"]
+        );
+    }
+
+    #[test]
+    fn extract_new_arrivals_excludes_history_hash_for_both_paths() {
+        let mut index = HashIndex::new();
+        index.insert("/a".into(), entry("same", Some("2026-01-01T00:00:00Z")));
+        index.insert("/b".into(), entry("same", Some("2026-01-02T00:00:00Z")));
+        index.insert("/c".into(), entry("other", Some("2026-01-03T00:00:00Z")));
+        let mut history = History::new();
+        history.insert(
+            "same".into(),
+            PlayRecord {
+                count: 1,
+                last_played_ms: 1,
+            },
+        );
+        let got = extract_new_arrivals(&index, &history, HashIndexProvenance::Loaded, true);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, "/c");
+    }
+
+    #[test]
+    fn fold_played_arrivals_clears_only_history_hashes() {
+        let mut index = HashIndex::new();
+        index.insert("/a".into(), entry("ha", Some("2026-01-01T00:00:00Z")));
+        index.insert("/b".into(), entry("hb", Some("2026-01-02T00:00:00Z")));
+        index.insert("/c".into(), entry("hc", None));
+        let mut history = History::new();
+        history.insert(
+            "ha".into(),
+            PlayRecord {
+                count: 1,
+                last_played_ms: 1,
+            },
+        );
+        assert!(fold_played_arrivals(&mut index, &history));
+        assert!(index["/a"].first_seen.is_none());
+        assert_eq!(
+            index["/b"].first_seen.as_deref(),
+            Some("2026-01-02T00:00:00Z")
+        );
+        assert!(index["/c"].first_seen.is_none());
+        assert!(!fold_played_arrivals(&mut index, &history));
     }
 }

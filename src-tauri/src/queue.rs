@@ -96,6 +96,46 @@ pub fn replace_pending(queue: &SharedQueue, paths: Vec<PathBuf>) {
     q.pending = paths.into();
 }
 
+/// Judge and insert under one queue lock: keep `candidates` order, prepend
+/// survivors to `pending`, leave `reserved` alone.
+///
+/// Paths already in `reserved`, `pending`, or `now_playing` are skipped.
+/// Returns how many paths were actually added. Idempotent: a second call with
+/// the same candidates returns 0.
+///
+/// Resulting order: `[reserved?] ++ new ++ old pending`.
+pub fn prepend_pending_filtered(
+    queue: &SharedQueue,
+    candidates: &[PathBuf],
+    now_playing: Option<&Path>,
+) -> usize {
+    use std::collections::HashSet;
+
+    let mut q = queue.lock().unwrap();
+    let mut excluded: HashSet<PathBuf> = HashSet::new();
+    if let Some(r) = q.reserved.as_ref() {
+        excluded.insert(r.clone());
+    }
+    for p in &q.pending {
+        excluded.insert(p.clone());
+    }
+    if let Some(np) = now_playing {
+        excluded.insert(np.to_path_buf());
+    }
+
+    let mut to_add: Vec<PathBuf> = Vec::new();
+    for c in candidates {
+        if excluded.insert(c.clone()) {
+            to_add.push(c.clone());
+        }
+    }
+    let n = to_add.len();
+    for c in to_add.into_iter().rev() {
+        q.pending.push_front(c);
+    }
+    n
+}
+
 /// An edit to the list the UI actually displays: `reserved` (if any) followed
 /// by `pending`, as one 0-based sequence. Index `0` is `reserved` when it is
 /// present; otherwise the list is just `pending` and indices line up with it
@@ -595,6 +635,43 @@ mod tests {
         replace_pending(&q, vec![p("b")]);
         assert_eq!(reserved(&q), Some(p("a")));
         assert_eq!(snapshot(&q), vec![p("b")]);
+    }
+
+    #[test]
+    fn prepend_pending_filtered_preserves_candidate_order_at_front() {
+        let q = queue_with(None, &["old"]);
+        let added = prepend_pending_filtered(&q, &[p("a"), p("b"), p("c")], None);
+        assert_eq!(added, 3);
+        assert_eq!(snapshot(&q), vec![p("a"), p("b"), p("c"), p("old")]);
+    }
+
+    #[test]
+    fn prepend_pending_filtered_leaves_reserved_and_inserts_after_it() {
+        let q = queue_with(Some("r"), &["old"]);
+        let added = prepend_pending_filtered(&q, &[p("a"), p("b")], None);
+        assert_eq!(added, 2);
+        assert_eq!(state_snapshot(&q), (Some(p("r")), vec![p("a"), p("b"), p("old")]));
+    }
+
+    #[test]
+    fn prepend_pending_filtered_skips_reserved_pending_and_now_playing() {
+        let q = queue_with(Some("r"), &["pend"]);
+        let added = prepend_pending_filtered(
+            &q,
+            &[p("r"), p("pend"), p("now"), p("new")],
+            Some(Path::new("now")),
+        );
+        assert_eq!(added, 1);
+        assert_eq!(state_snapshot(&q), (Some(p("r")), vec![p("new"), p("pend")]));
+    }
+
+    #[test]
+    fn prepend_pending_filtered_is_idempotent() {
+        let q = queue_with(None, &[]);
+        let candidates = [p("a"), p("b")];
+        assert_eq!(prepend_pending_filtered(&q, &candidates, None), 2);
+        assert_eq!(prepend_pending_filtered(&q, &candidates, None), 0);
+        assert_eq!(snapshot(&q), vec![p("a"), p("b")]);
     }
 
     /// A `revoke` that panics if it runs. Used by tests below whose whole
