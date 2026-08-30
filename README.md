@@ -339,11 +339,13 @@ live profile is restored when the window closes:
 ```
 
 `-Run` backs up settings JSON + `Music\` + `funkot-cache\` to
-`%APPDATA%\jp.hatsuboshi.funkotplayer.guard-bak`, **wipes the live profile to
-empty** (Store-like first launch: `music_dir_needed`, pick a Music folder),
-launches the exe, and restores on exit. Pass `-InPlace` to skip the wipe.
-Manual `-Backup` / `-Restore` are available; `-SkipCache` omits the analysis
-cache from the round-trip.
+`%APPDATA%\jp.hatsuboshi.funkotplayer.guard-bak`, **moves the live profile
+aside** to `.guard-stash` and creates an empty first-launch directory
+(`music_dir_needed`, pick a Music folder), launches the exe, and renames the
+stash back on exit. If the script is killed before restore, the next
+`-Backup` / `-Restore` / `-Run` puts the stash back first. Pass `-InPlace` to
+skip the empty-profile step. Manual `-Backup` / `-Restore` are available;
+`-SkipCache` omits the analysis cache from the round-trip.
 
 ### Working with a device
 

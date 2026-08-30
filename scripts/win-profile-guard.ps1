@@ -2,24 +2,32 @@
 #
 # Default -Run:
 #   1) backup settings JSON + Music + funkot-cache
-#   2) wipe the live profile to an empty first-launch state
+#   2) move the live profile aside (.guard-stash) and create an empty
+#      first-launch directory (do not delete live in place)
 #   3) launch the deployed exe (demos seed into empty Music)
-#   4) on exit, restore the backup
+#   4) on exit, rename the stash back over the test profile
+#
+# If PowerShell is killed before step 4, the original files remain in
+# .guard-stash. The next -Backup / -Restore / -Run puts that stash back
+# before touching backup or live.
 #
 # Usage (from Windows or via scripts/win-profile-guard.sh):
 #   .\scripts\win-profile-guard.ps1 -Backup
 #   .\scripts\win-profile-guard.ps1 -Restore
 #   .\scripts\win-profile-guard.ps1 -Run -ReplaceBackup
-#   .\scripts\win-profile-guard.ps1 -Run -InPlace -ReplaceBackup   # mutate live, no wipe
+#   .\scripts\win-profile-guard.ps1 -Run -InPlace -ReplaceBackup   # mutate live, no stash
+#   .\scripts\win-profile-guard.ps1 -SelfTest
 #
 # Profile:  %APPDATA%\jp.hatsuboshi.funkotplayer
 # Backup:   %APPDATA%\jp.hatsuboshi.funkotplayer.guard-bak
+# Stash:    %APPDATA%\jp.hatsuboshi.funkotplayer.guard-stash
 # Exe:      C:\funkot-player-test\funkot-player.exe  (-Exe to override)
 
 param(
     [switch]$Backup,
     [switch]$Restore,
     [switch]$Run,
+    [switch]$SelfTest,
     [switch]$ReplaceBackup,
     # Keep the live profile as-is during -Run (old behaviour). Default is wipe
     # to empty so UNC / leftover tracks are not visible.
@@ -34,6 +42,7 @@ $ErrorActionPreference = 'Stop'
 $ProfileName = 'jp.hatsuboshi.funkotplayer'
 $Live = Join-Path $env:APPDATA $ProfileName
 $Bak = Join-Path $env:APPDATA ($ProfileName + '.guard-bak')
+$Stash = Join-Path $env:APPDATA ($ProfileName + '.guard-stash')
 $ManifestName = 'guard-manifest.txt'
 
 # Root-level files that count as "settings / state" for a round-trip test.
@@ -76,7 +85,27 @@ function Remove-LiveStateFiles {
     }
 }
 
+# Put a leftover .guard-stash back over live. Returns $true if a stash was
+# applied. Must run before Invoke-Backup so -ReplaceBackup cannot snapshot an
+# empty test profile and discard the previous backup of real data.
+function Restore-LiveFromStash {
+    if (-not (Test-Path -LiteralPath $Stash)) {
+        return $false
+    }
+    if ((Get-FunkotTestProcesses)) {
+        throw "stop funkot-player ($Exe) before restoring stash"
+    }
+    Write-Host "WARN: leftover profile stash at $Stash; restoring live before continuing"
+    if (Test-Path -LiteralPath $Live) {
+        Remove-Item -LiteralPath $Live -Recurse -Force
+    }
+    Move-Item -LiteralPath $Stash -Destination $Live
+    Write-Host "OK: live profile restored from stash"
+    return $true
+}
+
 function Invoke-Backup {
+    Restore-LiveFromStash | Out-Null
     Assert-LiveProfile
 
     if ((Get-FunkotTestProcesses)) {
@@ -135,21 +164,21 @@ function Invoke-ResetToFreshInstall {
         throw "stop funkot-player ($Exe) before reset"
     }
 
-    Remove-LiveStateFiles
-
-    $musicLive = Join-Path $Live 'Music'
-    New-Item -ItemType Directory -Force -Path $musicLive | Out-Null
-    Clear-DirectoryContents $musicLive
-
-    $cacheLive = Join-Path $Live 'funkot-cache'
-    if (Test-Path -LiteralPath $cacheLive) {
-        Clear-DirectoryContents $cacheLive
+    if (Test-Path -LiteralPath $Stash) {
+        throw "stash already exists: $Stash; restore it before creating another empty live profile"
     }
 
-    Write-Host "OK: live profile wiped to empty (no settings / no Music tracks)"
+    # Rename the whole live directory aside. In-place deletion is what left
+    # AppData empty when -Run was killed before restore. files not listed in
+    # $StateFiles (labels.json, history.json, ...) go with the stash too.
+    Move-Item -LiteralPath $Live -Destination $Stash
+    New-Item -ItemType Directory -Force -Path $Live | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $Live 'Music') | Out-Null
+
+    Write-Host "OK: live profile moved to stash; empty first-launch profile at $Live"
 }
 
-function Invoke-Restore {
+function Invoke-RestoreFromBak {
     Assert-LiveProfile
 
     if (-not (Test-Path -LiteralPath $Bak)) {
@@ -187,6 +216,13 @@ function Invoke-Restore {
     Write-Host "OK: restored from $Bak"
 }
 
+function Invoke-Restore {
+    if (Restore-LiveFromStash) {
+        return
+    }
+    Invoke-RestoreFromBak
+}
+
 function Invoke-Run {
     if (-not (Test-Path -LiteralPath $Exe)) {
         throw "exe missing: $Exe (deploy with ./scripts/win-run.sh first)"
@@ -222,20 +258,87 @@ function Invoke-Run {
         }
         catch {
             Write-Host "ERROR: restore failed: $($_.Exception.Message)"
+            if (Test-Path -LiteralPath $Stash) {
+                Write-Host "Original profile left at: $Stash"
+            }
             Write-Host "Backup left at: $Bak"
             throw
         }
     }
 }
 
-$modeCount = @($Backup, $Restore, $Run).Where({ $_ }).Count
+function Assert-SelfTest([bool]$Condition, [string]$Message) {
+    if (-not $Condition) {
+        throw "selftest failed: $Message"
+    }
+}
+
+function Invoke-SelfTest {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('funkot-guard-selftest-' + [guid]::NewGuid().ToString('N'))
+    $script:Live = Join-Path $root $ProfileName
+    $script:Bak = Join-Path $root ($ProfileName + '.guard-bak')
+    $script:Stash = Join-Path $root ($ProfileName + '.guard-stash')
+    $script:Exe = Join-Path $root 'no-such-funkot-player.exe'
+    $script:ReplaceBackup = $true
+    $script:SkipCache = $false
+    $script:InPlace = $false
+
+    $sentinel = 'guard-selftest-sentinel'
+    $settings = Join-Path $Live 'settings.json'
+    $labels = Join-Path $Live 'labels.json'
+    $musicFile = Join-Path (Join-Path $Live 'Music') 'keep-me.txt'
+
+    try {
+        New-Item -ItemType Directory -Force -Path (Join-Path $Live 'Music') | Out-Null
+        Set-Content -LiteralPath $settings -Value $sentinel -Encoding UTF8
+        Set-Content -LiteralPath $labels -Value $sentinel -Encoding UTF8
+        Set-Content -LiteralPath $musicFile -Value $sentinel -Encoding UTF8
+
+        Invoke-Backup
+        Assert-SelfTest (Test-Path -LiteralPath (Join-Path $Bak 'settings.json')) 'backup copied settings.json'
+
+        Invoke-ResetToFreshInstall
+        Assert-SelfTest (-not (Test-Path -LiteralPath $settings)) 'live settings.json must leave with the stash'
+        Assert-SelfTest (-not (Test-Path -LiteralPath $labels)) 'live labels.json must leave with the stash'
+        Assert-SelfTest (Test-Path -LiteralPath (Join-Path $Live 'Music')) 'empty live keeps Music/'
+        Assert-SelfTest ((Get-ChildItem -LiteralPath (Join-Path $Live 'Music') -Force | Measure-Object).Count -eq 0) 'empty live Music/ must have no tracks'
+        Assert-SelfTest (Test-Path -LiteralPath (Join-Path $Stash 'settings.json')) 'stash holds settings.json'
+        Assert-SelfTest (Test-Path -LiteralPath (Join-Path $Stash 'labels.json')) 'stash holds labels.json'
+        Assert-SelfTest ((Get-Content -LiteralPath (Join-Path $Stash 'settings.json') -Raw) -match $sentinel) 'stash settings.json keeps sentinel'
+
+        # Simulate a killed -Run: do not restore. The next backup must recover
+        # stash first so -ReplaceBackup cannot overwrite bak with an empty live.
+        Invoke-Backup
+        Assert-SelfTest (-not (Test-Path -LiteralPath $Stash)) 'backup recovers leftover stash'
+        Assert-SelfTest ((Get-Content -LiteralPath $settings -Raw) -match $sentinel) 'live settings.json returns from stash'
+        Assert-SelfTest ((Get-Content -LiteralPath $labels -Raw) -match $sentinel) 'live labels.json returns from stash'
+        Assert-SelfTest ((Get-Content -LiteralPath (Join-Path $Bak 'settings.json') -Raw) -match $sentinel) 'bak still has sentinel after recovered -ReplaceBackup'
+
+        Invoke-ResetToFreshInstall
+        Invoke-Restore
+        Assert-SelfTest (-not (Test-Path -LiteralPath $Stash)) 'restore consumes stash'
+        Assert-SelfTest ((Get-Content -LiteralPath $settings -Raw) -match $sentinel) 'restore from stash returns settings.json'
+        Assert-SelfTest ((Get-Content -LiteralPath $labels -Raw) -match $sentinel) 'restore from stash returns labels.json'
+        Assert-SelfTest ((Get-Content -LiteralPath $musicFile -Raw) -match $sentinel) 'restore from stash returns Music files'
+
+        Write-Host "OK: selftest passed ($root)"
+    }
+    finally {
+        if (Test-Path -LiteralPath $root) {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+$modeCount = @($Backup, $Restore, $Run, $SelfTest).Where({ $_ }).Count
 if ($modeCount -eq 0) {
-    throw 'Specify one of -Backup / -Restore / -Run'
+    throw 'Specify one of -Backup / -Restore / -Run / -SelfTest'
 }
 if ($modeCount -gt 1) {
-    throw 'Specify only one of -Backup / -Restore / -Run'
+    throw 'Specify only one of -Backup / -Restore / -Run / -SelfTest'
 }
 
 if ($Backup) { Invoke-Backup }
 elseif ($Restore) { Invoke-Restore }
+elseif ($SelfTest) { Invoke-SelfTest }
 else { Invoke-Run }

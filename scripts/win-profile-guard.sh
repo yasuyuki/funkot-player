@@ -7,6 +7,7 @@
 #   ./scripts/win-profile-guard.sh -Run -ReplaceBackup
 #   ./scripts/win-profile-guard.sh -Run -ReplaceBackup -InPlace
 #   ./scripts/win-profile-guard.sh -Run -ReplaceBackup -SkipCache
+#   ./scripts/win-profile-guard.sh -SelfTest
 #
 # Typical Store-like verify (empty profile, demos only, restore on close):
 #   ./scripts/win-run.sh
@@ -18,7 +19,7 @@ WIN_PLAYER=/mnt/c/src/funkot-player
 PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
 
 if [ "$#" -eq 0 ]; then
-	echo "Usage: $0 -Backup | -Restore | -Run [-ReplaceBackup] [-InPlace] [-SkipCache] [-Exe PATH]" >&2
+	echo "Usage: $0 -Backup | -Restore | -Run | -SelfTest [-ReplaceBackup] [-InPlace] [-SkipCache] [-Exe PATH]" >&2
 	exit 1
 fi
 
