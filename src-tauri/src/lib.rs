@@ -6452,7 +6452,8 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
 
     let plan = store::arrivals_commit_plan(kind, complete);
     if plan.save_index {
-        store::stamp_missing_added_order(&mut hash_index, next_added_order);
+        store::stamp_missing_added_order(&mut hash_index, next_added_order)
+            .ok_or_else(|| "library addition order exhausted".to_string())?;
     }
     for row in &mut rows {
         row.added_order = hash_index

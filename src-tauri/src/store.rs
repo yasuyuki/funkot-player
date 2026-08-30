@@ -464,7 +464,7 @@ pub struct HashIndexEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_seen: Option<String>,
     /// Stable library-addition batch. Unlike `first_seen`, play history never
-    /// clears it. Older entries are assigned together by the next scan.
+    /// clears it. Missing values are filled by [`stamp_missing_added_order`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_order: Option<u64>,
 }
@@ -573,15 +573,43 @@ pub fn stamp_new_paths(index: &mut HashIndex, original_keys: &BTreeSet<String>, 
     }
 }
 
-/// Give every authoritative index entry without an addition order the same
-/// scan batch. This migrates the whole legacy index and stamps newly resolved
-/// paths together. Call only when the refresh commit will save the index.
-pub fn stamp_missing_added_order(index: &mut HashIndex, order: u64) {
-    for entry in index.values_mut() {
+/// Fill every authoritative index entry that still lacks an addition order.
+///
+/// `first_seen is None` is the legacy baseline and gets `order`. Entries that
+/// already carry a first-seen stamp — new paths this scan, or arrivals a
+/// previous build recorded — get the next batch when both kinds are present.
+/// Recency is not inferred from mtime or play history. Call only when the
+/// refresh commit will save the index.
+///
+/// Returns `None` when a distinct recent batch is required but `order + 1`
+/// would overflow.
+pub fn stamp_missing_added_order(index: &mut HashIndex, order: u64) -> Option<()> {
+    let mut has_legacy = false;
+    let mut has_recent = false;
+    for entry in index.values() {
         if entry.added_order.is_none() {
-            entry.added_order = Some(order);
+            if entry.first_seen.is_some() {
+                has_recent = true;
+            } else {
+                has_legacy = true;
+            }
         }
     }
+    let recent_order = if has_legacy && has_recent {
+        order.checked_add(1)?
+    } else {
+        order
+    };
+    for entry in index.values_mut() {
+        if entry.added_order.is_none() {
+            entry.added_order = Some(if entry.first_seen.is_some() {
+                recent_order
+            } else {
+                order
+            });
+        }
+    }
+    Some(())
 }
 
 /// Next scan batch, strictly greater than every persisted batch.
@@ -2931,11 +2959,39 @@ mod tests {
         index.insert("/b".into(), entry("hb", None));
         index.insert("/missed".into(), entry("hm", None));
         index.get_mut("/b").unwrap().added_order = Some(4);
-        stamp_missing_added_order(&mut index, 5);
+        assert_eq!(stamp_missing_added_order(&mut index, 5), Some(()));
 
         assert_eq!(index["/a"].added_order, Some(5));
         assert_eq!(index["/b"].added_order, Some(4));
         assert_eq!(index["/missed"].added_order, Some(5));
+    }
+
+    #[test]
+    fn stamp_missing_added_order_puts_first_seen_arrivals_in_a_newer_batch() {
+        let mut index = HashIndex::new();
+        index.insert("/old".into(), entry("ho", None));
+        index.insert("/kept".into(), entry("hk", None));
+        index.insert("/new-a".into(), entry("hn1", Some("2026-08-30T11:21:00Z")));
+        index.insert("/new-b".into(), entry("hn2", Some("2026-08-30T11:22:00Z")));
+        index.get_mut("/kept").unwrap().added_order = Some(4);
+        assert_eq!(stamp_missing_added_order(&mut index, 5), Some(()));
+
+        assert_eq!(index["/old"].added_order, Some(5));
+        assert_eq!(index["/kept"].added_order, Some(4));
+        assert_eq!(index["/new-a"].added_order, Some(6));
+        assert_eq!(index["/new-b"].added_order, Some(6));
+    }
+
+    #[test]
+    fn stamp_missing_added_order_keeps_a_recent_only_scan_as_one_batch() {
+        let mut index = HashIndex::new();
+        index.insert("/old".into(), entry("ho", None));
+        index.insert("/new".into(), entry("hn", Some("2026-08-30T11:21:00Z")));
+        index.get_mut("/old").unwrap().added_order = Some(7);
+        assert_eq!(stamp_missing_added_order(&mut index, 8), Some(()));
+
+        assert_eq!(index["/old"].added_order, Some(7));
+        assert_eq!(index["/new"].added_order, Some(8));
     }
 
     #[test]
