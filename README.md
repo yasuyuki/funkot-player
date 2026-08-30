@@ -138,8 +138,13 @@ Bulk / resume-safe push from WSL over wireless adb (hundreds of tracks): see
 - **開始 / 一時停止 / 次の曲** — main transport. Playback continues in the
   background. On Android, use the notification or lock-screen controls when
   the app is not on screen (Windows has in-app transport only).
-- **Queue** — reorder with ↑↓, drop with ✕, and set the next track. Near a
-  transition, some edits lock for a short window.
+- **次に再生 / ライブラリ** — the two play screens, switched by the tab row
+  under the transport. The app opens on ライブラリ, so a long queue never
+  buries the track list; search text, sort order and scroll position survive a
+  switch and come back as you left them.
+- **次に再生** — the playback order, restored from the previous run at launch.
+  Reorder with ↑↓, drop with ✕, and set the next track. Near a transition,
+  some edits lock for a short window.
 - **編集** — fix intro / outro bar counts on a transition that sounded wrong.
   Corrections are kept and re-applied after a fresh analysis.
 - **⋮ → 再スキャン** — pick up tracks added since the last scan.

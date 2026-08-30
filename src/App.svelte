@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { ui } from "./lib/ui.svelte";
   import { store } from "./lib/state.svelte";
   import { sessionActive } from "./lib/transportMode";
   import UiBoundary from "./components/UiBoundary.svelte";
   import NowCard from "./components/NowCard.svelte";
   import AuditionBanner from "./components/AuditionBanner.svelte";
+  import NewArrivalsBanner from "./components/NewArrivalsBanner.svelte";
   import TransitionStrip from "./components/TransitionStrip.svelte";
   import Transport from "./components/Transport.svelte";
   import OverflowMenu from "./components/OverflowMenu.svelte";
@@ -30,6 +32,26 @@
       !transportVisible &&
       sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false),
   );
+
+  /// Last scroll offset per play subtab. Deliberately not `$state`: nothing
+  /// renders from it, and a reactive write inside the swap would be one more
+  /// thing to order against `tick`.
+  let scrollByPlaySub: Record<"queue" | "library", number> = { queue: 0, library: 0 };
+
+  /// The document scrolls (`body` in tokens.css carries the padding; neither
+  /// pane is its own scroll container), so hiding a pane changes the page
+  /// height and the browser clamps the offset. Save before the swap, restore
+  /// after the DOM has the new height -- otherwise coming back to a library of
+  /// hundreds of rows always lands at the top, which is the same "the list is
+  /// far away" problem this split exists to fix. A restore past the new bottom
+  /// is clamped by the browser, so there is nothing to clamp here.
+  async function onPlaySub(sub: "queue" | "library") {
+    if (ui.playSub === sub) return;
+    scrollByPlaySub[ui.playSub] = window.scrollY;
+    ui.setPlaySub(sub);
+    await tick();
+    window.scrollTo(0, scrollByPlaySub[sub]);
+  }
 
   $effect(() => {
     const el = sentinelEl;
@@ -125,12 +147,48 @@
 </UiBoundary>
 
 {#if ui.mode === "play"}
+  <!-- Above the subtabs rather than inside Library: the arrivals banner is
+       meant to be standing, and from inside a pane it would disappear whenever
+       the queue tab is up. It renders nothing while there are no actionable
+       arrivals, so the tabs do not move on an ordinary launch. -->
   <UiBoundary>
-    <Queue />
+    <NewArrivalsBanner />
   </UiBoundary>
-  <UiBoundary>
-    <Library />
-  </UiBoundary>
+
+  <div class="subtabs" role="tablist" aria-label="再生サブタブ">
+    <button
+      type="button"
+      class="tab"
+      class:active={ui.playSub === "queue"}
+      role="tab"
+      aria-selected={ui.playSub === "queue"}
+      onclick={() => onPlaySub("queue")}
+    >次に再生</button>
+    <button
+      type="button"
+      class="tab"
+      class:active={ui.playSub === "library"}
+      role="tab"
+      aria-selected={ui.playSub === "library"}
+      onclick={() => onPlaySub("library")}
+    >ライブラリ</button>
+  </div>
+
+  <!-- Both panes stay mounted and the inactive one is `hidden`. An `{#if}`
+       would unmount Library and drop its search text, sort key and 新着のみ
+       state on every tab tap. -->
+  <div class="pane" hidden={ui.playSub !== "queue"}>
+    <UiBoundary>
+      <Queue />
+    </UiBoundary>
+  </div>
+  <div class="pane" hidden={ui.playSub !== "library"}>
+    <UiBoundary>
+      <Library />
+    </UiBoundary>
+  </div>
+
+  <!-- Outside the panes: the bar belongs to play mode, not to one tab. -->
   <UiBoundary>
     <MiniBar show={miniBarVisible} />
   </UiBoundary>
@@ -216,5 +274,12 @@
   .subtabs .tab.active {
     background: var(--color-tab-active-bg);
     color: var(--color-tab-active-text);
+  }
+
+  /* The panes exist only to carry `hidden`, so they get no display of their
+     own; the sections inside bring their own margins. Spelled out because a
+     future `display:` here would silently defeat the attribute. */
+  .pane[hidden] {
+    display: none;
   }
 </style>

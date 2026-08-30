@@ -7,7 +7,6 @@
     type LibrarySortKey,
   } from "../lib/library-sort";
   import { toast } from "../lib/toast.svelte";
-  import NewArrivalsBanner from "./NewArrivalsBanner.svelte";
 
   let query = $state("");
   let sortKey = $state<LibrarySortKey>("recent");
@@ -169,8 +168,6 @@
   {#if analysis}
     <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
   {/if}
-
-  <NewArrivalsBanner />
 
   {#if musicDirNeeded}
     <div class="empty">
