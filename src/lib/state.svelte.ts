@@ -58,6 +58,7 @@ import {
   nextLibraryRefreshOwed,
   type RefreshAttempt,
 } from "./arrivals";
+import { preserveLibraryAddedOrder } from "./library-sort";
 import { canSkipNext } from "./transportMode";
 import { toast } from "./toast.svelte";
 
@@ -352,7 +353,8 @@ class PlayerStore {
   /// every other entry).
   #replaceLibraryRow(row: TrackRow): void {
     const next = new Map(this.library);
-    next.set(row.path, row);
+    const previous = next.get(row.path);
+    next.set(row.path, preserveLibraryAddedOrder(previous, row));
     this.library = next;
   }
 

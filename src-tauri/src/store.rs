@@ -463,6 +463,10 @@ pub struct HashIndexEntry {
     /// RFC3339 UTC. `None` = present since baseline (legacy missing field → `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_seen: Option<String>,
+    /// Stable library-addition batch. Unlike `first_seen`, play history never
+    /// clears it. Older entries are assigned together by the next scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_order: Option<u64>,
 }
 
 /// Path → content hash, with mtime/size so unchanged files skip re-hashing.
@@ -567,6 +571,27 @@ pub fn stamp_new_paths(index: &mut HashIndex, original_keys: &BTreeSet<String>, 
             entry.first_seen = Some(now.to_string());
         }
     }
+}
+
+/// Give every authoritative index entry without an addition order the same
+/// scan batch. This migrates the whole legacy index and stamps newly resolved
+/// paths together. Call only when the refresh commit will save the index.
+pub fn stamp_missing_added_order(index: &mut HashIndex, order: u64) {
+    for entry in index.values_mut() {
+        if entry.added_order.is_none() {
+            entry.added_order = Some(order);
+        }
+    }
+}
+
+/// Next scan batch, strictly greater than every persisted batch.
+pub fn next_added_order(index: &HashIndex) -> Option<u64> {
+    index
+        .values()
+        .filter_map(|entry| entry.added_order)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
 }
 
 /// Clear `first_seen` on every entry whose key is in `scan_keys`.
@@ -816,12 +841,21 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
 
     if let Some((mtime_ms, len)) = fingerprint {
         let prior = index.get(&key).cloned();
-        let (first_seen, tags_cached, title, artist) = match prior {
-            None => (None, false, None, None),
+        let (first_seen, added_order, tags_cached, title, artist) = match prior {
+            None => (None, None, false, None, None),
             Some(old) if old.hash == hash => {
-                (old.first_seen, old.tags_cached, old.title, old.artist)
+                (
+                    old.first_seen,
+                    old.added_order,
+                    old.tags_cached,
+                    old.title,
+                    old.artist,
+                )
             }
-            Some(_) => (Some(utc_rfc3339_now()), false, None, None),
+            Some(_) => {
+                let now = utc_rfc3339_now();
+                (Some(now), None, false, None, None)
+            }
         };
         index.insert(
             key,
@@ -833,6 +867,7 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
                 title,
                 artist,
                 first_seen,
+                added_order,
             },
         );
     }
@@ -868,6 +903,7 @@ pub fn resolve_library_file(
                 }
                 let hash = entry.hash.clone();
                 let first_seen = entry.first_seen.clone();
+                let added_order = entry.added_order;
                 match probe_audio_tags(path) {
                     Ok((title, artist)) => {
                         index.insert(
@@ -880,6 +916,7 @@ pub fn resolve_library_file(
                                 title: title.clone(),
                                 artist: artist.clone(),
                                 first_seen,
+                                added_order,
                             },
                         );
                         return Ok(ResolvedLibraryFile {
@@ -909,10 +946,13 @@ pub fn resolve_library_file(
 
     if let Some((mtime_ms, len)) = fingerprint {
         let prior = index.get(&key).cloned();
-        let first_seen = match &prior {
-            None => None,
-            Some(old) if old.hash == hash => old.first_seen.clone(),
-            Some(_) => Some(utc_rfc3339_now()),
+        let (first_seen, added_order) = match &prior {
+            None => (None, None),
+            Some(old) if old.hash == hash => (old.first_seen.clone(), old.added_order),
+            Some(_) => {
+                let now = utc_rfc3339_now();
+                (Some(now), None)
+            }
         };
         index.insert(
             key,
@@ -924,6 +964,7 @@ pub fn resolve_library_file(
                 title: title.clone(),
                 artist: artist.clone(),
                 first_seen,
+                added_order,
             },
         );
     }
@@ -1504,6 +1545,7 @@ mod tests {
                 title: Some("A".into()),
                 artist: Some("Artist".into()),
                 first_seen: None,
+                added_order: Some(7),
             },
         );
         save_hash_index(&dir.0, &index).unwrap();
@@ -1526,6 +1568,7 @@ mod tests {
         assert!(entry.title.is_none());
         assert!(entry.artist.is_none());
         assert!(entry.first_seen.is_none());
+        assert!(entry.added_order.is_none());
     }
 
     #[test]
@@ -1641,6 +1684,7 @@ mod tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         index.insert(
@@ -1653,6 +1697,7 @@ mod tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         index.retain(|path, _| path == "/music/kept.flac");
@@ -1684,6 +1729,7 @@ mod tests {
                 title: Some("Cached Title".into()),
                 artist: Some("Cached Artist".into()),
                 first_seen: None,
+                added_order: None,
             },
         );
 
@@ -1756,6 +1802,7 @@ mod tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
 
@@ -1820,6 +1867,7 @@ mod tests {
                 title: Some("T".into()),
                 artist: Some("A".into()),
                 first_seen: None,
+                added_order: None,
             },
         );
 
@@ -2799,6 +2847,7 @@ mod tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         let original_keys: BTreeSet<String> = index.keys().cloned().collect();
@@ -2812,6 +2861,7 @@ mod tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         stamp_new_paths(&mut index, &original_keys, "2026-08-30T00:00:00Z");
@@ -2841,6 +2891,7 @@ mod tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         // Incomplete: do not save. Next complete recovery applies baseline markers.
@@ -2865,11 +2916,37 @@ mod tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         let original: BTreeSet<String> = ["/music/a.flac".into()].into_iter().collect();
         stamp_new_paths(&mut index, &original, "NOW");
         assert!(index["/music/a.flac"].first_seen.is_none());
+    }
+
+    #[test]
+    fn stamp_missing_added_order_migrates_the_whole_index_as_one_batch() {
+        let mut index = HashIndex::new();
+        index.insert("/a".into(), entry("ha", None));
+        index.insert("/b".into(), entry("hb", None));
+        index.insert("/missed".into(), entry("hm", None));
+        index.get_mut("/b").unwrap().added_order = Some(4);
+        stamp_missing_added_order(&mut index, 5);
+
+        assert_eq!(index["/a"].added_order, Some(5));
+        assert_eq!(index["/b"].added_order, Some(4));
+        assert_eq!(index["/missed"].added_order, Some(5));
+    }
+
+    #[test]
+    fn next_added_order_is_strictly_monotonic_across_scans() {
+        let mut index = HashIndex::new();
+        assert_eq!(next_added_order(&index), Some(1));
+        index.insert("/a".into(), entry("ha", None));
+        index.get_mut("/a").unwrap().added_order = Some(7);
+        assert_eq!(next_added_order(&index), Some(8));
+        index.get_mut("/a").unwrap().added_order = Some(u64::MAX);
+        assert_eq!(next_added_order(&index), None);
     }
 
     #[test]
@@ -2892,6 +2969,7 @@ mod tests {
                 title: Some("T".into()),
                 artist: Some("A".into()),
                 first_seen: None,
+                added_order: Some(3),
             },
         );
         // Bump mtime → miss → same content hash.
@@ -2907,6 +2985,7 @@ mod tests {
         assert_eq!(resolve_content_hash(&path, &mut index).unwrap(), hash);
         let entry = &index[&key];
         assert!(entry.first_seen.is_none());
+        assert_eq!(entry.added_order, Some(3));
         assert!(entry.tags_cached);
         assert_eq!(entry.title.as_deref(), Some("T"));
     }
@@ -2930,6 +3009,7 @@ mod tests {
                 title: Some("T".into()),
                 artist: Some("A".into()),
                 first_seen: None,
+                added_order: None,
             },
         );
         fs::write(&path, vec![2u8; 256]).unwrap();
@@ -2938,6 +3018,7 @@ mod tests {
         assert_ne!(new_hash, "old-hash");
         let entry = &index[&key];
         assert!(entry.first_seen.is_some());
+        assert!(entry.added_order.is_none());
         assert!(!entry.tags_cached);
         assert!(entry.title.is_none());
     }
@@ -2961,6 +3042,7 @@ mod tests {
                 title: None,
                 artist: None,
                 first_seen: Some("2020-01-01T00:00:00Z".into()),
+                added_order: None,
             },
         );
 
@@ -3088,6 +3170,7 @@ mod tests {
             title: None,
             artist: None,
             first_seen: first_seen.map(str::to_string),
+            added_order: None,
         }
     }
 

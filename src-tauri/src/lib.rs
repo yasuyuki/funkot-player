@@ -4626,6 +4626,8 @@ struct TrackRow {
     /// `history.json` `last_played_ms` for this track's content hash; `None`
     /// when never heard (count is not exposed on the row).
     played_at_ms: Option<u64>,
+    /// Stable library-addition batch from `hash-index.json`.
+    added_order: Option<u64>,
 }
 
 /// Counts of human labels vs library size for the labeling UI.
@@ -4813,6 +4815,7 @@ fn track_row(
                 intro_low_confidence: a.intro_bars_low_confidence,
                 outro_low_confidence: a.outro_bars_low_confidence,
                 played_at_ms,
+                added_order: None,
             }
         }
         None => TrackRow {
@@ -4831,6 +4834,7 @@ fn track_row(
             intro_low_confidence: false,
             outro_low_confidence: false,
             played_at_ms,
+            added_order: None,
         },
     }
 }
@@ -5172,6 +5176,7 @@ mod cache_state_tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         store::save_hash_index(&data.0, &index).unwrap();
@@ -5211,6 +5216,7 @@ mod cache_state_tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         store::save_hash_index(&data.0, &index).unwrap();
@@ -5475,6 +5481,7 @@ mod cache_state_tests {
             title: None,
             artist: None,
             first_seen: first_seen.map(str::to_string),
+            added_order: None,
         }
     }
 
@@ -6247,6 +6254,7 @@ mod arrivals_settings_rmw_tests {
                 title: None,
                 artist: None,
                 first_seen: None,
+                added_order: None,
             },
         );
         let plan = store::arrivals_commit_plan(store::ArrivalsKind::Recovery, false);
@@ -6349,7 +6357,10 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let history = store::load_history(&data_dir);
     let loaded_index = store::load_hash_index(&data_dir);
     let provenance = loaded_index.provenance;
+    let next_added_order = store::next_added_order(&loaded_index.index)
+        .ok_or_else(|| "library addition order exhausted".to_string())?;
     let mut hash_index = loaded_index.index;
+    let scan_now = store::utc_rfc3339_now();
     let original_keys: std::collections::BTreeSet<String> =
         hash_index.keys().cloned().collect();
     let found = paths.len();
@@ -6369,6 +6380,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     for path in &paths {
         let path_key = path.to_string_lossy().into_owned();
         seen_paths.insert(path_key.clone());
+        let prior_hash = hash_index.get(&path_key).map(|entry| entry.hash.clone());
         let (hash, tags) = match store::resolve_library_file(path, &mut hash_index) {
             Ok(resolved) => {
                 let tags = CachedTags {
@@ -6386,6 +6398,14 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
                         .lock()
                         .unwrap()
                         .insert(path.to_path_buf(), tags.clone());
+                }
+                if prior_hash
+                    .as_ref()
+                    .is_some_and(|prior| prior != &resolved.hash)
+                {
+                    if let Some(entry) = hash_index.get_mut(&path_key) {
+                        entry.added_order = Some(next_added_order);
+                    }
                 }
                 (Some(resolved.hash), Some(tags))
             }
@@ -6417,8 +6437,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let kind = store::arrivals_kind(baseline_done, provenance);
     match kind {
         store::ArrivalsKind::Normal => {
-            let now = store::utc_rfc3339_now();
-            store::stamp_new_paths(&mut hash_index, &original_keys, &now);
+            store::stamp_new_paths(&mut hash_index, &original_keys, &scan_now);
         }
         store::ArrivalsKind::Baseline | store::ArrivalsKind::Recovery => {
             if matches!(kind, store::ArrivalsKind::Recovery) {
@@ -6432,6 +6451,14 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     }
 
     let plan = store::arrivals_commit_plan(kind, complete);
+    if plan.save_index {
+        store::stamp_missing_added_order(&mut hash_index, next_added_order);
+    }
+    for row in &mut rows {
+        row.added_order = hash_index
+            .get(&row.path)
+            .and_then(|entry| entry.added_order);
+    }
     commit_arrivals_after_scan(
         &data_dir,
         &hash_index,

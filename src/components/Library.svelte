@@ -1,13 +1,16 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
   import { openMusicDir, type TrackRow } from "../lib/tauri";
+  import {
+    nextLibrarySortKey,
+    sortLibraryRows,
+    type LibrarySortKey,
+  } from "../lib/library-sort";
   import { toast } from "../lib/toast.svelte";
   import NewArrivalsBanner from "./NewArrivalsBanner.svelte";
 
-  type SortKey = "title" | "artist";
-
   let query = $state("");
-  let sortKey = $state<SortKey>("title");
+  let sortKey = $state<LibrarySortKey>("recent");
   let newOnly = $state(false);
   let busy = $state<Record<string, boolean>>({});
   let openMusicBusy = $state(false);
@@ -39,18 +42,11 @@
       if (newOnly && !arrivalPaths.has(r.path)) return false;
       return matches(r, q);
     });
-    const sorted = filtered.slice().sort((a, b) => {
-      if (sortKey === "artist") {
-        const byArtist = a.artist.localeCompare(b.artist, "ja");
-        if (byArtist !== 0) return byArtist;
-      }
-      return a.title.localeCompare(b.title, "ja");
-    });
-    return sorted;
+    return sortLibraryRows(filtered, sortKey);
   });
 
   function toggleSort() {
-    sortKey = sortKey === "title" ? "artist" : "title";
+    sortKey = nextLibrarySortKey(sortKey);
   }
 
   function toggleNewOnly() {
@@ -153,7 +149,11 @@
       onclick={toggleNewOnly}
     >新着のみ</button>
     <button type="button" class="sort" onclick={toggleSort}>
-      {sortKey === "title" ? "曲名順▾" : "アーティスト順▾"}
+      {sortKey === "recent"
+        ? "新着順▾"
+        : sortKey === "title"
+          ? "曲名順▾"
+          : "アーティスト順▾"}
     </button>
   </div>
 
