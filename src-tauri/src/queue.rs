@@ -28,10 +28,10 @@
 //! The fixed order across this codebase is **`INDEX_LOCK` → `SAVE_LOCK` →
 //! `SESSION` → queue → render**, never the reverse. `INDEX_LOCK` and
 //! `SAVE_LOCK` / `SESSION` live in `src-tauri/src/lib.rs`. `SESSION` is the
-//! restart-persistence counterpart to this module's queue; it only ever
-//! nests under `SAVE_LOCK` inside `persist_session`, and never nests with
-//! this module's queue lock at all — the two are independent saves that
-//! happen to share `SAVE_LOCK`'s ordering slot, not a real dependency.
+//! restart-persistence counterpart to this module's queue. `queue_state`
+//! snapshots `SESSION` → queue, and the new-arrivals bulk insert holds
+//! `SAVE_LOCK` → `SESSION` → queue so its exclusion test and insert are one
+//! operation.
 //! The other nestings here are real, not hypothetical:
 //! [`edit_displayed`] takes the engine's `RenderState` lock (`render` in
 //! `src-tauri/src/lib.rs`) via its `revoke` closure while already holding this
@@ -99,7 +99,9 @@ pub fn replace_pending(queue: &SharedQueue, paths: Vec<PathBuf>) {
 /// Judge and insert under one queue lock: keep `candidates` order, prepend
 /// survivors to `pending`, leave `reserved` alone.
 ///
-/// Paths already in `reserved`, `pending`, or `now_playing` are skipped.
+/// Paths already in `reserved`, `pending`, `now_playing`, or `in_flight` are
+/// skipped. `in_flight` covers the engine's full prepared runway, while
+/// `reserved` closes the short gap before a new hand-off is persisted there.
 /// Returns how many paths were actually added. Idempotent: a second call with
 /// the same candidates returns 0.
 ///
@@ -108,6 +110,7 @@ pub fn prepend_pending_filtered(
     queue: &SharedQueue,
     candidates: &[PathBuf],
     now_playing: Option<&Path>,
+    in_flight: &[PathBuf],
 ) -> usize {
     use std::collections::HashSet;
 
@@ -121,6 +124,9 @@ pub fn prepend_pending_filtered(
     }
     if let Some(np) = now_playing {
         excluded.insert(np.to_path_buf());
+    }
+    for p in in_flight {
+        excluded.insert(p.clone());
     }
 
     let mut to_add: Vec<PathBuf> = Vec::new();
@@ -640,7 +646,7 @@ mod tests {
     #[test]
     fn prepend_pending_filtered_preserves_candidate_order_at_front() {
         let q = queue_with(None, &["old"]);
-        let added = prepend_pending_filtered(&q, &[p("a"), p("b"), p("c")], None);
+        let added = prepend_pending_filtered(&q, &[p("a"), p("b"), p("c")], None, &[]);
         assert_eq!(added, 3);
         assert_eq!(snapshot(&q), vec![p("a"), p("b"), p("c"), p("old")]);
     }
@@ -648,7 +654,7 @@ mod tests {
     #[test]
     fn prepend_pending_filtered_leaves_reserved_and_inserts_after_it() {
         let q = queue_with(Some("r"), &["old"]);
-        let added = prepend_pending_filtered(&q, &[p("a"), p("b")], None);
+        let added = prepend_pending_filtered(&q, &[p("a"), p("b")], None, &[]);
         assert_eq!(added, 2);
         assert_eq!(state_snapshot(&q), (Some(p("r")), vec![p("a"), p("b"), p("old")]));
     }
@@ -660,6 +666,7 @@ mod tests {
             &q,
             &[p("r"), p("pend"), p("now"), p("new")],
             Some(Path::new("now")),
+            &[],
         );
         assert_eq!(added, 1);
         assert_eq!(state_snapshot(&q), (Some(p("r")), vec![p("new"), p("pend")]));
@@ -669,9 +676,32 @@ mod tests {
     fn prepend_pending_filtered_is_idempotent() {
         let q = queue_with(None, &[]);
         let candidates = [p("a"), p("b")];
-        assert_eq!(prepend_pending_filtered(&q, &candidates, None), 2);
-        assert_eq!(prepend_pending_filtered(&q, &candidates, None), 0);
+        assert_eq!(prepend_pending_filtered(&q, &candidates, None, &[]), 2);
+        assert_eq!(prepend_pending_filtered(&q, &candidates, None, &[]), 0);
         assert_eq!(snapshot(&q), vec![p("a"), p("b")]);
+    }
+
+    #[test]
+    fn prepend_pending_filtered_skips_every_in_flight_occurrence() {
+        let q = queue_with(Some("reserved"), &["pending"]);
+        let candidates = [
+            p("old-current"),
+            p("prefetched"),
+            p("reserved"),
+            p("pending"),
+            p("new"),
+        ];
+        let in_flight = [p("old-current"), p("prefetched")];
+
+        assert_eq!(
+            prepend_pending_filtered(&q, &candidates, None, &in_flight),
+            1
+        );
+        assert_eq!(snapshot(&q), vec![p("new"), p("pending")]);
+        assert_eq!(
+            prepend_pending_filtered(&q, &candidates, None, &in_flight),
+            0
+        );
     }
 
     /// A `revoke` that panics if it runs. Used by tests below whose whole

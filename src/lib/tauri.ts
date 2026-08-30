@@ -135,11 +135,13 @@ export function refreshLibrary(kickAnalysis = true): Promise<TrackRow[]> {
   return invoke<TrackRow[]>("refresh_library", { kickAnalysis });
 }
 
-/// Matches `QueueSnapshot`. `reserved` / `pending` are absolute paths (see
+/// Matches `QueueSnapshot`. Queue paths are absolute (see
 /// `src-tauri/src/lib.rs`); the UI resolves them against the library by path.
 export interface QueueSnapshot {
   reserved: string | null;
   pending: string[];
+  /// Tracks already handed to the engine: active first, then its runway.
+  in_flight: string[];
   /// Whether `reorder`/`dequeue` would currently accept an edit that reaches
   /// into the `reserved` slot (displayed index 0, or `Move { to: 0 }`).
   reserved_swappable: boolean;

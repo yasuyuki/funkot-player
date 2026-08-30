@@ -1005,7 +1005,8 @@ static INDEX_LOCK: Mutex<()> = Mutex::new(());
 ///
 /// Lock order (fixed, never reversed): [`INDEX_LOCK`] → `SAVE_LOCK` →
 /// [`SESSION`] → queue (`src-tauri/src/queue.rs`) → render. `persist_session`
-/// is the only place `SAVE_LOCK` and `SESSION` nest; see its doc comment.
+/// and the new-arrivals bulk insert nest `SAVE_LOCK` and `SESSION`; the latter
+/// continues into queue so its exclusion test and insert remain atomic.
 /// Refresh holds `INDEX_LOCK` across the scan and only takes `SAVE_LOCK` at
 /// commit time for the baseline flag — never for the whole walk.
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
@@ -1046,9 +1047,9 @@ static LAST_FOLDER_LABEL_UNDO: Mutex<Option<Vec<FolderLabelUndo>>> = Mutex::new(
 /// What the next launch will restore (see `store::Session`). Mutated by its
 /// three save sites directly (each takes only this mutex, the same pattern
 /// `reorder`/`dequeue` use for `queue` — see `persist_queue`), then handed to
-/// `persist_session` to write out. Touch it under `SAVE_LOCK` only from
-/// inside `persist_session` itself; nothing else may nest the two, in either
-/// order (see `SAVE_LOCK`'s doc comment).
+/// `persist_session` to write out. Mutations normally release it before
+/// persisting. The new-arrivals bulk insert may read it under `SAVE_LOCK` and
+/// continue into queue, always in the documented global order.
 static SESSION: Mutex<store::Session> = Mutex::new(store::Session::new());
 
 /// Save `SESSION`'s current value under [`DATA_DIR`]. Best-effort: no
@@ -4220,6 +4221,9 @@ struct QueueSnapshot {
     reserved: Option<String>,
     /// Waiting queue; its head is "reserved's successor".
     pending: Vec<String>,
+    /// Main-engine tracks handed out but not yet retired, in reservation
+    /// order. Raw occurrences are preserved; the frontend unions by path.
+    in_flight: Vec<String>,
     /// Whether `reorder`/`dequeue` would currently accept an edit that
     /// reaches into the `reserved` slot (`Move`/`Remove` at displayed index
     /// `0`, or `Move { to: 0, .. }`). `false` while: nothing is reserved; an
@@ -4530,7 +4534,15 @@ fn dequeue(
 /// Current queue contents, for the UI to render.
 #[tauri::command]
 fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
-    let (reserved, pending) = queue::state_snapshot(&state.queue);
+    // Fixed order: SESSION → queue. Hold both just long enough to produce a
+    // mutually consistent snapshot for the frontend's exclusion union.
+    let (reserved, pending, in_flight) = {
+        let session = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (reserved, pending) = queue::state_snapshot(&state.queue);
+        (reserved, pending, session.in_flight.clone())
+    };
     let auditioning =
         AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed);
     let frames = FRAMES_UNTIL_TRANSITION.load(Ordering::Relaxed);
@@ -4564,6 +4576,10 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
     Ok(QueueSnapshot {
         reserved: reserved.map(|p| p.to_string_lossy().into_owned()),
         pending: pending
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+        in_flight: in_flight
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
@@ -5687,6 +5703,10 @@ mod cache_state_tests {
             "/music/m.flac".into(),
             arrivals_entry("hm", Some("2026-01-02T00:00:00Z")),
         );
+        index.insert(
+            "/music/r.flac".into(),
+            arrivals_entry("hr", Some("2026-01-01T00:00:00Z")),
+        );
         store::save_hash_index(&data.0, &index).unwrap();
 
         let q = queue::new_shared_queue();
@@ -5704,8 +5724,9 @@ mod cache_state_tests {
             Some((0, PathBuf::from("/music/r.flac")))
         );
 
-        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, true).unwrap();
-        assert_eq!(added, 3);
+        let in_flight = vec![PathBuf::from("/music/z.flac")];
+        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, true, &in_flight).unwrap();
+        assert_eq!(added, 2);
         // `queue_new_arrivals` calls `persist_queue` only after this returns
         // (INDEX/SAVE/queue guards dropped). Do not try_lock process-wide
         // mutexes here — other tests share them.
@@ -5716,12 +5737,14 @@ mod cache_state_tests {
             pending,
             vec![
                 PathBuf::from("/music/a.flac"),
-                PathBuf::from("/music/z.flac"),
                 PathBuf::from("/music/m.flac"),
                 PathBuf::from("/music/old.flac"),
             ]
         );
-        assert_eq!(queue_new_arrivals_with(&data.0, &cache.0, &q, true).unwrap(), 0);
+        assert_eq!(
+            queue_new_arrivals_with(&data.0, &cache.0, &q, true, &in_flight).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -5759,7 +5782,7 @@ mod cache_state_tests {
         store::save_hash_index(&data.0, &index).unwrap();
 
         let q = queue::new_shared_queue();
-        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, false).unwrap();
+        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, false, &[]).unwrap();
         assert_eq!(added, 1);
         assert_eq!(queue::snapshot(&q), vec![PathBuf::from(&ua_path)]);
     }
@@ -5792,7 +5815,7 @@ mod cache_state_tests {
             now.now = Some(PathBuf::from("/music/now.flac"));
         }
         let q = queue::new_shared_queue();
-        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, true).unwrap();
+        let added = queue_new_arrivals_with(&data.0, &cache.0, &q, true, &[]).unwrap();
         assert_eq!(added, 1);
         assert_eq!(queue::snapshot(&q), vec![PathBuf::from("/music/new.flac")]);
         NOW.lock().unwrap().now = None;
@@ -6981,7 +7004,7 @@ fn list_new_arrivals_impl(data_dir: &std::path::Path) -> Result<Vec<store::NewAr
 /// Queue every current new arrival at the front of pending (explicit action).
 ///
 /// Locking / persist split: [`queue_new_arrivals_locked`] holds
-/// `INDEX_LOCK` → `SAVE_LOCK` → queue, then drops all three before
+/// `INDEX_LOCK` → `SAVE_LOCK` → `SESSION` → queue, then drops all four before
 /// [`persist_queue`] (which takes `SAVE_LOCK` → queue again).
 #[tauri::command(async)]
 fn queue_new_arrivals(
@@ -6993,15 +7016,25 @@ fn queue_new_arrivals(
     Ok(added)
 }
 
-/// Extract / gate / prepend under INDEX → SAVE → queue, then release all
+/// Extract / gate / prepend under INDEX → SAVE → SESSION → queue, then release all
 /// guards before returning so the caller can safely call [`persist_queue`].
 fn queue_new_arrivals_locked(app: &tauri::AppHandle, state: &AppState) -> Result<u32, String> {
     let dirs = resolve_dirs(app)?;
-    queue_new_arrivals_with(
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let session = SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    queue_new_arrivals_under_locks(
         Path::new(&dirs.data_dir),
         Path::new(&dirs.cache_dir),
         &state.queue,
         ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+        &session.in_flight,
     )
 }
 
@@ -7009,11 +7042,13 @@ fn queue_new_arrivals_locked(app: &tauri::AppHandle, state: &AppState) -> Result
 ///
 /// After return, `SAVE_LOCK` and the queue lock are free (so
 /// [`persist_queue`] can re-acquire them).
+#[cfg(test)]
 fn queue_new_arrivals_with(
     data_dir: &std::path::Path,
     cache_dir: &std::path::Path,
     queue: &SharedQueue,
     allow_non_funkot: bool,
+    in_flight: &[PathBuf],
 ) -> Result<u32, String> {
     let _index = INDEX_LOCK
         .lock()
@@ -7022,6 +7057,18 @@ fn queue_new_arrivals_with(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    queue_new_arrivals_under_locks(data_dir, cache_dir, queue, allow_non_funkot, in_flight)
+}
+
+/// Body shared by production (which also holds `SESSION`) and tests (which
+/// pass an explicit in-flight snapshot). Callers must hold INDEX then SAVE.
+fn queue_new_arrivals_under_locks(
+    data_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
+    queue: &SharedQueue,
+    allow_non_funkot: bool,
+    in_flight: &[PathBuf],
+) -> Result<u32, String> {
     let settings = store::load_settings(data_dir);
     let loaded = store::load_hash_index(data_dir);
     let mut index = loaded.index;
@@ -7060,7 +7107,12 @@ fn queue_new_arrivals_with(
         now.now.clone()
     };
 
-    let added = queue::prepend_pending_filtered(queue, &candidates, now_playing.as_deref());
+    let added = queue::prepend_pending_filtered(
+        queue,
+        &candidates,
+        now_playing.as_deref(),
+        in_flight,
+    );
     // `_saving` / `_index` / queue guard (inside prepend) drop here.
     Ok(added as u32)
 }

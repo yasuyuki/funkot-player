@@ -147,8 +147,9 @@ Start 時のスナップショットで固定され再起動まで更新され�
     二重管理であり、ラベル設定 / bars 設定 / 解析進捗 row による field 消失問題がそもそも消える。
     command は path と first-seen の組の配列を返し、フロントが path で library row と join する。
 20. getter は 3 本。バッジ・フィルタ用（gate 非依存）/ gate 適用 / **gate 適用 ＋ 再生中・
-    reserved・pending を除外**。バナーの操作件数は 3 番目。再生中も外すのは、revision が反映
-    されるまで再生中の曲が件数へ一瞬戻るため。
+    in-flight・reserved・pending を除外**。バナーの操作件数は 3 番目。in-flight は engine へ渡した
+    全曲を保持し、reserved は queue slot 更新から in-flight 保存までの短い間隙を補う。同じ和集合を
+    一括キュー投入 command も使い、表示件数と実際の追加件数を一致させる。
 
 ## 留意点
 

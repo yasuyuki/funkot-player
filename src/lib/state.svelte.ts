@@ -367,7 +367,7 @@ class PlayerStore {
     return arrivalPathSet(this.arrivals);
   }
 
-  /// Banner count: gate + now/reserved/pending excluded.
+  /// Banner count: gate + every playing, handed-off, or queued path excluded.
   get actionableNewArrivalCount(): number {
     return actionableArrivals(
       this.arrivals,
@@ -376,6 +376,7 @@ class PlayerStore {
       this.player?.now_playing ?? null,
       this.queue?.reserved ?? null,
       this.queue?.pending ?? [],
+      this.queue?.in_flight ?? [],
     ).length;
   }
 

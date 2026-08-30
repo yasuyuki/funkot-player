@@ -36,8 +36,10 @@ revision、キュー投入 command が無いと、この phase の表示と操�
 
 ## 守るべき制約と不変条件
 
-- getter は 3 本。バッジ・フィルタ用（gate 非依存）/ gate 適用 / gate 適用 ＋ 再生中・reserved・
-  pending 除外。バナーの操作件数は 3 番目
+- getter は 3 本。バッジ・フィルタ用（gate 非依存）/ gate 適用 / gate 適用 ＋ 再生中・in-flight・
+  reserved・pending 除外。バナーの操作件数は 3 番目。同じ除外集合を一括キュー投入 command も使う
+- in-flight は engine へ渡した全曲を保持し、reserved は queue slot 更新から in-flight 保存までの
+  短い間隙を補う。loader の多段先読みで reserved が進んでも、投入済み曲を再表示・重複追加しない
 - pull のトリガは now playing ではなく history revision
 - 自動 refresh は busy または error なら owed を維持し、成功した refresh だけが owed を解除する
 - stale generation response を破棄しても owed は解除しない
@@ -50,7 +52,7 @@ revision、キュー投入 command が無いと、この phase の表示と操�
 型検査と build が通り、doc claim checker が通ること。
 
 ```
-wsl.exe -d Ubuntu -u funkot-agent -e sh -lc 'cd /srv/funkot-agent/foundation-n-plus-17/funkot-player && ./dev.sh npm run check && ./dev.sh npm run build && ./scripts/check-doc-claims.sh'
+wsl.exe -d Ubuntu -u funkot-agent -e sh -lc 'cd /srv/funkot-agent/foundation-n-plus-17/funkot-player && ./dev.sh npm test && ./dev.sh npm run check && ./dev.sh npm run build && ./scripts/check-doc-claims.sh'
 ```
 
 受け入れ条件に「refresh が error で失敗した後も owed が残り、次の成功でのみ解除される」を含める。

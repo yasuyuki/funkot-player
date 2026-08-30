@@ -26,7 +26,11 @@ export function gatedArrivals(
   return arrivals.filter((a) => passesGate(library.get(a.path), allowNonFunkot));
 }
 
-/// Banner count: gated, then drop now / reserved / pending by path.
+/// Banner count: gated, then drop everything already playing or queued.
+///
+/// `inFlight` is the stable record of everything handed to the engine, while
+/// `reserved` closes the short gap between the loader updating the queue slot
+/// and persisting that hand-off. The union matches the backend bulk action.
 export function actionableArrivals(
   arrivals: NewArrival[],
   library: ReadonlyMap<string, TrackRow>,
@@ -34,11 +38,13 @@ export function actionableArrivals(
   nowPlaying: string | null,
   reserved: string | null,
   pending: readonly string[],
+  inFlight: readonly string[],
 ): NewArrival[] {
   const exclude = new Set<string>();
   if (nowPlaying) exclude.add(nowPlaying);
   if (reserved) exclude.add(reserved);
   for (const p of pending) exclude.add(p);
+  for (const p of inFlight) exclude.add(p);
   return gatedArrivals(arrivals, library, allowNonFunkot).filter(
     (a) => !exclude.has(a.path),
   );
