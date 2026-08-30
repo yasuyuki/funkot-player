@@ -1,6 +1,6 @@
 [package]
 name = "funkot-player"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Auto-DJ music player for Funkot, built on funkot-core"
