@@ -2,6 +2,9 @@
   import { store } from "../lib/state.svelte";
   import { toast } from "../lib/toast.svelte";
   import { ui } from "../lib/ui.svelte";
+  import { i18n } from "../lib/i18n.svelte";
+
+  let t = $derived(i18n.t);
 
   // See Transport.svelte's comment on why this exists: every command
   // round-trips through the host, so a second tap before the first reply
@@ -28,8 +31,8 @@
 
   function formatAgo(secondsAgo: number): string {
     const s = Math.max(0, Math.floor(secondsAgo));
-    if (s < 60) return `${s}秒前`;
-    return `${Math.floor(s / 60)}分前`;
+    if (s < 60) return t.secondsAgo(s);
+    return t.minutesAgo(Math.floor(s / 60));
   }
 
   let agoLabel = $derived(transition ? formatAgo(transition.seconds_ago) : "");
@@ -37,7 +40,7 @@
   // Non-null only when there is no pair to show; keeps the markup below to a
   // single branch instead of juggling three independent conditions.
   let placeholder = $derived(
-    auditioning ? "試聴中" : transition === null ? "まだつなぎがありません" : null,
+    auditioning ? t.auditioningShort : transition === null ? t.noTransitionYet : null,
   );
 
   async function onFlagClick() {
@@ -51,7 +54,7 @@
         // `fromTitle`/`toTitle` above -- same as legacy's `showFlagToast`,
         // so the toast can never say something different from what was
         // actually written to flags.json.
-        toast.show(`${result.from_title} → ${result.to_title} を記録`, () =>
+        toast.show(t.flagRecorded(result.from_title, result.to_title), () =>
           store.doUndoLastFlag(),
         );
       }
@@ -66,7 +69,7 @@
        titles are long enough to fill a line on their own, and giving them
        the full width is what makes the flagged pair readable. -->
   <div class="label">
-    <span>直前の自動つなぎ</span>
+    <span>{t.lastAutoTransition}</span>
     {#if agoLabel}<span class="ago">{agoLabel}</span>{/if}
   </div>
   <!-- One title per line, each clipped to its own line. When a pair is
@@ -83,14 +86,14 @@
   </div>
   <div class="flag-row">
     <button type="button" class="flag" disabled={!flagEnabled || busy} onclick={onFlagClick}>
-      ⚑ このつなぎは不適切
+      {t.flagBadTransition}
     </button>
     <button
       type="button"
       class="mode-toggle"
-      aria-label={ui.mode === "play" ? "編集モードへ" : "再生モードへ"}
+      aria-label={ui.mode === "play" ? t.toEditModeLabel : t.toPlayModeLabel}
       onclick={() => ui.setMode(ui.mode === "play" ? "edit" : "play")}
-    >{ui.mode === "play" ? "編集" : "再生"}</button>
+    >{ui.mode === "play" ? t.editMode : t.playMode}</button>
   </div>
 </div>
 

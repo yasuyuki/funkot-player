@@ -30,6 +30,8 @@ import {
   setAllowNonFunkot as setAllowNonFunkotCmd,
   getLabelingMode as getLabelingModeCmd,
   setLabelingMode as setLabelingModeCmd,
+  getLocale as getLocaleCmd,
+  setLocale as setLocaleCmd,
   takePendingImport as takePendingImportCmd,
   setLabel as setLabelCmd,
   setFolderLabel as setFolderLabelCmd,
@@ -61,6 +63,8 @@ import {
 import { preserveLibraryAddedOrder } from "./library-sort";
 import { canSkipNext } from "./transportMode";
 import { toast } from "./toast.svelte";
+import { i18n } from "./i18n.svelte";
+import { isLocale, type Locale } from "./locale";
 
 /// How often `player_state` / `queue_state` are polled. A self-rescheduling
 /// `setTimeout`, not `setInterval`: an `invoke` that is slow to answer (or a
@@ -106,6 +110,10 @@ class PlayerStore {
   /// `settings.json` `labeling_mode`: every prepare uses a 20s head-only
   /// stretch instead of the full track, and skip becomes a hard cut.
   labelingMode = $state(false);
+  /// True after the persisted locale lookup finishes (success or fallback).
+  /// The language button stays disabled before this so a stale startup read
+  /// cannot overwrite a listener choice made while the read was in flight.
+  localeReady = $state(false);
   /// `labelingMode`'s value at the moment the *running* session's `doStart`
   /// last succeeded, or `null` if no session has started yet this app run.
   /// `EngineOptions::head_only_secs` is fixed for the life of the `Engine`
@@ -184,10 +192,15 @@ class PlayerStore {
   }
 
   async #init() {
+    // Before anything that can produce a message: `i18n` starts on the
+    // platform locale (resolved synchronously at module load, since the
+    // first render beats this call), and the stored choice — when there is
+    // one — has to win before the first toast or error is composed.
+    await this.#loadLocale();
     try {
       this.dirs = await appDirs();
       if (this.dirs.music_dir_needed && this.dirs.music_dir_unavailable) {
-        this.lastError = `指定した音楽フォルダを開けません: ${this.dirs.music_dir_custom}`;
+        this.lastError = i18n.t.musicDirUnavailable(this.dirs.music_dir_custom ?? "");
       }
     } catch (e) {
       this.lastError = String(e);
@@ -741,6 +754,34 @@ class PlayerStore {
     }
   }
 
+  /// Adopt the stored UI language, if the listener has ever picked one.
+  /// A failure here is not worth an error banner: the platform locale
+  /// `i18n` already resolved is a usable answer, so this only logs.
+  async #loadLocale(): Promise<void> {
+    try {
+      const stored = await getLocaleCmd();
+      if (isLocale(stored)) i18n.setLocale(stored);
+    } catch (e) {
+      console.warn("get_locale failed; keeping the platform locale", e);
+    } finally {
+      this.localeReady = true;
+    }
+  }
+
+  /// Switch the UI language and persist it. Applied locally first so the
+  /// screen turns over on the tap rather than after the round-trip; a failed
+  /// save leaves the new language up for this run and reverts on restart,
+  /// which is the harmless direction to fail in.
+  async doSetLocale(locale: Locale): Promise<void> {
+    if (!this.localeReady) return;
+    i18n.setLocale(locale);
+    try {
+      await setLocaleCmd(locale);
+    } catch (e) {
+      this.lastError = String(e);
+    }
+  }
+
   async doSetAllowNonFunkot(allow: boolean): Promise<void> {
     try {
       this.allowNonFunkot = await setAllowNonFunkotCmd(allow);
@@ -892,20 +933,9 @@ class PlayerStore {
     try {
       result = await takePendingImportCmd();
       if (result.tracks > 0) {
-        const notes: string[] = [];
-        if (result.skipped > 0) notes.push(`非対応${result.skipped}件`);
-        if (result.failed > 0) notes.push(`失敗${result.failed}件`);
-        const suffix = notes.length > 0 ? `（${notes.join("・")}）` : "";
-        toast.notify(`${result.tracks}曲を取り込みました${suffix}`);
+        toast.notify(i18n.t.importedSummary(result.tracks, result.skipped, result.failed));
       } else if (result.skipped > 0 || result.failed > 0) {
-        const notes: string[] = [];
-        if (result.skipped > 0) {
-          notes.push(`対応していない形式のため${result.skipped}件を取り込めませんでした`);
-        }
-        if (result.failed > 0) {
-          notes.push(`${result.failed}件の取り込みに失敗しました`);
-        }
-        toast.notify(notes.join("、"));
+        toast.notify(i18n.t.importProblems(result.skipped, result.failed));
       }
       // Only worth attempting when something actually landed this call, or
       // an earlier auto refresh is still owed -- otherwise there is nothing
@@ -1086,7 +1116,7 @@ class PlayerStore {
     { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
   > {
     try {
-      const result = await setMusicDirCmd();
+      const result = await setMusicDirCmd(i18n.t.pickMusicFolder);
       this.dirs = result.dirs;
       if (result.changed) {
         this.#markLibraryRefreshOwed();

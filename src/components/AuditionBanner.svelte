@@ -1,5 +1,8 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
+  import { i18n } from "../lib/i18n.svelte";
+
+  let t = $derived(i18n.t);
 
   let busy = $state(false);
 
@@ -7,11 +10,7 @@
   let to = $derived(store.player?.audition_to ?? null);
   // Same wording as legacy/index.html: raw file names from player_state,
   // not library-resolved titles.
-  let label = $derived(
-    from && to
-      ? `「${from}」→「${to}」を試聴中`
-      : "自動再生を中断しました",
-  );
+  let label = $derived(from && to ? t.auditioning(from, to) : t.autoplayInterrupted);
 
   async function onResume() {
     if (busy) return;
@@ -28,7 +27,7 @@
   <span class="what">{label}</span>
   <span class="sep" aria-hidden="true">｜</span>
   <button type="button" class="resume" disabled={busy} onclick={onResume}>
-    〔再開〕
+    {t.resumeAction}
   </button>
 </div>
 

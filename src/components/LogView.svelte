@@ -2,6 +2,9 @@
   import { store } from "../lib/state.svelte";
   import { ui } from "../lib/ui.svelte";
   import { pollLog } from "../lib/tauri";
+  import { i18n } from "../lib/i18n.svelte";
+
+  let t = $derived(i18n.t);
 
   const POLL_INTERVAL_MS = 500;
 
@@ -41,7 +44,7 @@
 
   // Closing the log acknowledges whatever error is in it. Without this
   // `lastError` is never cleared -- nothing assigns null to it -- so one
-  // transient invoke failure would leave NowCard's ログを表示 link up
+  // transient invoke failure would leave NowCard's show-log link up
   // forever, long after polling recovered. Cleared on close rather than on
   // open so the error is still readable while the panel is up.
   function onClose() {
@@ -53,27 +56,30 @@
 {#if ui.logOpen}
   <div class="log-view">
     <div class="log-header">
-      <span class="log-title">ログ</span>
-      <button type="button" class="close" onclick={onClose}>閉じる</button>
+      <span class="log-title">{t.logTitle}</span>
+      <button type="button" class="close" onclick={onClose}>{t.close}</button>
     </div>
     {#if store.dirs}
       <!-- Same paths legacy/index.html printed at startup -- lets a tester
            confirm the app is reading/writing where they expect. On Android
            this is also the only place the music folder's path appears (the
-           ⋮ menu has no "開く" item there), and it is what someone about to
-           copy files over MTP needs to read, hence Japanese labels rather
+           ⋮ menu has no "open" item there), and it is what someone about to
+           copy files over MTP needs to read, hence spelled-out labels rather
            than the bare `music:` / `cache:` keys. -->
       <div class="dirs">
-        <div>音楽フォルダ: {store.dirs.music_dir}</div>
-        <div>キャッシュ: {store.dirs.cache_dir}</div>
+        <div>{t.musicFolderLabel}: {store.dirs.music_dir}</div>
+        <div>{t.cacheLabel}: {store.dirs.cache_dir}</div>
       </div>
     {/if}
     <div class="dirs">
       <div>
-        新着: 抽出 {arrivalsInspect.listed} / gate後 {arrivalsInspect.gated} / バナー {arrivalsInspect.banner}
+        {t.arrivalsInspect(arrivalsInspect.listed, arrivalsInspect.gated, arrivalsInspect.banner)}
       </div>
       <div>
-        history rev {arrivalsInspect.historyRevision ?? "—"} / 適用 {arrivalsInspect.processedRevision ?? "—"}
+        {t.historyRevLine(
+          String(arrivalsInspect.historyRevision ?? "—"),
+          String(arrivalsInspect.processedRevision ?? "—"),
+        )}
       </div>
       <div>
         now {arrivalsInspect.nowPlaying ? store.relName(arrivalsInspect.nowPlaying) : "—"}
@@ -81,7 +87,7 @@
         / pending {arrivalsInspect.pending}
       </div>
       {#if arrivalsInspect.names.length > 0}
-        <div>新着path: {arrivalsInspect.names.join(" · ")}</div>
+        <div>{t.arrivalsPathsLabel}: {arrivalsInspect.names.join(" · ")}</div>
       {/if}
     </div>
     {#if store.lastError}

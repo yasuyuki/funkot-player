@@ -4,6 +4,10 @@
   import { toast } from "../../lib/toast.svelte";
   import ChipEditor from "./ChipEditor.svelte";
   import type { FlaggedTrackRow } from "../../lib/tauri";
+  import { i18n } from "../../lib/i18n.svelte";
+  import { flaggedTitle, roleLabel as translatedRoleLabel } from "../../lib/messages";
+
+  let t = $derived(i18n.t);
 
   let busy = $state(false);
 
@@ -46,15 +50,17 @@
   let kind = $derived<"intro" | "outro">(
     row?.role === "outgoing" ? "outro" : "intro",
   );
-  let roleLabel = $derived(row?.role === "outgoing" ? "出る側" : "入る側");
+  let roleLabel = $derived(translatedRoleLabel(t, row?.role ?? "incoming"));
   let partnersText = $derived.by(() => {
     const r = row;
     if (!r) return "";
     return r.partners
       .map((p) => {
-        const left = r.role === "outgoing" ? r.title : p.title;
-        const right = r.role === "outgoing" ? p.title : r.title;
-        const mul = p.count > 1 ? `×${p.count}` : "";
+        const rowTitle = flaggedTitle(t, r.title, r.missing);
+        const partnerTitle = flaggedTitle(t, p.title, p.missing);
+        const left = r.role === "outgoing" ? rowTitle : partnerTitle;
+        const right = r.role === "outgoing" ? partnerTitle : rowTitle;
+        const mul = p.count > 1 ? t.flagCount(p.count) : "";
         return `${left} → ${right}${mul}`;
       })
       .join(" / ");
@@ -86,7 +92,7 @@
     if (!updated) return;
     dirty = true;
     const path = r.path;
-    toast.show("変更しました", async () => {
+    toast.show(t.changed, async () => {
       const restored = await store.doSetBars(
         path,
         kind === "intro" ? prevIntro : null,
@@ -138,7 +144,7 @@
       if (n === null) return;
       ui.closeFlaggedDetail();
       if (n) {
-        toast.show("削除しました", () => store.doUndoLastDismiss());
+        toast.show(t.deleted, () => store.doUndoLastDismiss());
       }
     } finally {
       busy = false;
@@ -179,15 +185,15 @@
 </script>
 
 {#if row}
-  <button type="button" class="linkish" onclick={goList}>← 一覧へ</button>
+  <button type="button" class="linkish" onclick={goList}>{t.backToList}</button>
 
   <div class="meta">
     <div>
-      <strong>{row.title}</strong>
+      <strong>{flaggedTitle(t, row.title, row.missing)}</strong>
       {#if row.artist}<span class="artist"> {row.artist}</span>{/if}
     </div>
     <div>
-      {roleLabel} · {row.count}回
+      {roleLabel} · {t.flagCount(row.count)}
       {#if row.low_confidence}<span class="warn"> ⚠</span>{/if}
     </div>
     <div>{partnersText}</div>
@@ -210,8 +216,8 @@
         onclick={() => listenPartner(partner.path, outgoing)}
       >
         {outgoing
-          ? `「${partner.title}」へのつなぎを聴く`
-          : `「${partner.title}」からのつなぎを聴く`}
+          ? t.listenTransitionTo(flaggedTitle(t, partner.title, partner.missing))
+          : t.listenTransitionFrom(flaggedTitle(t, partner.title, partner.missing))}
       </button>
     {/each}
     <button
@@ -219,15 +225,15 @@
       class="again"
       disabled={!againEnabled || busy}
       onclick={onAgain}
-    >もう一度聴く</button>
+    >{t.listenAgain}</button>
   </div>
 
   <div class="actions">
     <button type="button" class="confirm" disabled={busy} onclick={onConfirm}>
-      〔確定〕
+      {t.confirmAction}
     </button>
     <button type="button" class="cancel" disabled={busy} onclick={onCancel}>
-      〔キャンセル〕
+      {t.cancelAction}
     </button>
   </div>
 {/if}

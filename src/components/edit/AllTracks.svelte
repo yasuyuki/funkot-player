@@ -3,6 +3,9 @@
   import { toast, BULK_DISMISS_MS } from "../../lib/toast.svelte";
   import ChipEditor from "./ChipEditor.svelte";
   import type { TrackRow } from "../../lib/tauri";
+  import { i18n } from "../../lib/i18n.svelte";
+
+  let t = $derived(i18n.t);
 
   /// At most one inline chip editor: `"path\\tintro|outro"` (legacy `openChipKey`).
   let openChipKey = $state<string | null>(null);
@@ -36,8 +39,8 @@
 
   function rootHeading(): string {
     const md = store.dirs?.music_dir;
-    if (!md) return "（ルート）";
-    return store.pathBasename(md) || "（ルート）";
+    if (!md) return t.rootFolder;
+    return store.pathBasename(md) || t.rootFolder;
   }
 
   /// Exactly one group per top-level segment, ordered by where that segment
@@ -98,9 +101,9 @@
   }
 
   function labelText(row: TrackRow): string {
-    if (row.label === true) return "Funkot";
-    if (row.label === false) return "非Funkot";
-    return "—";
+    if (row.label === true) return t.funkot;
+    if (row.label === false) return t.notFunkot;
+    return t.noLabel;
   }
 
   async function onChipPick(path: string, kind: "intro" | "outro", value: number) {
@@ -118,7 +121,7 @@
     if (!updated) return;
     // Re-open the same editor on the refreshed row (legacy).
     openChipKey = `${path}\t${kind}`;
-    toast.show("変更しました", async () => {
+    toast.show(t.changed, async () => {
       const restored = await store.doSetBars(
         path,
         kind === "intro" ? prevIntro : null,
@@ -137,7 +140,7 @@
     try {
       const updated = await store.doSetLabel(row.path, next);
       if (!updated) return;
-      toast.show(next ? "Funkot に登録" : "非Funkot に登録", async () => {
+      toast.show(next ? t.labeledFunkot : t.labeledNotFunkot, async () => {
         const restored = await store.doSetLabel(row.path, prevLabel);
         return restored !== null;
       });
@@ -179,8 +182,7 @@
         undo = () => store.doUndoLastFolderLabel();
       }
       if (n === null) return;
-      const word = verdict ? "Funkot" : "非Funkot";
-      toast.show(`${n}曲を ${word} に登録`, undo, BULK_DISMISS_MS);
+      toast.show(t.bulkLabeled(n, verdict), undo, BULK_DISMISS_MS);
     } finally {
       busy = false;
     }
@@ -210,7 +212,7 @@
     <thead>
       <tr>
         <th>track</th>
-        <th>ラベル</th>
+        <th>{t.colLabel}</th>
         <th>intro</th>
         <th>outro</th>
         <th>mix</th>
@@ -228,14 +230,14 @@
               disabled={busy || (group.key !== "" && !group.absDir)}
               onclick={() =>
                 onFolderLabel(group.absDir, true, group.tracks, group.key === "")}
-            >Funkot</button>
+            >{t.funkot}</button>
             <button
               type="button"
               class="folder-btn"
               disabled={busy || (group.key !== "" && !group.absDir)}
               onclick={() =>
                 onFolderLabel(group.absDir, false, group.tracks, group.key === "")}
-            >非Funkot</button>
+            >{t.notFunkot}</button>
           </td>
         </tr>
         {#each group.tracks as row (row.path)}

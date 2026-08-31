@@ -251,6 +251,12 @@ pub struct Settings {
     /// `false`.
     #[serde(default)]
     pub arrivals_baseline_done: bool,
+    /// UI language the listener picked (`"en"` / `"ja"` / `"id"`). `None`
+    /// means nothing has been picked, and the UI follows the platform locale
+    /// instead — so this stays `None` on a fresh install rather than being
+    /// stamped with whatever the first launch happened to detect.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 fn default_allow_non_funkot() -> bool {
@@ -264,6 +270,7 @@ impl Default for Settings {
             allow_non_funkot: default_allow_non_funkot(),
             labeling_mode: false,
             arrivals_baseline_done: false,
+            locale: None,
         }
     }
 }
@@ -1270,7 +1277,12 @@ pub struct FlaggedTrackRow {
     pub analyzed: bool,
 }
 
-const MISSING_TITLE: &str = "ライブラリにない曲";
+/// Title for a flagged track that is no longer in the library. Left empty on
+/// purpose: `FlaggedTrackRow.missing` / `FlagPartner.missing` already tell the
+/// UI what this row is, and the stand-in wording belongs in the UI's message
+/// catalogue with everything else the listener reads, not in a Rust literal
+/// this layer could never translate.
+const MISSING_TITLE: &str = "";
 const ROLE_OUTGOING: &str = "outgoing";
 const ROLE_INCOMING: &str = "incoming";
 
@@ -2299,7 +2311,9 @@ mod tests {
             .find(|r| r.track_hash == "zzz")
             .expect("missing incoming");
         assert!(missing.missing);
-        assert_eq!(missing.title, MISSING_TITLE);
+        // No title: `missing` is the signal, and the UI's catalogue owns the
+        // stand-in wording (see MISSING_TITLE).
+        assert_eq!(missing.title, "");
         assert!(!missing.low_confidence); // never ⚠ on missing
         assert_eq!(missing.role, ROLE_INCOMING);
         assert!(!missing.analyzed);
@@ -2319,7 +2333,7 @@ mod tests {
         assert!(out.analyzed);
         assert_eq!(out.partners[0].track_hash, "zzz");
         assert!(out.partners[0].missing);
-        assert_eq!(out.partners[0].title, MISSING_TITLE);
+        assert_eq!(out.partners[0].title, "");
         assert_eq!(out.partners[0].path, None);
     }
 
@@ -2556,6 +2570,32 @@ mod tests {
         let loaded = load_settings(&dir.0);
         assert_eq!(loaded, settings);
         assert!(!loaded.allow_non_funkot);
+    }
+
+    #[test]
+    fn settings_round_trip_locale() {
+        let dir = TempDir::new("settings-locale");
+        let settings = Settings {
+            locale: Some("id".into()),
+            ..Default::default()
+        };
+        save_settings(&dir.0, &settings).unwrap();
+        assert_eq!(load_settings(&dir.0).locale.as_deref(), Some("id"));
+    }
+
+    /// A settings file written before this key existed must stay `None`, not
+    /// pick up a language: `None` is what makes the UI follow the platform
+    /// locale, and stamping one in would silently freeze the language for
+    /// every existing install.
+    #[test]
+    fn settings_old_json_without_locale_stays_unset() {
+        let dir = TempDir::new("settings-legacy-locale");
+        fs::write(
+            dir.0.join(SETTINGS_FILE),
+            br#"{"music_dir":"/somewhere/Music","allow_non_funkot":true}"#,
+        )
+        .unwrap();
+        assert_eq!(load_settings(&dir.0).locale, None);
     }
 
     #[test]

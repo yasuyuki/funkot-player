@@ -1,6 +1,10 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
   import { toast } from "../lib/toast.svelte";
+  import { i18n } from "../lib/i18n.svelte";
+  import { queueErrorMessage } from "../lib/messages";
+
+  let t = $derived(i18n.t);
 
   // Per-button busy, not a whole-row lock: tapping ↑ must not freeze ↓/✕
   // (legacy `withBusy` disabled only the tapped button).
@@ -11,7 +15,7 @@
   let reservedSwappable = $derived(store.queue?.reserved_swappable ?? false);
   // `?? true`, not `?? false`: before the first poll lands (`store.queue` is
   // still null), `reserved` is also null so the badge doesn't render at all —
-  // this default only matters for not flashing "準備中" in that instant.
+  // this default only matters for not flashing "preparing" in that instant.
   let reservedPrepared = $derived(store.queue?.reserved_prepared ?? true);
   let transitionInSecs = $derived(store.queue?.transition_in_secs ?? null);
   /// The list actually shown: `reserved` (if any) folded into the front, so
@@ -25,7 +29,7 @@
     const clamped = Math.max(0, Math.floor(secs));
     const m = Math.floor(clamped / 60);
     const s = clamped % 60;
-    return `切替まで ${m}:${s.toString().padStart(2, "0")}`;
+    return t.transitionIn(`${m}:${s.toString().padStart(2, "0")}`);
   }
 
   /// Mirrors `queue::edit_displayed`'s `touches_reserved` check: a `Move`
@@ -56,49 +60,36 @@
     }
   }
 
-  function toastForError(code: string): string {
-    switch (code) {
-      case "too_late":
-        return "もう切り替えに間に合いません";
-      case "stale":
-        return "キューが更新されました";
-      case "auditioning":
-        return "試聴中は変更できません";
-      default:
-        return "キューを更新できませんでした";
-    }
-  }
-
   function onUp(index: number) {
     void withBusy(`up:${index}`, async () => {
       const err = await store.doReorder(index, index - 1, items[index]);
-      if (err) toast.notify(toastForError(err));
+      if (err) toast.notify(queueErrorMessage(t, err));
     });
   }
 
   function onDown(index: number) {
     void withBusy(`down:${index}`, async () => {
       const err = await store.doReorder(index, index + 1, items[index]);
-      if (err) toast.notify(toastForError(err));
+      if (err) toast.notify(queueErrorMessage(t, err));
     });
   }
 
   function onDel(index: number) {
     void withBusy(`del:${index}`, async () => {
       const err = await store.doDequeue(index, items[index]);
-      if (err) toast.notify(toastForError(err));
+      if (err) toast.notify(queueErrorMessage(t, err));
     });
   }
 </script>
 
 <section class="queue">
-  <h2 class="heading">次に再生</h2>
+  <h2 class="heading">{t.queueHeading}</h2>
 
   {#if isEmpty}
     <!-- An empty queue is not an empty playlist: DrainPolicy falls back to
          walking the music folder, so we keep the section visible and say so
          rather than vanishing like legacy/index.html did. -->
-    <p class="empty">キューは空 — 自動選曲で継続</p>
+    <p class="empty">{t.queueEmpty}</p>
   {:else}
     <ul class="list">
       {#each items as path, index (path + ":" + index)}
@@ -121,10 +112,10 @@
                    otherwise. -->
               <span class="badge" class:preparing={!reservedPrepared}>
                 {!reservedPrepared
-                  ? "準備中"
+                  ? t.queuePreparing
                   : reservedSwappable && transitionInSecs !== null
                     ? transitionBadge(transitionInSecs)
-                    : "準備済み"}
+                    : t.queuePrepared}
               </span>
             {/if}
             <div class="acts">
@@ -133,21 +124,21 @@
                 class="mini"
                 disabled={index === 0 || reservedBlocksMove(index, index - 1) || !!busy[`up:${index}`]}
                 onclick={() => onUp(index)}
-                aria-label="上へ"
+                aria-label={t.moveUpLabel}
               >↑</button>
               <button
                 type="button"
                 class="mini"
                 disabled={index === items.length - 1 || reservedBlocksMove(index, index + 1) || !!busy[`down:${index}`]}
                 onclick={() => onDown(index)}
-                aria-label="下へ"
+                aria-label={t.moveDownLabel}
               >↓</button>
               <button
                 type="button"
                 class="mini"
                 disabled={reservedBlocksRemove(index) || !!busy[`del:${index}`]}
                 onclick={() => onDel(index)}
-                aria-label="削除"
+                aria-label={t.removeLabel}
               >✕</button>
             </div>
           </div>

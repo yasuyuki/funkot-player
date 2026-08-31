@@ -1,0 +1,11 @@
+<resources>
+    <string name="notification_channel_playback">Pemutaran</string>
+    <string name="notification_flag_saved">Dicatat</string>
+    <string name="notification_flag_failed">Tidak dapat mencatat</string>
+    <string name="notification_play">Putar</string>
+    <string name="notification_pause">Jeda</string>
+    <string name="notification_next">Berikutnya</string>
+    <string name="notification_output_disconnected">Keluaran terputus</string>
+    <string name="notification_paused">Dijeda</string>
+    <string name="notification_playing">Diputar</string>
+</resources>

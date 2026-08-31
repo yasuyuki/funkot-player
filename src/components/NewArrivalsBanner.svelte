@@ -1,5 +1,8 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
+  import { i18n } from "../lib/i18n.svelte";
+
+  let t = $derived(i18n.t);
 
   // Internal re-entry guard only — the button is never `disabled`. Queuing an
   // unanalysed arrival can stall playback (loader may analyse synchronously);
@@ -23,7 +26,7 @@
 {#if count > 0}
   <div class="banner">
     <button type="button" class="action" onclick={onQueue}>
-      新着 {count} 曲をキューの先頭に入れる
+      {t.queueNewArrivals(count)}
     </button>
   </div>
 {/if}

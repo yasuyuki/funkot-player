@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.media.MediaMetadata
 import android.media.session.MediaSession
@@ -19,6 +20,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
+import java.util.Locale
 
 /**
  * Foreground service whose only job is to keep this process foreground-
@@ -107,6 +109,10 @@ class PlaybackService : Service() {
         /** Resolved track artist for MediaSession (empty when absent). */
         @JvmStatic
         external fun currentArtist(): String
+
+        /** Stored UI locale, or empty to follow the device locale. */
+        @JvmStatic
+        external fun currentLocaleTag(): String
     }
 
     private lateinit var session: MediaSession
@@ -121,6 +127,16 @@ class PlaybackService : Service() {
     private var clearFlagFeedback: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun localizedContext(): Context {
+        val tag = currentLocaleTag()
+        if (tag.isBlank()) return this
+        val config = Configuration(resources.configuration)
+        config.setLocale(Locale.forLanguageTag(tag))
+        return createConfigurationContext(config)
+    }
+
+    private fun text(resourceId: Int): String = localizedContext().getString(resourceId)
 
     override fun onCreate() {
         super.onCreate()
@@ -210,7 +226,7 @@ class PlaybackService : Service() {
     }
 
     private fun showFlagFeedback(ok: Boolean) {
-        val msg = if (ok) "記録しました" else "記録できませんでした"
+        val msg = text(if (ok) R.string.notification_flag_saved else R.string.notification_flag_failed)
         flagFeedback = msg
         Log.i("funkot", "flag feedback: $msg")
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
@@ -274,15 +290,16 @@ class PlaybackService : Service() {
 
     private fun ensureChannel() {
         val manager = getSystemService(NotificationManager::class.java)
-        if (manager.getNotificationChannel(CHANNEL_ID) == null) {
-            manager.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    "Playback",
-                    NotificationManager.IMPORTANCE_LOW,
-                ),
-            )
-        }
+        // Re-creating an existing channel updates its user-visible name, so a
+        // language switch also updates Android Settings without changing the
+        // channel's stable identity or importance.
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID,
+                text(R.string.notification_channel_playback),
+                NotificationManager.IMPORTANCE_LOW,
+            ),
+        )
     }
 
     private fun selfIntent(action: String, requestCode: Int): PendingIntent =
@@ -309,12 +326,12 @@ class PlaybackService : Service() {
         // PlaybackState custom action instead (see setPlaybackState).
         val toggle = Notification.Action.Builder(
             Icon.createWithResource(this, if (paused) R.drawable.ic_play else R.drawable.ic_pause),
-            if (paused) "再生" else "一時停止",
+            text(if (paused) R.string.notification_play else R.string.notification_pause),
             selfIntent(ACTION_TOGGLE, 0),
         ).build()
         val next = Notification.Action.Builder(
             Icon.createWithResource(this, R.drawable.ic_next),
-            "次へ",
+            text(R.string.notification_next),
             selfIntent(ACTION_NEXT, 1),
         ).build()
         val flag = Notification.Action.Builder(
@@ -324,9 +341,9 @@ class PlaybackService : Service() {
         ).build()
 
         val contentText = when {
-            phase == PHASE_DISCONNECTED -> "出力切断中"
-            paused -> "一時停止中"
-            else -> "再生中"
+            phase == PHASE_DISCONNECTED -> text(R.string.notification_output_disconnected)
+            paused -> text(R.string.notification_paused)
+            else -> text(R.string.notification_playing)
         }
 
         val builder = Notification.Builder(this, CHANNEL_ID)

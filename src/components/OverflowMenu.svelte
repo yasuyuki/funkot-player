@@ -4,6 +4,11 @@
   import { toast } from "../lib/toast.svelte";
   import { ui } from "../lib/ui.svelte";
   import { sessionActive } from "../lib/transportMode";
+  import { i18n } from "../lib/i18n.svelte";
+  import { LOCALE_NAMES, nextLocale } from "../lib/locale";
+  import { musicDirErrorMessage } from "../lib/messages";
+
+  let t = $derived(i18n.t);
 
   let scanBusy = $state(false);
   let openMusicBusy = $state(false);
@@ -12,6 +17,7 @@
   let allowNonFunkotBusy = $state(false);
   let labelingModeBusy = $state(false);
   let clearLabelsBusy = $state(false);
+  let localeBusy = $state(false);
 
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
   let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
@@ -45,9 +51,9 @@
       const result = await store.doRefreshLibrary();
       // Check `ok` first so the busy/error arms narrow cleanly (both are `ok: false`).
       if (result.ok) {
-        toast.notify(`${result.count}曲見つかりました`);
+        toast.notify(t.scanFound(result.count));
       } else if ("busy" in result) {
-        toast.notify("スキャン中です");
+        toast.notify(t.scanBusy);
       } else {
         toast.notify(result.error);
       }
@@ -73,28 +79,6 @@
     }
   }
 
-  /// Error code (`set_music_dir`) → Japanese toast text.
-  /// Codes must stay in sync with `src-tauri/src/lib.rs` and
-  /// `src/lib/tauri.ts` (same contract as `Queue.svelte`'s `toastForError`).
-  function toastForMusicDirError(error: string): string {
-    switch (error) {
-      case "not_absolute":
-        return "絶対パスのフォルダを選んでください";
-      case "not_found":
-        return "そのフォルダが見つかりません";
-      case "not_a_directory":
-        return "フォルダを選んでください";
-      case "not_readable":
-        return "そのフォルダを読み取れません";
-      case "contains_app_data":
-        return "アプリのデータフォルダを含むフォルダは選べません";
-      case "unsupported_platform":
-        return "この端末では変更できません";
-      default:
-        return "Musicフォルダを変更できませんでした";
-    }
-  }
-
   async function onSetMusicDir() {
     if (musicDirBusy) return;
     musicDirBusy = true;
@@ -102,15 +86,13 @@
     try {
       const result = await store.doSetMusicDir();
       if (!result.ok) {
-        toast.notify(toastForMusicDirError(result.error));
+        toast.notify(musicDirErrorMessage(t, result.error));
       } else if (!result.changed) {
-        toast.notify("変更しませんでした");
+        toast.notify(t.musicDirUnchanged);
       } else if (result.restartRequired) {
-        toast.notify(
-          `Musicフォルダを変更しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
-        );
+        toast.notify(t.musicDirChangedRestart(store.dirs?.music_dir ?? ""));
       } else {
-        toast.notify(`Musicフォルダを変更しました: ${store.dirs?.music_dir}`);
+        toast.notify(t.musicDirChanged(store.dirs?.music_dir ?? ""));
       }
     } finally {
       musicDirBusy = false;
@@ -123,11 +105,7 @@
     ui.menuOpen = false;
     try {
       await store.doSetAllowNonFunkot(!store.allowNonFunkot);
-      toast.notify(
-        store.allowNonFunkot
-          ? "非Funkotも追加・自動選曲できます"
-          : "非Funkotは追加・自動選曲から除外します",
-      );
+      toast.notify(t.allowNonFunkotToast(store.allowNonFunkot));
     } finally {
       allowNonFunkotBusy = false;
     }
@@ -139,19 +117,7 @@
     ui.menuOpen = false;
     try {
       await store.doSetLabelingMode(!store.labelingMode);
-      if (labelingModePending) {
-        toast.notify(
-          store.labelingMode
-            ? "ラベリングモード: ON（次回の再生開始から有効）"
-            : "ラベリングモード: OFF（次回の再生開始から有効）",
-        );
-      } else {
-        toast.notify(
-          store.labelingMode
-            ? "ラベリングモード: ON（頭20秒だけ再生）"
-            : "ラベリングモード: OFF",
-        );
-      }
+      toast.notify(t.labelingModeToast(store.labelingMode, labelingModePending));
     } finally {
       labelingModeBusy = false;
     }
@@ -159,15 +125,15 @@
 
   async function onClearLabelsAndHistory() {
     if (clearLabelsBusy) return;
-    if (!window.confirm("ラベルと再生履歴を全部消しますか？")) return;
+    if (!window.confirm(t.confirmClearLabels)) return;
     clearLabelsBusy = true;
     ui.menuOpen = false;
     try {
       const ok = await store.doClearLabelsAndHistory();
       if (ok) {
-        toast.notify("ラベルと再生履歴を消しました");
+        toast.notify(t.clearedLabels);
       } else {
-        toast.notify(store.lastError ?? "ラベルと再生履歴を消せませんでした");
+        toast.notify(store.lastError ?? t.clearLabelsFailed);
       }
     } finally {
       clearLabelsBusy = false;
@@ -179,7 +145,7 @@
     feedbackBusy = true;
     ui.menuOpen = false;
     try {
-      const result = await shareFeedback();
+      const result = await shareFeedback(t.sendFeedback);
       if (result.mode === "saved") {
         toast.notify(result.path);
       }
@@ -187,6 +153,17 @@
       toast.notify(String(err));
     } finally {
       feedbackBusy = false;
+    }
+  }
+
+  async function onCycleLocale() {
+    if (localeBusy || !store.localeReady) return;
+    localeBusy = true;
+    ui.menuOpen = false;
+    try {
+      await store.doSetLocale(nextLocale(i18n.locale));
+    } finally {
+      localeBusy = false;
     }
   }
 
@@ -212,16 +189,16 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu" onclick={(event) => event.stopPropagation()}>
-      <button type="button" onclick={onRescan} disabled={scanBusy}>再スキャン</button>
+      <button type="button" onclick={onRescan} disabled={scanBusy}>{t.rescan}</button>
       {#if musicDirConfigurable && musicDirNeeded}
-        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>Musicフォルダを選ぶ</button>
+        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>{t.pickMusicFolder}</button>
       {/if}
       {#if musicDirConfigurable && !musicDirNeeded}
-        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>Musicフォルダを変更</button>
-        <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>Musicフォルダを開く</button>
+        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>{t.changeMusicFolder}</button>
+        <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>{t.openMusicFolder}</button>
       {/if}
       <button type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
-        非Funkotも再生: {store.allowNonFunkot ? "ON" : "OFF"}
+        {t.allowNonFunkotItem(store.allowNonFunkot)}
       </button>
       <!-- Desktop only, same platform test as the folder items above: labeling
            mode prefetches a dozen stretched head buffers at once (~115 MB), which
@@ -229,14 +206,17 @@
            src-tauri/src/lib.rs -- this only hides the button. -->
       {#if musicDirConfigurable}
         <button type="button" onclick={onToggleLabelingMode} disabled={labelingModeBusy}>
-          ラベリングモード: {store.labelingMode ? "ON" : "OFF"}{labelingModePending ? "（次回の再生開始から）" : ""}
+          {t.labelingModeItem(store.labelingMode, labelingModePending)}
         </button>
       {/if}
       <button type="button" onclick={onClearLabelsAndHistory} disabled={clearLabelsBusy}>
-        ラベルと再生履歴を消す
+        {t.clearLabelsItem}
       </button>
-      <button type="button" onclick={onShowLog}>ログを表示</button>
-      <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>意見を送る</button>
+      <button type="button" onclick={onShowLog}>{t.showLog}</button>
+      <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>{t.sendFeedback}</button>
+      <button type="button" onclick={onCycleLocale} disabled={localeBusy || !store.localeReady}>
+        {t.languageItem(LOCALE_NAMES[i18n.locale])}
+      </button>
     </div>
   {/if}
 </div>

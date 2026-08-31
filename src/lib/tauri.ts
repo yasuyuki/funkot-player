@@ -105,13 +105,17 @@ export interface SetMusicDirResult {
 /// folder, validates it and saves it to `settings.json`. Desktop only
 /// (Windows/Mac/Linux) — rejects with `"unsupported_platform"` on Android.
 ///
+/// `title` is the dialog's window title. It comes from here rather than from
+/// the host because the message catalogue (`src/lib/locales/`) is the single
+/// place any UI wording lives.
+///
 /// Rejects with one of `"not_absolute"` / `"not_found"` / `"not_a_directory"`
 /// / `"not_readable"` / `"contains_app_data"` / `"unsupported_platform"`
 /// (see `set_music_dir`'s doc comment in `src-tauri/src/lib.rs`) — this file
-/// and that one, plus `OverflowMenu.svelte`, must keep the exact strings in
-/// sync.
-export function setMusicDir(): Promise<SetMusicDirResult> {
-  return invoke<SetMusicDirResult>("set_music_dir");
+/// and that one, plus `musicDirErrorMessage` in `src/lib/messages.ts`, must
+/// keep the exact strings in sync.
+export function setMusicDir(title: string): Promise<SetMusicDirResult> {
+  return invoke<SetMusicDirResult>("set_music_dir", { title });
 }
 
 export function playerState(): Promise<PlayerState> {
@@ -195,6 +199,18 @@ export function getAllowNonFunkot(): Promise<boolean> {
 /// Persist and apply `allow_non_funkot`. Returns the saved value.
 export function setAllowNonFunkot(allow: boolean): Promise<boolean> {
   return invoke<boolean>("set_allow_non_funkot", { allow });
+}
+
+/// Stored UI language tag, or `null` when the listener has never picked one
+/// (the UI then follows the platform locale — see `src/lib/locale.ts`).
+export function getLocale(): Promise<string | null> {
+  return invoke<string | null>("get_locale");
+}
+
+/// Persist the UI language. Returns the saved tag. On Android this also
+/// re-publishes the playback notification in the new language.
+export function setLocale(locale: string): Promise<string> {
+  return invoke<string>("set_locale", { locale });
 }
 
 /// Current `settings.json` `labeling_mode`.
@@ -393,8 +409,8 @@ export interface ShareFeedbackResult {
 
 /// Snapshot `library.json` / `flags.json` into a ZIP and share (Android) or
 /// return the staged path (desktop).
-export function shareFeedback(): Promise<ShareFeedbackResult> {
-  return invoke<ShareFeedbackResult>("share_feedback");
+export function shareFeedback(title: string): Promise<ShareFeedbackResult> {
+  return invoke<ShareFeedbackResult>("share_feedback", { title });
 }
 
 /// Matches `ImportResult`.

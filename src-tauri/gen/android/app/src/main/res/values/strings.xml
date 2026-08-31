@@ -1,4 +1,13 @@
 <resources>
     <string name="app_name">"Funkot"</string>
     <string name="main_activity_title">"Funkot"</string>
+    <string name="notification_channel_playback">Playback</string>
+    <string name="notification_flag_saved">Recorded</string>
+    <string name="notification_flag_failed">Could not record</string>
+    <string name="notification_play">Play</string>
+    <string name="notification_pause">Pause</string>
+    <string name="notification_next">Next</string>
+    <string name="notification_output_disconnected">Output disconnected</string>
+    <string name="notification_paused">Paused</string>
+    <string name="notification_playing">Playing</string>
 </resources>

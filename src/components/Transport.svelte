@@ -1,12 +1,15 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
   import { primaryMode as resolvePrimaryMode, canSkipNext } from "../lib/transportMode";
+  import { i18n } from "../lib/i18n.svelte";
+
+  let t = $derived(i18n.t);
 
   // Every command round-trips through the host, and `start`/`toggle_pause`
   // touch the filesystem or the audio thread; without a busy guard a second
   // tap before the first reply lands double-fires (the desktop/legacy
-  // equivalent was `withBusy`). Two flags, not one: a tap on 次の曲 must not
-  // wait on an in-flight 開始/一時停止 or vice-versa.
+  // equivalent was `withBusy`). Two flags, not one: a tap on the next-track
+  // button must not wait on an in-flight start/pause or vice-versa.
   let primaryBusy = $state(false);
   let nextBusy = $state(false);
 
@@ -22,13 +25,7 @@
   // — tried on the device — so fixing it needs a different glyph or an inline
   // SVG; left for stage 5 rather than spent a build cycle on here.
   let primaryLabel = $derived(
-    mode === "start"
-      ? "開始"
-      : mode === "pause"
-        ? "⏸ 一時停止"
-        : mode === "resume"
-          ? "▶ 再開"
-          : "開始",
+    mode === "pause" ? t.pause : mode === "resume" ? t.resumePlayback : t.start,
   );
 
   // "idle" only, not "failed" as well: `start()` can only fail after it has
@@ -84,7 +81,7 @@
     {primaryLabel}
   </button>
   <button type="button" class="secondary" disabled={nextDisabled} onclick={onNextClick}>
-    ⏭ 次の曲
+    {t.nextTrack}
   </button>
 </div>
 

@@ -7,6 +7,10 @@
     type LibrarySortKey,
   } from "../lib/library-sort";
   import { toast } from "../lib/toast.svelte";
+  import { i18n } from "../lib/i18n.svelte";
+  import { musicDirErrorMessage } from "../lib/messages";
+
+  let t = $derived(i18n.t);
 
   let query = $state("");
   let sortKey = $state<LibrarySortKey>("recent");
@@ -72,42 +76,19 @@
     return !!busy[row.path] || (isNonFunkot(row) && !store.allowNonFunkot);
   }
 
-  /// Error code (`set_music_dir`) → Japanese toast text. Keep in sync with
-  /// `OverflowMenu.svelte` / `src-tauri/src/lib.rs` / `src/lib/tauri.ts`.
-  function toastForMusicDirError(error: string): string {
-    switch (error) {
-      case "not_absolute":
-        return "絶対パスのフォルダを選んでください";
-      case "not_found":
-        return "そのフォルダが見つかりません";
-      case "not_a_directory":
-        return "フォルダを選んでください";
-      case "not_readable":
-        return "そのフォルダを読み取れません";
-      case "contains_app_data":
-        return "アプリのデータフォルダを含むフォルダは選べません";
-      case "unsupported_platform":
-        return "この端末では変更できません";
-      default:
-        return "Musicフォルダを変更できませんでした";
-    }
-  }
-
   async function onSetMusicDir() {
     if (setMusicBusy) return;
     setMusicBusy = true;
     try {
       const result = await store.doSetMusicDir();
       if (!result.ok) {
-        toast.notify(toastForMusicDirError(result.error));
+        toast.notify(musicDirErrorMessage(t, result.error));
       } else if (!result.changed) {
-        toast.notify("変更しませんでした");
+        toast.notify(t.musicDirUnchanged);
       } else if (result.restartRequired) {
-        toast.notify(
-          `Musicフォルダを変更しました: ${store.dirs?.music_dir}（自動選曲は再起動後に切り替わります）`,
-        );
+        toast.notify(t.musicDirChangedRestart(store.dirs?.music_dir ?? ""));
       } else {
-        toast.notify(`Musicフォルダを変更しました: ${store.dirs?.music_dir}`);
+        toast.notify(t.musicDirChanged(store.dirs?.music_dir ?? ""));
       }
     } finally {
       setMusicBusy = false;
@@ -129,16 +110,16 @@
 </script>
 
 <section class="library">
-  <h2 class="heading">ライブラリ</h2>
+  <h2 class="heading">{t.libraryHeading}</h2>
 
   <!-- Sticky so search stays reachable while scrolling hundreds of rows. -->
   <div class="toolbar">
     <input
       class="search"
       type="search"
-      placeholder="検索"
+      placeholder={t.searchPlaceholder}
       bind:value={query}
-      aria-label="ライブラリを検索"
+      aria-label={t.searchLabel}
     />
     <button
       type="button"
@@ -146,32 +127,28 @@
       class:on={newOnly}
       aria-pressed={newOnly}
       onclick={toggleNewOnly}
-    >新着のみ</button>
+    >{t.newOnly}</button>
     <button type="button" class="sort" onclick={toggleSort}>
-      {sortKey === "recent"
-        ? "新着順▾"
-        : sortKey === "title"
-          ? "曲名順▾"
-          : "アーティスト順▾"}
+      {sortKey === "recent" ? t.sortRecent : sortKey === "title" ? t.sortTitle : t.sortArtist}
     </button>
   </div>
 
   {#if libraryScan}
     <p class="progress">
       {#if libraryScan.phase === "walking"}
-        スキャン中…
+        {t.scanningWalking}
       {:else}
-        スキャン中 {libraryScan.found}曲を確認中 {libraryScan.done}/{libraryScan.found}
+        {t.scanningHashing(libraryScan.found, libraryScan.done)}
       {/if}
     </p>
   {/if}
   {#if analysis}
-    <p class="progress">解析中 {analysis.done}/{analysis.total}: {analysis.name}</p>
+    <p class="progress">{t.analyzing(analysis.done, analysis.total, analysis.name)}</p>
   {/if}
 
   {#if musicDirNeeded}
     <div class="empty">
-      <p class="empty-title">Musicフォルダを選んでください</p>
+      <p class="empty-title">{t.pickMusicFolderPrompt}</p>
       <div class="empty-actions">
         {#if musicDirConfigurable}
           <button
@@ -179,34 +156,29 @@
             class="set-music"
             disabled={setMusicBusy}
             onclick={onSetMusicDir}
-          >Musicフォルダを選ぶ</button>
+          >{t.pickMusicFolder}</button>
         {/if}
       </div>
     </div>
   {:else if libraryEmpty}
     <div class="empty">
-      <p class="empty-title">曲がありません</p>
+      <p class="empty-title">{t.noTracks}</p>
       <!-- Desktop only, same platform test as OverflowMenu's folder items:
            Android's music folder is under `Android/data`, which no file
            manager has been able to reach since Android 11, so `open_music_dir`
            can only report the path there. Store requirement 10.1.2.10 is a
            Microsoft Store rule, so hiding the button on Android costs nothing;
-           the path stays visible in ⋮ → ログを表示 (see LogView). -->
+           the path stays visible in ⋮ → show log (see LogView). -->
       {#if musicDirConfigurable}
-        <p class="empty-hint">
-          Musicフォルダを開いて音声ファイルを入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。
-        </p>
+        <p class="empty-hint">{t.emptyHintDesktop}</p>
         <button
           type="button"
           class="open-music"
           disabled={openMusicBusy}
           onclick={onOpenMusicDir}
-        >Musicフォルダを開く</button>
+        >{t.openMusicFolder}</button>
       {:else}
-        <p class="empty-hint">
-          音声ファイルをMusicフォルダへ入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。
-          フォルダの場所は ⋮ メニューの「ログを表示」に出ます。
-        </p>
+        <p class="empty-hint">{t.emptyHintAndroid}</p>
       {/if}
     </div>
   {:else}
@@ -222,7 +194,7 @@
               {/if}
             </div>
             <div class="sub">
-              <span class="artist">{row.artist || "—"}</span>
+              <span class="artist">{row.artist || t.noLabel}</span>
               <span class="dur">{formatDuration(row.duration_secs)}</span>
             </div>
           </div>
@@ -232,7 +204,7 @@
             class="add"
             disabled={addDisabled(row)}
             onclick={() => onAdd(row.path)}
-            aria-label={`${row.title} をキューに追加`}
+            aria-label={t.addToQueueLabel(row.title)}
           >+</button>
         </li>
       {/each}

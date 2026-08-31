@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
   import { primaryMode as resolvePrimaryMode, canSkipNext } from "../lib/transportMode";
+  import { i18n } from "../lib/i18n.svelte";
 
   interface Props {
     /// Whether the bar is up. Derived in App rather than here because Toast
@@ -10,6 +11,8 @@
   }
 
   let { show }: Props = $props();
+
+  let t = $derived(i18n.t);
 
   let primaryBusy = $state(false);
   let nextBusy = $state(false);
@@ -50,7 +53,7 @@
 {#if show}
   <!-- In-flow spacer so the fixed bar does not cover the last library rows. -->
   <div class="spacer" aria-hidden="true"></div>
-  <div class="minibar" role="toolbar" aria-label="再生コントロール">
+  <div class="minibar" role="toolbar" aria-label={t.playbackControlsLabel}>
     <div class="title">{store.nowTitle ?? ""}</div>
     <button
       type="button"
@@ -58,14 +61,14 @@
       class:resume={mode === "resume"}
       disabled={primaryDisabled}
       onclick={onPrimaryClick}
-      aria-label={mode === "resume" ? "再開" : "一時停止"}
+      aria-label={mode === "resume" ? t.resumeLabel : t.pauseLabel}
     >{primaryLabel}</button>
     <button
       type="button"
       class="ctrl next"
       disabled={nextDisabled}
       onclick={onNextClick}
-      aria-label="次の曲"
+      aria-label={t.nextTrackLabel}
     >⏭</button>
   </div>
 {/if}

@@ -54,6 +54,19 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// on the loader thread; `set_allow_non_funkot` updates it without restart.
 static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 
+/// Whether Android's foreground playback service has been started for this
+/// process. Settings-only actions must not call `syncFrom` before playback:
+/// `startForegroundService` would otherwise create a ghost notification.
+static SERVICE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Live copy of `settings.json`'s `locale`, or empty when the listener has
+/// not picked one. Exists for the Android `currentLocaleTag` JNI entry, which
+/// Kotlin calls with no `AppHandle` to reach `settings.json` through — the
+/// same reason `LAST_SESSION_META` exists for `currentTitle`. Empty means
+/// "follow the device locale", which is what Android resource selection does
+/// on its own.
+static LOCALE_TAG: Mutex<String> = Mutex::new(String::new());
+
 /// Bumped after a successful `history.json` persist (`record_heard`, history
 /// wipe). `player_state` exposes it so the UI can re-pull arrivals.
 static HISTORY_REVISION: AtomicU64 = AtomicU64::new(0);
@@ -692,15 +705,21 @@ struct SetMusicDirResult {
 /// strings — keep this contract in sync on all three, the same as
 /// `reorder`/`dequeue`'s error codes.
 ///
+/// `title` is the dialog's window title, passed in already translated. The
+/// UI's message catalogue is the only place any of these words live, so this
+/// layer takes the string rather than holding a second, unreachable copy of
+/// it per language.
+///
 /// Always `async`: `blocking_pick_folder` must never run on the main thread.
 #[tauri::command(async)]
 fn set_music_dir(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
+    title: String,
 ) -> Result<SetMusicDirResult, String> {
     #[cfg(target_os = "android")]
     {
-        let _ = (&app, &state);
+        let _ = (&app, &state, &title);
         return Err("unsupported_platform".into());
     }
     #[cfg(not(target_os = "android"))]
@@ -710,10 +729,7 @@ fn set_music_dir(
 
         let dirs = resolve_dirs(&app)?;
 
-        let mut b = app
-            .dialog()
-            .file()
-            .set_title("Musicフォルダを選ぶ");
+        let mut b = app.dialog().file().set_title(&title);
         if !dirs.music_dir.is_empty() {
             b = b.set_directory(&dirs.music_dir);
         }
@@ -786,7 +802,7 @@ struct ShareFeedbackResult {
 ///
 /// Does not move or delete anything under `data_dir`.
 #[tauri::command(async)]
-fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> {
+fn share_feedback(app: tauri::AppHandle, title: String) -> Result<ShareFeedbackResult, String> {
     let dirs = resolve_dirs(&app)?;
 
     #[cfg(target_os = "android")]
@@ -824,7 +840,7 @@ fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> 
 
     #[cfg(target_os = "android")]
     {
-        feedback_share(&path)?;
+        feedback_share(&path, &title)?;
         Ok(ShareFeedbackResult {
             mode: "shared".into(),
             path,
@@ -832,6 +848,7 @@ fn share_feedback(app: tauri::AppHandle) -> Result<ShareFeedbackResult, String> 
     }
     #[cfg(not(target_os = "android"))]
     {
+        let _ = title;
         Ok(ShareFeedbackResult {
             mode: "saved".into(),
             path,
@@ -4359,6 +4376,48 @@ fn set_labeling_mode(app: tauri::AppHandle, on: bool) -> Result<bool, String> {
     Ok(on)
 }
 
+/// The stored UI language, or `None` when the listener has never picked one
+/// (fresh install) — the UI then follows the platform locale. Also refreshes
+/// [`LOCALE_TAG`] so the Android notification agrees with the app after a
+/// cold start, not only after a switch.
+#[tauri::command(async)]
+fn get_locale(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let dirs = resolve_dirs(&app)?;
+    let locale = store::load_settings(Path::new(&dirs.data_dir)).locale;
+    *LOCALE_TAG.lock().unwrap() = locale.clone().unwrap_or_default();
+    Ok(locale)
+}
+
+/// Persist the UI language and apply it to the Android notification.
+///
+/// [`LOCALE_TAG`] is stored **before** `SAVE_LOCK` is released (same shape as
+/// `set_allow_non_funkot`). `service_sync_state` then makes a running
+/// `PlaybackService` rebuild its notification and re-read the tag through
+/// `currentLocaleTag`. Before playback starts it is deliberately a no-op.
+#[tauri::command(async)]
+fn set_locale(app: tauri::AppHandle, locale: String) -> Result<String, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data = Path::new(&dirs.data_dir);
+    let saved = with_settings_rmw_then(
+        data,
+        |settings| {
+            settings.locale = Some(locale.clone());
+        },
+        |_| {
+            *LOCALE_TAG.lock().unwrap() = locale.clone();
+            locale.clone()
+        },
+    )?;
+    service_sync_state();
+    Ok(saved)
+}
+
+/// Used by the Android `currentLocaleTag` JNI entry.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn notification_locale_tag() -> String {
+    LOCALE_TAG.lock().unwrap().clone()
+}
+
 /// `SAVE_LOCK`-scoped Settings read-modify-write: reload, mutate, atomic save.
 fn with_settings_rmw(
     data: &Path,
@@ -4749,6 +4808,10 @@ fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
     let session = store::load_session(&data);
     let settings = store::load_settings(&data);
     ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
+    // Earliest point settings are on hand. Seeding here rather than waiting
+    // for the UI's `get_locale` means a notification raised before the WebView
+    // has finished starting already speaks the right language.
+    *LOCALE_TAG.lock().unwrap() = settings.locale.clone().unwrap_or_default();
     let saved = store::load_queue(&data).unwrap_or_else(|e| {
         log::warn!("setup: load_queue({}): {e}", data.display());
         Vec::new()
@@ -7446,6 +7509,7 @@ fn service_call(method: &str) {
 fn service_call(_method: &str) {}
 
 fn service_set_running(running: bool) {
+    SERVICE_RUNNING.store(running, Ordering::Relaxed);
     service_call(if running { "startFrom" } else { "stopFrom" });
 }
 
@@ -7455,7 +7519,9 @@ fn service_set_running(running: bool) {
 /// this, pausing from the app leaves the notification showing the old label
 /// until something else touches it.
 fn service_sync_state() {
-    service_call("syncFrom");
+    if SERVICE_RUNNING.load(Ordering::Relaxed) {
+        service_call("syncFrom");
+    }
 }
 
 /// `android.os.Build.MODEL` (device marketing name).
@@ -7539,7 +7605,7 @@ fn android_cache_dir() -> Result<PathBuf, String> {
 /// Same classloader routing as [`service_call`]: this runs on Tauri's blocking
 /// pool, so the system classloader cannot see app classes.
 #[cfg(target_os = "android")]
-fn feedback_share(absolute_path: &str) -> Result<(), String> {
+fn feedback_share(absolute_path: &str, title: &str) -> Result<(), String> {
     use jni::objects::{JClassLoader, JObject};
     use jni::refs::LoaderContext;
     use jni::strings::JNIString;
@@ -7566,11 +7632,12 @@ fn feedback_share(absolute_path: &str) -> Result<(), String> {
             true,
         )?;
         let path = env.new_string(absolute_path)?;
+        let title = env.new_string(title)?;
         env.call_static_method(
             &class,
             JNIString::new("shareFrom"),
-            jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)V"),
-            &[(&context).into(), (&path).into()],
+            jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V"),
+            &[(&context).into(), (&path).into(), (&title).into()],
         )?;
         Ok(())
     });
@@ -7765,6 +7832,21 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentArtist<
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+/// UI language tag for `Loc.kt`'s config context, or empty to follow the
+/// device locale.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentLocaleTag<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: jni::objects::JClass<'local>,
+) -> jni::sys::jstring {
+    let tag = notification_locale_tag();
+    env.with_env(|env| {
+        Ok::<_, jni::errors::Error>(env.new_string(&tag)?.into_raw())
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "android")]
@@ -7870,6 +7952,8 @@ pub fn run() {
             set_allow_non_funkot,
             get_labeling_mode,
             set_labeling_mode,
+            get_locale,
+            set_locale,
             share_feedback,
             take_pending_import
         ])

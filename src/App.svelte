@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { ui } from "./lib/ui.svelte";
+  import { i18n } from "./lib/i18n.svelte";
   import { store } from "./lib/state.svelte";
   import { sessionActive } from "./lib/transportMode";
   import UiBoundary from "./components/UiBoundary.svelte";
@@ -21,6 +22,8 @@
 
   /// True while the transport sentinel intersects the viewport. MiniBar
   /// flips on when this goes false (user scrolled the transport away).
+  let t = $derived(i18n.t);
+
   let transportVisible = $state(true);
   let sentinelEl = $state<HTMLElement | null>(null);
 
@@ -63,7 +66,15 @@
     return () => io.disconnect();
   });
 
-  // Load flagged rows only when the edit → 直すべきつなぎ panel is showing
+  // Keep the document language in step with the UI language: line breaking
+  // and the font the WebView picks for CJK vs Latin text both key off it, and
+  // a stale `lang` is what makes a switched-to-English screen still break
+  // lines as if it were Japanese.
+  $effect(() => {
+    document.documentElement.lang = i18n.locale;
+  });
+
+  // Load flagged rows only when the edit → flagged-transitions panel is showing
   // (legacy `showTab` / `showEditSub`). Pure UI otherwise — no transport invoke.
   $effect(() => {
     if (ui.mode === "edit" && ui.editSub === "flags") {
@@ -155,7 +166,7 @@
     <NewArrivalsBanner />
   </UiBoundary>
 
-  <div class="subtabs" role="tablist" aria-label="再生サブタブ">
+  <div class="subtabs" role="tablist" aria-label={t.playTabsLabel}>
     <button
       type="button"
       class="tab"
@@ -163,7 +174,7 @@
       role="tab"
       aria-selected={ui.playSub === "queue"}
       onclick={() => onPlaySub("queue")}
-    >次に再生</button>
+    >{t.queueHeading}</button>
     <button
       type="button"
       class="tab"
@@ -171,12 +182,12 @@
       role="tab"
       aria-selected={ui.playSub === "library"}
       onclick={() => onPlaySub("library")}
-    >ライブラリ</button>
+    >{t.libraryHeading}</button>
   </div>
 
   <!-- Both panes stay mounted and the inactive one is `hidden`. An `{#if}`
-       would unmount Library and drop its search text, sort key and 新着のみ
-       state on every tab tap. -->
+       would unmount Library and drop its search text, sort key and
+       new-arrivals-only state on every tab tap. -->
   <div class="pane" hidden={ui.playSub !== "queue"}>
     <UiBoundary>
       <Queue />
@@ -193,7 +204,7 @@
     <MiniBar show={miniBarVisible} />
   </UiBoundary>
 {:else}
-  <div class="subtabs" role="tablist" aria-label="編集サブタブ">
+  <div class="subtabs" role="tablist" aria-label={t.editTabsLabel}>
     <button
       type="button"
       class="tab"
@@ -201,7 +212,7 @@
       role="tab"
       aria-selected={ui.editSub === "flags"}
       onclick={() => ui.setEditSub("flags")}
-    >直すべきつなぎ</button>
+    >{t.tabFlags}</button>
     <button
       type="button"
       class="tab"
@@ -209,7 +220,7 @@
       role="tab"
       aria-selected={ui.editSub === "all"}
       onclick={() => ui.setEditSub("all")}
-    >すべての曲</button>
+    >{t.tabAllTracks}</button>
   </div>
 
   {#if ui.editSub === "flags"}

@@ -3,16 +3,10 @@
   import { store } from "../lib/state.svelte";
   import { toast } from "../lib/toast.svelte";
   import { ui } from "../lib/ui.svelte";
+  import { i18n } from "../lib/i18n.svelte";
+  import { phaseLabel as phaseText } from "../lib/messages";
 
-  const PHASE_LABEL: Record<string, string> = {
-    idle: "待機中",
-    starting: "準備中",
-    playing: "再生中",
-    paused: "一時停止",
-    stalled: "次の曲を準備中",
-    failed: "再生できません",
-    disconnected: "出力先を再接続中",
-  };
+  let t = $derived(i18n.t);
 
   function formatTime(secs: number | null): string {
     if (secs === null || !Number.isFinite(secs)) return "--:--";
@@ -23,7 +17,7 @@
   }
 
   let phase = $derived(store.player?.phase ?? "idle");
-  let phaseLabel = $derived(PHASE_LABEL[phase] ?? phase);
+  let phaseLabel = $derived(phaseText(t, phase));
   let elapsed = $derived(store.elapsed);
   let duration = $derived(store.player?.duration_secs ?? null);
   let progressPct = $derived(
@@ -74,7 +68,7 @@
     try {
       const updated = await store.doSetLabel(nowPath, next);
       if (!updated) return;
-      toast.show(next ? "Funkot に登録" : "非Funkot に登録", async () => {
+      toast.show(next ? t.labeledFunkot : t.labeledNotFunkot, async () => {
         const restored = await store.doSetLabel(nowPath!, prevLabel);
         return restored !== null;
       });
@@ -98,7 +92,7 @@
         class="label-toggle"
         disabled={labelBusy}
         onclick={onToggleLabel}
-      >{shownFunkot ? "Funkot" : "非Funkot"}</button>
+      >{shownFunkot ? t.funkot : t.notFunkot}</button>
     {/if}
     <span class="progress">{labelProgress.current} / {labelProgress.total}</span>
   </div>
@@ -123,7 +117,7 @@
     <div class="error-actions">
       {#if showLogLink}
         <button type="button" class="log-link" onclick={() => (ui.logOpen = true)}>
-          ログを表示
+          {t.showLog}
         </button>
       {/if}
       {#if showOpenMusic}
@@ -132,7 +126,7 @@
           class="log-link"
           disabled={openMusicBusy}
           onclick={onOpenMusicDir}
-        >Musicフォルダを開く</button>
+        >{t.openMusicFolder}</button>
       {/if}
     </div>
   {/if}

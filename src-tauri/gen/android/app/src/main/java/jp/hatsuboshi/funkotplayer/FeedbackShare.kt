@@ -15,7 +15,7 @@ import java.io.File
  */
 object FeedbackShare {
     @JvmStatic
-    fun shareFrom(context: Context, absolutePath: String) {
+    fun shareFrom(context: Context, absolutePath: String, title: String) {
         val file = File(absolutePath)
         val uri = FileProvider.getUriForFile(
             context,
@@ -28,7 +28,7 @@ object FeedbackShare {
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        val chooser = Intent.createChooser(send, "意見を送る").apply {
+        val chooser = Intent.createChooser(send, title).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(chooser)

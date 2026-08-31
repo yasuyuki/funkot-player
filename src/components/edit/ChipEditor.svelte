@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { i18n } from "../../lib/i18n.svelte";
+
   /// Shared intro/outro step set (legacy INTRO_STEPS / OUTRO_STEPS).
   const STEPS = [16, 32, 48, 64, 80];
 
@@ -26,12 +28,9 @@
     return Array.from(set).sort((a, b) => a - b);
   });
 
-  let title = $derived(kind === "intro" ? "イントロ" : "アウトロ");
-  let hint = $derived(
-    kind === "outro"
-      ? "長くすると切り替わりが早くなる"
-      : "長くするほどイントロを飛ばし、短い前振りで入る",
-  );
+  let t = $derived(i18n.t);
+  let title = $derived(kind === "intro" ? t.intro : t.outro);
+  let hint = $derived(kind === "outro" ? t.outroHint : t.introHint);
 
   async function pick(v: number) {
     // Re-tapping the current chip is a no-op (legacy).
@@ -47,7 +46,7 @@
 
 <div class="chip-editor">
   <h3 class="title">{title}</h3>
-  <div class="scale">短い ←──────→ 長い</div>
+  <div class="scale">{t.chipScale}</div>
   <div class="row">
     {#each values as v (v)}
       <button

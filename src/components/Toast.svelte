@@ -1,5 +1,6 @@
 <script lang="ts">
   import { toast } from "../lib/toast.svelte";
+  import { i18n } from "../lib/i18n.svelte";
 
   interface Props {
     /// True while MiniBar is up, so the toast sits on top of it instead of
@@ -8,6 +9,8 @@
   }
 
   let { raised }: Props = $props();
+
+  let t = $derived(i18n.t);
 </script>
 
 {#if toast.message !== null}
@@ -16,7 +19,7 @@
     {#if toast.undoable}
       <span class="sep">｜</span>
       <button type="button" class="undo" disabled={toast.busy} onclick={() => toast.undo()}>
-        取消
+        {t.undo}
       </button>
     {/if}
   </div>
@@ -27,7 +30,7 @@
      transport. Every message here is the result of something the user just
      did, and the two places they are most likely to be looking -- the
      library list and the edit tabs -- are scrolled far below that spot, so
-     an in-flow toast auto-dismissed off-screen. It also puts 取消 within
+     an in-flow toast auto-dismissed off-screen. It also puts undo within
      thumb reach. Deliberately NOT where the scan/analysis progress lines
      live (Library.svelte): those belong next to the rows they describe, and
      analysis keeps running in the background, so sharing this one slot
@@ -69,14 +72,14 @@
     flex: none;
     color: var(--color-text-dimmer);
   }
-  /* Overrides tokens.css's default `button` (full width, large padding): 取消
+  /* Overrides tokens.css's default `button` (full width, large padding): undo
      is an inline text action next to the message, not a standalone control.
      No `transition` here either, for the same tap-must-be-instant reason as
      every other button in this app. */
   .undo {
     width: auto;
     /* Two long titles make the message wrap, and without these the flex row
-       squeezes 取消 down to one character per line -- seen on the device. */
+       squeezes undo down to one character per line -- seen on the device. */
     flex: none;
     white-space: nowrap;
     font-size: inherit;

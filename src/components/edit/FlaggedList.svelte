@@ -3,14 +3,14 @@
   import { ui } from "../../lib/ui.svelte";
   import { toast } from "../../lib/toast.svelte";
   import type { FlaggedTrackRow } from "../../lib/tauri";
+  import { i18n } from "../../lib/i18n.svelte";
+  import { flaggedTitle, roleLabel } from "../../lib/messages";
+
+  let t = $derived(i18n.t);
 
   let busyKey = $state<string | null>(null);
 
   let rows = $derived(store.flaggedRows);
-
-  function roleLabel(role: string): string {
-    return role === "outgoing" ? "出る側" : "入る側";
-  }
 
   function openDetail(row: FlaggedTrackRow) {
     ui.openFlaggedDetail(row.track_hash, row.role);
@@ -28,7 +28,7 @@
       const n = await store.doDismissFlags(row.track_hash, row.role);
       // Legacy: toast only when dismiss actually recorded a new key (`n` truthy).
       if (n) {
-        toast.show("削除しました", () => store.doUndoLastDismiss());
+        toast.show(t.deleted, () => store.doUndoLastDismiss());
       }
     } finally {
       busyKey = null;
@@ -37,40 +37,40 @@
 </script>
 
 {#if rows.length === 0}
-  <p class="empty">直すべきつなぎはありません</p>
-  <button type="button" class="linkish" onclick={seeAll}>すべての曲を見る</button>
+  <p class="empty">{t.noFlagged}</p>
+  <button type="button" class="linkish" onclick={seeAll}>{t.seeAllTracks}</button>
 {:else}
   <ul class="list">
     {#each rows as row (`${row.track_hash}:${row.role}`)}
       <li class="row">
         {#if row.missing}
           <button type="button" class="head" disabled>
-            <span class="title">{row.title}</span>
+            <span class="title">{flaggedTitle(t, row.title, row.missing)}</span>
             {#if row.artist}<span class="artist">{row.artist}</span>{/if}
-            <span class="role">{roleLabel(row.role)}</span>
-            <span class="count">{row.count}</span>
+            <span class="role">{roleLabel(t, row.role)}</span>
+            <span class="count">{t.flagCount(row.count)}</span>
           </button>
           <button
             type="button"
             class="ok"
             disabled={busyKey === `${row.track_hash}\t${row.role}`}
             onclick={() => dismiss(row)}
-          >〔外す〕</button>
+          >{t.dismissFlag}</button>
         {:else if !row.analyzed}
           <button type="button" class="head" disabled>
             <span class="title">{row.title}</span>
             {#if row.artist}<span class="artist">{row.artist}</span>{/if}
-            <span class="role">{roleLabel(row.role)}</span>
-            <span class="count">{row.count}</span>
+            <span class="role">{roleLabel(t, row.role)}</span>
+            <span class="count">{t.flagCount(row.count)}</span>
             {#if row.low_confidence}<span class="warn">⚠</span>{/if}
-            <span class="unanalyzed">未解析</span>
+            <span class="unanalyzed">{t.unanalyzed}</span>
           </button>
         {:else}
           <button type="button" class="head" onclick={() => openDetail(row)}>
             <span class="title">{row.title}</span>
             {#if row.artist}<span class="artist">{row.artist}</span>{/if}
-            <span class="role">{roleLabel(row.role)}</span>
-            <span class="count">{row.count}</span>
+            <span class="role">{roleLabel(t, row.role)}</span>
+            <span class="count">{t.flagCount(row.count)}</span>
             {#if row.low_confidence}<span class="warn">⚠</span>{/if}
           </button>
         {/if}
