@@ -16,7 +16,7 @@
   <Identity
     Name="hatsuboshi.jp.Funkotplayer"
     Publisher="CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64"
-    Version="0.2.0.0"
+    Version="0.3.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
