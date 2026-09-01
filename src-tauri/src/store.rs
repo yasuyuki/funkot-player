@@ -909,6 +909,20 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
     Ok(hash)
 }
 
+/// The hash [`resolve_content_hash`] would return without touching the file:
+/// `Some` when `path`'s mtime+size still match its `index` entry.
+///
+/// Split out so a caller holding the index behind a lock can answer from
+/// memory and drop the lock before hashing on a miss -- hashing reads the
+/// whole file, which is not something to do with a shared index locked. Must
+/// stay identical to the fingerprint test in [`resolve_content_hash`]; only
+/// what happens after a miss differs.
+pub fn fingerprint_hit(path: &Path, index: &HashIndex) -> Option<String> {
+    let (mtime_ms, len) = file_mtime_ms_and_len(path)?;
+    let entry = index.get(&*path.to_string_lossy())?;
+    (entry.mtime_ms == mtime_ms && entry.len == len).then(|| entry.hash.clone())
+}
+
 /// Resolve content hash and embedded tags for a library scan, updating `index`
 /// in place. Does not persist to disk.
 ///

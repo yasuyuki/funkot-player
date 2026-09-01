@@ -5,6 +5,7 @@
 
 mod queue;
 mod store;
+mod store_cache;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -2152,8 +2153,9 @@ fn record_heard(path: &Path) {
     };
     // Hash outside SAVE_LOCK (same as gated_non_funkot): index is read-only
     // here — never save. Persist of hash-index is `refresh_library` only.
-    let mut index = store::load_hash_index(data_dir).index;
-    let hash = match store::resolve_content_hash(path, &mut index) {
+    // `store_cache` answers from the parsed index instead of re-reading the
+    // whole file for one lookup on every track change.
+    let hash = match store_cache::content_hash(data_dir, path) {
         Ok(h) => h,
         Err(e) => {
             log::warn!("record_heard: cannot hash {}: {e}", path.display());
@@ -4729,9 +4731,9 @@ fn gated_non_funkot(
 ) -> bool {
     // Read-only use of the index: never save here. Persist is `refresh_library`
     // only — otherwise folder-drain / enqueue races with refresh and can
-    // overwrite a pruned index with a stale map.
-    let mut index = store::load_hash_index(data_dir).index;
-    let Ok(hash) = store::resolve_content_hash(path, &mut index) else {
+    // overwrite a pruned index with a stale map. `store_cache` is read-only
+    // for exactly that reason, so it is the right side of that rule.
+    let Ok(hash) = store_cache::content_hash(data_dir, path) else {
         return false;
     };
     let Some(a) = analyzed_cache_entry(cache_dir, &hash) else {
@@ -6527,7 +6529,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
         &data_dir,
         &hash_index,
         plan,
-        store::save_hash_index,
+        store_cache::save_hash_index,
         mark_arrivals_baseline_done,
     )?;
 
@@ -6743,8 +6745,10 @@ fn set_label_impl(
     track: &std::path::Path,
     verdict: Option<bool>,
 ) -> Result<TrackRow, String> {
-    let mut index = store::load_hash_index(data_dir).index;
-    let hash = store::resolve_content_hash(track, &mut index)
+    // Read-only, like `record_heard`: this path labels one track and never
+    // persists the index. Reading it from memory is what keeps a keypress off
+    // the size of the library.
+    let hash = store_cache::content_hash(data_dir, track)
         .map_err(|e| format!("cannot hash {}: {e}", track.display()))?;
 
     let mut labels = store::load_labels(data_dir);
@@ -7011,7 +7015,11 @@ fn clear_labels_and_history(app: tauri::AppHandle) -> Result<(), String> {
 ///
 /// Caller must hold `INDEX_LOCK` → `SAVE_LOCK` (or be single-threaded in tests).
 fn clear_labels_and_history_impl(data_dir: &std::path::Path) -> Result<(), String> {
-    clear_labels_and_history_with_index_save(data_dir, store::save_hash_index, &HISTORY_REVISION)
+    clear_labels_and_history_with_index_save(
+        data_dir,
+        store_cache::save_hash_index,
+        &HISTORY_REVISION,
+    )
 }
 
 /// Same as [`clear_labels_and_history_impl`], with injectable index save and
@@ -7081,7 +7089,7 @@ fn list_new_arrivals_impl(data_dir: &std::path::Path) -> Result<Vec<store::NewAr
     let mut index = loaded.index;
     let history = store::load_history(data_dir);
     if store::fold_played_arrivals(&mut index, &history) {
-        store::save_hash_index(data_dir, &index)
+        store_cache::save_hash_index(data_dir, &index)
             .map_err(|e| format!("cannot save hash-index: {e}"))?;
     }
     Ok(store::extract_new_arrivals(
@@ -7165,7 +7173,7 @@ fn queue_new_arrivals_under_locks(
     let mut index = loaded.index;
     let history = store::load_history(data_dir);
     if store::fold_played_arrivals(&mut index, &history) {
-        store::save_hash_index(data_dir, &index)
+        store_cache::save_hash_index(data_dir, &index)
             .map_err(|e| format!("cannot save hash-index: {e}"))?;
     }
     let arrivals = store::extract_new_arrivals(
