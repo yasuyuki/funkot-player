@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
   import { openMusicDir, type TrackRow } from "../lib/tauri";
+  import { showLibraryEmpty } from "../lib/library-empty";
   import {
     nextLibrarySortKey,
     sortLibraryRows,
@@ -21,8 +22,10 @@
 
   let analysis = $derived(store.analysis);
   let libraryScan = $derived(store.libraryScan);
-  let libraryEmpty = $derived(store.libraryList.length === 0);
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
+  let libraryEmpty = $derived(
+    showLibraryEmpty(store.libraryList.length, musicDirNeeded, libraryScan),
+  );
   let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
 
   function formatDuration(secs: number | null): string {
@@ -133,7 +136,7 @@
     </button>
   </div>
 
-  {#if libraryScan}
+  {#if libraryScan && !musicDirNeeded}
     <p class="progress">
       {#if libraryScan.phase === "walking"}
         {t.scanningWalking}

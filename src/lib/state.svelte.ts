@@ -97,8 +97,13 @@ class PlayerStore {
   /// `analysis-done` (or overwritten by the next progress event).
   analysis = $state<{ done: number; total: number; name: string } | null>(null);
   /// Non-null while `refresh_library` is walking / hashing. Cleared when the
-  /// invoke returns (success or error).
-  libraryScan = $state<LibraryScanProgress | null>(null);
+  /// invoke returns (success or error). Starts as walking so the first paint
+  /// does not treat an unloaded library as empty ("No tracks").
+  libraryScan = $state<LibraryScanProgress | null>({
+    phase: "walking",
+    found: 0,
+    done: 0,
+  });
   /// Last invoke failure, from either the poll loop or a transport action,
   /// or a render throw caught by `<svelte:boundary>` (`UiBoundary`).
   /// Polling keeps running after one of these; it is not fatal.
@@ -342,6 +347,7 @@ class PlayerStore {
     // concurrent music-dir / import owed).
     if (this.#libraryBusy) return;
     this.#libraryBusy = true;
+    this.libraryScan = { phase: "walking", found: 0, done: 0 };
     let applied = false;
     try {
       // List only — do not re-queue analysis (would loop on permanent failures).
@@ -843,6 +849,7 @@ class PlayerStore {
   > {
     if (this.#libraryBusy) return { ok: false, busy: true };
     this.#libraryBusy = true;
+    this.libraryScan = { phase: "walking", found: 0, done: 0 };
     let attempt: RefreshAttempt = "error";
     const consume = this.#libraryRefreshOwed;
     const owedEpoch = this.#libraryRefreshOwedEpoch;
