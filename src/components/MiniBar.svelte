@@ -54,22 +54,24 @@
   <!-- In-flow spacer so the fixed bar does not cover the last library rows. -->
   <div class="spacer" aria-hidden="true"></div>
   <div class="minibar" role="toolbar" aria-label={t.playbackControlsLabel}>
-    <div class="title">{store.nowTitle ?? ""}</div>
-    <button
-      type="button"
-      class="ctrl"
-      class:resume={mode === "resume"}
-      disabled={primaryDisabled}
-      onclick={onPrimaryClick}
-      aria-label={mode === "resume" ? t.resumeLabel : t.pauseLabel}
-    >{primaryLabel}</button>
-    <button
-      type="button"
-      class="ctrl next"
-      disabled={nextDisabled}
-      onclick={onNextClick}
-      aria-label={t.nextTrackLabel}
-    >⏭</button>
+    <div class="inner">
+      <div class="title">{store.nowTitle ?? ""}</div>
+      <button
+        type="button"
+        class="ctrl"
+        class:resume={mode === "resume"}
+        disabled={primaryDisabled}
+        onclick={onPrimaryClick}
+        aria-label={mode === "resume" ? t.resumeLabel : t.pauseLabel}
+      >{primaryLabel}</button>
+      <button
+        type="button"
+        class="ctrl next"
+        disabled={nextDisabled}
+        onclick={onNextClick}
+        aria-label={t.nextTrackLabel}
+      >⏭</button>
+    </div>
   </div>
 {/if}
 
@@ -86,12 +88,27 @@
     z-index: 20;
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
     height: calc(var(--minibar-height) + env(safe-area-inset-bottom, 0px));
-    padding: var(--space-sm) var(--space-xl)
-      calc(var(--space-sm) + env(safe-area-inset-bottom, 0px));
+    padding: var(--space-sm) 0 calc(var(--space-sm) + env(safe-area-inset-bottom, 0px));
     background: var(--color-minibar-bg);
     border-top: 1px solid var(--color-border);
+    box-sizing: border-box;
+  }
+
+  /* Two layers: the fill runs edge to edge (it is the bottom of the window),
+     the content lines up with #app's shell so the title and the controls do
+     not drift to opposite corners on a wide window. The extra --space-xl per
+     side is body's padding, which puts this content box exactly on the
+     shell's rather than 1rem inside it. Below the cap only the padding is
+     left, which is what the bar had before. */
+  .inner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    width: 100%;
+    max-width: calc(var(--shell-max-width) + 2 * var(--space-xl));
+    margin-inline: auto;
+    padding-inline: var(--space-xl);
     box-sizing: border-box;
   }
 

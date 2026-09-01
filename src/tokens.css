@@ -76,6 +76,16 @@
   --library-row-height: 3.4rem;
   --queue-row-height: 3.2rem;
 
+  /* Desktop shell: the app is mobile-first, so this only bites once the window
+   * is wider than the layout was ever designed for. */
+  --shell-max-width: 1200px;
+
+  /* Two-column browse area (play mode). The 48rem switch point is spelled out
+   * in App.svelte's @container -- a container query cannot read a custom
+   * property -- and comes from these two: 2 x 360px + 1.5rem = 744px. */
+  --browse-col-min: 360px;
+  --browse-gutter: 1.5rem;
+
   /* Spacing */
   --space-xs: 0.3rem;
   --space-sm: 0.4rem;
@@ -104,6 +114,14 @@ body {
     calc(var(--space-xl) + env(safe-area-inset-bottom, 2rem));
   background: var(--color-bg);
   color: var(--color-text);
+}
+
+/* Centred shell. `body` carries symmetric side padding, so `margin-inline:
+ * auto` lands the app in the middle of the viewport; below the cap nothing
+ * changes and the column is still full width. */
+#app {
+  max-width: var(--shell-max-width);
+  margin-inline: auto;
 }
 
 button {

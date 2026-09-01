@@ -15,13 +15,15 @@
 
 {#if toast.message !== null}
   <div class="toast" class:raised>
-    <span class="message">{toast.message}</span>
-    {#if toast.undoable}
-      <span class="sep">｜</span>
-      <button type="button" class="undo" disabled={toast.busy} onclick={() => toast.undo()}>
-        {t.undo}
-      </button>
-    {/if}
+    <div class="inner">
+      <span class="message">{toast.message}</span>
+      {#if toast.undoable}
+        <span class="sep">｜</span>
+        <button type="button" class="undo" disabled={toast.busy} onclick={() => toast.undo()}>
+          {t.undo}
+        </button>
+      {/if}
+    </div>
   </div>
 {/if}
 
@@ -45,9 +47,7 @@
     z-index: 21;
     display: flex;
     align-items: center;
-    gap: var(--space-xs);
-    padding: var(--space-md) var(--space-xl)
-      calc(var(--space-md) + env(safe-area-inset-bottom, 0px));
+    padding: var(--space-md) 0 calc(var(--space-md) + env(safe-area-inset-bottom, 0px));
     /* Same fill and top rule as MiniBar: when both are up they read as one
        two-row dock rather than two competing bars. */
     background: var(--color-minibar-bg);
@@ -63,6 +63,20 @@
   .toast.raised {
     bottom: calc(var(--minibar-height) + env(safe-area-inset-bottom, 0px));
     padding-bottom: var(--space-md);
+  }
+
+  /* Same two layers as MiniBar (see its .inner): fill edge to edge, content on
+     #app's shell, so a toast sitting on the bar shares its left and right
+     edges instead of running the full width of a wide window. */
+  .inner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    width: 100%;
+    max-width: calc(var(--shell-max-width) + 2 * var(--space-xl));
+    margin-inline: auto;
+    padding-inline: var(--space-xl);
+    box-sizing: border-box;
   }
   .message {
     flex: 1;

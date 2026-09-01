@@ -166,37 +166,52 @@
     <NewArrivalsBanner />
   </UiBoundary>
 
-  <div class="subtabs" role="tablist" aria-label={t.playTabsLabel}>
-    <button
-      type="button"
-      class="tab"
-      class:active={ui.playSub === "queue"}
-      role="tab"
-      aria-selected={ui.playSub === "queue"}
-      onclick={() => onPlaySub("queue")}
-    >{t.queueHeading}</button>
-    <button
-      type="button"
-      class="tab"
-      class:active={ui.playSub === "library"}
-      role="tab"
-      aria-selected={ui.playSub === "library"}
-      onclick={() => onPlaySub("library")}
-    >{t.libraryHeading}</button>
-  </div>
+  <!-- The tabs live inside the container, not beside it: a container query
+       styles the container's descendants, and hiding the tabs when both panes
+       fit is part of that same query. -->
+  <div class="browse">
+    <div class="subtabs" role="tablist" aria-label={t.playTabsLabel}>
+      <button
+        type="button"
+        class="tab"
+        class:active={ui.playSub === "queue"}
+        role="tab"
+        aria-selected={ui.playSub === "queue"}
+        onclick={() => onPlaySub("queue")}
+      >{t.queueHeading}</button>
+      <button
+        type="button"
+        class="tab"
+        class:active={ui.playSub === "library"}
+        role="tab"
+        aria-selected={ui.playSub === "library"}
+        onclick={() => onPlaySub("library")}
+      >{t.libraryHeading}</button>
+    </div>
 
-  <!-- Both panes stay mounted and the inactive one is `hidden`. An `{#if}`
-       would unmount Library and drop its search text, sort key and
-       new-arrivals-only state on every tab tap. -->
-  <div class="pane" hidden={ui.playSub !== "queue"}>
-    <UiBoundary>
-      <Queue />
-    </UiBoundary>
-  </div>
-  <div class="pane" hidden={ui.playSub !== "library"}>
-    <UiBoundary>
-      <Library />
-    </UiBoundary>
+    <!-- Library first so the wide layout reads left-to-right the way the work
+         does: find it in the library, then add it to what plays next. DOM
+         order rather than `order:` so focus and screen readers agree with the
+         columns. Narrow shows one pane at a time, so the swap is invisible
+         there and the tab buttons keep their old order.
+
+         Both panes stay mounted and the inactive one is display:none'd by
+         class. An `{#if}` would unmount Library and drop its search text, sort
+         key and new-arrivals-only state on every tab tap; the `hidden`
+         attribute would have to be fought with CSS to show both panes at
+         once, which is exactly what it is not for. -->
+    <div class="panes">
+      <div class="pane" class:active={ui.playSub === "library"}>
+        <UiBoundary>
+          <Library />
+        </UiBoundary>
+      </div>
+      <div class="pane" class:active={ui.playSub === "queue"}>
+        <UiBoundary>
+          <Queue />
+        </UiBoundary>
+      </div>
+    </div>
   </div>
 
   <!-- Outside the panes: the bar belongs to play mode, not to one tab. -->
@@ -287,10 +302,46 @@
     color: var(--color-tab-active-text);
   }
 
-  /* The panes exist only to carry `hidden`, so they get no display of their
-     own; the sections inside bring their own margins. Spelled out because a
-     future `display:` here would silently defeat the attribute. */
-  .pane[hidden] {
+  .browse {
+    container-type: inline-size;
+    container-name: browse;
+  }
+
+  /* The panes carry only their visibility -- the sections inside bring their
+     own margins -- plus the min-width a grid item needs before the ellipsis
+     inside every row can do its job. */
+  .pane {
+    min-width: 0;
+  }
+
+  /* Narrow: whichever tab is selected, and only that one. */
+  .panes > .pane:not(.active) {
     display: none;
+  }
+
+  /* 48rem: two --browse-col-min columns plus one --browse-gutter is 744px, so
+     this is that floor with a little slack. Spelled out rather than tokenised
+     because a container query cannot read a custom property. Measured on the
+     browse wrapper, not the viewport, so shell padding -- or the library tree
+     column planned for the left of this area -- does not move the switch. */
+  @container browse (min-width: 48rem) {
+    /* Both panes are up, each under its own heading, so the tabs would only
+       be a second way to say which one you are looking at. */
+    .subtabs {
+      display: none;
+    }
+
+    .panes {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(var(--browse-col-min), 1fr));
+      gap: var(--browse-gutter);
+      /* Top-aligned: the shorter column just ends, leaving space under it.
+         No filler, and no per-column scrolling -- the page is one scroll. */
+      align-items: start;
+    }
+
+    .panes > .pane:not(.active) {
+      display: block;
+    }
   }
 </style>
