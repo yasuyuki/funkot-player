@@ -1007,7 +1007,8 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
 static INDEX_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serialises writes under `data_dir` (`queue.json`, `flags.json`,
-/// `labels.json`, `history.json`, `session.json`, and Settings RMW).
+/// `labels.json`, `library.json`, `history.json`, `session.json`, and Settings
+/// RMW).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
 /// really do overlap — tapping ✕ on one row and ↑ on another in quick
@@ -6631,6 +6632,9 @@ fn set_bars(
     let dirs = resolve_dirs(&app)?;
     let cache_dir = PathBuf::from(&dirs.cache_dir);
     let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     set_bars_impl(
         &cache_dir,
         &data_dir,
@@ -6642,7 +6646,12 @@ fn set_bars(
 }
 
 /// Core of [`set_bars`], split out so unit tests can drive cache + library.json
-/// without an `AppHandle`.
+/// without an `AppHandle` / global lock.
+///
+/// Caller must hold `SAVE_LOCK` (or be single-threaded in tests): the
+/// `library.json` read-modify-write below is the same one [`set_label_impl`]
+/// and [`set_folder_label_impl`] do for the funkot mirror, so without the lock
+/// a concurrent bar edit and label write lose one of the two.
 fn set_bars_impl(
     cache_dir: &std::path::Path,
     data_dir: &std::path::Path,
