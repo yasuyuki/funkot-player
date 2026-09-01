@@ -47,7 +47,8 @@ manifest_languages() {
 }
 
 sorted_lower() {
-    tr '[:upper:]' '[:lower:]' | sort
+    # Windows Git bash / CPython text mode may inject CR; compare as a set of tags.
+    tr -d '\r' | tr '[:upper:]' '[:lower:]' | grep -v '^$' | sort
 }
 
 compare_sets() {
@@ -119,7 +120,7 @@ langs = re.findall(r'<Resource Language="([^"]+)"', text)
 if not langs:
     sys.stderr.write("FAIL: packed AppxManifest.xml has no Resource Language entries\n")
     raise SystemExit(1)
-sys.stdout.write("\n".join(langs) + "\n")
+sys.stdout.buffer.write(("\n".join(langs) + "\n").encode("utf-8"))
 PY
 }
 
