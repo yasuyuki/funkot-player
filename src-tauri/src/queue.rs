@@ -62,6 +62,20 @@ use funkot_core::engine::TrackSource;
 pub struct QueueState {
     pending: VecDeque<PathBuf>,
     reserved: Option<PathBuf>,
+    /// When `false`, [`Self::reserved`] is the first hand-off of this
+    /// `HostSource` — the track being prepared as *current*, not as next-up.
+    /// The displayed list (`[reserved?] ++ pending`) then omits it, so the
+    /// next-up list does not keep showing the track that is about to play.
+    reserved_is_next: bool,
+}
+
+impl QueueState {
+    /// The reserved row the UI and [`edit_displayed`] treat as next-up.
+    /// `None` when nothing is reserved, or when the reserved track is the
+    /// current one still being prepared (the first `HostSource::next`).
+    fn displayed_reserved(&self) -> Option<&PathBuf> {
+        self.reserved.as_ref().filter(|_| self.reserved_is_next)
+    }
 }
 
 /// Shared handle to the host-owned queue. Cheap to clone; every clone points
@@ -73,6 +87,7 @@ pub fn new_shared_queue() -> SharedQueue {
     Arc::new(Mutex::new(QueueState {
         pending: VecDeque::new(),
         reserved: None,
+        reserved_is_next: false,
     }))
 }
 
@@ -142,12 +157,15 @@ pub fn prepend_pending_filtered(
     n
 }
 
-/// An edit to the list the UI actually displays: `reserved` (if any) followed
-/// by `pending`, as one 0-based sequence. Index `0` is `reserved` when it is
-/// present; otherwise the list is just `pending` and indices line up with it
-/// directly. This mirrors what `queue_state`'s `QueueSnapshot`
-/// (`src-tauri/src/lib.rs`) hands the frontend, so a UI index can be passed
-/// straight through to [`edit_displayed`] with no translation of its own.
+/// An edit to the list the UI actually displays: displayed `reserved` (the
+/// next-up row, if any) followed by `pending`, as one 0-based sequence.
+/// Index `0` is that reserved row when it is present; otherwise the list is
+/// just `pending` and indices line up with it directly. The first hand-off
+/// of a `HostSource` (current track being prepared) is not displayed — see
+/// [`QueueState::reserved_is_next`]. This mirrors what `queue_state`'s
+/// `QueueSnapshot` (`src-tauri/src/lib.rs`) hands the frontend, so a UI
+/// index can be passed straight through to [`edit_displayed`] with no
+/// translation of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueEdit {
     /// Move the item at `from` to `to` (both displayed-list indices).
@@ -194,8 +212,9 @@ impl std::fmt::Display for EditError {
     }
 }
 
-/// Apply `edit` to the displayed list (`[reserved?] ++ pending`), swapping
-/// the reserved slot back into `pending` first if the edit reaches into it.
+/// Apply `edit` to the displayed list (`[displayed reserved?] ++ pending`),
+/// swapping the reserved slot back into `pending` first if the edit reaches
+/// into it. The first hand-off of a `HostSource` is not in this list.
 ///
 /// # Why this takes `queue.lock()` once and never lets go
 ///
@@ -224,10 +243,12 @@ impl std::fmt::Display for EditError {
 ///
 /// # What counts as "touches reserved"
 ///
-/// `reserved.is_some()` and the edit's `from`, `to`, or `index` is `0` —
-/// including `Move { to: 0, .. }`: moving some other item to the front
-/// displaces `reserved` from that slot just as surely as moving `reserved`
-/// itself would, so it needs the exact same hand-back.
+/// `reserved.is_some()` **and it is next-up** (`reserved_is_next`) and the
+/// edit's `from`, `to`, or `index` is `0` — including `Move { to: 0, .. }`:
+/// moving some other item to the front displaces `reserved` from that slot
+/// just as surely as moving `reserved` itself would, so it needs the exact
+/// same hand-back. The first hand-off of a run is not displayed, so edits
+/// never revoke it this way.
 ///
 /// # Errors
 ///
@@ -244,7 +265,7 @@ pub fn edit_displayed(
 ) -> Result<(), EditError> {
     let mut q = queue.lock().unwrap();
 
-    let has_reserved = q.reserved.is_some();
+    let has_reserved = q.displayed_reserved().is_some();
     let len = q.pending.len() + usize::from(has_reserved);
 
     // The edit's "subject" is the index whose path must match `expect`:
@@ -311,6 +332,7 @@ pub fn edit_displayed(
                     );
                 }
                 q.reserved = None;
+                q.reserved_is_next = false;
                 q.pending.push_front(path);
             }
             None => return Err(EditError::TooLate),
@@ -347,12 +369,23 @@ pub fn snapshot(queue: &SharedQueue) -> Vec<PathBuf> {
     queue.lock().unwrap().pending.iter().cloned().collect()
 }
 
-/// `(reserved, pending)` read under a single lock acquisition, so callers get
-/// a consistent view instead of two snapshots that could straddle a `next()`
-/// call.
+/// `(displayed reserved, pending)` read under a single lock acquisition, so
+/// callers get a consistent view instead of two snapshots that could
+/// straddle a `next()` call. Displayed reserved is the next-up row; the
+/// first hand-off of a `HostSource` (current track being prepared) is
+/// omitted — see [`QueueState::reserved_is_next`].
 pub fn state_snapshot(queue: &SharedQueue) -> (Option<PathBuf>, Vec<PathBuf>) {
     let q = queue.lock().unwrap();
-    (q.reserved.clone(), q.pending.iter().cloned().collect())
+    (
+        q.displayed_reserved().cloned(),
+        q.pending.iter().cloned().collect(),
+    )
+}
+
+/// Last path handed to the engine, including a first-track current that
+/// [`state_snapshot`] does not expose as the displayed reserved row.
+pub(crate) fn reserved_track(queue: &SharedQueue) -> Option<PathBuf> {
+    queue.lock().unwrap().reserved.clone()
 }
 
 /// What to play once the host-managed pending queue runs dry.
@@ -503,6 +536,7 @@ impl HostSource {
             match q.pending.pop_front() {
                 Some(path) => {
                     q.reserved = Some(path.clone());
+                    q.reserved_is_next = self.calls > 0;
                     let remaining = Some(q.pending.iter().cloned().collect::<Vec<_>>());
                     (path, remaining)
                 }
@@ -521,11 +555,13 @@ impl HostSource {
                         None => {
                             let mut q = self.queue.lock().unwrap();
                             q.reserved = None;
+                            q.reserved_is_next = false;
                             return None;
                         }
                     };
                     let mut q = self.queue.lock().unwrap();
                     q.reserved = Some(path.clone());
+                    q.reserved_is_next = self.calls > 0;
                     (path, None)
                 }
             }
@@ -588,11 +624,15 @@ mod tests {
         PathBuf::from(name)
     }
 
-    /// The reserved track on its own. Production code always wants it
+    /// Displayed reserved on its own. Production code always wants it
     /// together with `pending`, so `state_snapshot` is the only accessor;
     /// this just keeps the assertions below readable.
     fn reserved(queue: &SharedQueue) -> Option<PathBuf> {
         state_snapshot(queue).0
+    }
+
+    fn handed_out(queue: &SharedQueue) -> Option<PathBuf> {
+        reserved_track(queue)
     }
 
     fn empty_policy() -> DrainPolicy {
@@ -636,10 +676,12 @@ mod tests {
         enqueue(&q, p("a"));
         let mut source = HostSource::new(Arc::clone(&q), empty_policy());
         assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(reserved(&q), Some(p("a")));
+        assert_eq!(handed_out(&q), Some(p("a")));
+        assert_eq!(reserved(&q), None);
 
         replace_pending(&q, vec![p("b")]);
-        assert_eq!(reserved(&q), Some(p("a")));
+        assert_eq!(handed_out(&q), Some(p("a")));
+        assert_eq!(reserved(&q), None);
         assert_eq!(snapshot(&q), vec![p("b")]);
     }
 
@@ -820,10 +862,13 @@ mod tests {
     #[test]
     fn host_source_falls_back_to_folder_when_queue_drains() {
         let q = new_shared_queue();
-        let mut source = HostSource::new(q, folder_policy(&["f1", "f2", "f3"]));
+        let mut source = HostSource::new(Arc::clone(&q), folder_policy(&["f1", "f2", "f3"]));
         assert_eq!(source.next(), Some((0, p("f1"))));
+        assert_eq!(reserved(&q), None);
         assert_eq!(source.next(), Some((1, p("f2"))));
+        assert_eq!(reserved(&q), Some(p("f2")));
         assert_eq!(source.next(), Some((2, p("f3"))));
+        assert_eq!(reserved(&q), Some(p("f3")));
     }
 
     #[test]
@@ -882,34 +927,58 @@ mod tests {
     #[test]
     fn reserved_reflects_the_most_recently_handed_out_track() {
         let q = new_shared_queue();
-        assert_eq!(reserved(&q), None);
+        assert_eq!(handed_out(&q), None);
         enqueue(&q, p("a"));
         let mut source = HostSource::new(Arc::clone(&q), empty_policy());
         assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(reserved(&q), Some(p("a")));
+        assert_eq!(handed_out(&q), Some(p("a")));
+        // First hand-off is current, not next-up — the displayed list omits it.
+        assert_eq!(reserved(&q), None);
+        enqueue(&q, p("b"));
+        assert_eq!(source.next(), Some((1, p("b"))));
+        assert_eq!(handed_out(&q), Some(p("b")));
+        assert_eq!(reserved(&q), Some(p("b")));
+    }
+
+    #[test]
+    fn first_hand_off_is_not_in_the_displayed_list() {
+        let q = new_shared_queue();
+        for name in ["a", "b", "c"] {
+            enqueue(&q, p(name));
+        }
+        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
+        assert_eq!(source.next(), Some((0, p("a"))));
+        assert_eq!(state_snapshot(&q), (None, vec![p("b"), p("c")]));
+        // Index 0 is pending's "b", not the current-preparing "a".
+        edit_displayed(&q, QueueEdit::Move { from: 0, to: 1 }, &p("b"), panic_revoke).unwrap();
+        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &p("b"), panic_revoke).unwrap();
+        assert_eq!(handed_out(&q), Some(p("a")));
+        assert_eq!(state_snapshot(&q), (None, vec![p("c")]));
     }
 
     #[test]
     fn edits_that_do_not_touch_reserved_do_not_revoke_it() {
         let q = new_shared_queue();
         enqueue(&q, p("a"));
+        enqueue(&q, p("b"));
         let mut source = HostSource::new(Arc::clone(&q), empty_policy());
         assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(reserved(&q), Some(p("a")));
+        assert_eq!(source.next(), Some((1, p("b"))));
+        assert_eq!(reserved(&q), Some(p("b")));
 
-        enqueue(&q, p("b"));
         enqueue(&q, p("c"));
-        // Displayed list is [a(reserved), b, c]; neither edit's `from`/`to`/
+        enqueue(&q, p("d"));
+        // Displayed list is [b(reserved), c, d]; neither edit's `from`/`to`/
         // `index` is 0, so per `edit_displayed`'s "touches reserved" rule
         // neither should revoke `reserved` -- this is the design's central
         // invariant. `panic_revoke` makes that assertion load-bearing: if
         // either edit wrongly reached into the reserved slot, the test
         // panics instead of quietly passing.
-        edit_displayed(&q, QueueEdit::Move { from: 1, to: 2 }, &p("b"), panic_revoke).unwrap();
-        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &p("c"), panic_revoke).unwrap();
+        edit_displayed(&q, QueueEdit::Move { from: 1, to: 2 }, &p("c"), panic_revoke).unwrap();
+        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &p("d"), panic_revoke).unwrap();
 
-        assert_eq!(reserved(&q), Some(p("a")));
-        assert_eq!(state_snapshot(&q), (Some(p("a")), vec![p("b")]));
+        assert_eq!(reserved(&q), Some(p("b")));
+        assert_eq!(state_snapshot(&q), (Some(p("b")), vec![p("c")]));
     }
 
     /// Collects what the observer is handed, standing in for `queue.json`.
@@ -1056,8 +1125,10 @@ mod tests {
         enqueue(&q, p("a"));
         let mut source = HostSource::new(Arc::clone(&q), empty_policy());
         assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(reserved(&q), Some(p("a")));
+        assert_eq!(handed_out(&q), Some(p("a")));
+        assert_eq!(reserved(&q), None);
         assert_eq!(source.next(), None);
+        assert_eq!(handed_out(&q), None);
         assert_eq!(reserved(&q), None);
     }
 
@@ -1068,6 +1139,7 @@ mod tests {
         Arc::new(Mutex::new(QueueState {
             pending: pending.iter().map(|n| p(n)).collect(),
             reserved: reserved.map(p),
+            reserved_is_next: reserved.is_some(),
         }))
     }
 

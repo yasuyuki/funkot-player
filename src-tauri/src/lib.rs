@@ -4236,7 +4236,9 @@ const SWAP_DEADLINE_SECS: f64 = 30.0;
 /// Snapshot of the playback queue, for the UI.
 #[derive(serde::Serialize, Clone)]
 struct QueueSnapshot {
-    /// Reserved = already handed to the engine to play next.
+    /// Reserved = already handed to the engine to play next. `None` while the
+    /// only reserved track is the first of a run (being prepared as current,
+    /// not as next-up).
     reserved: Option<String>,
     /// Waiting queue; its head is "reserved's successor".
     pending: Vec<String>,
@@ -4494,8 +4496,8 @@ fn revoke_reserved() -> Option<PathBuf> {
     path
 }
 
-/// Move an item within the *displayed* queue list (`[reserved?] ++ pending`;
-/// index `0` is `reserved` when present — matches `QueueSnapshot` and
+/// Move an item within the *displayed* queue list (`[displayed reserved?] ++
+/// pending`; index `0` is next-up `reserved` when present — matches `QueueSnapshot` and
 /// `queue::QueueEdit`'s doc comment). `expect` must be the path currently
 /// shown at `from`, so a caller acting on a stale view is rejected instead of
 /// moving whatever now happens to be there.
@@ -5804,7 +5806,11 @@ mod cache_state_tests {
         // mutexes here — other tests share them.
 
         let (reserved, pending) = queue::state_snapshot(&q);
-        assert_eq!(reserved, Some(PathBuf::from("/music/r.flac")));
+        assert_eq!(reserved, None);
+        assert_eq!(
+            queue::reserved_track(&q),
+            Some(PathBuf::from("/music/r.flac"))
+        );
         assert_eq!(
             pending,
             vec![

@@ -144,6 +144,8 @@ export function refreshLibrary(kickAnalysis = true): Promise<TrackRow[]> {
 /// Matches `QueueSnapshot`. Queue paths are absolute (see
 /// `src-tauri/src/lib.rs`); the UI resolves them against the library by path.
 export interface QueueSnapshot {
+  /// Already handed to the engine to play next. `null` while the only
+  /// reserved track is the first of a run (being prepared as current).
   reserved: string | null;
   pending: string[];
   /// Tracks already handed to the engine: active first, then its runway.
@@ -225,8 +227,8 @@ export function setLabelingMode(on: boolean): Promise<boolean> {
 }
 
 // `index`/`from`/`to` below are indices into the *displayed* queue list
-// (`[reserved?] ++ pending` — index 0 is `reserved` when present, matching
-// `QueueSnapshot`), not just `pending`. `expect` is the path currently shown
+// (`[reserved?] ++ pending` — index 0 is next-up `reserved` when present,
+// matching `QueueSnapshot`; the first hand-off of a run is not displayed), not just `pending`. `expect` is the path currently shown
 // at the edited position; a stale caller gets `"stale"` back rather than
 // silently acting on the wrong track.
 //
