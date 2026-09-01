@@ -16,7 +16,7 @@
   <Identity
     Name="hatsuboshi.jp.Funkotplayer"
     Publisher="CN=FDFC3ACA-C9AA-47DF-9627-BB76E4AE4D64"
-    Version="0.3.0.0"
+    Version="0.3.1.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
@@ -26,9 +26,19 @@
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
+  <!--
+    Package languages for Partner Center / Microsoft Store. Listed explicitly
+    because this tree packs with makeappx from this file (pack-msix.ps1) and
+    never runs Visual Studio MakePri. `x-generate` would not expand: UI
+    strings live in src/lib/locales/*.ts, not MRT language-qualified resources.
+    First entry is the package default language. Keep in sync with LOCALES in
+    src/lib/locale.ts (en->en-US, ja->ja-JP, id->id-ID); scripts/check-msix-languages.sh
+    enforces that, including against the packed AppxManifest.xml.
+  -->
   <Resources>
-    <Resource Language="en-us" />
-    <Resource Language="ja-jp" />
+    <Resource Language="ja-JP" />
+    <Resource Language="en-US" />
+    <Resource Language="id-ID" />
   </Resources>
 
   <Dependencies>

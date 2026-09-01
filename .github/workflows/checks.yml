@@ -33,6 +33,12 @@ jobs:
       - name: Check the version is consistent
         run: ./scripts/set-version.sh --check
 
+      # UI locales live in TS JSON-like catalogues, not MRT resources, so the
+      # Store only sees languages listed in Package.appxmanifest. Fail if that
+      # list drifts from src/lib/locale.ts LOCALES.
+      - name: Check MSIX package languages match UI locales
+        run: ./scripts/check-msix-languages.sh
+
       # Plan-phase citations rot silently: a line number that was true when
       # written becomes a lie that later phases copy. Same script a developer
       # runs; also needs no toolchain. Sibling repos are not checked out here,

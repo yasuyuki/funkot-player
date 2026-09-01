@@ -10,7 +10,7 @@
 #   .\packaging\msix\scripts\pack-msix.ps1 -SkipBuild   # use existing release exe
 #
 # Output (unsigned):
-#   packaging\msix\out\Funkot_0.3.0.0_x64.msix
+#   packaging\msix\out\Funkot_0.3.1.0_x64.msix
 #
 # Notes:
 #   - Build uses --no-bundle so WiX/NSIS icons are not required; MSIX is packed
@@ -35,7 +35,7 @@ $ManifestSrc = Join-Path $MsixRoot "Package.appxmanifest"
 $IconsDir = Join-Path $RepoRoot "src-tauri\icons"
 $ReleaseDir = Join-Path $RepoRoot "src-tauri\target\release"
 $ExeName = "funkot-player.exe"
-$PackageVersion = "0.3.0.0"
+$PackageVersion = "0.3.1.0"
 $OutDir = Join-Path $MsixRoot "out"
 $OutMsix = Join-Path $OutDir "Funkot_${PackageVersion}_x64.msix"
 $StagingDir = Join-Path $MsixRoot "staging"
@@ -56,6 +56,51 @@ function Find-MakeAppx {
         throw "makeappx.exe not found under $kitsRoot"
     }
     return $candidates[0].FullName
+}
+
+function Get-ManifestLanguages([string]$Xml) {
+    [regex]::Matches($Xml, '<Resource Language="([^"]+)"') |
+        ForEach-Object { $_.Groups[1].Value }
+}
+
+function Get-PackedAppxManifestXml([string]$MsixPath) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($MsixPath)
+    try {
+        $entry = $zip.GetEntry("AppxManifest.xml")
+        if (-not $entry) {
+            throw "packed MSIX has no AppxManifest.xml: $MsixPath"
+        }
+        $stream = $entry.Open()
+        try {
+            $reader = New-Object System.IO.StreamReader($stream)
+            try {
+                return $reader.ReadToEnd()
+            } finally {
+                $reader.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
+
+function Assert-PackedPackageLanguages {
+    $srcXml = Get-Content -Raw -LiteralPath $ManifestSrc
+    $src = @(Get-ManifestLanguages $srcXml)
+    $packedXml = Get-PackedAppxManifestXml $OutMsix
+    $got = @(Get-ManifestLanguages $packedXml)
+    $srcKey = ($src | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object) -join ","
+    $gotKey = ($got | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object) -join ","
+    if ($srcKey -ne $gotKey) {
+        throw "packed AppxManifest languages ($($got -join ', ')) != source ($($src -join ', '))"
+    }
+    if (-not $got) {
+        throw "packed AppxManifest.xml has no Resource Language entries"
+    }
+    Write-Host "Packed package languages: $($got -join ', ')"
 }
 
 Push-Location $RepoRoot
@@ -120,6 +165,8 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "makeappx pack failed with exit code $LASTEXITCODE"
     }
+
+    Assert-PackedPackageLanguages
 
     Write-Host "Wrote unsigned MSIX: $OutMsix"
     Write-Host "Upload this file in Partner Center (or self-sign for local sideload — see README)."
