@@ -332,6 +332,14 @@ Store 提出物（未署名）をそのままダブルクリックすると、Ap
 必須は各言語で説明文＋スクショ 1 枚以上（**4 枚推奨**）。日本語で撮ったスクショを
 英語・インドネシア語へ流用してよい。
 
+**新機能文の対象:** Partner Center の読者は Windows の
+Store 利用者だけ。書くのは **(1) 全 OS 共通** と **(2) Windows 固有**。
+Android 固有（戻るキーでプロセスが死ぬ、通知シェード / MediaSession、
+前景サービス、APK）は **GitHub Release 本文**へ。GitHub は Android APK の
+配布面なので、そちらに Android の記述を入れてよい。GitHub 本文を Store へ
+コピーしない。`./scripts/check-doc-claims.sh` が下の新機能ペースト欄に
+Android 語が混ざると落とす。
+
 **スクリーンショット（Desktop）:**
 
 - PNG、**1366×768 以上**（4K 可）、1 ファイル 50 MB 以下
@@ -442,7 +450,7 @@ intro / outro の手直し
 
 **このバージョンの新機能（0.5.0）:**
 ```text
-手動で足した曲を、自動選曲より先に再生します。起動時に復元した曲をキューから消したあと、開始で戻ってきていた不具合を直しています。Android では戻る操作で再生が止まらず、一時停止しても通知とメディアコントロールから再開できます。
+手動で足した曲を、自動選曲より先に再生します。起動時に復元した曲をキューから消したあと、開始で戻ってきていた不具合を直しています。
 ```
 
 ### English
@@ -490,7 +498,7 @@ Flag a bad transition and keep a feedback ZIP
 
 **What's new in this version (0.5.0):**
 ```text
-Manually queued tracks play before auto-selected ones. Deleting a restored queue item no longer brings it back when you press Start. On Android, Back no longer kills playback, and pause keeps the notification and media controls so you can resume.
+Manually queued tracks play before auto-selected ones. Deleting a restored queue item no longer brings it back when you press Start.
 ```
 
 ### Bahasa Indonesia
@@ -538,7 +546,7 @@ Tandai transisi yang tidak pas dan simpan ZIP masukan
 
 **Yang baru di versi ini (0.5.0):**
 ```text
-Lagu yang Anda antrekan secara manual diputar sebelum lagu pilihan otomatis. Menghapus item antrean yang dipulihkan tidak lagi mengembalikannya saat Start. Di Android, tombol Kembali tidak lagi menghentikan pemutaran, dan jeda tetap menampilkan notifikasi serta kontrol media untuk melanjutkan.
+Lagu yang Anda antrekan secara manual diputar sebelum lagu pilihan otomatis. Menghapus item antrean yang dipulihkan tidak lagi mengembalikannya saat Start.
 ```
 
 ---
@@ -551,7 +559,11 @@ Lagu yang Anda antrekan secara manual diputar sebelum lagu pilihan otomatis. Men
    片方だけ直すと中身と違う版数の MSIX が焼ける）。
    **番号は前回提出より大きいこと。** 決め方と Android 側は
    `.claude/skills/app-version/SKILL.md`。
-2. `main` に push → `windows-msix` を再実行 → 新しい未署名 MSIX を提出。
+2. 上の「このバージョンの新機能」三言語を、その版の **共通 + Windows 固有** だけに
+   書き換える。GitHub Release 本文（英語、Android を含めてよい）を流用しない。
+   見出しの版数も揃える。
+3. Store に今出ている版数を確認してから提出する。HANDOFF の「認証待ち」は古くなりうる。
+4. `main` に push → `windows-msix` を再実行 → 新しい未署名 MSIX を提出。
 
 ---
 

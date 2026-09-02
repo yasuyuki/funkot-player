@@ -65,7 +65,11 @@ description: funkot-player の版数（アプリのバージョン）を上げ�
 3. artifact `funkot-player-windows-msix` を **その版数の run から** 取る。古い run を使わない
 4. Partner Center で提出ドラフトを作り、未署名 MSIX を上げる。
    画面クリック順と記入値の正本は [docs/store-submission.md](../../../docs/store-submission.md)
-5. 「このバージョンの新機能」は人が書く。Partner Center 側にしか存在しない
+5. 「このバージョンの新機能」は Partner Center 用で、**全 OS 共通 + Windows 固有
+   だけ**書く。Android 固有は GitHub Release 本文（英語）へ。GitHub 本文を
+   Store へコピーしない。書き方の正本は
+   [docs/store-submission.md](../../../docs/store-submission.md) 節 F-5。
+   提出前に Store の公開済み版数を確認する。HANDOFF の「認証待ち」は古くなりうる
 
 ローカルで焼くなら Windows 側で `.\packaging\msix\scripts\pack-msix.ps1`。
 版数はスクリプトが持っているので、手順 1 を済ませてあれば引数は要らない。
@@ -94,7 +98,9 @@ description: funkot-player の版数（アプリのバージョン）を上げ�
    skill `android-device`
 4. Play Console は未使用。Android 側に提出作業は無い
 5. GitHub Release を切るなら **説明文（release body）は英語**。チャットが日本語でも
-   本文は英語。Partner Center の「このバージョンの新機能」は日本語のまま
+   本文は英語。GitHub は Android APK の配布面なので、Android 固有を含めてよい。
+   Partner Center の「このバージョンの新機能」は三言語で、共通 + Windows だけ
+   （節 3 の 5。GitHub 本文を流用しない）
 
 ## 版数の食い違いを疑うとき
 

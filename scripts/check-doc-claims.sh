@@ -215,8 +215,50 @@ check_symbols_resolve() {
     [ "$failed" = 0 ]
 }
 
+# Partner Center "what's new" paste blocks. The Store listing is a Windows
+# audience; Android-only notes belong in the GitHub Release body (which ships
+# the APK). Headings must include the version so the F-5 audience rule, which
+# names Android on purpose, is not scanned.
+check_store_whats_new_is_windows_audience() {
+    f=docs/store-submission.md
+    if [ ! -f "$f" ]; then
+        echo "FAIL: missing $f" >&2
+        return 1
+    fi
+    awk '
+        heading == 0 && /(このバージョンの新機能（[0-9]|What.s new in this version \([0-9]|Yang baru di versi ini \([0-9])/ {
+            heading = 1
+            next
+        }
+        heading == 1 && /^```/ {
+            if (fence == 0) { fence = 1; next }
+            n++
+            heading = 0
+            fence = 0
+            next
+        }
+        fence == 1 { print }
+        END { if (n != 3) exit 2 }
+    ' "$f" > "$TMP/whats_new" || {
+        echo "FAIL: $f — expected 3 versioned Store what's-new paste blocks" >&2
+        return 1
+    }
+    if [ ! -s "$TMP/whats_new" ]; then
+        echo "FAIL: $f Store what's-new paste blocks are empty" >&2
+        return 1
+    fi
+    if grep -Ei 'Android|Pixel|\<APK\>|MediaSession' "$TMP/whats_new"; then
+        echo "FAIL: Store listing what's-new is a Windows audience." >&2
+        echo "  Write only all-OS changes or Windows-only changes." >&2
+        echo "  Android-only notes belong in the GitHub Release body." >&2
+        return 1
+    fi
+    return 0
+}
+
 check_no_line_citations || status=1
 check_symbols_resolve || status=1
+check_store_whats_new_is_windows_audience || status=1
 
 if [ "$status" = 0 ]; then
     echo "doc-claim checks: OK"
