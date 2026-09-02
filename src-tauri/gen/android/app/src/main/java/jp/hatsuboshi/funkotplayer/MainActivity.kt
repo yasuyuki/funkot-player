@@ -55,6 +55,14 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  override fun onResume() {
+    super.onResume()
+    // Android takes the playback service away behind our back once it has been
+    // paused for a while (see PlaybackService). Coming back to the screen is
+    // both when we can notice and when starting one is allowed again.
+    PlaybackService.reassertIfPlaying(this)
+  }
+
   override fun onNewIntent(intent: Intent) {
     // Must run first: TauriActivity.onNewIntent (generated/TauriActivity.kt)
     // routes to PluginManager.onNewIntent / Rust.onNewIntent, and skipping it

@@ -34,6 +34,15 @@ import java.util.Locale
  * leaves the screen or the display turns off, even though the stream stays
  * alive.
  *
+ * Foreground only while sound is actually coming out. Android reaps a
+ * `mediaPlayback` service that sits in the foreground while paused: after
+ * about ten minutes it demotes the service, destroys it a minute later, then
+ * freezes and reclaims the process — silence, with no notification left to
+ * come back through. So pausing drops the foreground state on our own terms
+ * and detaches the notification, which then survives the service and is the
+ * way back: its transport actions start the service again (see
+ * [publishState], [onDestroy], and `playbackAlive` on the Rust side).
+ *
  * The MediaSession is not decoration. A plain notification, even an ongoing one
  * with actions, lands in the silent section of the shade and gets collapsed into
  * the icon strip at the bottom, where it is effectively invisible. A MediaStyle
@@ -69,26 +78,59 @@ class PlaybackService : Service() {
             System.loadLibrary("funkot_player_lib")
         }
 
+        /**
+         * Set by [stopFrom] so [onDestroy] can tell the app taking the service
+         * down from Android taking it down under us; only the latter leaves a
+         * notification behind.
+         */
+        @Volatile
+        private var deliberateStop = false
+
         @JvmStatic
-        fun startFrom(context: Context) {
-            androidx.core.content.ContextCompat.startForegroundService(
-                context,
-                Intent(context, PlaybackService::class.java),
-            )
-        }
+        fun startFrom(context: Context) = startService(context, null)
 
         @JvmStatic
         fun stopFrom(context: Context) {
+            deliberateStop = true
             context.stopService(Intent(context, PlaybackService::class.java))
         }
 
         /** Re-read the paused flag after the app's own buttons changed it. */
         @JvmStatic
-        fun syncFrom(context: Context) {
-            androidx.core.content.ContextCompat.startForegroundService(
-                context,
-                Intent(context, PlaybackService::class.java).setAction(ACTION_SYNC),
-            )
+        fun syncFrom(context: Context) = startService(context, ACTION_SYNC)
+
+        /**
+         * Put the foreground service back after Android took it away.
+         *
+         * Nothing tells the app that its service was demoted and reaped, and
+         * the app is not allowed to start one from the background anyway. The
+         * listener returning to the app is both when we can notice and when
+         * the start is permitted again, so [MainActivity] calls this from
+         * onResume. Idempotent: a service that is already up just re-publishes
+         * its notification. Paused is left alone on purpose — being out of the
+         * foreground is the point while nothing is playing.
+         */
+        @JvmStatic
+        fun reassertIfPlaying(context: Context) {
+            if (!playbackAlive()) return
+            if ((onNativeControl(CONTROL_QUERY) and 1) != 0) return
+            startFrom(context)
+        }
+
+        private fun startService(context: Context, action: String?) {
+            val intent = Intent(context, PlaybackService::class.java)
+            if (action != null) intent.action = action
+            try {
+                androidx.core.content.ContextCompat.startForegroundService(context, intent)
+            } catch (e: Exception) {
+                // Android 12+ refuses a foreground-service start made from the
+                // background (ForegroundServiceStartNotAllowedException), and
+                // this is reached from the events thread as tracks change.
+                // Audio does not depend on it; the notification just goes
+                // stale until the next start that is allowed. Never let it
+                // reach the JNI caller as a pending Java exception.
+                Log.w("funkot", "startForegroundService($action): $e")
+            }
         }
 
         /**
@@ -97,6 +139,14 @@ class PlaybackService : Service() {
          */
         @JvmStatic
         external fun onNativeControl(action: Int): Int
+
+        /**
+         * Whether a playback session still stands behind the notification.
+         * False in a process the notification outlived (see the Rust
+         * `playback_session_alive`).
+         */
+        @JvmStatic
+        external fun playbackAlive(): Boolean
 
         /** Whether the last notification ⚑ persisted successfully. */
         @JvmStatic
@@ -123,6 +173,10 @@ class PlaybackService : Service() {
      * also flash it via MediaMetadata artist + a Toast.
      */
     private var flagFeedback: String? = null
+
+    /** Whether [startForeground] currently holds, so we detach exactly once. */
+    private var isForeground = false
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private var clearFlagFeedback: Runnable? = null
 
@@ -168,6 +222,15 @@ class PlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The paused notification outlives this service and can outlive the
+        // process; Android keeps it posted for the package either way. A
+        // transport tap landing in a process with nothing playing has nothing
+        // to control, so retire the leftover rather than show dead controls.
+        if (!playbackAlive()) {
+            retireStaleNotification()
+            return START_NOT_STICKY
+        }
+
         val packed = when (intent?.action) {
             ACTION_TOGGLE -> onNativeControl(CONTROL_TOGGLE)
             ACTION_NEXT -> onNativeControl(CONTROL_NEXT)
@@ -177,26 +240,7 @@ class PlaybackService : Service() {
             // Also covers the first start (null action): query, never assume.
             else -> onNativeControl(CONTROL_QUERY)
         }
-        val paused = (packed and 1) != 0
-        val phase = packed ushr 1
-        val title = currentTitle()
-        val artist = currentArtist()
-
-        ensureChannel()
-        setPlaybackState(paused, phase)
-        setSessionMetadata(title, artist)
-        val notification = buildNotification(paused, phase, title)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-            )
-        } else {
-            // The service-type overload of startForeground is API 29+; below
-            // that, foregroundServiceType in the manifest is just metadata.
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        publishState(packed, fromStart = true)
 
         // Not sticky: playback state lives in the Rust process, so a service
         // the OS recreates on its own after a kill would post transport
@@ -208,21 +252,114 @@ class PlaybackService : Service() {
     override fun onDestroy() {
         clearFlagFeedback?.let { mainHandler.removeCallbacks(it) }
         clearFlagFeedback = null
+        // Android destroys this service a minute or so after it stops being
+        // foreground, which for us means "the listener paused a while ago".
+        // The notification is their way back, so re-post it as its own
+        // notification first: it is currently a MediaStyle backed by the
+        // session about to be released, which would leave the shade drawing
+        // media controls for a session that no longer exists. A stop we asked
+        // for, or a session that is gone, means nobody is coming back.
+        if (!deliberateStop && !isForeground && playbackAlive()) {
+            val packed = onNativeControl(CONTROL_QUERY)
+            getSystemService(NotificationManager::class.java).notify(
+                NOTIFICATION_ID,
+                buildNotification((packed and 1) != 0, packed ushr 1, currentTitle(), false),
+            )
+        } else {
+            leaveForeground(remove = true)
+        }
+        deliberateStop = false
         session.isActive = false
         session.release()
         super.onDestroy()
     }
 
     /** Re-publish state and notification after a control came from the session. */
-    private fun applyControlState(packed: Int) {
+    private fun applyControlState(packed: Int) = publishState(packed)
+
+    /**
+     * Publish one control state everywhere it shows: the MediaSession, the
+     * notification, and whether we are a foreground service at all.
+     *
+     * @param fromStart this came from [onStartCommand], so the system is
+     *   waiting on a startForeground call for it.
+     */
+    private fun publishState(packed: Int, fromStart: Boolean = false) {
         val paused = (packed and 1) != 0
         val phase = packed ushr 1
         val title = currentTitle()
-        val artist = currentArtist()
+
+        ensureChannel()
         setPlaybackState(paused, phase)
-        setSessionMetadata(title, artist)
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification(paused, phase, title))
+        setSessionMetadata(title, currentArtist())
+        val notification = buildNotification(paused, phase, title)
+
+        if (!paused) {
+            enterForeground(notification)
+            return
+        }
+
+        // Paused: no foreground service (see the class comment). A start that
+        // came through startForegroundService still owes the system one
+        // startForeground within five seconds whatever the outcome — omitting
+        // it is itself a crash (ForegroundServiceDidNotStartInTimeException) —
+        // so take the foreground and hand it straight back, keeping the
+        // notification. Anything else just updates the notification in place.
+        if (fromStart) {
+            enterForeground(notification)
+        } else {
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, notification)
+        }
+        leaveForeground(remove = false)
+    }
+
+    private fun enterForeground(notification: Notification) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                )
+            } else {
+                // The service-type overload of startForeground is API 29+; below
+                // that, foregroundServiceType in the manifest is just metadata.
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            isForeground = true
+        } catch (e: Exception) {
+            // Android 12+ can refuse a foreground start made from the
+            // background. Post the notification anyway — it is the listener's
+            // way back — and let the next allowed start re-assert the service.
+            Log.w("funkot", "startForeground: $e")
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, notification)
+        }
+    }
+
+    /** Leave the foreground, keeping (`remove = false`) the notification. */
+    private fun leaveForeground(remove: Boolean) {
+        if (isForeground) {
+            stopForeground(if (remove) STOP_FOREGROUND_REMOVE else STOP_FOREGROUND_DETACH)
+            isForeground = false
+        } else if (remove) {
+            getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        }
+    }
+
+    /**
+     * Take down a notification whose playback session is gone and stop.
+     *
+     * Still goes foreground first: this start came from a `PendingIntent` the
+     * stale notification owns, so the five-second startForeground contract
+     * applies here too.
+     */
+    private fun retireStaleNotification() {
+        ensureChannel()
+        enterForeground(buildNotification(true, 0, currentTitle(), false))
+        leaveForeground(remove = true)
+        stopSelf()
     }
 
     private fun showFlagFeedback(ok: Boolean) {
@@ -302,15 +439,32 @@ class PlaybackService : Service() {
         )
     }
 
+    /**
+     * getForegroundService, not getService: while paused we are not a
+     * foreground service (and may not be running at all), so a plain
+     * background start of ⏵ would be refused. Starting as a foreground
+     * service is what the tap is allowed to do — [onStartCommand] holds up
+     * its end by calling startForeground on every path.
+     */
     private fun selfIntent(action: String, requestCode: Int): PendingIntent =
-        PendingIntent.getService(
+        PendingIntent.getForegroundService(
             this,
             requestCode,
             Intent(this, PlaybackService::class.java).setAction(action),
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-    private fun buildNotification(paused: Boolean, phase: Int, title: String): Notification {
+    /**
+     * @param withSession false once the MediaSession is going away (see
+     *   [onDestroy]) or was never behind this notification, so the shade draws
+     *   the notification's own actions instead of controls for a dead session.
+     */
+    private fun buildNotification(
+        paused: Boolean,
+        phase: Int,
+        title: String,
+        withSession: Boolean = true,
+    ): Notification {
         val contentIntent = PendingIntent.getActivity(
             this,
             0,
@@ -346,20 +500,24 @@ class PlaybackService : Service() {
             else -> text(R.string.notification_playing)
         }
 
+        val style = Notification.MediaStyle().setShowActionsInCompactView(0, 1, 2)
+        if (withSession) {
+            style.setMediaSession(session.sessionToken)
+        }
+
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_play)
             .setContentTitle(title)
             .setContentText(contentText)
-            .setOngoing(true)
+            // Ongoing only while playing. Paused, this notification is no
+            // longer tied to a foreground service and may outlive the process,
+            // so the listener has to be able to swipe it away.
+            .setOngoing(!paused)
             .setContentIntent(contentIntent)
             .addAction(toggle)
             .addAction(next)
             .addAction(flag)
-            .setStyle(
-                Notification.MediaStyle()
-                    .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2),
-            )
+            .setStyle(style)
         flagFeedback?.let { builder.setSubText(it) }
         return builder.build()
     }

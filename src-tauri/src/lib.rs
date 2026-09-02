@@ -270,6 +270,31 @@ fn pack_native_control_state(paused: bool, phase: Phase) -> i32 {
     ((phase as i32) << 1) | (paused as i32)
 }
 
+/// Whether the notification's transport still has a playback session behind
+/// it (`playbackAlive` in Kotlin).
+///
+/// While paused, `PlaybackService` leaves the foreground but keeps its
+/// notification, so that notification can outlive both the service and the
+/// process: Android keeps it posted for the package, and its `PendingIntent`s
+/// then start a *fresh* process where nothing is playing. Kotlin asks this
+/// before acting on such a start (and before re-posting from `onDestroy`) so
+/// a stale notification retires itself instead of offering transport controls
+/// with nothing behind them.
+///
+/// `Failed` counts as dead — the audio thread gave up — while `Disconnected`
+/// does not: `audio_thread` is still retrying the output device.
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn playback_session_alive(has_playback: bool, phase: Phase) -> bool {
+    match phase {
+        Phase::Idle | Phase::Failed => false,
+        // `start_impl` publishes `Starting` before spawning the audio thread
+        // that sets `PLAYBACK`, and it starts the service in the same breath,
+        // so the very first start legitimately has no `PLAYBACK` yet.
+        Phase::Starting => true,
+        _ => has_playback,
+    }
+}
+
 /// Where the app keeps music, the analysis cache, and its own data, as
 /// absolute paths.
 ///
@@ -1407,6 +1432,22 @@ mod flip_paused_tests {
         assert!(
             pack_native_control_state(false, Phase::Playing) == (Phase::Playing as i32) << 1
         );
+    }
+
+    #[test]
+    fn stale_notification_has_no_live_playback_session() {
+        // Fresh process started by a leftover notification: no `PLAYBACK`.
+        assert!(!playback_session_alive(false, Phase::Idle));
+        assert!(!playback_session_alive(false, Phase::Playing));
+        // ... but the first start of a real session precedes `PLAYBACK`.
+        assert!(playback_session_alive(false, Phase::Starting));
+        // Audio thread gave up: nothing for the transport to drive either.
+        assert!(!playback_session_alive(true, Phase::Failed));
+        // Paused, and the output device dropped out mid-session, both stay
+        // drivable — the notification is how the listener comes back.
+        assert!(playback_session_alive(true, Phase::Paused));
+        assert!(playback_session_alive(true, Phase::Disconnected));
+        assert!(playback_session_alive(true, Phase::Playing));
     }
 
     #[test]
@@ -7815,6 +7856,20 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
         _ => {}
     }
     pack_native_control_state(playback.paused.load(Ordering::Relaxed), get_phase())
+}
+
+/// Whether a playback session still stands behind the notification.
+///
+/// See [`playback_session_alive`]. Kotlin calls this on every service start
+/// and before re-posting the paused notification, because that notification
+/// outlives the service (and can outlive the process).
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_playbackAlive(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+) -> jni::sys::jboolean {
+    playback_session_alive(PLAYBACK.get().is_some(), get_phase()) as jni::sys::jboolean
 }
 
 /// Whether the last notification ⚑ (`onNativeControl(3)`) persisted successfully.
