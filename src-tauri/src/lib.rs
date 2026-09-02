@@ -3278,6 +3278,16 @@ fn scan_tracks_into(
 /// spelled out at both ends.
 const ALREADY_STARTED: &str = "already started";
 
+/// Reject an empty library, but allow a single track: [`queue::HostSource`]
+/// cycles the folder and gives each pass a new playlist index, so one file is
+/// a valid repeating playlist.
+fn ensure_tracks_available(paths: &[PathBuf], dir: &Path) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err(format!("need >= 1 track in {}, found 0", dir.display()));
+    }
+    Ok(())
+}
+
 /// Start the main audio thread. `initial_paused` is for cold-start audition:
 /// PLAYBACK is published paused so the main engine never becomes audible
 /// before an audition engine is installed.
@@ -3320,10 +3330,10 @@ fn start_impl(
     let dir = PathBuf::from(music_dir);
     let (paths, _complete): (Vec<PathBuf>, bool) = scan_tracks(&dir)?;
 
-    if paths.len() < 2 {
+    if let Err(error) = ensure_tracks_available(&paths, &dir) {
         // Early error: nothing has been set up yet, so the phase is left at
         // whatever it already was (Idle, on a fresh launch).
-        return Err(format!("need >= 2 tracks in {}, found {}", dir.display(), paths.len()));
+        return Err(error);
     }
 
     let (tx, rx) = mpsc::channel();
@@ -6200,6 +6210,21 @@ mod scan_tracks_tests {
             file_name_str(&found[0]),
             file_name_str(&found[1]),
             "file names collide, which is exactly why PlayerState must key on path_str instead"
+        );
+    }
+
+    #[test]
+    fn playback_track_count_accepts_one_track() {
+        let dir = Path::new("/music");
+        assert_eq!(ensure_tracks_available(&[dir.join("only.mp3")], dir), Ok(()));
+    }
+
+    #[test]
+    fn playback_track_count_rejects_an_empty_library() {
+        let dir = Path::new("/music");
+        assert_eq!(
+            ensure_tracks_available(&[], dir),
+            Err("need >= 1 track in /music, found 0".into())
         );
     }
 }

@@ -882,6 +882,15 @@ mod tests {
     }
 
     #[test]
+    fn host_source_repeats_a_single_folder_track_as_distinct_occurrences() {
+        let q = new_shared_queue();
+        let mut source = HostSource::new(q, folder_policy(&["only"]));
+        assert_eq!(source.next(), Some((0, p("only"))));
+        assert_eq!(source.next(), Some((1, p("only"))));
+        assert_eq!(source.next(), Some((2, p("only"))));
+    }
+
+    #[test]
     fn host_source_skips_folder_entries_matching_predicate() {
         let q = new_shared_queue();
         let mut source = HostSource::new(q, folder_policy(&["f1", "skip", "f3"])).skip_folder_entry(
