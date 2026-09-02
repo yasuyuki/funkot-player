@@ -39,9 +39,17 @@ import java.util.Locale
  * about ten minutes it demotes the service, destroys it a minute later, then
  * freezes and reclaims the process — silence, with no notification left to
  * come back through. So pausing drops the foreground state on our own terms
- * and detaches the notification, which then survives the service and is the
- * way back: its transport actions start the service again (see
- * [publishState], [onDestroy], and `playbackAlive` on the Rust side).
+ * and detaches the notification, which survives the service (see
+ * [publishState] and `playbackAlive` on the Rust side).
+ *
+ * The MediaSession therefore belongs to the process, not to this service.
+ * Android destroys the service about a minute after it leaves the foreground
+ * (`am_stop_idle_service`, measured), and a released session takes the shade's
+ * media controls with it, dropping the listener's way back into the collapsed
+ * silent-notification strip. Kept alive, the paused controls stay where a
+ * music app's controls belong, and their callbacks start the service back up
+ * — a media-session callback carries a short window in which starting a
+ * foreground service is allowed again.
  *
  * The MediaSession is not decoration. A plain notification, even an ongoing one
  * with actions, lands in the silent section of the shade and gets collapsed into
@@ -86,6 +94,19 @@ class PlaybackService : Service() {
         @Volatile
         private var deliberateStop = false
 
+        /**
+         * The live service, or null while none exists — the session outlives
+         * it, so its callbacks have to work either way.
+         */
+        @Volatile
+        private var instance: PlaybackService? = null
+
+        /** Owned here, not by the service instance; see the class comment. */
+        private var session: MediaSession? = null
+
+        /** Application context the session's callbacks start the service from. */
+        private var appContext: Context? = null
+
         @JvmStatic
         fun startFrom(context: Context) = startService(context, null)
 
@@ -115,6 +136,70 @@ class PlaybackService : Service() {
             if (!playbackAlive()) return
             if ((onNativeControl(CONTROL_QUERY) and 1) != 0) return
             startFrom(context)
+        }
+
+        /**
+         * Create the process-wide MediaSession, or return the live one.
+         *
+         * Callbacks route through the service when it exists and through the
+         * same intents its notification buttons use when it does not, so one
+         * path publishes state and brings the foreground service back.
+         */
+        private fun ensureSession(context: Context): MediaSession {
+            session?.let { return it }
+            val app = context.applicationContext
+            appContext = app
+            val created = MediaSession(app, "funkot-player").apply {
+                setCallback(object : MediaSession.Callback() {
+                    // The media UI shows play or pause depending on the state
+                    // we publish, so both callbacks mean the same: toggle.
+                    override fun onPlay() = toggleFromSession()
+                    override fun onPause() = toggleFromSession()
+                    override fun onSkipToNext() {
+                        val svc = instance
+                        if (svc == null) {
+                            startService(app, ACTION_NEXT)
+                        } else {
+                            onNativeControl(CONTROL_NEXT)
+                        }
+                    }
+                    // Android 13+ media controls read PlaybackState custom
+                    // actions, not Notification.Action. ACTION_FLAG is that
+                    // custom action.
+                    override fun onCustomAction(action: String, extras: Bundle?) {
+                        if (action != ACTION_FLAG) return
+                        val svc = instance
+                        if (svc == null) {
+                            // Let the started service do the flag, so it also
+                            // gets to show the ⚑ feedback it owns.
+                            startService(app, ACTION_FLAG)
+                        } else {
+                            onNativeControl(CONTROL_FLAG)
+                            svc.showFlagFeedback(lastFlagOk())
+                        }
+                    }
+                })
+                isActive = true
+            }
+            session = created
+            return created
+        }
+
+        private fun toggleFromSession() {
+            val svc = instance
+            if (svc == null) {
+                startService(appContext ?: return, ACTION_TOGGLE)
+            } else {
+                svc.applyControlState(onNativeControl(CONTROL_TOGGLE))
+            }
+        }
+
+        private fun releaseSession() {
+            session?.let {
+                it.isActive = false
+                it.release()
+            }
+            session = null
         }
 
         private fun startService(context: Context, action: String?) {
@@ -165,8 +250,6 @@ class PlaybackService : Service() {
         external fun currentLocaleTag(): String
     }
 
-    private lateinit var session: MediaSession
-
     /**
      * Transient feedback after tapping ⚑; cleared after [FLAG_FEEDBACK_MS].
      * Android 13+ media UI ignores [Notification.Builder.setSubText], so we
@@ -194,31 +277,9 @@ class PlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        session = MediaSession(this, "funkot-player").apply {
-            setCallback(object : MediaSession.Callback() {
-                // The media UI shows play or pause depending on the state we
-                // publish, so both callbacks mean the same thing here: toggle.
-                override fun onPlay() = applyControlState(onNativeControl(CONTROL_TOGGLE))
-                override fun onPause() = applyControlState(onNativeControl(CONTROL_TOGGLE))
-                override fun onSkipToNext() {
-                    onNativeControl(CONTROL_NEXT)
-                }
-                // Android 13+ media controls read PlaybackState custom actions,
-                // not Notification.Action. ACTION_FLAG is that custom action.
-                override fun onCustomAction(action: String, extras: Bundle?) {
-                    if (action != ACTION_FLAG) return
-                    onNativeControl(CONTROL_FLAG)
-                    showFlagFeedback(lastFlagOk())
-                }
-            })
-            setMetadata(
-                MediaMetadata.Builder()
-                    .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle())
-                    .putString(MediaMetadata.METADATA_KEY_ARTIST, currentArtist())
-                    .build(),
-            )
-            isActive = true
-        }
+        instance = this
+        ensureSession(this)
+        setSessionMetadata(currentTitle(), currentArtist())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -252,25 +313,18 @@ class PlaybackService : Service() {
     override fun onDestroy() {
         clearFlagFeedback?.let { mainHandler.removeCallbacks(it) }
         clearFlagFeedback = null
-        // Android destroys this service a minute or so after it stops being
+        instance = null
+        // Android destroys this service about a minute after it leaves the
         // foreground, which for us means "the listener paused a while ago".
-        // The notification is their way back, so re-post it as its own
-        // notification first: it is currently a MediaStyle backed by the
-        // session about to be released, which would leave the shade drawing
-        // media controls for a session that no longer exists. A stop we asked
-        // for, or a session that is gone, means nobody is coming back.
-        if (!deliberateStop && !isForeground && playbackAlive()) {
-            val packed = onNativeControl(CONTROL_QUERY)
-            getSystemService(NotificationManager::class.java).notify(
-                NOTIFICATION_ID,
-                buildNotification((packed and 1) != 0, packed ushr 1, currentTitle(), false),
-            )
-        } else {
+        // Leave the session and its notification standing: together they are
+        // the way back, and the session's callbacks start this service again.
+        // A stop we asked for, or playback that is gone, means nobody is
+        // coming back — take both down instead.
+        if (deliberateStop || !playbackAlive()) {
             leaveForeground(remove = true)
+            releaseSession()
         }
         deliberateStop = false
-        session.isActive = false
-        session.release()
         super.onDestroy()
     }
 
@@ -357,8 +411,9 @@ class PlaybackService : Service() {
      */
     private fun retireStaleNotification() {
         ensureChannel()
-        enterForeground(buildNotification(true, 0, currentTitle(), false))
+        enterForeground(buildNotification(true, 0, currentTitle()))
         leaveForeground(remove = true)
+        releaseSession()
         stopSelf()
     }
 
@@ -387,6 +442,7 @@ class PlaybackService : Service() {
         // Android 13+ media UI ignores Notification.setSubText; while feedback
         // is active, surface it on the artist line the controls already show.
         val displayArtist = flagFeedback ?: artist
+        val session = session ?: return
         session.setMetadata(
             MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, title)
@@ -404,6 +460,7 @@ class PlaybackService : Service() {
         // Android 13+ derives media-control buttons from PlaybackState, not
         // from Notification.Action. With PLAY_PAUSE + SKIP_TO_NEXT and no
         // SKIP_TO_PREVIOUS, the custom ⚑ fills compact slot 2 (pause | ⚑ | next).
+        val session = session ?: return
         session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
@@ -454,17 +511,7 @@ class PlaybackService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-    /**
-     * @param withSession false once the MediaSession is going away (see
-     *   [onDestroy]) or was never behind this notification, so the shade draws
-     *   the notification's own actions instead of controls for a dead session.
-     */
-    private fun buildNotification(
-        paused: Boolean,
-        phase: Int,
-        title: String,
-        withSession: Boolean = true,
-    ): Notification {
+    private fun buildNotification(paused: Boolean, phase: Int, title: String): Notification {
         val contentIntent = PendingIntent.getActivity(
             this,
             0,
@@ -501,17 +548,17 @@ class PlaybackService : Service() {
         }
 
         val style = Notification.MediaStyle().setShowActionsInCompactView(0, 1, 2)
-        if (withSession) {
-            style.setMediaSession(session.sessionToken)
-        }
+        session?.let { style.setMediaSession(it.sessionToken) }
 
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_play)
             .setContentTitle(title)
             .setContentText(contentText)
-            // Ongoing only while playing. Paused, this notification is no
-            // longer tied to a foreground service and may outlive the process,
-            // so the listener has to be able to swipe it away.
+            // Ongoing only while playing: paused, this is no longer a
+            // foreground-service notification and may outlive the process, so
+            // it must not also claim to be undismissable. (MediaStyle still
+            // adds NO_CLEAR of its own while the session lives — measured on
+            // Android 17.)
             .setOngoing(!paused)
             .setContentIntent(contentIntent)
             .addAction(toggle)
