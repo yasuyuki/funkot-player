@@ -81,6 +81,7 @@ export const ja: Messages = {
   queueEmpty: "キューは空 — 自動選曲で継続",
   queuePreparing: "準備中",
   queuePrepared: "準備済み",
+  automaticSelection: "自動選曲",
   transitionIn: (clock) => `切替まで ${clock}`,
   moveUpLabel: "上へ",
   moveDownLabel: "下へ",
@@ -88,6 +89,7 @@ export const ja: Messages = {
   queueErrTooLate: "もう切り替えに間に合いません",
   queueErrStale: "キューが更新されました",
   queueErrAuditioning: "試聴中は変更できません",
+  queueErrOriginBoundary: "手動追加曲と自動選曲の境界を越えて並べ替えできません",
   queueErrGeneric: "キューを更新できませんでした",
 
   // --- Library ---

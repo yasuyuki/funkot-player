@@ -46,6 +46,8 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTag};
 
+use crate::queue::{QueueItem, QueueOrigin};
+
 const QUEUE_FILE: &str = "queue.json";
 const LIBRARY_FILE: &str = "library.json";
 const FLAGS_FILE: &str = "flags.json";
@@ -141,22 +143,41 @@ pub fn migrate_from(old_dir: &Path, dir: &Path) {
 ///
 /// Returns an empty `Vec` (not an error) if the file does not exist yet, so
 /// first-run callers do not need to special-case "no queue saved".
-pub fn load_queue(dir: &Path) -> io::Result<Vec<PathBuf>> {
+pub fn load_queue(dir: &Path) -> io::Result<Vec<QueueItem>> {
     let path = dir.join(QUEUE_FILE);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let paths: Vec<PathBuf> = serde_json::from_slice(&bytes)
+    let paths: Vec<PersistedQueueItem> = serde_json::from_slice(&bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    Ok(paths)
+    Ok(paths.into_iter().map(PersistedQueueItem::into_item).collect())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PersistedQueueItem {
+    Current(QueueItem),
+    Legacy(PathBuf),
+}
+
+impl PersistedQueueItem {
+    fn into_item(self) -> QueueItem {
+        match self {
+            Self::Current(item) => item,
+            Self::Legacy(path) => QueueItem::manual(path),
+        }
+    }
 }
 
 /// Persist `queue`'s current contents under `dir`, overwriting any previous
 /// save.
-pub fn save_queue(dir: &Path, queue: &VecDeque<PathBuf>) -> io::Result<()> {
-    let paths: Vec<&PathBuf> = queue.iter().collect();
+pub fn save_queue<T>(dir: &Path, queue: &VecDeque<T>) -> io::Result<()>
+where
+    T: Clone + Into<QueueItem>,
+{
+    let paths: Vec<QueueItem> = queue.iter().cloned().map(Into::into).collect();
     let json = serde_json::to_vec_pretty(&paths)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(QUEUE_FILE), json)
@@ -180,9 +201,18 @@ pub struct Session {
     /// file mirrors `pending` only), which is exactly why a plain restart
     /// used to lose the first two tracks — see [`restored_pending`].
     #[serde(default)]
-    pub in_flight: Vec<PathBuf>,
+    #[serde(deserialize_with = "deserialize_queue_items")]
+    pub in_flight: Vec<QueueItem>,
     #[serde(default)]
     pub paused: bool,
+}
+
+fn deserialize_queue_items<'de, D>(deserializer: D) -> Result<Vec<QueueItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let items: Vec<PersistedQueueItem> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(items.into_iter().map(PersistedQueueItem::into_item).collect())
 }
 
 impl Session {
@@ -310,7 +340,8 @@ pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
 /// whatever `queue.json` still had. `exists` drops paths the library no
 /// longer has (moved/deleted while the app was closed).
 ///
-/// Paths repeated across the two inputs keep only their first occurrence.
+/// Identical items repeated across the two inputs keep only their first
+/// occurrence. The same path with different origins remains distinct.
 /// That is not a defensive nicety: `HostSource::next` (`src-tauri/src/
 /// queue.rs`) pops from `pending`, then calls `on_pending_consumed` (which
 /// rewrites `queue.json` without that entry) and *then* `on_reserved` (which
@@ -321,18 +352,39 @@ pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
 /// fix; its window is microsecond-scale, and losing at most one track to it
 /// is accepted.
 pub fn restored_pending(
-    in_flight: &[PathBuf],
-    saved_queue: &[PathBuf],
+    in_flight: &[QueueItem],
+    saved_queue: &[QueueItem],
     exists: impl Fn(&Path) -> bool,
-) -> Vec<PathBuf> {
-    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-    in_flight
-        .iter()
-        .chain(saved_queue.iter())
-        .filter(|p| exists(p))
-        .filter(|p| seen.insert((*p).clone()))
-        .cloned()
-        .collect()
+) -> Vec<QueueItem> {
+    let active = in_flight
+        .first()
+        .filter(|item| exists(&item.path))
+        .cloned();
+    let mut combined: Vec<QueueItem> = Vec::new();
+    for item in in_flight.iter().chain(saved_queue.iter()) {
+        if exists(&item.path) && !combined.contains(item) {
+            combined.push(item.clone());
+        }
+    }
+    let mut restored = Vec::new();
+    if let Some(active) = active {
+        if let Some(pos) = combined.iter().position(|item| item == &active) {
+            combined.remove(pos);
+        }
+        restored.push(active);
+    }
+    restored.extend(
+        combined
+            .iter()
+            .filter(|item| item.origin == QueueOrigin::Manual)
+            .cloned(),
+    );
+    restored.extend(
+        combined
+            .into_iter()
+            .filter(|item| item.origin == QueueOrigin::Automatic),
+    );
+    restored
 }
 
 /// Removes `revoked` from `in_flight` after `queue::edit_displayed`'s
@@ -354,10 +406,31 @@ pub fn restored_pending(
 /// A no-op if `revoked` is not found in `in_flight` (should not happen if
 /// `in_flight` and the engine's reserved slot stay in sync, but this
 /// function is not the place to assert that).
-pub fn retire_revoked(in_flight: &mut Vec<PathBuf>, revoked: &Path) {
-    if let Some(pos) = in_flight.iter().rposition(|p| p.as_path() == revoked) {
+pub fn retire_revoked(in_flight: &mut Vec<QueueItem>, revoked: &QueueItem) {
+    if let Some(pos) = in_flight.iter().rposition(|item| item == revoked) {
         in_flight.remove(pos);
     }
+}
+
+/// Advance `in_flight` from the completed transition's outgoing occurrence
+/// to its incoming occurrence. Searching after `from` is essential when both
+/// occurrences have the same path but different origins.
+pub fn retire_transition(in_flight: &mut Vec<QueueItem>, from: &Path, to: &Path) {
+    let Some(from_pos) = in_flight
+        .iter()
+        .position(|item| item.path.as_path() == from)
+    else {
+        return;
+    };
+    let Some(to_pos) = in_flight
+        .iter()
+        .enumerate()
+        .skip(from_pos + 1)
+        .find_map(|(index, item)| (item.path.as_path() == to).then_some(index))
+    else {
+        return;
+    };
+    in_flight.drain(..to_pos);
 }
 
 /// Where to resume folder cycling (`DrainPolicy::ContinueFolder`,
@@ -1477,6 +1550,36 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    fn qi(path: &str) -> QueueItem {
+        QueueItem::manual(PathBuf::from(path))
+    }
+
+    fn ai(path: &str) -> QueueItem {
+        QueueItem::automatic(PathBuf::from(path))
+    }
+
+    #[test]
+    fn queue_round_trip_preserves_origins() {
+        let dir = TempDir::new("queue-origin-roundtrip");
+        let queue = VecDeque::from([qi("/music/manual.flac"), ai("/music/auto.flac")]);
+        save_queue(&dir.0, &queue).unwrap();
+        assert_eq!(load_queue(&dir.0).unwrap(), Vec::from(queue));
+    }
+
+    #[test]
+    fn legacy_string_queue_entries_migrate_to_manual() {
+        let dir = TempDir::new("queue-legacy-manual");
+        fs::write(
+            dir.0.join(QUEUE_FILE),
+            br#"["/music/a.flac","/music/b.flac"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_queue(&dir.0).unwrap(),
+            vec![qi("/music/a.flac"), qi("/music/b.flac")]
+        );
+    }
+
     /// Fresh temp dir per test, cleaned up on drop.
     struct TempDir(PathBuf);
 
@@ -2522,13 +2625,24 @@ mod tests {
         let dir = TempDir::new("session-roundtrip");
         let session = Session {
             in_flight: vec![
-                PathBuf::from("/music/active.flac"),
-                PathBuf::from("/music/reserved.flac"),
+                qi("/music/active.flac"),
+                qi("/music/reserved.flac"),
             ],
             paused: true,
         };
         save_session(&dir.0, &session).unwrap();
         assert_eq!(load_session(&dir.0), session);
+    }
+
+    #[test]
+    fn legacy_session_in_flight_entries_migrate_to_manual() {
+        let dir = TempDir::new("session-legacy-manual");
+        fs::write(
+            dir.0.join(SESSION_FILE),
+            br#"{"in_flight":["/music/active.flac"],"paused":false}"#,
+        )
+        .unwrap();
+        assert_eq!(load_session(&dir.0).in_flight, vec![qi("/music/active.flac")]);
     }
 
     #[test]
@@ -2686,8 +2800,8 @@ mod tests {
 
     #[test]
     fn restored_pending_puts_in_flight_before_saved_queue() {
-        let in_flight = vec![PathBuf::from("/music/active.flac")];
-        let saved = vec![PathBuf::from("/music/next.flac")];
+        let in_flight = vec![qi("/music/active.flac")];
+        let saved = vec![qi("/music/next.flac")];
         let restored = restored_pending(&in_flight, &saved, |_| true);
         assert_eq!(
             restored,
@@ -2703,10 +2817,10 @@ mod tests {
     /// `in_flight` position.
     #[test]
     fn restored_pending_dedupes_keeping_first_occurrence() {
-        let in_flight = vec![PathBuf::from("/music/a.flac")];
+        let in_flight = vec![qi("/music/a.flac")];
         let saved = vec![
-            PathBuf::from("/music/a.flac"),
-            PathBuf::from("/music/b.flac"),
+            qi("/music/a.flac"),
+            qi("/music/b.flac"),
         ];
         let restored = restored_pending(&in_flight, &saved, |_| true);
         assert_eq!(
@@ -2721,10 +2835,10 @@ mod tests {
     #[test]
     fn restored_pending_drops_paths_that_no_longer_exist() {
         let in_flight = vec![
-            PathBuf::from("/music/gone.flac"),
-            PathBuf::from("/music/still-here.flac"),
+            qi("/music/gone.flac"),
+            qi("/music/still-here.flac"),
         ];
-        let saved = vec![PathBuf::from("/music/also-gone.flac")];
+        let saved = vec![qi("/music/also-gone.flac")];
         let restored = restored_pending(&in_flight, &saved, |p| {
             p == Path::new("/music/still-here.flac")
         });
@@ -2734,6 +2848,40 @@ mod tests {
     #[test]
     fn restored_pending_both_empty_is_empty() {
         assert!(restored_pending(&[], &[], |_| true).is_empty());
+    }
+
+    #[test]
+    fn restored_pending_keeps_active_first_then_manual_then_automatic() {
+        let in_flight = vec![ai("active"), ai("reserved-auto")];
+        let saved = vec![qi("manual-1"), ai("auto-2"), qi("manual-2")];
+        assert_eq!(
+            restored_pending(&in_flight, &saved, |_| true),
+            vec![
+                ai("active"),
+                qi("manual-1"),
+                qi("manual-2"),
+                ai("reserved-auto"),
+                ai("auto-2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn restored_pending_without_active_partitions_all_saved_items() {
+        let saved = vec![ai("auto-1"), qi("manual"), ai("auto-2")];
+        assert_eq!(
+            restored_pending(&[], &saved, |_| true),
+            vec![qi("manual"), ai("auto-1"), ai("auto-2")]
+        );
+    }
+
+    #[test]
+    fn restored_pending_preserves_same_path_with_different_origins() {
+        let path = "/music/same.flac";
+        assert_eq!(
+            restored_pending(&[ai(path)], &[qi(path)], |_| true),
+            vec![ai(path), qi(path)]
+        );
     }
 
     #[test]
@@ -2787,20 +2935,20 @@ mod tests {
     #[test]
     fn retire_revoked_removes_the_last_match_not_the_first() {
         let mut in_flight = vec![
-            PathBuf::from("/music/x.flac"),
-            PathBuf::from("/music/x.flac"),
+            qi("/music/x.flac"),
+            qi("/music/x.flac"),
         ];
-        retire_revoked(&mut in_flight, Path::new("/music/x.flac"));
+        retire_revoked(&mut in_flight, &qi("/music/x.flac"));
         assert_eq!(in_flight, vec![PathBuf::from("/music/x.flac")]);
     }
 
     #[test]
     fn retire_revoked_with_no_match_leaves_in_flight_unchanged() {
         let mut in_flight = vec![
-            PathBuf::from("/music/a.flac"),
-            PathBuf::from("/music/b.flac"),
+            qi("/music/a.flac"),
+            qi("/music/b.flac"),
         ];
-        retire_revoked(&mut in_flight, Path::new("/music/c.flac"));
+        retire_revoked(&mut in_flight, &qi("/music/c.flac"));
         assert_eq!(
             in_flight,
             vec![PathBuf::from("/music/a.flac"), PathBuf::from("/music/b.flac")]
@@ -2809,16 +2957,29 @@ mod tests {
 
     #[test]
     fn retire_revoked_on_empty_in_flight_is_a_noop() {
-        let mut in_flight: Vec<PathBuf> = Vec::new();
-        retire_revoked(&mut in_flight, Path::new("/music/a.flac"));
+        let mut in_flight: Vec<QueueItem> = Vec::new();
+        retire_revoked(&mut in_flight, &qi("/music/a.flac"));
         assert!(in_flight.is_empty());
     }
 
     #[test]
     fn retire_revoked_with_one_matching_element_empties_it() {
-        let mut in_flight = vec![PathBuf::from("/music/a.flac")];
-        retire_revoked(&mut in_flight, Path::new("/music/a.flac"));
+        let mut in_flight = vec![qi("/music/a.flac")];
+        retire_revoked(&mut in_flight, &qi("/music/a.flac"));
         assert!(in_flight.is_empty());
+    }
+
+
+    #[test]
+    fn retire_transition_advances_same_path_to_the_incoming_origin() {
+        let path = Path::new("/music/same.flac");
+        let mut in_flight = vec![ai("/music/same.flac"), qi("/music/same.flac")];
+        retire_transition(&mut in_flight, path, path);
+        assert_eq!(in_flight, vec![qi("/music/same.flac")]);
+        assert_eq!(
+            restored_pending(&in_flight, &[], |_| true),
+            vec![qi("/music/same.flac")]
+        );
     }
 
     #[test]

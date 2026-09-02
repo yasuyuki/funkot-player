@@ -79,6 +79,7 @@ export const id: Messages = {
   queueEmpty: "Antrean kosong — pemilihan otomatis tetap jalan",
   queuePreparing: "Menyiapkan",
   queuePrepared: "Siap",
+  automaticSelection: "Pilihan otomatis",
   transitionIn: (clock) => `Ganti dalam ${clock}`,
   moveUpLabel: "Naikkan",
   moveDownLabel: "Turunkan",
@@ -86,6 +87,7 @@ export const id: Messages = {
   queueErrTooLate: "Sudah terlambat untuk mengubah yang ini",
   queueErrStale: "Antrean sudah berubah",
   queueErrAuditioning: "Tidak bisa diubah saat pratinjau",
+  queueErrOriginBoundary: "Lagu manual dan otomatis tidak dapat dipindahkan melewati batasnya",
   queueErrGeneric: "Tidak dapat memperbarui antrean",
 
   // --- Library ---

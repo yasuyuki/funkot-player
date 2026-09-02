@@ -49,6 +49,7 @@ import type {
   LibraryScanProgress,
   NewArrival,
   PlayerState,
+  QueueItem,
   QueueSnapshot,
   TrackRow,
 } from "./tauri";
@@ -395,9 +396,9 @@ class PlayerStore {
       this.library,
       this.allowNonFunkot,
       this.player?.now_playing ?? null,
-      this.queue?.reserved ?? null,
-      this.queue?.pending ?? [],
-      this.queue?.in_flight ?? [],
+      this.queue?.reserved?.path ?? null,
+      this.queue?.pending.map((item) => item.path) ?? [],
+      this.queue?.in_flight.map((item) => item.path) ?? [],
     ).length;
   }
 
@@ -426,7 +427,7 @@ class PlayerStore {
         .length,
       banner: this.actionableNewArrivalCount,
       nowPlaying: this.player?.now_playing ?? null,
-      reserved: this.queue?.reserved ?? null,
+      reserved: this.queue?.reserved?.path ?? null,
       pending: this.queue?.pending?.length ?? 0,
       names: listed.map((a) => this.relName(a.path)),
     };
@@ -805,7 +806,7 @@ class PlayerStore {
   }
 
   /// `index` is a displayed-list index (see `dequeue`'s doc comment in
-  /// `src/lib/tauri.ts`); `expect` is the path shown there. Returns the
+  /// `src/lib/tauri.ts`); `expect` is the item shown there. Returns the
   /// error code (`"too_late"` / `"stale"` / `"out_of_range"` /
   /// `"auditioning"`, or the generic invoke failure string) on failure,
   /// `null` on success, so the caller can pick a toast message without
@@ -813,7 +814,7 @@ class PlayerStore {
   /// any other) rejection means what's on screen may already not match the
   /// host, so the caller's next render should show the current truth rather
   /// than the guess that just failed.
-  async doDequeue(index: number, expect: string): Promise<string | null> {
+  async doDequeue(index: number, expect: QueueItem): Promise<string | null> {
     try {
       await dequeueCmd(index, expect);
       await this.#refreshQueueNow();
@@ -827,8 +828,8 @@ class PlayerStore {
   }
 
   /// As `doDequeue`, for `Move`. `from`/`to` are displayed-list indices;
-  /// `expect` is the path shown at `from`.
-  async doReorder(from: number, to: number, expect: string): Promise<string | null> {
+  /// `expect` is the item shown at `from`.
+  async doReorder(from: number, to: number, expect: QueueItem): Promise<string | null> {
     try {
       await reorderCmd(from, to, expect);
       await this.#refreshQueueNow();

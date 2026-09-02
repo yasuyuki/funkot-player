@@ -20,7 +20,7 @@ use funkot_core::engine::{
 };
 use funkot_core::EngineOptions;
 
-use queue::{DrainPolicy, HostSource, QueueEdit, SharedQueue};
+use queue::{DrainPolicy, HostSource, QueueEdit, QueueItem, QueueOrigin, SharedQueue};
 
 /// Global handle to the running engine's playback controls.
 ///
@@ -1095,6 +1095,11 @@ static LAST_FOLDER_LABEL_UNDO: Mutex<Option<Vec<FolderLabelUndo>>> = Mutex::new(
 /// persisting. The new-arrivals bulk insert may read it under `SAVE_LOCK` and
 /// continue into queue, always in the documented global order.
 static SESSION: Mutex<store::Session> = Mutex::new(store::Session::new());
+
+/// Nonzero generation while an automatic reserved track may still need to
+/// yield to manual work. Compare-and-clear prevents an older watchdog pass
+/// from erasing a concurrent enqueue's newer request.
+static MANUAL_PRIORITY_REQUEST: AtomicU64 = AtomicU64::new(0);
 
 /// Save `SESSION`'s current value under [`DATA_DIR`]. Best-effort: no
 /// `DATA_DIR` yet (nothing has resolved it this launch) or a write failure
@@ -2178,10 +2183,24 @@ fn retire_in_flight_up_to(now: Option<&Path>) {
         let mut session = SESSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(pos) = session.in_flight.iter().position(|p| p.as_path() == now) else {
+        let Some(pos) = session
+            .in_flight
+            .iter()
+            .position(|item| item.path.as_path() == now)
+        else {
             return;
         };
         session.in_flight.drain(..pos);
+    }
+    persist_session();
+}
+
+fn retire_in_flight_transition(from: &Path, to: &Path) {
+    {
+        let mut session = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        store::retire_transition(&mut session.in_flight, from, to);
     }
     persist_session();
 }
@@ -2312,6 +2331,10 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     (completed, changed, tracker.now.clone())
                 };
                 let heard = completed.is_some() && !audition;
+                let main_transition = completed
+                    .as_ref()
+                    .filter(|_| !audition)
+                    .map(|(from, to, _)| (from.clone(), to.clone()));
                 if let Some((from, to, origin)) = completed {
                     log::info!(
                         "transition: {} -> {} ({})",
@@ -2323,8 +2346,8 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 if changed {
                     service_sync_state();
                 }
-                if changed && !audition {
-                    retire_in_flight_up_to(now_path.as_deref());
+                if let Some((from, to)) = main_transition {
+                    retire_in_flight_transition(&from, &to);
                 }
                 // Record even when path is unchanged (same-track restart:
                 // `changed` is false but `now = to` was assigned). Skip
@@ -2599,11 +2622,12 @@ fn audio_thread(
     // this app is to keep playing with the screen off.
     let queue_dir = data_dir.clone();
     let cache_dir_for_skip = cache_dir_for_log.clone();
-    let data_dir_for_skip = data_dir;
+    let data_dir_for_skip = data_dir.clone();
     // Cloned before `queue` moves into `HostSource::new` below: the
     // `on_pending_consumed` closure needs its own handle so it can re-read
     // the queue under `SAVE_LOCK` (see the closure body).
     let queue_for_save = Arc::clone(&queue);
+    let queue_for_priority = Arc::clone(&queue);
     let source = HostSource::new(
         queue,
         DrainPolicy::ContinueFolder {
@@ -2644,13 +2668,13 @@ fn audio_thread(
             let _saving = SAVE_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let pending: VecDeque<PathBuf> = queue::snapshot(&queue_for_save).into_iter().collect();
+            let pending: VecDeque<QueueItem> = queue::snapshot(&queue_for_save).into_iter().collect();
             if let Err(e) = store::save_queue(&queue_dir, &pending) {
                 log::warn!("save_queue({}): {e}", queue_dir.display());
             }
         }))
-        .on_reserved(Box::new(move |path| {
-            let analysis = funkot_core::cache::content_hash(path)
+        .on_reserved(Box::new(move |item| {
+            let analysis = funkot_core::cache::content_hash(&item.path)
                 .ok()
                 .and_then(|h| analyzed_cache_entry(&cache_dir_for_log, &h))
                 .is_some();
@@ -2661,7 +2685,7 @@ fn audio_thread(
             };
             log::info!(
                 "loader: preparing {} (analysis: {analysis})",
-                path.display()
+                item.path.display()
             );
             // Record this as in-flight the moment it leaves `pending` (or
             // the folder-drain fallback), so a process death before it ever
@@ -2675,7 +2699,7 @@ fn audio_thread(
                 let mut session = SESSION
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                session.in_flight.push(path.to_path_buf());
+                session.in_flight.push(item.clone());
             }
             persist_session();
         }))
@@ -2788,6 +2812,20 @@ fn audio_thread(
         // the rest of the app goes out of its way not to wake a phone up for
         // no reason.
         std::thread::sleep(Duration::from_secs(1));
+
+        let request = MANUAL_PRIORITY_REQUEST.load(Ordering::Acquire);
+        if request != 0 && try_prioritize_manual(&queue_for_priority, request) {
+            let _saving = SAVE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let pending: VecDeque<QueueItem> =
+                queue::snapshot(&queue_for_priority).into_iter().collect();
+            if let Err(e) = store::save_queue(&data_dir, &pending) {
+                log::warn!("save_queue({}): {e}", data_dir.display());
+            }
+            drop(_saving);
+            persist_session();
+        }
 
         // No open stream: stay Disconnected and retry reopen on the cooldown.
         // Do not set `Failed` — that is for the initial setup path only.
@@ -3373,7 +3411,7 @@ fn start_impl(
         Vec::new()
     });
     let restored = store::restored_pending(&session.in_flight, &saved, |p| p.exists());
-    let restored = apply_non_funkot_gate(
+    let restored = apply_non_funkot_gate_items(
         restored,
         &cache,
         &data,
@@ -3415,7 +3453,15 @@ fn start_impl(
     // `audio_thread` below, from `in_flight`'s *last* entry (the most
     // recently reserved track, whichever queue it came from).
     let folder_pos =
-        store::restored_folder_pos(&paths, session.in_flight.last().map(PathBuf::as_path));
+        store::restored_folder_pos(
+            &paths,
+            session
+                .in_flight
+                .iter()
+                .rev()
+                .find(|item| item.origin == QueueOrigin::Automatic)
+                .map(|item| item.path.as_path()),
+        );
     let queue = Arc::clone(&state.queue);
 
     // Set before the audio thread starts: any in-flight analysis worker
@@ -4285,18 +4331,61 @@ fn undo_last_flag(app: tauri::AppHandle) -> Result<(), String> {
 /// listener hears the outro run out solo).
 const SWAP_DEADLINE_SECS: f64 = 30.0;
 
+fn manual_priority_swap_safe(
+    auditioning: bool,
+    prepared: bool,
+    frames_until_transition: u64,
+    sample_rate: u32,
+) -> bool {
+    !auditioning
+        && prepared
+        && sample_rate != 0
+        && frames_until_transition != u64::MAX
+        && frames_until_transition as f64 / sample_rate as f64 > SWAP_DEADLINE_SECS
+}
+
+#[cfg(test)]
+mod manual_priority_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_automatic_is_swappable_with_safe_runway() {
+        assert!(manual_priority_swap_safe(false, true, 31_000, 1_000));
+    }
+
+    #[test]
+    fn preparing_automatic_waits_for_a_later_retry() {
+        assert!(!manual_priority_swap_safe(false, false, 31_000, 1_000));
+    }
+
+    #[test]
+    fn automatic_at_the_deadline_is_kept_for_one_track() {
+        assert!(!manual_priority_swap_safe(false, true, 30_000, 1_000));
+    }
+
+    #[test]
+    fn stale_watchdog_cannot_clear_a_newer_manual_request() {
+        let request = AtomicU64::new(1);
+        request.store(2, Ordering::Release);
+        clear_request_if_current(&request, 1);
+        assert_eq!(request.load(Ordering::Acquire), 2);
+        clear_request_if_current(&request, 2);
+        assert_eq!(request.load(Ordering::Acquire), 0);
+    }
+}
+
 /// Snapshot of the playback queue, for the UI.
 #[derive(serde::Serialize, Clone)]
 struct QueueSnapshot {
     /// Reserved = already handed to the engine to play next. `None` while the
     /// only reserved track is the first of a run (being prepared as current,
     /// not as next-up).
-    reserved: Option<String>,
+    reserved: Option<QueueItem>,
     /// Waiting queue; its head is "reserved's successor".
-    pending: Vec<String>,
+    pending: Vec<QueueItem>,
     /// Main-engine tracks handed out but not yet retired, in reservation
     /// order. Raw occurrences are preserved; the frontend unions by path.
-    in_flight: Vec<String>,
+    in_flight: Vec<QueueItem>,
     /// Whether `reorder`/`dequeue` would currently accept an edit that
     /// reaches into the `reserved` slot (`Move`/`Remove` at displayed index
     /// `0`, or `Move { to: 0, .. }`). `false` while: nothing is reserved; an
@@ -4355,7 +4444,7 @@ fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
     let _saving = SAVE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let pending: VecDeque<PathBuf> = queue::snapshot(&state.queue).into_iter().collect();
+    let pending: VecDeque<QueueItem> = queue::snapshot(&state.queue).into_iter().collect();
     if let Err(e) = store::save_queue(&data_dir, &pending) {
         log::warn!("save_queue({}): {e}", data_dir.display());
     }
@@ -4381,7 +4470,12 @@ fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -
         return Err("non_funkot".into());
     }
     let len = queue::enqueue(&state.queue, path_buf);
+    let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
+    let prioritized = try_prioritize_manual(&state.queue, request);
     persist_queue(&app, &state);
+    if prioritized {
+        persist_session();
+    }
     Ok(len)
 }
 
@@ -4548,6 +4642,81 @@ fn revoke_reserved() -> Option<PathBuf> {
     path
 }
 
+/// Same engine-side revoke as [`revoke_reserved`], but rechecks the manual
+/// priority deadline from the engine while holding the render lock. Atomics
+/// used by the watchdog are only a wake-up hint and may lag a buffer.
+fn revoke_reserved_for_manual_priority() -> Option<PathBuf> {
+    let playback = PLAYBACK.get()?;
+    let mut state = playback
+        .render
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let auditioning = state.audition.is_some()
+        || AUDITIONING.load(Ordering::Relaxed)
+        || AUDITION_PREPARING.load(Ordering::Relaxed);
+    let prepared = state.engine.next_track_path().is_some();
+    let frames = state.engine.frames_until_transition().unwrap_or(u64::MAX);
+    if !manual_priority_swap_safe(auditioning, prepared, frames, playback.sample_rate) {
+        return None;
+    }
+    let path = state.engine.revoke_next();
+    if path.is_some() {
+        NEXT_PREPARED.store(false, Ordering::Relaxed);
+    }
+    path
+}
+
+/// Replace a prepared automatic next track with the oldest waiting manual
+/// item when there is enough runway to decode the replacement safely.
+/// Returns true only when a replacement actually happened.
+fn clear_request_if_current(cell: &AtomicU64, request: u64) {
+    let _ = cell.compare_exchange(
+        request,
+        0,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+}
+
+fn clear_manual_priority_request(request: u64) {
+    clear_request_if_current(&MANUAL_PRIORITY_REQUEST, request);
+}
+
+fn try_prioritize_manual(queue: &SharedQueue, request: u64) -> bool {
+    if !queue::manual_priority_needed(queue) {
+        clear_manual_priority_request(request);
+        return false;
+    }
+    let auditioning =
+        AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed);
+    let prepared = NEXT_PREPARED.load(Ordering::Relaxed);
+    if auditioning || !prepared {
+        return false;
+    }
+    let frames = FRAMES_UNTIL_TRANSITION.load(Ordering::Relaxed);
+    let safe = PLAYBACK.get().is_some_and(|playback| {
+        manual_priority_swap_safe(auditioning, prepared, frames, playback.sample_rate)
+    });
+    if !safe {
+        // This automatic track is already committed. The manual partition is
+        // at the head of pending, so it will take over immediately after it.
+        clear_manual_priority_request(request);
+        return false;
+    }
+
+    let Some(revoked) = queue::prioritize_manual(queue, revoke_reserved_for_manual_priority) else {
+        return false;
+    };
+    {
+        let mut session = SESSION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        store::retire_revoked(&mut session.in_flight, &revoked);
+    }
+    clear_manual_priority_request(request);
+    true
+}
+
 /// Move an item within the *displayed* queue list (`[displayed reserved?] ++
 /// pending`; index `0` is next-up `reserved` when present — matches `QueueSnapshot` and
 /// `queue::QueueEdit`'s doc comment). `expect` must be the path currently
@@ -4564,7 +4733,7 @@ fn revoke_reserved() -> Option<PathBuf> {
 fn reorder(
     from: usize,
     to: usize,
-    expect: String,
+    expect: QueueItem,
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
@@ -4580,7 +4749,7 @@ fn reorder(
     queue::edit_displayed(
         &state.queue,
         QueueEdit::Move { from, to },
-        Path::new(&expect),
+        &expect,
         || {
             let path = revoke_reserved();
             revoked = path.clone();
@@ -4593,7 +4762,11 @@ fn reorder(
             let mut session = SESSION
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            store::retire_revoked(&mut session.in_flight, &path);
+            let item = QueueItem {
+                path,
+                origin: expect.origin,
+            };
+            store::retire_revoked(&mut session.in_flight, &item);
         }
         persist_session();
     }
@@ -4611,10 +4784,10 @@ fn reorder(
 #[tauri::command(async)]
 fn dequeue(
     index: usize,
-    expect: String,
+    expect: QueueItem,
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
-) -> Result<String, String> {
+) -> Result<QueueItem, String> {
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
     }
@@ -4625,7 +4798,7 @@ fn dequeue(
     queue::edit_displayed(
         &state.queue,
         QueueEdit::Remove { index },
-        Path::new(&expect),
+        &expect,
         || {
             let path = revoke_reserved();
             revoked = path.clone();
@@ -4638,7 +4811,11 @@ fn dequeue(
             let mut session = SESSION
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            store::retire_revoked(&mut session.in_flight, &path);
+            let item = QueueItem {
+                path,
+                origin: expect.origin,
+            };
+            store::retire_revoked(&mut session.in_flight, &item);
         }
         persist_session();
     }
@@ -4689,15 +4866,9 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
     let reserved_prepared = reserved.is_some()
         && (auditioning || paused || NEXT_PREPARED.load(Ordering::Relaxed));
     Ok(QueueSnapshot {
-        reserved: reserved.map(|p| p.to_string_lossy().into_owned()),
-        pending: pending
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect(),
-        in_flight: in_flight
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect(),
+        reserved,
+        pending,
+        in_flight,
         reserved_swappable,
         reserved_prepared,
         transition_in_secs,
@@ -4802,6 +4973,7 @@ fn gated_non_funkot(
 /// Pending restore can include folder-drain `in_flight`; apply the same gate
 /// as enqueue / folder skip so analysed non-Funkot are not replayed when
 /// `allow` is off. Does not read `ALLOW_NON_FUNKOT` (caller passes it).
+#[cfg(test)]
 fn apply_non_funkot_gate(
     paths: Vec<PathBuf>,
     cache_dir: &std::path::Path,
@@ -4814,6 +4986,21 @@ fn apply_non_funkot_gate(
     paths
         .into_iter()
         .filter(|p| !gated_non_funkot(p, cache_dir, data_dir))
+        .collect()
+}
+
+fn apply_non_funkot_gate_items(
+    items: Vec<QueueItem>,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    allow: bool,
+) -> Vec<QueueItem> {
+    if allow {
+        return items;
+    }
+    items
+        .into_iter()
+        .filter(|item| !gated_non_funkot(&item.path, cache_dir, data_dir))
         .collect()
 }
 
@@ -4839,6 +5026,7 @@ fn gated_non_funkot_from_index(
 /// Like [`apply_non_funkot_gate`], but never stats/hashes/exists music files.
 /// Loads hash-index and overrides once. Used by setup preload only;
 /// `start_impl` keeps the strict gate.
+#[cfg(test)]
 fn apply_non_funkot_gate_from_index(
     paths: Vec<PathBuf>,
     cache_dir: &std::path::Path,
@@ -4853,6 +5041,25 @@ fn apply_non_funkot_gate_from_index(
     paths
         .into_iter()
         .filter(|p| !gated_non_funkot_from_index(p, cache_dir, &index, &overrides))
+        .collect()
+}
+
+fn apply_non_funkot_gate_items_from_index(
+    items: Vec<QueueItem>,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    allow: bool,
+) -> Vec<QueueItem> {
+    if allow {
+        return items;
+    }
+    let index = store::load_hash_index(data_dir).index;
+    let overrides = store::load_overrides(data_dir);
+    items
+        .into_iter()
+        .filter(|item| {
+            !gated_non_funkot_from_index(&item.path, cache_dir, &index, &overrides)
+        })
         .collect()
 }
 
@@ -4873,7 +5080,7 @@ fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
         Vec::new()
     });
     let restored = store::restored_pending(&session.in_flight, &saved, |_| true);
-    let restored = apply_non_funkot_gate_from_index(
+    let restored = apply_non_funkot_gate_items_from_index(
         restored,
         cache_dir,
         &data,
@@ -5850,7 +6057,7 @@ mod cache_state_tests {
             Some((0, PathBuf::from("/music/r.flac")))
         );
 
-        let in_flight = vec![PathBuf::from("/music/z.flac")];
+        let in_flight = vec![QueueItem::manual(PathBuf::from("/music/z.flac"))];
         let added = queue_new_arrivals_with(&data.0, &cache.0, &q, true, &in_flight).unwrap();
         assert_eq!(added, 2);
         // `queue_new_arrivals` calls `persist_queue` only after this returns
@@ -5866,9 +6073,9 @@ mod cache_state_tests {
         assert_eq!(
             pending,
             vec![
+                PathBuf::from("/music/old.flac"),
                 PathBuf::from("/music/a.flac"),
                 PathBuf::from("/music/m.flac"),
-                PathBuf::from("/music/old.flac"),
             ]
         );
         assert_eq!(
@@ -7192,7 +7399,15 @@ fn queue_new_arrivals(
     state: tauri::State<AppState>,
 ) -> Result<u32, String> {
     let added = queue_new_arrivals_locked(&app, &state)?;
+    let mut prioritized = false;
+    if added > 0 {
+        let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
+        prioritized = try_prioritize_manual(&state.queue, request);
+    }
     persist_queue(&app, &state);
+    if prioritized {
+        persist_session();
+    }
     Ok(added)
 }
 
@@ -7228,7 +7443,7 @@ fn queue_new_arrivals_with(
     cache_dir: &std::path::Path,
     queue: &SharedQueue,
     allow_non_funkot: bool,
-    in_flight: &[PathBuf],
+    in_flight: &[QueueItem],
 ) -> Result<u32, String> {
     let _index = INDEX_LOCK
         .lock()
@@ -7247,7 +7462,7 @@ fn queue_new_arrivals_under_locks(
     cache_dir: &std::path::Path,
     queue: &SharedQueue,
     allow_non_funkot: bool,
-    in_flight: &[PathBuf],
+    in_flight: &[QueueItem],
 ) -> Result<u32, String> {
     let settings = store::load_settings(data_dir);
     let loaded = store::load_hash_index(data_dir);

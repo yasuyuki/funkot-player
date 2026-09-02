@@ -42,6 +42,8 @@ export function queueErrorMessage(t: Messages, code: string): string {
       return t.queueErrStale;
     case "auditioning":
       return t.queueErrAuditioning;
+    case "origin_boundary":
+      return t.queueErrOriginBoundary;
     default:
       return t.queueErrGeneric;
   }

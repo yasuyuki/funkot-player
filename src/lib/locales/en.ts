@@ -88,6 +88,7 @@ export const en = {
   queueEmpty: "Queue is empty — auto-select keeps going",
   queuePreparing: "Preparing",
   queuePrepared: "Ready",
+  automaticSelection: "Automatic selection",
   transitionIn: (clock: string) => `Switch in ${clock}`,
   moveUpLabel: "Move up",
   moveDownLabel: "Move down",
@@ -95,6 +96,7 @@ export const en = {
   queueErrTooLate: "Too late to change this one",
   queueErrStale: "The queue changed",
   queueErrAuditioning: "Cannot edit while auditioning",
+  queueErrOriginBoundary: "Manual and automatic tracks cannot be reordered across each other",
   queueErrGeneric: "Could not update the queue",
 
   // --- Library ---

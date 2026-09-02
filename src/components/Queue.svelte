@@ -42,6 +42,13 @@
     return from === 0 || to === 0;
   }
 
+  /// Manual FIFO and the automatic runway are separate reorder regions.
+  /// Adjacent arrows at their boundary stay disabled, matching the host's
+  /// `origin_boundary` rejection for stale or non-UI callers.
+  function originBlocksMove(from: number, to: number): boolean {
+    return items[from]?.origin !== items[to]?.origin;
+  }
+
   /// As `reservedBlocksMove`, for `Remove`.
   function reservedBlocksRemove(index: number): boolean {
     if (reserved === null || reservedSwappable) return false;
@@ -92,12 +99,31 @@
     <p class="empty">{t.queueEmpty}</p>
   {:else}
     <ul class="list">
-      {#each items as path, index (path + ":" + index)}
+      {#each items as item, index (item.path + ":" + item.origin + ":" + index)}
         <li class="row" class:reserved={reserved !== null && index === 0}>
           <div class="meta">
             <div class="text">
-              <div class="title">{store.titleForPath(path)}</div>
-              <div class="artist">{store.artistForPath(path)}</div>
+              <div class="title-line">
+                <span class="title">{store.titleForPath(item.path)}</span>
+                {#if item.origin === "automatic"}
+                  <svg
+                    class="automatic-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    role="img"
+                    aria-label={t.automaticSelection}
+                  >
+                    <title>{t.automaticSelection}</title>
+                    <path d="m12 3-1.1 3.1a3 3 0 0 1-1.8 1.8L6 9l3.1 1.1a3 3 0 0 1 1.8 1.8L12 15l1.1-3.1a3 3 0 0 1 1.8-1.8L18 9l-3.1-1.1a3 3 0 0 1-1.8-1.8L12 3Z" />
+                    <path d="m19 15-.6 1.7a2 2 0 0 1-1.2 1.2l-1.7.6 1.7.6a2 2 0 0 1 1.2 1.2L19 22l.6-1.7a2 2 0 0 1 1.2-1.2l1.7-.6-1.7-.6a2 2 0 0 1-1.2-1.2L19 15Z" />
+                  </svg>
+                {/if}
+              </div>
+              <div class="artist">{store.artistForPath(item.path)}</div>
             </div>
           </div>
           <div class="trailing">
@@ -122,14 +148,14 @@
               <button
                 type="button"
                 class="mini"
-                disabled={index === 0 || reservedBlocksMove(index, index - 1) || !!busy[`up:${index}`]}
+                disabled={index === 0 || reservedBlocksMove(index, index - 1) || originBlocksMove(index, index - 1) || !!busy[`up:${index}`]}
                 onclick={() => onUp(index)}
                 aria-label={t.moveUpLabel}
               >↑</button>
               <button
                 type="button"
                 class="mini"
-                disabled={index === items.length - 1 || reservedBlocksMove(index, index + 1) || !!busy[`down:${index}`]}
+                disabled={index === items.length - 1 || reservedBlocksMove(index, index + 1) || originBlocksMove(index, index + 1) || !!busy[`down:${index}`]}
                 onclick={() => onDown(index)}
                 aria-label={t.moveDownLabel}
               >↓</button>
@@ -207,11 +233,26 @@
     min-width: 0;
   }
 
+  .title-line {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    min-width: 0;
+  }
+
   .title {
+    min-width: 0;
     font-size: var(--font-size-md);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .automatic-icon {
+    width: 1rem;
+    height: 1rem;
+    flex: 0 0 auto;
+    color: var(--color-text-dim);
   }
 
   .artist {
