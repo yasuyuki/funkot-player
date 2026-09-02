@@ -328,22 +328,9 @@ Store 提出物（未署名）をそのままダブルクリックすると、Ap
 
 ### F-5. Store listings（一覧）
 
-言語は最低 **日本語**（英語は任意）。必須は説明文＋スクショ 1 枚以上（**4 枚推奨**）。
-
-**説明（コピー用）:**
-
-```text
-Funkot は、端末内の曲をつないで再生する Auto-DJ プレイヤーです。アカウント不要。初回は「Musicフォルダを選ぶ」で既存のフォルダを指定してください（ファイルはコピーしません）。選んだあと「Musicフォルダを開く」で中身を確認し、必要なら再スキャンしてください。
-```
-
-**機能・短い箇条書き（任意）:**
-
-```text
-- 端末内の曲をつないで連続再生
-- 初回は Musicフォルダを選ぶが必須（コピーしない）
-- 設定後は ⋮ → Musicフォルダを開く / 変更
-- アカウント不要・ローカル再生
-```
+言語はアプリ UI と同じ **日本語・英語・インドネシア語** の3つ。コピーは下の「説明文ドラフト」。
+必須は各言語で説明文＋スクショ 1 枚以上（**4 枚推奨**）。日本語で撮ったスクショを
+英語・インドネシア語へ流用してよい。
 
 **スクリーンショット（Desktop）:**
 
@@ -360,8 +347,9 @@ Funkot は、端末内の曲をつないで再生する Auto-DJ プレイヤー�
 
 ```text
 - On first desktop launch there is no default Music library root and no demo seed. Start stays disabled until the tester picks a folder.
-- Required path for certification: use 「Musicフォルダを選ぶ」 / Pick Music folder (empty-state primary button or ⋮). Point at a folder that already has audio (≥2 tracks to Start). Files are not copied or moved; that folder becomes the library scan root. Then ⋮ → 再スキャン (Rescan) if needed.
-- After a folder is set: 「Musicフォルダを変更」 / Change Music folder, and 「Musicフォルダを開く」 / Open Music folder (Explorer) to inspect or add files.
+- UI languages: Japanese, English, Indonesian. Cycle from the ⋮ menu (Language: …). Until the tester picks one, the app follows the PC language.
+- Required path for certification: use 「Musicフォルダを選ぶ」 / Pick Music folder / Pilih folder Musik (empty-state primary button or ⋮). Point at a folder that already has audio (≥2 tracks to Start). Files are not copied or moved; that folder becomes the library scan root. Then ⋮ → 再スキャン / Rescan / Pindai ulang if needed.
+- After a folder is set: 「Musicフォルダを変更」 / Change Music folder / Ganti folder Musik, and 「Musicフォルダを開く」 / Open Music folder / Buka folder Musik (Explorer) to inspect or add files.
 - Supported audio examples: wav/mp3/flac/m4a/ogg.
 - Local playback only; no account. Feedback ZIP stays on device until the user shares it.
 - Desktop full-trust (runFullTrust) for audio and file access.
@@ -406,18 +394,19 @@ Smart App Control に阻まれないことと、Music 配置 UX を確認する�
 
 ## 説明文ドラフト（コピー用）
 
-Partner Center の Store 一覧用。日本語だけで提出可。英語は任意。
+Partner Center の Store listings。アプリ UI と同じ **日本語・英語・インドネシア語**。
+ボタン名は画面どおり（「Musicフォルダを選ぶ」/ “Pick Music folder” / “Pilih folder Musik”）。
 
-### 短い説明（サブタイトル／短い説明欄がある場合・約1〜2文）
+### 日本語
 
+**短い説明:**
 ```text
-端末内の曲をつないで再生する Auto-DJ プレイヤー。アカウント不要。
+端末内の曲をつないで再生する Auto-DJ プレイヤー。アカウント不要。日本語・英語・インドネシア語。
 ```
 
-### 説明（本文）
-
+**説明:**
 ```text
-Funkot は、端末の曲を DJ 風のつなぎで連続再生するプレイヤーです。デッキ操作やビートマッチは不要。「Musicフォルダを選ぶ」で既存フォルダを指定すれば（ファイルはコピーしません）、あとは再生するだけです。
+Funkot は、端末の曲を DJ 風のつなぎで連続再生するプレイヤーです。デッキ操作やビートマッチは不要。「Musicフォルダを選ぶ」で既存フォルダを指定すれば（ファイルはコピーしません）、あとは再生するだけです。画面は日本語・英語・インドネシア語で、⋮ から切り替えられます。
 
 ■ はじめかた
 1. 「Musicフォルダを選ぶ」（ライブラリまたは ⋮）で音声があるフォルダを指定
@@ -439,11 +428,11 @@ Funkot は、端末の曲を DJ 風のつなぎで連続再生するプレイヤ
 つなぎの感覚について意見を集め、より自然な連続再生にしていくためのアプリです。気になるつなぎがあれば「このつなぎは不適切」から教えてください。
 ```
 
-### アプリの機能（Features・1行ずつ・最大あたり Partner Center の件数に合わせて削る）
-
+**アプリの機能:**
 ```text
 端末内の曲をつないで連続再生
 アカウント不要・ローカル再生のみ
+画面は日本語・英語・インドネシア語（⋮ から切替）
 Musicフォルダを選ぶで既存フォルダをスキャン（コピーしない）
 ⋮ → Musicフォルダを開く で選んだフォルダを表示（任意）
 キューの編集とセッション維持
@@ -451,35 +440,105 @@ intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
 ```
 
-### このバージョンの新機能（任意・初回は空でも可）
-
+**このバージョンの新機能（0.4.0）:**
 ```text
-Microsoft Store 向け初回公開（0.1.1）。Music フォルダを開く導線と、ローカルでのつなぎ再生に対応しています。
+広い画面ではライブラリと「次に再生」を並べて表示します。再生・次の曲・不適切フラグを1行にまとめ、つなぎ表示を短くして曲一覧が見やすくなりました。起動中に空のライブラリと出る不具合と、intro/outro の手直しが保存時に欠ける不具合を直しています。
 ```
 
-### English（任意）
+### English
 
-**Short:**
+**Short description:**
 ```text
-On-device Auto-DJ player. No account. Drop tracks in Music and play.
+On-device Auto-DJ player. No account. English, Japanese, and Indonesian.
 ```
 
 **Description:**
 ```text
-Funkot plays the tracks in your on-device Music folder back-to-back with DJ-style transitions. No decks, no beatmatching — prepare a folder and hit play.
+Funkot plays the tracks on your PC back-to-back with DJ-style transitions. No decks, no beatmatching. Use “Pick Music folder” to point at a folder you already have (files are not copied), then hit play. The UI is English, Japanese, or Indonesian; cycle it from the ⋮ menu.
 
 Getting started
-1. Use Musicフォルダを選ぶ (Pick Music folder) to point at a folder with audio (files are not copied)
-2. Rescan or start playback
-3. Optional: Open Music folder in Explorer to inspect or copy into the default Music path
+1. “Pick Music folder” (library or ⋮) and choose a folder that has audio
+2. “Rescan” if needed, or start playback
+3. Optional: “Open Music folder” shows that folder in Explorer so you can add files there
 
-Highlights
-• Continuous transitions across your library
-• Queue edit and session restore
-• Correct intro/outro bar counts
-• Flag bad transitions; feedback ZIP stays on device until you share it
+What it does
+• Loops transitions across tracks in the Music folder you picked
+• Add, reorder, and remove queue items (kept after you resume)
+• Adjust intro / outro transition points
+• Flag “This transition is wrong” to leave feedback
+• Feedback data stays on the device as a ZIP until you share it (no automatic upload)
 
-Local playback only. No account and no automatic upload. WebView2 (usually already on Windows) is required.
+Notes
+• No account and no cloud sync. Playback stays on the device.
+• Picking a folder does not move or copy files. Only the scan root changes.
+• Playback needs WebView2 (usually already on Windows).
+
+The app collects opinions on transitions so continuous playback can feel more natural. If a transition bothers you, tell us with “This transition is wrong”.
+```
+
+**App features:**
+```text
+Continuous transitions across on-device tracks
+No account — local playback only
+UI in English, Japanese, and Indonesian (cycle from ⋮)
+Pick Music folder to scan an existing folder (files are not copied)
+⋮ → Open Music folder to show the folder you picked (optional)
+Queue edit and session restore
+Adjust intro / outro
+Flag a bad transition and keep a feedback ZIP
+```
+
+**What's new in this version (0.4.0):**
+```text
+On a wide window, Library and Queue sit side by side. Play, next, and the flag control share one row, and the last transition is a single line, so more of the track list is visible. Startup no longer flashes an empty library, and saving intro/outro edits no longer races with Funkot labels.
+```
+
+### Bahasa Indonesia
+
+**Deskripsi singkat:**
+```text
+Pemutar Auto-DJ yang menyambungkan lagu di perangkat. Tanpa akun. Indonesia, Inggris, dan Jepang.
+```
+
+**Deskripsi:**
+```text
+Funkot memutar lagu di PC secara berkesinambungan dengan transisi bergaya DJ. Tidak perlu dek atau beatmatching. Lewat “Pilih folder Musik”, tunjuk folder yang sudah ada (berkas tidak disalin), lalu tekan putar. Tampilan tersedia dalam bahasa Indonesia, Inggris, dan Jepang; ganti dari menu ⋮.
+
+Mulai
+1. “Pilih folder Musik” (pustaka atau ⋮) dan pilih folder yang berisi audio
+2. “Pindai ulang” jika perlu, atau mulai pemutaran
+3. Opsional: “Buka folder Musik” menampilkan folder itu di Explorer agar berkas bisa ditambah di sana
+
+Yang bisa dilakukan
+• Memutar lagu di folder Musik yang dipilih dengan transisi berulang
+• Tambah, urutkan, dan hapus antrean (tetap ada setelah dilanjutkan)
+• Sesuaikan titik transisi intro / outro
+• Tandai “Transisi ini tidak pas” untuk memberi masukan
+• Data masukan tersimpan sebagai ZIP di perangkat sampai Anda membagikannya (tanpa unggah otomatis)
+
+Catatan
+• Tidak ada akun dan tidak ada sinkronisasi cloud. Pemutaran hanya di perangkat.
+• Memilih folder tidak memindahkan atau menyalin berkas. Yang berubah hanya akar pemindaian.
+• Pemutaran membutuhkan WebView2 (biasanya sudah ada di Windows).
+
+Aplikasi ini mengumpulkan masukan tentang transisi agar pemutaran berkesinambungan terasa lebih alami. Jika ada transisi yang mengganggu, beri tahu lewat “Transisi ini tidak pas”.
+```
+
+**Fitur aplikasi:**
+```text
+Lagu di perangkat diputar berkesinambungan dengan transisi
+Tanpa akun — pemutaran lokal saja
+Tampilan bahasa Indonesia, Inggris, dan Jepang (ganti dari ⋮)
+Pilih folder Musik untuk memindai folder yang sudah ada (tidak disalin)
+⋮ → Buka folder Musik untuk menampilkan folder yang dipilih (opsional)
+Sunting antrean dan lanjutkan sesi
+Sesuaikan intro / outro
+Tandai transisi yang tidak pas dan simpan ZIP masukan
+```
+
+**Yang baru di versi ini (0.4.0):**
+```text
+Di jendela yang lebar, Pustaka dan Antrean tampil berdampingan. Putar, lagu berikutnya, dan tanda transisi ada di satu baris, dan transisi terakhir jadi satu baris, sehingga daftar lagu lebih terlihat. Saat mulai, pustaka kosong tidak lagi berkedip, dan penyimpanan suntingan intro/outro tidak lagi bentrok dengan label Funkot.
 ```
 
 ---
