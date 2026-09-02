@@ -440,9 +440,9 @@ intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
 ```
 
-**このバージョンの新機能（0.4.0）:**
+**このバージョンの新機能（0.5.0）:**
 ```text
-広い画面ではライブラリと「次に再生」を並べて表示します。再生・次の曲・不適切フラグを1行にまとめ、つなぎ表示を短くして曲一覧が見やすくなりました。起動中に空のライブラリと出る不具合と、intro/outro の手直しが保存時に欠ける不具合を直しています。
+手動で足した曲を、自動選曲より先に再生します。起動時に復元した曲をキューから消したあと、開始で戻ってきていた不具合を直しています。Android では戻る操作で再生が止まらず、一時停止しても通知とメディアコントロールから再開できます。
 ```
 
 ### English
@@ -488,9 +488,9 @@ Adjust intro / outro
 Flag a bad transition and keep a feedback ZIP
 ```
 
-**What's new in this version (0.4.0):**
+**What's new in this version (0.5.0):**
 ```text
-On a wide window, Library and Queue sit side by side. Play, next, and the flag control share one row, and the last transition is a single line, so more of the track list is visible. Startup no longer flashes an empty library, and saving intro/outro edits no longer races with Funkot labels.
+Manually queued tracks play before auto-selected ones. Deleting a restored queue item no longer brings it back when you press Start. On Android, Back no longer kills playback, and pause keeps the notification and media controls so you can resume.
 ```
 
 ### Bahasa Indonesia
@@ -536,9 +536,9 @@ Sesuaikan intro / outro
 Tandai transisi yang tidak pas dan simpan ZIP masukan
 ```
 
-**Yang baru di versi ini (0.4.0):**
+**Yang baru di versi ini (0.5.0):**
 ```text
-Di jendela yang lebar, Pustaka dan Antrean tampil berdampingan. Putar, lagu berikutnya, dan tanda transisi ada di satu baris, dan transisi terakhir jadi satu baris, sehingga daftar lagu lebih terlihat. Saat mulai, pustaka kosong tidak lagi berkedip, dan penyimpanan suntingan intro/outro tidak lagi bentrok dengan label Funkot.
+Lagu yang Anda antrekan secara manual diputar sebelum lagu pilihan otomatis. Menghapus item antrean yang dipulihkan tidak lagi mengembalikannya saat Start. Di Android, tombol Kembali tidak lagi menghentikan pemutaran, dan jeda tetap menampilkan notifikasi serta kontrol media untuk melanjutkan.
 ```
 
 ---
