@@ -210,6 +210,19 @@ Release (signed; needs `src-tauri/gen/android/keystore.properties` +
 # → src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
 
+When the signing checkout is a different Unix user (cannot read this tree),
+do not copy the keystore here. From this tree, write a Windows-side bundle;
+the owner builds and the APK comes back through a drop directory:
+
+```sh
+./scripts/android-signed-release.sh prepare    # this tree
+# then the one-liner it prints, as the owner (sync + signed build + install)
+./scripts/android-signed-release.sh install    # if the phone was not on adb yet
+```
+
+Pairing is still a phone-in-hand step (`pair` / `connect` subcommands). The
+release key fingerprint is checked before `adb install -r`.
+
 ### Invariant checks
 
 ```sh
