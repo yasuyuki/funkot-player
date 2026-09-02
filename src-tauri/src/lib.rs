@@ -7870,6 +7870,36 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentLocaleT
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+/// Keep the process after the last window is destroyed.
+///
+/// Android playback (cpal + the mediaPlayback FGS) lives in this process.
+/// tao's Android event loop calls `process::exit` once `ControlFlow::Exit`
+/// is set, which would tear down the FGS with the activity. Desktop must
+/// still quit when the window closes.
+fn keep_process_after_last_window(is_android: bool, service_running: bool) -> bool {
+    is_android && service_running
+}
+
+#[cfg(test)]
+mod last_window_exit_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_quits_even_while_playback_is_up() {
+        assert!(!keep_process_after_last_window(false, true));
+    }
+
+    #[test]
+    fn android_quits_before_playback_service_starts() {
+        assert!(!keep_process_after_last_window(true, false));
+    }
+
+    #[test]
+    fn android_stays_up_while_playback_service_is_running() {
+        assert!(keep_process_after_last_window(true, true));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "android")]
@@ -7980,6 +8010,16 @@ pub fn run() {
             share_feedback,
             take_pending_import
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if keep_process_after_last_window(
+                    cfg!(target_os = "android"),
+                    SERVICE_RUNNING.load(Ordering::Relaxed),
+                ) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }

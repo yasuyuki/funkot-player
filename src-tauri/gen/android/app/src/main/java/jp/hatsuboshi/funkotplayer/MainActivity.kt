@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -13,6 +14,21 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+
+    // TauriActivity sets handleBackNavigation=false, so the platform default
+    // finishes this activity. tao then sees the last window destroyed and
+    // calls process::exit, which kills the playback FGS along with the UI.
+    // Background the task instead: the process, cpal stream, and
+    // PlaybackService stay up. Recents swipe still finishes the activity;
+    // Rust prevent_exit covers that path while the service is up.
+    onBackPressedDispatcher.addCallback(
+      this,
+      object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+          moveTaskToBack(true)
+        }
+      },
+    )
 
     // Needed to show the playback notification on Android 13+; without it
     // background playback (via PlaybackService) still works, the notification
