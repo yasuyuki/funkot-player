@@ -5088,6 +5088,30 @@ fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
     );
     let state = app.state::<AppState>();
     queue::replace_pending(&state.queue, restored);
+
+    // The preload is not only a view: from this point the restored entries
+    // are editable as ordinary pending rows. Commit that ownership transfer
+    // before the UI can delete/reorder them, otherwise start_impl reloads the
+    // old session.json and resurrects rows the listener already removed.
+    // Write queue first, then clear session, so a crash cannot lose an
+    // in-flight track from both files. Use the already-resolved data path;
+    // persist_queue would call resolve_dirs and probe a potentially slow SMB
+    // music folder on the GUI thread.
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pending: VecDeque<QueueItem> = queue::snapshot(&state.queue).into_iter().collect();
+    match store::save_restored_queue_and_clear_session(&data, &pending) {
+        Ok(()) => {
+            let mut live = SESSION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *live = store::Session::new();
+        }
+        Err(e) => {
+            log::warn!("setup: cannot persist preloaded queue/session: {e}");
+        }
+    }
 }
 
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.

@@ -250,6 +250,17 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
     fs::write(dir.join(SESSION_FILE), json)
 }
 
+/// Make a restored queue the durable editable owner of all session entries.
+/// Queue is written first so a crash between writes duplicates at worst;
+/// [`restored_pending`] removes that overlap on the next launch.
+pub fn save_restored_queue_and_clear_session(
+    dir: &Path,
+    queue: &VecDeque<QueueItem>,
+) -> io::Result<()> {
+    save_queue(dir, queue)?;
+    save_session(dir, &Session::new())
+}
+
 /// User-configurable app settings (`settings.json`).
 ///
 /// `music_dir`, when set, is the folder the listener picked via
@@ -2643,6 +2654,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_session(&dir.0).in_flight, vec![qi("/music/active.flac")]);
+    }
+
+    #[test]
+    fn consumed_preload_does_not_resurrect_rows_deleted_before_start() {
+        let dir = TempDir::new("preload-consumes-session");
+        let session = Session {
+            in_flight: vec![qi("/music/old-active.flac")],
+            paused: false,
+        };
+        save_session(&dir.0, &session).unwrap();
+        let restored = restored_pending(&session.in_flight, &[], |_| true);
+        save_restored_queue_and_clear_session(&dir.0, &VecDeque::from(restored)).unwrap();
+
+        // Listener clears the preloaded row before pressing Start.
+        save_queue(&dir.0, &VecDeque::<QueueItem>::new()).unwrap();
+
+        let at_start = restored_pending(
+            &load_session(&dir.0).in_flight,
+            &load_queue(&dir.0).unwrap(),
+            |_| true,
+        );
+        assert!(at_start.is_empty());
     }
 
     #[test]
