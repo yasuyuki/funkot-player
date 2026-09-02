@@ -28,12 +28,15 @@
   let sentinelEl = $state<HTMLElement | null>(null);
 
   /// Whether MiniBar is on screen. Derived here rather than inside MiniBar
-  /// because Toast docks on top of it and needs the same answer; the edit
-  /// tabs do not mount MiniBar at all, hence the mode test.
+  /// because Toast docks on top of it and needs the same answer.
+  ///
+  /// Edit mode draws no transport at all, so there is no sentinel to scroll
+  /// away and the bar is unconditionally the only playback control there --
+  /// it is what "the session keeps running while you edit" is made of. In
+  /// play mode it still waits for the transport row to leave the viewport.
   let miniBarVisible = $derived(
-    ui.mode === "play" &&
-      !transportVisible &&
-      sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false),
+    sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false) &&
+      (ui.mode === "edit" || !transportVisible),
   );
 
   /// Last scroll offset per play subtab. Deliberately not `$state`: nothing
@@ -116,38 +119,66 @@
   });
 </script>
 
+<!-- Mode lives in the header rather than down among the playback controls:
+     it is the one switch that is neither a per-tap playback command nor a
+     rare setting, and from here it stays reachable in both modes -- edit
+     mode draws none of the blocks the old toggle sat inside. -->
 <div class="header">
   <h1 class="app-title">Funkot</h1>
+  <div class="mode-switch" role="tablist">
+    <button
+      type="button"
+      class="mode"
+      class:active={ui.mode === "play"}
+      role="tab"
+      aria-selected={ui.mode === "play"}
+      aria-label={t.toPlayModeLabel}
+      onclick={() => ui.setMode("play")}
+    >{t.playMode}</button>
+    <button
+      type="button"
+      class="mode"
+      class:active={ui.mode === "edit"}
+      role="tab"
+      aria-selected={ui.mode === "edit"}
+      aria-label={t.toEditModeLabel}
+      onclick={() => ui.setMode("edit")}
+    >{t.editMode}</button>
+  </div>
   <UiBoundary>
     <OverflowMenu />
   </UiBoundary>
 </div>
 
+<!-- Auditioning is reachable from the edit side (FlaggedDetail starts it), so
+     the banner is drawn in both modes; the rest of the play chrome is not. -->
 {#if store.player?.auditioning}
   <UiBoundary>
     <AuditionBanner />
   </UiBoundary>
-{:else}
+{:else if ui.mode === "play"}
   <UiBoundary>
     <NowCard />
   </UiBoundary>
 {/if}
 
-<div class="playback-blocks">
-  <div class="transport-block">
-    <UiBoundary>
-      <Transport />
-    </UiBoundary>
-    <!-- Tied to Transport, not the whole playback-blocks: scrolling transport
-         away must still reveal MiniBar even when TransitionStrip follows. -->
-    <div class="minibar-sentinel" bind:this={sentinelEl} aria-hidden="true"></div>
+{#if ui.mode === "play"}
+  <div class="playback-blocks">
+    <div class="transport-block">
+      <UiBoundary>
+        <Transport />
+      </UiBoundary>
+      <!-- Tied to Transport, not the whole playback-blocks: scrolling transport
+           away must still reveal MiniBar even when TransitionStrip follows. -->
+      <div class="minibar-sentinel" bind:this={sentinelEl} aria-hidden="true"></div>
+    </div>
+    <div class="strip-block">
+      <UiBoundary>
+        <TransitionStrip />
+      </UiBoundary>
+    </div>
   </div>
-  <div class="strip-block">
-    <UiBoundary>
-      <TransitionStrip />
-    </UiBoundary>
-  </div>
-</div>
+{/if}
 
 <UiBoundary>
   <Toast raised={miniBarVisible} />
@@ -214,10 +245,6 @@
     </div>
   </div>
 
-  <!-- Outside the panes: the bar belongs to play mode, not to one tab. -->
-  <UiBoundary>
-    <MiniBar show={miniBarVisible} />
-  </UiBoundary>
 {:else}
   <div class="subtabs" role="tablist" aria-label={t.editTabsLabel}>
     <button
@@ -255,6 +282,13 @@
   {/if}
 {/if}
 
+<!-- Outside both modes: the bar belongs to the session, not to a screen, and
+     in edit mode it is the only playback control there is. Last in the
+     document so its in-flow spacer clears whichever list ends the page. -->
+<UiBoundary>
+  <MiniBar show={miniBarVisible} />
+</UiBoundary>
+
 <style>
   .header {
     display: flex;
@@ -268,6 +302,33 @@
     color: var(--color-text);
     font-size: var(--font-size-lg);
     margin: 0;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Segmented, not a pair of standalone buttons: the two share a border and
+     only one is filled, so which mode you are in is the same read as the
+     subtabs below. `flex: none` keeps it whole and hands any squeeze to the
+     title, which is the one thing here that can be clipped. */
+  .mode-switch {
+    display: flex;
+    flex: none;
+    gap: var(--space-xs);
+  }
+
+  .mode-switch .mode {
+    width: auto;
+    font-size: var(--font-size-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--color-tab-bg);
+    color: var(--color-tab-text);
+  }
+
+  .mode-switch .mode.active {
+    background: var(--color-tab-active-bg);
+    color: var(--color-tab-active-text);
   }
 
   .playback-blocks {

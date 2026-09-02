@@ -94,7 +94,13 @@
         onclick={onToggleLabel}
       >{shownFunkot ? t.funkot : t.notFunkot}</button>
     {/if}
-    <span class="progress">{labelProgress.current} / {labelProgress.total}</span>
+    <!-- n / total is the folder-scan position: a meter for the labelling
+         pass, not for listening. Off the play screen unless labelling mode is
+         on, where it is the only way to tell how far through the folder the
+         session has got. -->
+    {#if store.labelingMode}
+      <span class="progress">{labelProgress.current} / {labelProgress.total}</span>
+    {/if}
   </div>
 
   <!-- Reserved height on the title/artist block: the title/artist arrive a
