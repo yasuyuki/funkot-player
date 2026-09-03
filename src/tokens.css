@@ -76,8 +76,8 @@
   --library-row-height: 3.4rem;
   --queue-row-height: 3.2rem;
 
-  /* Desktop shell: the app is mobile-first, so this only bites once the window
-   * is wider than the layout was ever designed for. */
+  /* Desktop shell: first-launch width is 1024 (tauri.conf.json), under this
+   * 1200px cap. Wider windows centre the column. */
   --shell-max-width: 1200px;
 
   /* Two-column browse area (play mode). The 48rem switch point is spelled out

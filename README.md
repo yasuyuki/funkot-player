@@ -336,7 +336,7 @@ GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
   ```sh
   GUI=1 GUI_X11=1 ./dev.sh sh -c 'w=$(xdotool search --onlyvisible --name "^Funkot$" | tail -1);
       xdotool windowactivate --sync "$w";
-      xdotool mousemove --sync --window "$w" 137 197 click 1'   # 「開始」@420x760
+      xdotool mousemove --sync --window "$w" 137 197 click 1'   # 「開始」@1024x760
   ```
   Search by `productName` (`Funkot`) or `--class funkot-player` — not the
   binary name as `--name`. Use XTEST (`click` / `mousedown` without

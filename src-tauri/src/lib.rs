@@ -8189,6 +8189,89 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentLocaleT
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
+/// Reopen the desktop window at the last inner size, or leave the
+/// `tauri.conf.json` default (1024×760, wide enough for the two-pane
+/// browse layout). Android is always full-screen, so this is a no-op there.
+///
+/// Failures are `log::warn!`-only: a missing or unusable `window.json` must
+/// not block launch.
+#[cfg(not(target_os = "android"))]
+fn restore_desktop_window(app: &tauri::AppHandle, data: &Path) {
+    use tauri::{LogicalSize, Manager, Size};
+
+    let Some(frame) = store::load_window_frame(data) else {
+        return;
+    };
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let frame = match w.current_monitor() {
+        Ok(Some(m)) => {
+            let scale = m.scale_factor();
+            let phys = m.size();
+            let max_w = phys.width as f64 / scale;
+            let max_h = phys.height as f64 / scale;
+            frame.clamp_to(max_w, max_h)
+        }
+        _ => frame,
+    };
+    if let Err(e) = w.set_size(Size::Logical(LogicalSize {
+        width: frame.width,
+        height: frame.height,
+    })) {
+        log::warn!("restore window size: {e}");
+        return;
+    }
+    if frame.maximized {
+        if let Err(e) = w.maximize() {
+            log::warn!("restore maximized: {e}");
+        }
+    }
+}
+
+/// Write the live inner size to `window.json`. Best-effort: no window, no
+/// [`DATA_DIR`], or a write failure is `log::warn!`-only — closing the
+/// window must not fail because the size could not be saved.
+#[cfg(not(target_os = "android"))]
+fn persist_desktop_window(app: &tauri::AppHandle) {
+    use tauri::Manager;
+
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(physical) = w.inner_size() else {
+        return;
+    };
+    let Ok(scale) = w.scale_factor() else {
+        return;
+    };
+    let logical = physical.to_logical::<f64>(scale);
+    let maximized = w.is_maximized().unwrap_or(false);
+    let Some(frame) = store::WindowFrame::new(logical.width, logical.height, maximized) else {
+        return;
+    };
+    let Some(dir) = DATA_DIR.get() else {
+        log::warn!("persist window: DATA_DIR not resolved yet");
+        return;
+    };
+    if let Err(e) = store::save_window_frame(dir, &frame) {
+        log::warn!("save_window_frame({}): {e}", dir.display());
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn on_desktop_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
+    match event {
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { .. },
+            ..
+        } if label == "main" => persist_desktop_window(app),
+        tauri::RunEvent::ExitRequested { .. } => persist_desktop_window(app),
+        _ => {}
+    }
+}
+
 /// Keep the process after the last window is destroyed.
 ///
 /// Android playback (cpal + the mediaPlayback FGS) lives in this process.
@@ -8216,6 +8299,30 @@ mod last_window_exit_tests {
     #[test]
     fn android_stays_up_while_playback_service_is_running() {
         assert!(keep_process_after_last_window(true, true));
+    }
+}
+
+#[cfg(test)]
+mod desktop_window_default_tests {
+    /// `tauri.conf.json` width must open the two-pane browse layout on a
+    /// first desktop launch. `.browse` is a container query at 48rem, and
+    /// `body` side padding is `--space-xl` (1rem) each side; at the 16px
+    /// root used in `tokens.css` that is 768px + 32px.
+    #[test]
+    fn default_width_fits_two_browse_panes() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let width = conf["app"]["windows"][0]["width"]
+            .as_f64()
+            .expect("app.windows[0].width");
+        const ROOT_PX: f64 = 16.0;
+        const BROWSE_TWO_PANE_MIN_REM: f64 = 48.0;
+        const BODY_PAD_X_REM: f64 = 1.0;
+        let inner_min = (BROWSE_TWO_PANE_MIN_REM + 2.0 * BODY_PAD_X_REM) * ROOT_PX;
+        assert!(
+            width >= inner_min,
+            "default width {width} is below the two-pane floor {inner_min}"
+        );
     }
 }
 
@@ -8262,6 +8369,7 @@ pub fn run() {
             #[cfg(not(target_os = "android"))]
             match handle.path().app_data_dir() {
                 Ok(data) => {
+                    restore_desktop_window(&handle, &data);
                     let cache = data.join("funkot-cache");
                     preload_queue_tab(&handle, data, &cache);
                 }
@@ -8331,7 +8439,11 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
+            #[cfg(not(target_os = "android"))]
+            on_desktop_run_event(app, &event);
+            #[cfg(target_os = "android")]
+            let _ = app;
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if keep_process_after_last_window(
                     cfg!(target_os = "android"),

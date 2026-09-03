@@ -57,6 +57,7 @@ const DISMISSED_FILE: &str = "dismissed.json";
 const META_FILE: &str = "meta.json";
 const SESSION_FILE: &str = "session.json";
 const SETTINGS_FILE: &str = "settings.json";
+const WINDOW_FILE: &str = "window.json";
 const HASH_INDEX_FILE: &str = "hash-index.json";
 
 /// Metadata bundled with a feedback ZIP (`share_feedback`).
@@ -248,6 +249,85 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(session)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(SESSION_FILE), json)
+}
+
+/// Logical inner size of the desktop window, remembered across launches.
+///
+/// Desktop only: Android is always full-screen. Missing, corrupt, or
+/// unusable numbers → [`None`], and the window keeps `tauri.conf.json`'s
+/// defaults. Losing this file only resets the size; it is not listener work.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WindowFrame {
+    pub width: f64,
+    pub height: f64,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+/// Smallest inner size we will restore. Below this the chrome is unusable
+/// (buttons clip); the listener can still shrink live, we just will not
+/// reopen that small.
+pub const WINDOW_FRAME_MIN: f64 = 200.0;
+
+/// Sanity cap so a saved value from a disconnected 8K display cannot
+/// reopen larger than any monitor we expect to see. Restore also clamps
+/// to the current monitor when that information is available.
+pub const WINDOW_FRAME_MAX: f64 = 8192.0;
+
+impl WindowFrame {
+    /// Accept a live or saved size, or `None` if it must not be applied.
+    /// Oversized values are clamped; non-finite or below [`WINDOW_FRAME_MIN`]
+    /// are rejected so a corrupt file cannot open a 0×0 window.
+    pub fn new(width: f64, height: f64, maximized: bool) -> Option<Self> {
+        if !width.is_finite() || !height.is_finite() {
+            return None;
+        }
+        if width < WINDOW_FRAME_MIN || height < WINDOW_FRAME_MIN {
+            return None;
+        }
+        Some(Self {
+            width: width.min(WINDOW_FRAME_MAX),
+            height: height.min(WINDOW_FRAME_MAX),
+            maximized,
+        })
+    }
+
+    /// Shrink to fit a monitor's logical size. Never grows, and never
+    /// drops below [`WINDOW_FRAME_MIN`] even if the monitor reports smaller.
+    pub fn clamp_to(self, max_width: f64, max_height: f64) -> Self {
+        let max_w = max_width.max(WINDOW_FRAME_MIN);
+        let max_h = max_height.max(WINDOW_FRAME_MIN);
+        Self {
+            width: self.width.min(max_w),
+            height: self.height.min(max_h),
+            maximized: self.maximized,
+        }
+    }
+}
+
+/// Load the last desktop window size under `dir`.
+///
+/// Missing or unusable → [`None`] (same policy as a missing session: the
+/// next launch uses the config default rather than refusing to start).
+pub fn load_window_frame(dir: &Path) -> Option<WindowFrame> {
+    let bytes = match fs::read(dir.join(WINDOW_FILE)) {
+        Ok(b) => b,
+        Err(_) => return None,
+    };
+    match serde_json::from_slice::<WindowFrame>(&bytes) {
+        Ok(frame) => WindowFrame::new(frame.width, frame.height, frame.maximized),
+        Err(e) => {
+            log::warn!("{WINDOW_FILE} is unreadable, using default size: {e}");
+            None
+        }
+    }
+}
+
+/// Persist `frame` under `dir`, overwriting any previous save.
+pub fn save_window_frame(dir: &Path, frame: &WindowFrame) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(frame)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    write_atomic(&dir.join(WINDOW_FILE), &json)
 }
 
 /// Make a restored queue the durable editable owner of all session entries.
@@ -2808,6 +2888,78 @@ mod tests {
         let dir = TempDir::new("settings-corrupt");
         fs::write(dir.0.join(SETTINGS_FILE), b"{not json").unwrap();
         assert_eq!(load_settings(&dir.0), Settings::default());
+    }
+
+    #[test]
+    fn window_frame_round_trip() {
+        let dir = TempDir::new("window-roundtrip");
+        let frame = WindowFrame::new(1100.0, 760.0, false).unwrap();
+        save_window_frame(&dir.0, &frame).unwrap();
+        assert_eq!(load_window_frame(&dir.0), Some(frame));
+    }
+
+    #[test]
+    fn window_frame_round_trip_maximized() {
+        let dir = TempDir::new("window-maximized");
+        let frame = WindowFrame::new(1024.0, 760.0, true).unwrap();
+        save_window_frame(&dir.0, &frame).unwrap();
+        assert_eq!(load_window_frame(&dir.0), Some(frame));
+    }
+
+    #[test]
+    fn missing_window_file_is_none() {
+        let dir = TempDir::new("window-missing");
+        assert_eq!(load_window_frame(&dir.0), None);
+    }
+
+    #[test]
+    fn corrupt_window_file_is_none_not_a_panic() {
+        let dir = TempDir::new("window-corrupt");
+        fs::write(dir.0.join(WINDOW_FILE), b"{not json").unwrap();
+        assert_eq!(load_window_frame(&dir.0), None);
+    }
+
+    #[test]
+    fn window_json_without_maximized_defaults_false() {
+        let dir = TempDir::new("window-legacy");
+        fs::write(
+            dir.0.join(WINDOW_FILE),
+            br#"{"width":900.0,"height":700.0}"#,
+        )
+        .unwrap();
+        let loaded = load_window_frame(&dir.0).unwrap();
+        assert_eq!(loaded.width, 900.0);
+        assert_eq!(loaded.height, 700.0);
+        assert!(!loaded.maximized);
+    }
+
+    #[test]
+    fn window_frame_rejects_too_small() {
+        assert!(WindowFrame::new(199.0, 760.0, false).is_none());
+        assert!(WindowFrame::new(1024.0, 199.0, false).is_none());
+        assert!(WindowFrame::new(0.0, 760.0, false).is_none());
+    }
+
+    #[test]
+    fn window_frame_rejects_non_finite() {
+        assert!(WindowFrame::new(f64::NAN, 760.0, false).is_none());
+        assert!(WindowFrame::new(1024.0, f64::INFINITY, false).is_none());
+    }
+
+    #[test]
+    fn window_frame_clamps_oversized_on_new() {
+        let frame = WindowFrame::new(20_000.0, 760.0, false).unwrap();
+        assert_eq!(frame.width, WINDOW_FRAME_MAX);
+        assert_eq!(frame.height, 760.0);
+    }
+
+    #[test]
+    fn window_frame_clamp_to_monitor() {
+        let frame = WindowFrame::new(2000.0, 1200.0, true).unwrap();
+        let clamped = frame.clamp_to(1280.0, 720.0);
+        assert_eq!(clamped.width, 1280.0);
+        assert_eq!(clamped.height, 720.0);
+        assert!(clamped.maximized);
     }
 
     #[test]
