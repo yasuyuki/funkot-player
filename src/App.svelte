@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { ui } from "./lib/ui.svelte";
+  import { ui, type PlaySub } from "./lib/ui.svelte";
   import { i18n } from "./lib/i18n.svelte";
   import { store } from "./lib/state.svelte";
   import { sessionActive } from "./lib/transportMode";
@@ -15,6 +15,7 @@
   import LogView from "./components/LogView.svelte";
   import Queue from "./components/Queue.svelte";
   import Library from "./components/Library.svelte";
+  import History from "./components/History.svelte";
   import MiniBar from "./components/MiniBar.svelte";
   import FlaggedList from "./components/edit/FlaggedList.svelte";
   import FlaggedDetail from "./components/edit/FlaggedDetail.svelte";
@@ -42,7 +43,13 @@
   /// Last scroll offset per play subtab. Deliberately not `$state`: nothing
   /// renders from it, and a reactive write inside the swap would be one more
   /// thing to order against `tick`.
-  let scrollByPlaySub: Record<"queue" | "library", number> = { queue: 0, library: 0 };
+  let scrollByPlaySub: Record<PlaySub, number> = { queue: 0, library: 0, history: 0 };
+
+  /// Which screen the left column shows once both columns are up. The queue
+  /// is pinned on the right there, so `playSub === "queue"` -- which a narrow
+  /// window can leave behind when it is widened -- still has to resolve to a
+  /// left-hand screen, and the library is the one to fall back to.
+  let leftSub = $derived(ui.playSub === "history" ? "history" : "library");
 
   /// The document scrolls (`body` in tokens.css carries the padding; neither
   /// pane is its own scroll container), so hiding a pane changes the page
@@ -51,7 +58,7 @@
   /// hundreds of rows always lands at the top, which is the same "the list is
   /// far away" problem this split exists to fix. A restore past the new bottom
   /// is clamped by the browser, so there is nothing to clamp here.
-  async function onPlaySub(sub: "queue" | "library") {
+  async function onPlaySub(sub: PlaySub) {
     if (ui.playSub === sub) return;
     scrollByPlaySub[ui.playSub] = window.scrollY;
     ui.setPlaySub(sub);
@@ -201,43 +208,66 @@
        styles the container's descendants, and hiding the tabs when both panes
        fit is part of that same query. -->
   <div class="browse">
+    <!-- The queue tab is hidden once two columns are up (the queue is one of
+         them), so at that width these choose the left-hand column and their
+         active state follows `leftSub`, not `playSub`. -->
     <div class="subtabs" role="tablist" aria-label={t.playTabsLabel}>
       <button
         type="button"
-        class="tab"
+        class="tab queue"
         class:active={ui.playSub === "queue"}
         role="tab"
         aria-selected={ui.playSub === "queue"}
         onclick={() => onPlaySub("queue")}
       >{t.queueHeading}</button>
+      <!-- `left` is what makes the library tab read as selected in the
+           two-column band when `playSub` is still "queue" from a narrower
+           window. Only the wide band styles it, so no width has to be
+           measured in script. -->
       <button
         type="button"
         class="tab"
         class:active={ui.playSub === "library"}
+        class:left={leftSub === "library"}
         role="tab"
         aria-selected={ui.playSub === "library"}
         onclick={() => onPlaySub("library")}
       >{t.libraryHeading}</button>
+      <button
+        type="button"
+        class="tab"
+        class:active={ui.playSub === "history"}
+        role="tab"
+        aria-selected={ui.playSub === "history"}
+        onclick={() => onPlaySub("history")}
+      >{t.historyHeading}</button>
     </div>
 
-    <!-- Library first so the wide layout reads left-to-right the way the work
-         does: find it in the library, then add it to what plays next. DOM
-         order rather than `order:` so focus and screen readers agree with the
-         columns. Narrow shows one pane at a time, so the swap is invisible
-         there and the tab buttons keep their old order.
+    <!-- Sources first, then the queue, so the wide layout reads left-to-right
+         the way the work does: find it — in the library, or in what you have
+         already played — then add it to what plays next. Library and History
+         are alternatives for that left column and only one is ever up, so DOM
+         order gives the columns without `order:`, and focus and screen readers
+         agree with them. Narrow shows one pane at a time, so the order is
+         invisible there and the tab buttons keep their own.
 
-         Both panes stay mounted and the inactive one is display:none'd by
+         All three panes stay mounted and the hidden ones are display:none'd by
          class. An `{#if}` would unmount Library and drop its search text, sort
-         key and new-arrivals-only state on every tab tap; the `hidden`
-         attribute would have to be fought with CSS to show both panes at
-         once, which is exactly what it is not for. -->
-    <div class="panes">
-      <div class="pane" class:active={ui.playSub === "library"}>
+         key, new-arrivals-only state and selection on every tab tap; the
+         `hidden` attribute would have to be fought with CSS to show two panes
+         at once, which is exactly what it is not for. -->
+    <div class="panes" class:history-left={leftSub === "history"}>
+      <div class="pane library" class:active={ui.playSub === "library"}>
         <UiBoundary>
           <Library />
         </UiBoundary>
       </div>
-      <div class="pane" class:active={ui.playSub === "queue"}>
+      <div class="pane history" class:active={ui.playSub === "history"}>
+        <UiBoundary>
+          <History />
+        </UiBoundary>
+      </div>
+      <div class="pane queue" class:active={ui.playSub === "queue"}>
         <UiBoundary>
           <Queue />
         </UiBoundary>
@@ -384,12 +414,24 @@
      this is that floor with a little slack. Spelled out rather than tokenised
      because a container query cannot read a custom property. Measured on the
      browse wrapper, not the viewport, so shell padding -- or the library tree
-     column planned for the left of this area -- does not move the switch. */
+     column planned for the left of this area -- does not move the switch.
+
+     The queue takes the right column and stays there: picking tracks out of
+     the library or out of what you have already played both mean adding them
+     to what plays next, and that is worth seeing while you pick. The left
+     column is whichever source is selected, so the tabs still have something
+     to say here -- only the queue's own tab goes, since it can no longer
+     point at anything you are not already looking at. */
   @container browse (min-width: 48rem) {
-    /* Both panes are up, each under its own heading, so the tabs would only
-       be a second way to say which one you are looking at. */
-    .subtabs {
+    .subtabs .tab.queue {
       display: none;
+    }
+
+    /* `playSub` can still be "queue" here, carried in from a narrower window;
+       `left` is the class that keeps the library tab reading as selected. */
+    .subtabs .tab.left {
+      background: var(--color-tab-active-bg);
+      color: var(--color-tab-active-text);
     }
 
     .panes {
@@ -401,7 +443,49 @@
       align-items: start;
     }
 
-    .panes > .pane:not(.active) {
+    /* Spelled out per pane rather than `:not(.active)`, which only worked
+       while there were exactly two of them. */
+    .panes > .pane.queue,
+    .panes > .pane.library {
+      display: block;
+    }
+
+    .panes > .pane.history {
+      display: none;
+    }
+
+    .panes.history-left > .pane.library {
+      display: none;
+    }
+
+    .panes.history-left > .pane.history {
+      display: block;
+    }
+  }
+
+  /* 70.5rem = 3 x --browse-col-min + 2 x --browse-gutter (1128px), the same
+     arithmetic as above with a third column. Below it a third column does not
+     fit -- the default desktop window is 1024 wide (tauri.conf.json) -- so
+     this band is only reached by widening one on a large monitor. Every pane
+     is up under its own heading, and now the tabs really would only be a
+     second way to say what you are already looking at. */
+  @container browse (min-width: 70.5rem) {
+    .subtabs {
+      display: none;
+    }
+
+    .panes {
+      grid-template-columns: repeat(3, minmax(var(--browse-col-min), 1fr));
+    }
+
+    /* Every pane, spelled out at the same specificity as the two-column
+       band's `display: none` rules above and after them, or those would still
+       win and the third column would come up blank. */
+    .panes > .pane.queue,
+    .panes > .pane.library,
+    .panes > .pane.history,
+    .panes.history-left > .pane.library,
+    .panes.history-left > .pane.history {
       display: block;
     }
   }

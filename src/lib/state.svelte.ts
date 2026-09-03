@@ -202,6 +202,9 @@ class PlayerStore {
   /// a guard would let either starve the other.
   #playHistoryGen = 0;
   #playHistoryBusy = false;
+  /// Last `history_revision` whose pull landed in `playHistory`. `null` until
+  /// the first success and after a wipe, so revision 0 still pulls once.
+  #appliedPlayHistoryRevision: number | null = null;
   /// Drops overlapping F/J/Space while a skip invoke is in flight, so the
   /// progress index cannot walk the library faster than playback.
   #labelSkipBusy = false;
@@ -658,6 +661,11 @@ class PlayerStore {
   async doClearLabelsAndHistory(): Promise<boolean> {
     try {
       await clearLabelsAndHistoryCmd();
+      // The wipe bumps `history_revision` too, so the pane would refresh on
+      // its own within a poll; clearing the applied revision makes it empty
+      // immediately instead of half a second after the confirmation.
+      this.invalidatePlayHistory();
+      await this.loadPlayHistory(null);
       await this.#reloadLibraryQuiet();
       return true;
     } catch (e) {
@@ -799,22 +807,41 @@ class PlayerStore {
 
   /// Both history views, pulled on demand.
   ///
-  /// Guarded by its own generation and single-flight flag rather than the
-  /// arrivals ones: both consume the same `history_revision`, and sharing a
-  /// guard would let one starve the other.
-  async loadPlayHistory(): Promise<void> {
+  /// `revision` is `PlayerState.history_revision`. The caller is an `$effect`
+  /// that reads `player`, which the 500ms poll reassigns wholesale, so it runs
+  /// twice a second; this only invokes when the revision has actually moved —
+  /// i.e. once per track change. Without that test the pane would re-fetch a
+  /// library-sized answer on every tick.
+  ///
+  /// The applied-revision, generation and single-flight guards are its own
+  /// rather than the arrivals ones: both are driven by the same revision, and
+  /// sharing them would let either starve the other.
+  async loadPlayHistory(revision: number | null): Promise<void> {
     if (this.#playHistoryBusy) return;
+    if (revision !== null && revision === this.#appliedPlayHistoryRevision) return;
     this.#playHistoryBusy = true;
     this.#playHistoryGen += 1;
     const gen = this.#playHistoryGen;
     try {
       const view = await listPlayHistory(PLAY_HISTORY_LIMIT);
-      if (gen === this.#playHistoryGen) this.playHistory = view;
+      if (gen === this.#playHistoryGen) {
+        this.playHistory = view;
+        // Only on success, so a failed pull is retried on the next tick
+        // rather than waiting for another track to finish.
+        this.#appliedPlayHistoryRevision = revision;
+      }
     } catch (e) {
       this.lastError = String(e);
     } finally {
       this.#playHistoryBusy = false;
     }
+  }
+
+  /// Forget which revision is on screen, so the next call re-fetches even
+  /// though nothing has played since. Wiping history does not bump
+  /// `history_revision` past a value this pane may already have applied.
+  invalidatePlayHistory(): void {
+    this.#appliedPlayHistoryRevision = null;
   }
 
   /// Adopt the stored UI language, if the listener has ever picked one.

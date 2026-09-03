@@ -3,6 +3,10 @@
 // than in `state.svelte.ts` -- there is nothing here that needs the poll
 // loop or its "what changed since last time" guard.
 
+/// The play-mode screens. Exported so the store, `App.svelte`'s tab handler
+/// and its per-screen scroll memory all widen together when one is added.
+export type PlaySub = "queue" | "library" | "history";
+
 class UiStore {
   menuOpen = $state(false);
   logOpen = $state(false);
@@ -13,7 +17,7 @@ class UiStore {
   /// before the first poll, so a long queue used to push the library -- the
   /// whole list of files -- off the bottom of the page. Defaults to the
   /// library, which is what gets browsed; the queue is one tap away.
-  playSub = $state<"queue" | "library">("library");
+  playSub = $state<PlaySub>("library");
   /// Edit-panel subtab. `flags` = 直すべきつなぎ, `all` = すべての曲.
   editSub = $state<"flags" | "all">("flags");
   /// Open flagged-detail identity, or `null` while the list is showing.
@@ -30,7 +34,7 @@ class UiStore {
 
   /// Deliberately does not reset on `setMode`: coming back from 編集 to the
   /// screen you left is what makes the flag-then-check loop bearable.
-  setPlaySub(sub: "queue" | "library"): void {
+  setPlaySub(sub: PlaySub): void {
     this.playSub = sub;
   }
 

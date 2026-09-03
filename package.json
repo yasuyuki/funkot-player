@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --test src/lib/arrivals.test.mjs src/lib/library-empty.test.mjs src/lib/library-sort.test.mjs src/lib/locale.test.mjs src/lib/selection.test.mjs",
+    "test": "node --test src/lib/arrivals.test.mjs src/lib/library-empty.test.mjs src/lib/library-sort.test.mjs src/lib/locale.test.mjs src/lib/play-history.test.mjs src/lib/selection.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
