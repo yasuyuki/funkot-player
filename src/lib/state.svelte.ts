@@ -452,10 +452,13 @@ class PlayerStore {
     return { current: idx >= 0 ? idx + 1 : 0, total };
   }
 
-  /// Start stays off until a usable Music folder is chosen and at least two
-  /// tracks are listed. `music_dir_needed` is the Store first-launch gate.
+  /// Start stays off until a usable Music folder is chosen and at least one
+  /// track is listed. One track is enough because `ensure_tracks_available`
+  /// (src-tauri/src/lib.rs) only rejects an empty library: `HostSource`
+  /// cycles the folder, so a single file is a valid repeating playlist.
+  /// `music_dir_needed` is the Store first-launch gate.
   get canStart(): boolean {
-    return !this.dirs?.music_dir_needed && this.libraryList.length >= 2;
+    return !this.dirs?.music_dir_needed && this.libraryList.length >= 1;
   }
 
   /// Seconds into the current track, client-side interpolated between polls.

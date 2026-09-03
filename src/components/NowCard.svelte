@@ -39,10 +39,13 @@
   // phase (e.g. a failed `skip_next` while still playing) would be
   // completely invisible.
   let showLogLink = $derived(phase === "failed" || store.lastError !== null);
-  // Store certification path: when Start fails for too few tracks, offer the
-  // same Music-folder opener as Library / OverflowMenu next to the log link.
+  // Store certification path: when Start fails for an empty library, offer
+  // the same Music-folder opener as Library / OverflowMenu next to the log
+  // link. The substring has to stay in step with `ensure_tracks_available`
+  // (src-tauri/src/lib.rs), which spells the error `need >= 1 track in <dir>,
+  // found 0`.
   let showOpenMusic = $derived(
-    store.lastError !== null && store.lastError.includes("need >= 2 tracks"),
+    store.lastError !== null && store.lastError.includes("need >= 1 track"),
   );
   let openMusicBusy = $state(false);
   let labelBusy = $state(false);

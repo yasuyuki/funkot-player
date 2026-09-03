@@ -148,7 +148,7 @@ Pages の再デプロイ: Settings → Pages が GitHub Actions。Actions → **
 ```text
 - On first desktop launch there is no default Music library root and no demo seed. Start stays disabled until the tester picks a folder.
 - UI languages: Japanese, English, Indonesian. Cycle from the ⋮ menu (Language: …). Until the tester picks one, the app follows the PC language.
-- Required path for certification: use 「Musicフォルダを選ぶ」 / Pick Music folder / Pilih folder Musik (empty-state primary button or ⋮). Point at a folder that already has audio (≥2 tracks to Start). Files are not copied or moved; that folder becomes the library scan root. Then ⋮ → 再スキャン / Rescan / Pindai ulang if needed.
+- Required path for certification: use 「Musicフォルダを選ぶ」 / Pick Music folder / Pilih folder Musik (empty-state primary button or ⋮). Point at a folder that already has audio (≥1 track to Start). Files are not copied or moved; that folder becomes the library scan root. Then ⋮ → 再スキャン / Rescan / Pindai ulang if needed.
 - After a folder is set: 「Musicフォルダを変更」 / Change Music folder / Ganti folder Musik, and 「Musicフォルダを開く」 / Open Music folder / Buka folder Musik (Explorer) to inspect or add files.
 - Supported audio examples: wav/mp3/flac/m4a/ogg.
 - Local playback only; no account. Feedback ZIP stays on device until the user shares it.
