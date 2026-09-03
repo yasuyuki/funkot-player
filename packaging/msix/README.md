@@ -3,8 +3,9 @@
 Unsigned MSIX for Partner Center upload. Not a substitute for the NSIS GitHub
 Release installer.
 
-**Human submission steps** (Partner Center, privacy URL, upload, device check):
-[`docs/store-submission.md`](../../docs/store-submission.md).
+**Human submission steps.** Each Store update:
+[`docs/store-submission.md`](../../docs/store-submission.md). First-time Partner
+Center setup: [`docs/store-first-submission.md`](../../docs/store-first-submission.md).
 
 ## Prerequisites
 
@@ -29,7 +30,7 @@ They are already produced by `tauri icon`. If missing, regenerate icons from
 
 1. Align `Package.appxmanifest` **Identity Name**, **Publisher**, and
    **PublisherDisplayName** with Partner Center (current Store values are in
-   the manifest; see `docs/store-submission.md`).
+   the manifest; see `docs/store-submission.md` for current Store Identity).
 2. From the repo root in PowerShell:
 
    ```powershell

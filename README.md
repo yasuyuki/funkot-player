@@ -29,7 +29,8 @@ Android builds live on this repo's
 [GitHub Releases](https://github.com/yasuyuki/funkot-player/releases).
 Windows is distributed via the **Microsoft Store** (MSIX; Microsoft re-signs
 the package). Packaging notes: [packaging/msix/README.md](packaging/msix/README.md),
-submission checklist: [docs/store-submission.md](docs/store-submission.md).
+update submission: [docs/store-submission.md](docs/store-submission.md)
+(first-time Partner Center setup: [docs/store-first-submission.md](docs/store-first-submission.md)).
 
 ### Android
 
@@ -78,7 +79,7 @@ Linux: 音楽フォルダの選択には xdg-desktop-portal と対応バック�
 
 Privacy policy (Store): [docs/privacy.md](docs/privacy.md) /
 https://yasuyuki.github.io/funkot-player/privacy.html
-Store publishing checklist: [docs/store-submission.md](docs/store-submission.md).
+Store update submission: [docs/store-submission.md](docs/store-submission.md).
 
 To send feedback, use **⋮ → 意見を送る** — on Windows this saves a ZIP and
 shows its path (there is no system share sheet). Attach that file in email or
@@ -260,9 +261,10 @@ Release for the tag before publishing:
    **Release notes (the GitHub Release body) are English**, even if the chat is
    Japanese. Partner Center listing copy stays Japanese.
 
-**Windows (Microsoft Store / MSIX).** Preferred path. Human steps (Partner
-Center, Pages, submit, device check):
-[docs/store-submission.md](docs/store-submission.md). Packing details:
+**Windows (Microsoft Store / MSIX).** Preferred path. Each Store update:
+[docs/store-submission.md](docs/store-submission.md). First-time Partner Center
+setup (account, name reservation, Identity):
+[docs/store-first-submission.md](docs/store-first-submission.md). Packing details:
 [packaging/msix/README.md](packaging/msix/README.md). CI:
 [Windows MSIX](.github/workflows/windows-msix.yml) (`workflow_dispatch`) uploads
 an **unsigned** `.msix` artifact for Partner Center.

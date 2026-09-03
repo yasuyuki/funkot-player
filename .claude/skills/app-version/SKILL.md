@@ -47,7 +47,7 @@ description: funkot-player の版数（アプリのバージョン）を上げ�
 
 **触らないもの**（スクリプトも避けている。手でも直さない）:
 
-- `docs/store-submission.md` の `0.1.2` — **提出した事実の記録**であって次に焼く版ではない
+- `docs/store-submission.md` の説明文ドラフト — **提出コピー**であって `set-version.sh` は触らない
 - ワークフローと README の `player/v0.1.1` — これは **funkot-autodj（エンジン）の版**。別物
 - `src-tauri/src/store.rs` の `0.1.0` — テスト fixture
 
@@ -64,11 +64,12 @@ description: funkot-player の版数（アプリのバージョン）を上げ�
    **タグ push 経路は入力欄が出ないので、黙って古いエンジンで焼かれる**
 3. artifact `funkot-player-windows-msix` を **その版数の run から** 取る。古い run を使わない
 4. Partner Center で提出ドラフトを作り、未署名 MSIX を上げる。
-   画面クリック順と記入値の正本は [docs/store-submission.md](../../../docs/store-submission.md)
+   画面クリック順の正本は [docs/store-submission.md](../../../docs/store-submission.md)
+   （初回登録は [docs/store-first-submission.md](../../../docs/store-first-submission.md)）
 5. 「このバージョンの新機能」は Partner Center 用で、**全 OS 共通 + Windows 固有
    だけ**書く。Android 固有は GitHub Release 本文（英語）へ。GitHub 本文を
    Store へコピーしない。書き方の正本は
-   [docs/store-submission.md](../../../docs/store-submission.md) 節 F-5。
+   [docs/store-submission.md](../../../docs/store-submission.md)「新機能文の対象」。
    提出前に Store の公開済み版数を確認する。HANDOFF の「認証待ち」は古くなりうる
 
 ローカルで焼くなら Windows 側で `.\packaging\msix\scripts\pack-msix.ps1`。

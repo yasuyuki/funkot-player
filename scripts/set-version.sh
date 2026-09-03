@@ -28,8 +28,9 @@
 # construction.
 #
 # Deliberately NOT touched:
-#   docs/store-submission.md  its 0.1.2 records what was submitted, not what
-#                             to build next
+#   docs/store-submission.md  listing copy is what to paste, not what
+#                             set-version.sh writes. First-time Partner Center
+#                             onboarding is docs/store-first-submission.md
 #   engine refs (player/v0.1.1 in the workflows and README) -- those version
 #                             funkot-autodj, not this app
 #   src-tauri/src/store.rs    the 0.1.0 there is a test fixture
