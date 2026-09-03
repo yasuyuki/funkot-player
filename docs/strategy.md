@@ -197,15 +197,25 @@ control、二段目はそれぞれの subtabs、FlaggedDetail からの戻りは
 
 `data_dir` の JSON 一式（`QUEUE_FILE` / `SETTINGS_FILE`（`src-tauri/src/store.rs`）とその並び）。**性質が2種類混ざっている**:
 
+`*_FILE` 定数は12本ある（この節が「8本」と書いていた時期がある。再取得は
+`grep -c '^const .*_FILE' src-tauri/src/store.rs`）。
+
 | 分類 | ファイル | 失うと |
 |---|---|---|
-| **ユーザー所有**（捨てられない） | `queue.json` `library.json` `flags.json` `dismissed.json` `session.json` `settings.json` | 手直しが消える |
+| **ユーザー所有**（捨てられない） | `queue.json` `library.json` `flags.json` `labels.json` `dismissed.json` `session.json` `settings.json` `window.json` | 手直しが消える |
+| **ユーザー所有だが手直しではない** | `history.json` `play-log.jsonl` | 何をいつ聴いたかが消える。作り直せないが、手直しは1つも失われない |
 | **導出**（捨ててよい） | `hash-index.json` `meta.json`、および `cache_dir/*.json` | 再構築される |
 
 **版数フィールドはユーザー所有側に一つも無い。** 前方互換の手当ては
 `#[serde(default)]` と「壊れていたら空で起動」だけ。エンジン側は
 `CACHE_VERSION`（`funkot-core/src/cache.rs`）を持つが、方針は
 「移行せず破棄・再解析」であり、ユーザー所有データには使えない。
+
+`play-log.jsonl` だけは1行1件の JSON Lines で、他と違って追記しかしない。
+壊れた1行は1回の再生を失うだけで済み、全損しない。**版数フィールドはここにも
+入れていない** — record 単位の `#[serde(default)]` で足り、それで吸えない形の変更は
+新しいファイル名で移行する方が安い。§7-1 の問いは既に利用者の端末にある上段の
+ファイルの話であり、この新規1ファイルは答えを出さない。
 
 ### 識別子は二層になっている（衝突ではない）
 
