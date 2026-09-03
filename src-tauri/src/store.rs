@@ -59,6 +59,7 @@ const SESSION_FILE: &str = "session.json";
 const SETTINGS_FILE: &str = "settings.json";
 const WINDOW_FILE: &str = "window.json";
 const HASH_INDEX_FILE: &str = "hash-index.json";
+const PLAY_LOG_FILE: &str = "play-log.jsonl";
 
 /// Metadata bundled with a feedback ZIP (`share_feedback`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -506,22 +507,25 @@ pub fn retire_revoked(in_flight: &mut Vec<QueueItem>, revoked: &QueueItem) {
 /// Advance `in_flight` from the completed transition's outgoing occurrence
 /// to its incoming occurrence. Searching after `from` is essential when both
 /// occurrences have the same path but different origins.
-pub fn retire_transition(in_flight: &mut Vec<QueueItem>, from: &Path, to: &Path) {
-    let Some(from_pos) = in_flight
+///
+/// Returns the position that was drained to, or `None` when either occurrence
+/// was not found and nothing moved. Callers use the `Some` case to read the
+/// incoming item -- now at index 0 -- while they still hold the session lock.
+pub fn retire_transition(
+    in_flight: &mut Vec<QueueItem>,
+    from: &Path,
+    to: &Path,
+) -> Option<usize> {
+    let from_pos = in_flight
         .iter()
-        .position(|item| item.path.as_path() == from)
-    else {
-        return;
-    };
-    let Some(to_pos) = in_flight
+        .position(|item| item.path.as_path() == from)?;
+    let to_pos = in_flight
         .iter()
         .enumerate()
         .skip(from_pos + 1)
-        .find_map(|(index, item)| (item.path.as_path() == to).then_some(index))
-    else {
-        return;
-    };
+        .find_map(|(index, item)| (item.path.as_path() == to).then_some(index))?;
     in_flight.drain(..to_pos);
+    Some(to_pos)
 }
 
 /// Where to resume folder cycling (`DrainPolicy::ContinueFolder`,
@@ -1309,6 +1313,282 @@ pub fn record_play(history: &mut History, hash: &str, now_ms: u64) {
     });
     entry.count = entry.count.saturating_add(1);
     entry.last_played_ms = now_ms;
+}
+
+/// One play, appended to `play-log.jsonl` when a track becomes `now`.
+///
+/// [`History`] answers "how often, and when last"; this answers "in what
+/// order". Replaying a track overwrites [`PlayRecord::last_played_ms`], so the
+/// aggregate cannot be turned back into a sequence -- the two files are not
+/// redundant.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlayLogEntry {
+    /// Unix epoch milliseconds, the same clock `PlayRecord::last_played_ms`
+    /// stamps.
+    pub at_ms: u64,
+    /// `funkot_core::cache::content_hash` -- the key every other file here
+    /// uses, so a rename or a move keeps the entry pointing at the track.
+    pub hash: String,
+    /// How the track reached the queue. `None` when the in-flight list could
+    /// not answer (the first `TrackStarted` of a run races the reserve push).
+    /// Recorded from the start even though no UI shows it yet: once a play has
+    /// happened, how it was chosen is gone, so this is the one field that
+    /// cannot be backfilled later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<QueueOrigin>,
+}
+
+/// Newest entries kept by [`compact_play_log`]. At ~123 bytes a line that is
+/// roughly 615 KB, or about 330 hours of listening at four minutes a track.
+pub const PLAY_LOG_MAX_ENTRIES: usize = 5_000;
+
+/// Size that triggers compaction (~8,000 lines), so a compaction runs about
+/// once per 3,000 further plays and its rewrite amortises to nothing.
+pub const PLAY_LOG_COMPACT_BYTES: u64 = 1_000_000;
+
+/// Append one play. O(1) in the log's length: no read, no re-serialise.
+///
+/// Deliberately *not* [`write_atomic`]: this is the hot path (it runs on the
+/// events thread under `SAVE_LOCK` on every track change), and the failure
+/// mode it trades for is a single truncated line, which [`load_play_log`]
+/// already drops. A whole-file rewrite here would also make the log's size cap
+/// double as a per-track cost, which is exactly the coupling append avoids.
+pub fn append_play_log(dir: &Path, entry: &PlayLogEntry) -> io::Result<()> {
+    let mut line = serde_json::to_vec(entry)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    line.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(PLAY_LOG_FILE))?;
+    file.write_all(&line)
+}
+
+/// Read the log oldest-first.
+///
+/// Missing file → empty (first run). A line that will not parse is warned
+/// about and skipped, so one bad byte costs one play rather than the whole
+/// record -- the reason this file is lines rather than one JSON document.
+/// A truncated final line is the crash-mid-append case and lands here too, so
+/// it is expected rather than exceptional.
+pub fn load_play_log(dir: &Path) -> Vec<PlayLogEntry> {
+    let bytes = match fs::read(dir.join(PLAY_LOG_FILE)) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    parse_play_log(&bytes)
+}
+
+/// Pure body of [`load_play_log`], so the skip rules are testable without a
+/// temp dir.
+pub fn parse_play_log(bytes: &[u8]) -> Vec<PlayLogEntry> {
+    let mut out = Vec::new();
+    for (n, line) in bytes.split(|b| *b == b'\n').enumerate() {
+        if line.iter().all(|b| b.is_ascii_whitespace()) {
+            continue;
+        }
+        match serde_json::from_slice::<PlayLogEntry>(line) {
+            Ok(entry) => out.push(entry),
+            Err(e) => log::warn!("{PLAY_LOG_FILE} line {}: {e}", n + 1),
+        }
+    }
+    out
+}
+
+/// `true` when the log has grown past `max_bytes`. One `metadata` call, so
+/// this is cheap enough to run on every track change.
+pub fn play_log_needs_compaction(dir: &Path, max_bytes: u64) -> bool {
+    fs::metadata(dir.join(PLAY_LOG_FILE))
+        .map(|m| m.len() > max_bytes)
+        .unwrap_or(false)
+}
+
+/// Rewrite the log keeping only its newest `keep` entries.
+///
+/// [`write_atomic`] here and not on append: losing the whole file is this
+/// operation's failure mode, which is the one `write_atomic` exists for.
+pub fn compact_play_log(dir: &Path, keep: usize) -> io::Result<()> {
+    let entries = load_play_log(dir);
+    let start = entries.len().saturating_sub(keep);
+    let mut bytes = Vec::new();
+    for entry in &entries[start..] {
+        serde_json::to_writer(&mut bytes, entry)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        bytes.push(b'\n');
+    }
+    write_atomic(&dir.join(PLAY_LOG_FILE), &bytes)
+}
+
+/// Drop the whole log. Paired with wiping [`History`] -- clearing play history
+/// has to clear both, or "履歴を消す" would leave a timestamped record behind.
+pub fn clear_play_log(dir: &Path) -> io::Result<()> {
+    match fs::remove_file(dir.join(PLAY_LOG_FILE)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// One chronological row: a single play, named.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlayLogRow {
+    pub at_ms: u64,
+    pub track_hash: String,
+    pub title: String,
+    pub artist: String,
+    /// Absolute path when the track is still in the library.
+    pub path: Option<String>,
+    pub missing: bool,
+    /// `"manual"` / `"automatic"`, or `None` when it was not recorded. A
+    /// string rather than the enum for the same reason `FlaggedTrackRow.role`
+    /// is one: the frontend maps codes to text and need not track a Rust enum.
+    pub origin: Option<String>,
+}
+
+/// One aggregate row: a track and how much of it has been heard.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlayedTrackRow {
+    pub track_hash: String,
+    pub title: String,
+    pub artist: String,
+    pub path: Option<String>,
+    pub missing: bool,
+    pub count: u32,
+    pub last_played_ms: u64,
+}
+
+/// Both halves of the history tab.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PlayHistory {
+    /// Newest first, truncated to the caller's limit.
+    pub log: Vec<PlayLogRow>,
+    /// `last_played_ms` descending, then title. Sourced from [`History`], so
+    /// plays from before the log existed still appear here -- only the
+    /// chronological half starts empty on upgrade.
+    pub tracks: Vec<PlayedTrackRow>,
+    /// Entries in the file before the limit was applied.
+    pub log_total: u32,
+}
+
+/// Trimmed tag value, or `None` when it is absent or blank. An empty tag is
+/// the same as no tag for display -- `session_metadata_for` treats it that way
+/// too, and a blank row would read as a bug.
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Last path component, for a file with no usable title tag.
+fn file_name_of(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Name resolved from the hash index for one content hash.
+struct HashName {
+    path: String,
+    title: String,
+    artist: String,
+}
+
+/// hash → name, built by walking the index once.
+///
+/// Two files with identical content share a hash; the lowest path wins so the
+/// answer does not depend on map iteration order.
+fn names_by_hash(index: &HashIndex) -> BTreeMap<String, HashName> {
+    let mut out: BTreeMap<String, HashName> = BTreeMap::new();
+    for (path, entry) in index {
+        let name = HashName {
+            path: path.clone(),
+            // Same fallback as `TrackRow.title`: an untagged file is shown by
+            // its file name, never blank.
+            title: non_empty(entry.title.as_deref()).unwrap_or_else(|| file_name_of(path)),
+            artist: non_empty(entry.artist.as_deref()).unwrap_or_default(),
+        };
+        match out.get(&entry.hash) {
+            Some(existing) if existing.path <= name.path => {}
+            _ => {
+                out.insert(entry.hash.clone(), name);
+            }
+        }
+    }
+    out
+}
+
+/// Build both history views. Pure: no I/O, so the join rules are testable.
+///
+/// `limit` caps the chronological half only; the aggregate is the whole of
+/// `history`, which is already one row per track.
+pub fn build_play_history(
+    log: &[PlayLogEntry],
+    history: &History,
+    index: &HashIndex,
+    limit: usize,
+) -> PlayHistory {
+    let names = names_by_hash(index);
+    let log_total = log.len() as u32;
+
+    let rows = log
+        .iter()
+        .rev()
+        .take(limit)
+        .map(|entry| {
+            let name = names.get(&entry.hash);
+            PlayLogRow {
+                at_ms: entry.at_ms,
+                track_hash: entry.hash.clone(),
+                title: name.map_or_else(|| MISSING_TITLE.to_string(), |n| n.title.clone()),
+                artist: name.map(|n| n.artist.clone()).unwrap_or_default(),
+                path: name.map(|n| n.path.clone()),
+                missing: name.is_none(),
+                origin: entry.origin.map(|o| play_origin_label(o).to_string()),
+            }
+        })
+        .collect();
+
+    let mut tracks: Vec<PlayedTrackRow> = history
+        .iter()
+        .map(|(hash, record)| {
+            let name = names.get(hash);
+            PlayedTrackRow {
+                track_hash: hash.clone(),
+                title: name.map_or_else(|| MISSING_TITLE.to_string(), |n| n.title.clone()),
+                artist: name.map(|n| n.artist.clone()).unwrap_or_default(),
+                path: name.map(|n| n.path.clone()),
+                missing: name.is_none(),
+                count: record.count,
+                last_played_ms: record.last_played_ms,
+            }
+        })
+        .collect();
+    // Most recently heard first; title then hash so equal stamps -- which the
+    // millisecond clock does produce for a same-millisecond restore -- do not
+    // reorder between calls.
+    tracks.sort_by(|a, b| {
+        b.last_played_ms
+            .cmp(&a.last_played_ms)
+            .then_with(|| a.title.cmp(&b.title))
+            .then_with(|| a.track_hash.cmp(&b.track_hash))
+    });
+
+    PlayHistory {
+        log: rows,
+        tracks,
+        log_total,
+    }
+}
+
+/// Wire label for [`QueueOrigin`]. Kept next to the rows that carry it so the
+/// string the UI switches on has one definition.
+pub fn play_origin_label(origin: QueueOrigin) -> &'static str {
+    match origin {
+        QueueOrigin::Manual => "manual",
+        QueueOrigin::Automatic => "automatic",
+    }
 }
 
 const EMPTY_JSON_OBJECT: &[u8] = b"{}";
@@ -2361,6 +2641,221 @@ mod tests {
         assert_eq!(entry.last_played_ms, 200);
     }
 
+    fn play(at_ms: u64, hash: &str, origin: Option<QueueOrigin>) -> PlayLogEntry {
+        PlayLogEntry {
+            at_ms,
+            hash: hash.into(),
+            origin,
+        }
+    }
+
+    fn indexed(path: &str, hash: &str, title: Option<&str>) -> (String, HashIndexEntry) {
+        (
+            path.into(),
+            HashIndexEntry {
+                mtime_ms: 1,
+                len: 1,
+                hash: hash.into(),
+                tags_cached: true,
+                title: title.map(str::to_string),
+                artist: Some("Artist".into()),
+                first_seen: None,
+                added_order: None,
+            },
+        )
+    }
+
+    #[test]
+    fn missing_play_log_is_empty() {
+        let dir = TempDir::new("play-log-missing");
+        assert!(load_play_log(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn append_play_log_keeps_earlier_lines() {
+        let dir = TempDir::new("play-log-append");
+        append_play_log(&dir.0, &play(100, "a", Some(QueueOrigin::Manual))).unwrap();
+        append_play_log(&dir.0, &play(200, "b", None)).unwrap();
+        append_play_log(&dir.0, &play(300, "a", Some(QueueOrigin::Automatic))).unwrap();
+
+        let log = load_play_log(&dir.0);
+        assert_eq!(
+            log.iter().map(|e| e.at_ms).collect::<Vec<_>>(),
+            vec![100, 200, 300],
+        );
+        // The same track twice is two entries -- the thing `history.json`
+        // cannot express.
+        assert_eq!(log[0].hash, "a");
+        assert_eq!(log[2].hash, "a");
+        assert_eq!(log[0].origin, Some(QueueOrigin::Manual));
+        assert_eq!(log[1].origin, None);
+    }
+
+    #[test]
+    fn play_log_skips_a_bad_line_and_keeps_the_rest() {
+        let log = parse_play_log(
+            b"{\"at_ms\":1,\"hash\":\"a\"}\n{not json}\n{\"at_ms\":3,\"hash\":\"c\"}\n",
+        );
+        assert_eq!(
+            log.iter().map(|e| e.at_ms).collect::<Vec<_>>(),
+            vec![1, 3],
+        );
+    }
+
+    #[test]
+    fn play_log_survives_a_truncated_final_line() {
+        // The crash-mid-append case: everything written before it stays.
+        let log = parse_play_log(b"{\"at_ms\":1,\"hash\":\"a\"}\n{\"at_ms\":2,\"ha");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].at_ms, 1);
+    }
+
+    #[test]
+    fn compact_play_log_keeps_the_newest() {
+        let dir = TempDir::new("play-log-compact");
+        for at_ms in 1..=10 {
+            append_play_log(&dir.0, &play(at_ms, "a", None)).unwrap();
+        }
+        compact_play_log(&dir.0, 3).unwrap();
+        assert_eq!(
+            load_play_log(&dir.0)
+                .iter()
+                .map(|e| e.at_ms)
+                .collect::<Vec<_>>(),
+            vec![8, 9, 10],
+        );
+    }
+
+    #[test]
+    fn compaction_triggers_only_past_the_size() {
+        let dir = TempDir::new("play-log-trigger");
+        assert!(!play_log_needs_compaction(&dir.0, 10));
+        append_play_log(&dir.0, &play(1, "a", None)).unwrap();
+        assert!(play_log_needs_compaction(&dir.0, 10));
+        assert!(!play_log_needs_compaction(&dir.0, 1_000_000));
+    }
+
+    #[test]
+    fn clear_play_log_is_ok_when_there_is_no_file() {
+        let dir = TempDir::new("play-log-clear-missing");
+        clear_play_log(&dir.0).unwrap();
+        append_play_log(&dir.0, &play(1, "a", None)).unwrap();
+        clear_play_log(&dir.0).unwrap();
+        assert!(load_play_log(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn build_play_history_names_rows_newest_first() {
+        let log = vec![
+            play(100, "h-a", Some(QueueOrigin::Manual)),
+            play(200, "h-b", None),
+            play(300, "h-a", Some(QueueOrigin::Automatic)),
+        ];
+        let mut history = History::new();
+        history.insert(
+            "h-a".into(),
+            PlayRecord {
+                count: 2,
+                last_played_ms: 300,
+            },
+        );
+        history.insert(
+            "h-b".into(),
+            PlayRecord {
+                count: 1,
+                last_played_ms: 200,
+            },
+        );
+        let mut index = HashIndex::new();
+        let (path, entry) = indexed("/music/a.m4a", "h-a", Some("A"));
+        index.insert(path, entry);
+        let (path, entry) = indexed("/music/b.m4a", "h-b", Some("B"));
+        index.insert(path, entry);
+
+        let view = build_play_history(&log, &history, &index, 10);
+
+        assert_eq!(view.log_total, 3);
+        assert_eq!(
+            view.log.iter().map(|r| r.at_ms).collect::<Vec<_>>(),
+            vec![300, 200, 100],
+        );
+        assert_eq!(view.log[0].title, "A");
+        assert_eq!(view.log[0].origin.as_deref(), Some("automatic"));
+        assert_eq!(view.log[1].origin, None);
+        assert!(!view.log[0].missing);
+        // Aggregate: one row per track, most recently heard first.
+        assert_eq!(
+            view.tracks
+                .iter()
+                .map(|r| (r.track_hash.as_str(), r.count))
+                .collect::<Vec<_>>(),
+            vec![("h-a", 2), ("h-b", 1)],
+        );
+    }
+
+    #[test]
+    fn build_play_history_limits_only_the_log() {
+        let log = vec![play(1, "h-a", None), play(2, "h-a", None), play(3, "h-a", None)];
+        let mut history = History::new();
+        for (n, hash) in ["h-a", "h-b"].iter().enumerate() {
+            history.insert(
+                (*hash).into(),
+                PlayRecord {
+                    count: 1,
+                    last_played_ms: n as u64 + 1,
+                },
+            );
+        }
+        let view = build_play_history(&log, &history, &HashIndex::new(), 2);
+        assert_eq!(view.log.len(), 2);
+        assert_eq!(view.log_total, 3);
+        // The aggregate is one row per track already, so the limit leaves it alone.
+        assert_eq!(view.tracks.len(), 2);
+    }
+
+    #[test]
+    fn build_play_history_marks_a_track_that_left_the_library() {
+        let log = vec![play(100, "gone", None)];
+        let mut history = History::new();
+        history.insert(
+            "gone".into(),
+            PlayRecord {
+                count: 1,
+                last_played_ms: 100,
+            },
+        );
+        let view = build_play_history(&log, &history, &HashIndex::new(), 10);
+        assert!(view.log[0].missing);
+        assert_eq!(view.log[0].path, None);
+        assert_eq!(view.log[0].title, MISSING_TITLE);
+        assert!(view.tracks[0].missing);
+    }
+
+    #[test]
+    fn build_play_history_falls_back_to_the_file_name() {
+        let log = vec![play(1, "h", None)];
+        let mut index = HashIndex::new();
+        let (path, entry) = indexed("/music/sub/Untagged.m4a", "h", None);
+        index.insert(path, entry);
+        let view = build_play_history(&log, &History::new(), &index, 10);
+        assert_eq!(view.log[0].title, "Untagged.m4a");
+    }
+
+    #[test]
+    fn build_play_history_picks_the_lowest_path_for_a_shared_hash() {
+        // Two identical files share a content hash; the answer must not depend
+        // on map iteration order.
+        let log = vec![play(1, "same", None)];
+        let mut index = HashIndex::new();
+        let (path, entry) = indexed("/music/z.m4a", "same", Some("Z"));
+        index.insert(path, entry);
+        let (path, entry) = indexed("/music/a.m4a", "same", Some("A"));
+        index.insert(path, entry);
+        let view = build_play_history(&log, &History::new(), &index, 10);
+        assert_eq!(view.log[0].path.as_deref(), Some("/music/a.m4a"));
+        assert_eq!(view.log[0].title, "A");
+    }
+
     fn meta(
         title: &str,
         artist: &str,
@@ -3159,8 +3654,11 @@ mod tests {
     fn retire_transition_advances_same_path_to_the_incoming_origin() {
         let path = Path::new("/music/same.flac");
         let mut in_flight = vec![ai("/music/same.flac"), qi("/music/same.flac")];
-        retire_transition(&mut in_flight, path, path);
+        assert_eq!(retire_transition(&mut in_flight, path, path), Some(1));
         assert_eq!(in_flight, vec![qi("/music/same.flac")]);
+        // The incoming item is at index 0, which is what the caller reads the
+        // play-log origin off while it still holds the session lock.
+        assert_eq!(in_flight[0].origin, QueueOrigin::Manual);
         assert_eq!(
             restored_pending(&in_flight, &[], |_| true),
             vec![qi("/music/same.flac")]

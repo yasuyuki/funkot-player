@@ -2175,39 +2175,63 @@ fn lock_now_unless_stale(audition: bool) -> Option<std::sync::MutexGuard<'static
 /// against it would either no-op (the common case) or, on an unlucky path
 /// collision, discard real main-queue session state for a track the
 /// audition never actually played to completion.
-fn retire_in_flight_up_to(now: Option<&Path>) {
-    let Some(now) = now else {
-        return;
-    };
+/// Returns how `now` reached the queue, read off `in_flight[0]` — which is
+/// `now` itself once the retirement above has run — while the session lock is
+/// still held. `None` when nothing was retired, which is the same "not found"
+/// case documented above and is the honest answer rather than a guess.
+fn retire_in_flight_up_to(now: Option<&Path>) -> Option<QueueOrigin> {
+    let now = now?;
+    let origin;
     {
         let mut session = SESSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(pos) = session
+        let pos = session
             .in_flight
             .iter()
-            .position(|item| item.path.as_path() == now)
-        else {
-            return;
-        };
+            .position(|item| item.path.as_path() == now)?;
         session.in_flight.drain(..pos);
+        origin = session.in_flight.first().map(|item| item.origin);
     }
     persist_session();
+    origin
 }
 
-fn retire_in_flight_transition(from: &Path, to: &Path) {
+/// As [`retire_in_flight_up_to`], for a completed transition: the incoming
+/// track is at `in_flight[0]` once `retire_transition` has drained to it.
+fn retire_in_flight_transition(from: &Path, to: &Path) -> Option<QueueOrigin> {
+    let origin;
     {
         let mut session = SESSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        store::retire_transition(&mut session.in_flight, from, to);
+        origin = store::retire_transition(&mut session.in_flight, from, to)
+            .and_then(|_| session.in_flight.first().map(|item| item.origin));
     }
     persist_session();
+    origin
 }
 
 /// Heard = this path just became `NowTracker::now`. No duration threshold
 /// (labeling skips too fast for one). Audition is not heard.
-fn record_heard(path: &Path) {
+///
+/// Writes both halves of play history: the per-track aggregate
+/// (`history.json`, "how often and when last") and one line on the
+/// chronological log (`play-log.jsonl`, "in what order"). The aggregate cannot
+/// answer the second question — a replay overwrites its timestamp — so the two
+/// are not redundant.
+///
+/// Order matters. The log append is best-effort and must never stop the
+/// history save: new-arrival detection is defined as "hash absent from
+/// `history.json`" (`store::extract_new_arrivals`), so a failed append that
+/// aborted the save would leave a track that has just played still badged NEW.
+/// `HISTORY_REVISION` is still bumped only on a successful history save.
+///
+/// `origin` is how the track reached the queue, captured by the retire helpers
+/// while they held the session lock. Nothing displays it yet; it is recorded
+/// from the start because it is the one field that cannot be reconstructed
+/// afterwards — once a play has happened, how it was chosen is gone.
+fn record_heard(path: &Path, origin: Option<QueueOrigin>) {
     let Some(data_dir) = DATA_DIR.get() else {
         log::warn!("record_heard: DATA_DIR not resolved yet");
         return;
@@ -2223,11 +2247,27 @@ fn record_heard(path: &Path) {
             return;
         }
     };
+    let at_ms = now_ms();
     let _saving = SAVE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = store::PlayLogEntry {
+        at_ms,
+        hash: hash.clone(),
+        origin,
+    };
+    if let Err(e) = store::append_play_log(data_dir, &entry) {
+        log::warn!("cannot append play log: {e}");
+    } else if store::play_log_needs_compaction(data_dir, store::PLAY_LOG_COMPACT_BYTES) {
+        // Under the lock this call already holds, on the events thread,
+        // between two tracks: the one place a rewrite cannot race an append
+        // and the only thread where a few milliseconds are free.
+        if let Err(e) = store::compact_play_log(data_dir, store::PLAY_LOG_MAX_ENTRIES) {
+            log::warn!("cannot compact play log: {e}");
+        }
+    }
     let mut history = store::load_history(data_dir);
-    store::record_play(&mut history, &hash, now_ms());
+    store::record_play(&mut history, &hash, at_ms);
     match store::save_history(data_dir, &history) {
         Ok(()) => {
             HISTORY_REVISION.fetch_add(1, Ordering::Relaxed);
@@ -2274,11 +2314,11 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
                 // Never for an audition event — see `retire_in_flight_up_to`.
                 if changed && !audition {
-                    retire_in_flight_up_to(now_path.as_deref());
+                    let origin = retire_in_flight_up_to(now_path.as_deref());
                     // Interrupt fold assigned `now` — record heard (tracker
                     // guard already dropped).
                     if let Some(ref p) = now_path {
-                        record_heard(p);
+                        record_heard(p, origin);
                     }
                 }
             }
@@ -2301,10 +2341,10 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     service_sync_state();
                 }
                 if changed && !audition {
-                    retire_in_flight_up_to(now_path.as_deref());
+                    let origin = retire_in_flight_up_to(now_path.as_deref());
                     // `on_track_started` assigned `now` (in_progress was none).
                     if let Some(ref p) = now_path {
-                        record_heard(p);
+                        record_heard(p, origin);
                     }
                 }
             }
@@ -2346,15 +2386,15 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 if changed {
                     service_sync_state();
                 }
-                if let Some((from, to)) = main_transition {
-                    retire_in_flight_transition(&from, &to);
-                }
+                let origin = main_transition
+                    .map(|(from, to)| retire_in_flight_transition(&from, &to))
+                    .flatten();
                 // Record even when path is unchanged (same-track restart:
                 // `changed` is false but `now = to` was assigned). Skip
                 // no-op TransitionEnded (`completed` is None).
                 if heard {
                     if let Some(ref p) = now_path {
-                        record_heard(p);
+                        record_heard(p, origin);
                     }
                 }
             }
@@ -5773,11 +5813,23 @@ mod cache_state_tests {
             },
         );
         store::save_history(&data.0, &history).unwrap();
+        store::append_play_log(
+            &data.0,
+            &store::PlayLogEntry {
+                at_ms: 99,
+                hash: "hash-a".into(),
+                origin: None,
+            },
+        )
+        .unwrap();
 
         clear_labels_and_history_impl(&data.0).unwrap();
 
         assert!(store::load_labels(&data.0).is_empty());
         assert!(store::load_history(&data.0).is_empty());
+        // Both halves: leaving the timestamped log behind would mean "clear
+        // play history" did not.
+        assert!(store::load_play_log(&data.0).is_empty());
     }
 
     #[test]
@@ -6106,6 +6158,145 @@ mod cache_state_tests {
             queue_new_arrivals_with(&data.0, &cache.0, &q, true, &in_flight).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn enqueue_many_with_keeps_the_given_order_after_the_manual_block() {
+        let data = TempDir::new("enqueue-many-order-data");
+        let cache = TempDir::new("enqueue-many-order-cache");
+        let q = queue::new_shared_queue();
+        queue::enqueue(&q, PathBuf::from("/music/already.flac"));
+
+        let result = enqueue_many_with(
+            &data.0,
+            &cache.0,
+            &q,
+            true,
+            &[],
+            &[
+                "/music/c.flac".to_string(),
+                "/music/a.flac".to_string(),
+                "/music/b.flac".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            result,
+            EnqueueManyResult {
+                added: 3,
+                rejected: 0,
+                skipped: 0,
+            }
+        );
+        // Selection order, not sorted: the list the listener ticked is the
+        // order they expect to hear.
+        assert_eq!(
+            queue::snapshot(&q),
+            vec![
+                PathBuf::from("/music/already.flac"),
+                PathBuf::from("/music/c.flac"),
+                PathBuf::from("/music/a.flac"),
+                PathBuf::from("/music/b.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn enqueue_many_with_counts_already_queued_as_skipped() {
+        let data = TempDir::new("enqueue-many-skip-data");
+        let cache = TempDir::new("enqueue-many-skip-cache");
+        let q = queue::new_shared_queue();
+        queue::enqueue(&q, PathBuf::from("/music/a.flac"));
+        let in_flight = vec![QueueItem::manual(PathBuf::from("/music/b.flac"))];
+
+        let result = enqueue_many_with(
+            &data.0,
+            &cache.0,
+            &q,
+            true,
+            &in_flight,
+            &[
+                "/music/a.flac".to_string(),
+                "/music/b.flac".to_string(),
+                "/music/c.flac".to_string(),
+                // A duplicate inside one selection is a skip too.
+                "/music/c.flac".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            result,
+            EnqueueManyResult {
+                added: 1,
+                rejected: 0,
+                skipped: 3,
+            }
+        );
+        assert_eq!(
+            queue::snapshot(&q),
+            vec![
+                PathBuf::from("/music/a.flac"),
+                PathBuf::from("/music/c.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn enqueue_many_with_counts_the_non_funkot_gate_instead_of_failing() {
+        let data = TempDir::new("enqueue-many-gate-data");
+        let cache = TempDir::new("enqueue-many-gate-cache");
+
+        let (non_funkot, mut analysis) = track_with_analysis(&cache.0);
+        analysis.is_funkot = false;
+        store_for(&non_funkot, &cache.0, &analysis);
+        let nf_hash = funkot_core::cache::content_hash(&non_funkot).unwrap();
+        let nf_path = non_funkot.to_string_lossy().into_owned();
+
+        let unanalysed = cache.0.join("unanalysed.wav");
+        std::fs::write(&unanalysed, vec![9u8; 4096]).unwrap();
+        let ua_path = unanalysed.to_string_lossy().into_owned();
+
+        let mut index = store::HashIndex::new();
+        index.insert(nf_path.clone(), arrivals_entry(&nf_hash, None));
+        index.insert(ua_path.clone(), arrivals_entry("hash-unanalysed", None));
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        let q = queue::new_shared_queue();
+        let result = enqueue_many_with(
+            &data.0,
+            &cache.0,
+            &q,
+            false,
+            &[],
+            &[nf_path.clone(), ua_path.clone()],
+        );
+
+        // One rejected row must not lose the other.
+        assert_eq!(
+            result,
+            EnqueueManyResult {
+                added: 1,
+                rejected: 1,
+                skipped: 0,
+            }
+        );
+        assert_eq!(queue::snapshot(&q), vec![PathBuf::from(&ua_path)]);
+    }
+
+    #[test]
+    fn enqueue_many_with_nothing_selected_is_all_zeros() {
+        let data = TempDir::new("enqueue-many-empty-data");
+        let cache = TempDir::new("enqueue-many-empty-cache");
+        let q = queue::new_shared_queue();
+        assert_eq!(
+            enqueue_many_with(&data.0, &cache.0, &q, true, &[], &[]),
+            EnqueueManyResult {
+                added: 0,
+                rejected: 0,
+                skipped: 0,
+            }
+        );
+        assert!(queue::snapshot(&q).is_empty());
     }
 
     #[test]
@@ -7362,6 +7553,11 @@ fn clear_labels_and_history_with_index_save(
     }
     store::save_history(data_dir, &store::History::new())
         .map_err(|e| format!("cannot persist history: {e}"))?;
+    // Both halves, or "clear play history" would leave a timestamped record of
+    // what was listened to sitting on disk after the counts were wiped.
+    if let Err(e) = store::clear_play_log(data_dir) {
+        log::warn!("cannot clear play log: {e}");
+    }
     revision.fetch_add(1, Ordering::Relaxed);
 
     if let Err(e) = store::save_labels(data_dir, &store::Labels::new()) {
@@ -7378,6 +7574,38 @@ fn clear_labels_and_history_with_index_save(
         log::warn!("cannot persist manual bars: {e}");
     }
     Ok(())
+}
+
+/// Both halves of play history for the 履歴 tab: the newest `limit` plays in
+/// order, plus the per-track aggregate.
+///
+/// Reads three files and does no Music-folder I/O — unlike
+/// [`list_flagged_tracks`], which walks it — so this is cheap enough to run on
+/// every `history_revision` bump, which is once per track change.
+///
+/// `SAVE_LOCK` covers the reads only. The join runs after the guard drops, so
+/// formatting a few hundred rows never blocks [`record_heard`] on the events
+/// thread. The hash index is parsed fresh rather than taken from
+/// `store_cache`, whose contract is to keep the closure short — holding that
+/// mutex across an O(library) join would stall the same events thread on its
+/// `content_hash` lookup. `list_new_arrivals_impl` reads it the same way on
+/// the same trigger.
+#[tauri::command(async)]
+fn list_play_history(app: tauri::AppHandle, limit: usize) -> Result<store::PlayHistory, String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = Path::new(&dirs.data_dir);
+    let (log, history, index) = {
+        let _saving = SAVE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            store::load_play_log(data_dir),
+            store::load_history(data_dir),
+            store::load_hash_index(data_dir).index,
+        )
+    };
+    let limit = limit.min(store::PLAY_LOG_MAX_ENTRIES);
+    Ok(store::build_play_history(&log, &history, &index, limit))
 }
 
 /// Fold played arrivals if needed, then list every new arrival (gate-agnostic).
@@ -7547,6 +7775,152 @@ fn queue_new_arrivals_under_locks(
     );
     // `_saving` / `_index` / queue guard (inside prepend) drop here.
     Ok(added as u32)
+}
+
+/// What [`enqueue_many`] did with the paths it was handed.
+///
+/// Three numbers rather than one because the two ways a path can fail to be
+/// queued mean different things to the listener: `rejected` is "the app
+/// refused it", `skipped` is "it was already coming up".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+struct EnqueueManyResult {
+    added: u32,
+    /// Dropped by the non-Funkot gate.
+    rejected: u32,
+    /// Already reserved, pending, playing, or in flight.
+    skipped: u32,
+}
+
+/// Add `paths` to the queue as manual items, in order, at the manual boundary.
+///
+/// Two things differ from single [`enqueue`], both deliberate:
+///
+/// * a path that is already reserved / pending / now-playing / in-flight is
+///   **skipped rather than duplicated** (`queue::prepend_pending_filtered`),
+///   where tapping `+` twice queues the track twice;
+/// * a non-Funkot path is **counted**, not turned into a failed call — one
+///   rejected row out of forty must not lose the other thirty-nine.
+///
+/// Empty `paths` is `Ok` with all zeros. Locking / persist split is
+/// [`queue_new_arrivals`]'s: all guards drop before [`persist_queue`].
+#[tauri::command(async)]
+fn enqueue_many(
+    paths: Vec<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<EnqueueManyResult, String> {
+    let result = enqueue_many_locked(&app, &state, &paths)?;
+    let mut prioritized = false;
+    if result.added > 0 {
+        let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
+        prioritized = try_prioritize_manual(&state.queue, request);
+    }
+    persist_queue(&app, &state);
+    if prioritized {
+        persist_session();
+    }
+    Ok(result)
+}
+
+/// Gate / prepend under INDEX → SAVE → SESSION → queue, then release all
+/// guards before returning so the caller can safely call [`persist_queue`].
+fn enqueue_many_locked(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    paths: &[String],
+) -> Result<EnqueueManyResult, String> {
+    let dirs = resolve_dirs(app)?;
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let session = SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(enqueue_many_under_locks(
+        Path::new(&dirs.data_dir),
+        Path::new(&dirs.cache_dir),
+        &state.queue,
+        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+        &session.in_flight,
+        paths,
+    ))
+}
+
+/// Testable body of [`enqueue_many_locked`]: no `AppHandle`.
+#[cfg(test)]
+fn enqueue_many_with(
+    data_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
+    queue: &SharedQueue,
+    allow_non_funkot: bool,
+    in_flight: &[QueueItem],
+    paths: &[String],
+) -> EnqueueManyResult {
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    enqueue_many_under_locks(
+        data_dir,
+        cache_dir,
+        queue,
+        allow_non_funkot,
+        in_flight,
+        paths,
+    )
+}
+
+/// Body shared by production (which also holds `SESSION`) and tests (which
+/// pass an explicit in-flight snapshot). Callers must hold INDEX then SAVE.
+fn enqueue_many_under_locks(
+    data_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
+    queue: &SharedQueue,
+    allow_non_funkot: bool,
+    in_flight: &[QueueItem],
+    paths: &[String],
+) -> EnqueueManyResult {
+    let requested = paths.len();
+    let candidates: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let candidates = if allow_non_funkot {
+        candidates
+    } else {
+        // Same policy as enqueue / `queue_new_arrivals_under_locks`, from the
+        // index rather than the Music folder (no file I/O).
+        let index = store::load_hash_index(data_dir).index;
+        let overrides = store::load_overrides(data_dir);
+        candidates
+            .into_iter()
+            .filter(|p| !gated_non_funkot_from_index(p, cache_dir, &index, &overrides))
+            .collect()
+    };
+    let rejected = requested - candidates.len();
+
+    // NOW while holding SAVE is allowed; NOW → SAVE is not.
+    let now_playing = {
+        let now = NOW
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        now.now.clone()
+    };
+
+    let added = queue::prepend_pending_filtered(
+        queue,
+        &candidates,
+        now_playing.as_deref(),
+        in_flight,
+    );
+    EnqueueManyResult {
+        added: added as u32,
+        rejected: rejected as u32,
+        skipped: (candidates.len() - added) as u32,
+    }
 }
 
 /// Progress payload for the `analysis-progress` event.
@@ -8437,7 +8811,9 @@ pub fn run() {
             clear_labels_and_history,
             list_new_arrivals,
             queue_new_arrivals,
+            list_play_history,
             enqueue,
+            enqueue_many,
             reorder,
             dequeue,
             queue_state,
