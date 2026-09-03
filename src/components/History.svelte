@@ -24,6 +24,8 @@
     toggleSelected,
   } from "../lib/selection";
   import SelectionBar from "./SelectionBar.svelte";
+  import TrackMenu from "./TrackMenu.svelte";
+  import { createLongPress, type MenuPoint } from "../lib/track-menu";
 
   let t = $derived(i18n.t);
 
@@ -33,6 +35,28 @@
   /// log lists the same track once per play.
   let selected = $state<Set<string>>(new Set());
   let addManyBusy = $state(false);
+  let menu = $state<{ path: string; at: MenuPoint } | null>(null);
+  const press = createLongPress<string>((path, at) => {
+    menu = { path, at };
+  });
+
+  function onRowPointerDown(
+    e: PointerEvent,
+    row: { missing: boolean; path: string | null },
+  ) {
+    if (!row.missing && row.path) press.down(e, row.path);
+  }
+
+  function onRowContextMenu(
+    e: MouseEvent,
+    row: { missing: boolean; path: string | null },
+  ) {
+    if (!row.missing && row.path) {
+      press.context(e, row.path);
+    } else {
+      e.preventDefault();
+    }
+  }
 
   /// Pulled on `history_revision` rather than on the tab being showing: in the
   /// three-column band this pane is visible while `playSub` is "library", so a
@@ -167,7 +191,15 @@
     {:else}
       <ul class="list">
         {#each tracks as row (row.track_hash)}
-          <li class="row" class:missing={row.missing}>
+          <li
+            class="row"
+            class:missing={row.missing}
+            onpointerdown={(e) => onRowPointerDown(e, row)}
+            onpointermove={press.move}
+            onpointerup={press.cancel}
+            onpointercancel={press.cancel}
+            oncontextmenu={(e) => onRowContextMenu(e, row)}
+          >
             {#if selectMode}
               <input
                 type="checkbox"
@@ -199,7 +231,15 @@
       <h3 class="day">{formatDayHeading(day.rows[0].at_ms)}</h3>
       <ul class="list">
         {#each day.rows as row (`${row.at_ms}:${row.track_hash}`)}
-          <li class="row" class:missing={row.missing}>
+          <li
+            class="row"
+            class:missing={row.missing}
+            onpointerdown={(e) => onRowPointerDown(e, row)}
+            onpointermove={press.move}
+            onpointerup={press.cancel}
+            onpointercancel={press.cancel}
+            oncontextmenu={(e) => onRowContextMenu(e, row)}
+          >
             {#if selectMode}
               <input
                 type="checkbox"
@@ -221,6 +261,10 @@
         {/each}
       </ul>
     {/each}
+  {/if}
+
+  {#if menu}
+    <TrackMenu path={menu.path} at={menu.at} onclose={() => (menu = null)} />
   {/if}
 </section>
 
@@ -305,6 +349,8 @@
     gap: var(--space-md);
     min-height: var(--library-row-height);
     border-bottom: 1px solid var(--color-border);
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .row.missing .title {

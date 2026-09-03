@@ -48,6 +48,7 @@ export const en = {
   noLabel: "—",
   labeledFunkot: "Labeled Funkot",
   labeledNotFunkot: "Labeled non-Funkot",
+  labelMenuLabel: "Track label",
   bulkLabeled: (n: number, verdict: boolean) =>
     `Labeled ${n} ${n === 1 ? "track" : "tracks"} as ${verdict ? "Funkot" : "non-Funkot"}`,
 

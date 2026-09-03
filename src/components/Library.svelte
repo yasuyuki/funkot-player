@@ -18,6 +18,8 @@
     toggleSelected,
   } from "../lib/selection";
   import SelectionBar from "./SelectionBar.svelte";
+  import TrackMenu from "./TrackMenu.svelte";
+  import { createLongPress, type MenuPoint } from "../lib/track-menu";
 
   let t = $derived(i18n.t);
 
@@ -37,6 +39,10 @@
   let addManyBusy = $state(false);
   let openMusicBusy = $state(false);
   let setMusicBusy = $state(false);
+  let menu = $state<{ path: string; at: MenuPoint } | null>(null);
+  const press = createLongPress<string>((path, at) => {
+    menu = { path, at };
+  });
 
   let analysis = $derived(store.analysis);
   let libraryScan = $derived(store.libraryScan);
@@ -278,7 +284,15 @@
     <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->
     <ul class="list">
       {#each rows as row (row.path)}
-        <li class="row" class:non-funkot={isNonFunkot(row)}>
+        <li
+          class="row"
+          class:non-funkot={isNonFunkot(row)}
+          onpointerdown={(e) => press.down(e, row.path)}
+          onpointermove={press.move}
+          onpointerup={press.cancel}
+          onpointercancel={press.cancel}
+          oncontextmenu={(e) => press.context(e, row.path)}
+        >
           {#if selectMode}
             <!-- Disabled by the same predicate that disables `+`, so a gated
                  row cannot be selected and the host's `rejected` count stays
@@ -317,6 +331,10 @@
         </li>
       {/each}
     </ul>
+  {/if}
+
+  {#if menu}
+    <TrackMenu path={menu.path} at={menu.at} onclose={() => (menu = null)} />
   {/if}
 </section>
 
@@ -451,6 +469,8 @@
     gap: var(--space-md);
     height: var(--library-row-height);
     border-bottom: 1px solid var(--color-border);
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .row.non-funkot {

@@ -41,6 +41,7 @@ export const id: Messages = {
   noLabel: "—",
   labeledFunkot: "Dilabeli Funkot",
   labeledNotFunkot: "Dilabeli non-Funkot",
+  labelMenuLabel: "Label trek",
   bulkLabeled: (n, verdict) => `${n} lagu dilabeli ${verdict ? "Funkot" : "non-Funkot"}`,
 
   // --- Toast / boundary ---

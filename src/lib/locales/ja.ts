@@ -43,6 +43,7 @@ export const ja: Messages = {
   noLabel: "—",
   labeledFunkot: "Funkot に登録",
   labeledNotFunkot: "非Funkot に登録",
+  labelMenuLabel: "トラックの分類",
   bulkLabeled: (n, verdict) => `${n}曲を ${verdict ? "Funkot" : "非Funkot"} に登録`,
 
   // --- Toast / boundary ---
