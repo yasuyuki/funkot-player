@@ -107,6 +107,31 @@ export const id: Messages = {
   emptyHintAndroid:
     "Taruh berkas audio di folder Musik, lalu pilih “Pindai ulang” dari menu ⋮ untuk memasukkannya ke pustaka. Menu ⋮ → “Tampilkan log” menunjukkan letak folder itu.",
 
+  // --- Multi-select / bulk add ---
+  selectMode: "Pilih",
+  selectModeLabel: "Pilih beberapa lagu",
+  selectTrackLabel: (title) => `Pilih ${title}`,
+  selectAll: "Pilih semua",
+  selectNone: "Kosongkan",
+  selectedCount: (n) => `${n} dipilih`,
+  addSelected: "Tambahkan ke antrean",
+  enqueueManyAdded: (n) => `${n} lagu ditambahkan`,
+  enqueueManySkipped: (n) => `${n} sudah di antrean`,
+  enqueueManyRejected: (n) => `${n} bukan Funkot`,
+  enqueueManyNotes: (notes) => ` (${notes})`,
+  listSeparator: ", ",
+
+  // --- History ---
+  historyHeading: "Riwayat",
+  historyByTrack: "Per lagu",
+  historyByTime: "Urutan main",
+  historyEmpty: "Belum ada yang diputar",
+  historyLogEmpty:
+    "Belum ada urutan yang tercatat. Urutan pemutaran disimpan mulai sekarang; jumlah putar sebelumnya ada di tab “Per lagu”.",
+  playCount: (n) => `${n}x diputar`,
+  playedToday: (time) => `Hari ini ${time}`,
+  playedYesterday: (time) => `Kemarin ${time}`,
+
   // --- Music folder ---
   pickMusicFolderPrompt: "Pilih folder Musik",
   pickMusicFolder: "Pilih folder Musik",

@@ -9,7 +9,15 @@
   } from "../lib/library-sort";
   import { toast } from "../lib/toast.svelte";
   import { i18n } from "../lib/i18n.svelte";
-  import { musicDirErrorMessage } from "../lib/messages";
+  import { enqueueManyMessage, musicDirErrorMessage } from "../lib/messages";
+  import {
+    addAll,
+    clearSelection,
+    selectAllState,
+    selectedInOrder,
+    toggleSelected,
+  } from "../lib/selection";
+  import SelectionBar from "./SelectionBar.svelte";
 
   let t = $derived(i18n.t);
 
@@ -17,6 +25,16 @@
   let sortKey = $state<LibrarySortKey>("recent");
   let newOnly = $state(false);
   let busy = $state<Record<string, boolean>>({});
+  /// A mode rather than a permanent checkbox column: on a 412px phone the row
+  /// already carries title, artist, duration and the `+` button, and a
+  /// checkbox that is there for an occasional action would cost that width
+  /// every time the library is browsed.
+  let selectMode = $state(false);
+  /// Keyed by path. Survives a tab swap for free -- both panes stay mounted
+  /// and are only `display:none`'d -- and is dropped when play mode unmounts
+  /// them, which is the right moment to forget it.
+  let selected = $state<Set<string>>(new Set());
+  let addManyBusy = $state(false);
   let openMusicBusy = $state(false);
   let setMusicBusy = $state(false);
 
@@ -51,12 +69,58 @@
     return sortLibraryRows(filtered, sortKey);
   });
 
+  /// Every selectable row in the pane's current sort, ignoring the search box
+  /// and the new-only filter.
+  ///
+  /// This -- not `rows` -- is the universe the bulk add works over, so typing
+  /// in the search box cannot silently make the button add nothing.
+  let addOrder = $derived(
+    sortLibraryRows(store.libraryList, sortKey)
+      .filter((r) => !gated(r))
+      .map((r) => r.path),
+  );
+
+  /// Rows currently on screen: what "select all" acts on. Scoping a bulk
+  /// action is what the search box is for; "select all 5,000" is never the
+  /// intent.
+  let visiblePaths = $derived(rows.filter((r) => !gated(r)).map((r) => r.path));
+
+  let selectedCount = $derived(selectedInOrder(selected, addOrder).length);
+  let allState = $derived(selectAllState(selected, visiblePaths));
+
   function toggleSort() {
     sortKey = nextLibrarySortKey(sortKey);
   }
 
   function toggleNewOnly() {
     newOnly = !newOnly;
+  }
+
+  function toggleSelectMode() {
+    selectMode = !selectMode;
+    if (!selectMode) selected = clearSelection();
+  }
+
+  function onToggleRow(path: string) {
+    selected = toggleSelected(selected, path);
+  }
+
+  async function onAddSelected() {
+    if (addManyBusy) return;
+    const paths = selectedInOrder(selected, addOrder);
+    if (paths.length === 0) return;
+    addManyBusy = true;
+    try {
+      const result = await store.doEnqueueMany(paths);
+      if (result) {
+        toast.notify(enqueueManyMessage(t, result));
+        // The rows are queued or knowingly refused; leaving forty boxes
+        // ticked is worse than re-selecting. The mode stays on.
+        selected = clearSelection();
+      }
+    } finally {
+      addManyBusy = false;
+    }
   }
 
   async function onAdd(path: string) {
@@ -75,8 +139,16 @@
     return row.analyzed && !row.is_funkot;
   }
 
+  /// The gate alone: analysed, effectively non-Funkot, and the setting is off.
+  /// Separate from [`addDisabled`] because that also folds in the per-row busy
+  /// flag, and a single add in flight must not drop the row out of a bulk
+  /// selection.
+  function gated(row: TrackRow): boolean {
+    return isNonFunkot(row) && !store.allowNonFunkot;
+  }
+
   function addDisabled(row: TrackRow): boolean {
-    return !!busy[row.path] || (isNonFunkot(row) && !store.allowNonFunkot);
+    return !!busy[row.path] || gated(row);
   }
 
   async function onSetMusicDir() {
@@ -134,6 +206,24 @@
     <button type="button" class="sort" onclick={toggleSort}>
       {sortKey === "recent" ? t.sortRecent : sortKey === "title" ? t.sortTitle : t.sortArtist}
     </button>
+    <button
+      type="button"
+      class="filter"
+      class:on={selectMode}
+      aria-pressed={selectMode}
+      aria-label={t.selectModeLabel}
+      onclick={toggleSelectMode}
+    >{t.selectMode}</button>
+    {#if selectMode}
+      <SelectionBar
+        count={selectedCount}
+        {allState}
+        busy={addManyBusy}
+        onSelectAll={() => (selected = addAll(selected, visiblePaths))}
+        onClear={() => (selected = clearSelection())}
+        onAdd={onAddSelected}
+      />
+    {/if}
   </div>
 
   {#if libraryScan && !musicDirNeeded}
@@ -189,6 +279,19 @@
     <ul class="list">
       {#each rows as row (row.path)}
         <li class="row" class:non-funkot={isNonFunkot(row)}>
+          {#if selectMode}
+            <!-- Disabled by the same predicate that disables `+`, so a gated
+                 row cannot be selected and the host's `rejected` count stays
+                 at zero unless analysis finished between render and tap. -->
+            <input
+              type="checkbox"
+              class="pick"
+              checked={selected.has(row.path)}
+              disabled={gated(row)}
+              onchange={() => onToggleRow(row.path)}
+              aria-label={t.selectTrackLabel(row.title)}
+            />
+          {/if}
           <div class="text">
             <div class="title">
               <span class="title-text">{row.title}</span>
@@ -201,14 +304,16 @@
               <span class="dur">{formatDuration(row.duration_secs)}</span>
             </div>
           </div>
-          <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
-          <button
-            type="button"
-            class="add"
-            disabled={addDisabled(row)}
-            onclick={() => onAdd(row.path)}
-            aria-label={t.addToQueueLabel(row.title)}
-          >+</button>
+          {#if !selectMode}
+            <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
+            <button
+              type="button"
+              class="add"
+              disabled={addDisabled(row)}
+              onclick={() => onAdd(row.path)}
+              aria-label={t.addToQueueLabel(row.title)}
+            >+</button>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -234,9 +339,23 @@
     top: calc(var(--space-xl) + env(safe-area-inset-top, 3rem));
     z-index: 5;
     display: flex;
+    /* The selection bar is a full-width flex item, so it wraps onto a second
+       line here instead of being a second sticky element with its own copy of
+       the safe-area calc above. */
+    flex-wrap: wrap;
     gap: var(--space-sm);
     padding: var(--space-sm) 0;
     background: var(--color-bg);
+  }
+
+  /* Not `width: auto` from the global button rule -- a checkbox is not a
+     button -- but it does need a fixed footprint so rows stay aligned. */
+  .pick {
+    flex: 0 0 auto;
+    width: 1.2rem;
+    height: 1.2rem;
+    margin: 0;
+    accent-color: var(--color-accent-bg);
   }
 
   .search {

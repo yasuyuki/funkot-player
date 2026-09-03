@@ -118,6 +118,34 @@ export const en = {
   emptyHintAndroid:
     "Put audio files in the Music folder, then pick “Rescan” from the ⋮ menu to bring them into the library. The ⋮ menu’s “Show log” tells you where that folder is.",
 
+  // --- Multi-select / bulk add ---
+  selectMode: "Select",
+  selectModeLabel: "Select several tracks",
+  selectTrackLabel: (title: string) => `Select ${title}`,
+  selectAll: "Select all",
+  selectNone: "Clear",
+  selectedCount: (n: number) => `${n} selected`,
+  addSelected: "Add to queue",
+  enqueueManyAdded: (n: number) =>
+    n === 1 ? "Added 1 track" : `Added ${n} tracks`,
+  enqueueManySkipped: (n: number) =>
+    n === 1 ? "1 already queued" : `${n} already queued`,
+  enqueueManyRejected: (n: number) =>
+    n === 1 ? "1 not Funkot" : `${n} not Funkot`,
+  enqueueManyNotes: (notes: string) => ` (${notes})`,
+  listSeparator: ", ",
+
+  // --- History ---
+  historyHeading: "History",
+  historyByTrack: "By track",
+  historyByTime: "In order",
+  historyEmpty: "Nothing played yet",
+  historyLogEmpty:
+    "No plays recorded yet. The order tracks played in is kept from here on; play counts from before it are on the “By track” tab.",
+  playCount: (n: number) => (n === 1 ? "1 play" : `${n} plays`),
+  playedToday: (time: string) => `Today ${time}`,
+  playedYesterday: (time: string) => `Yesterday ${time}`,
+
   // --- Music folder ---
   pickMusicFolderPrompt: "Pick a Music folder",
   pickMusicFolder: "Pick Music folder",

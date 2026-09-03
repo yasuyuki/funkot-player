@@ -109,6 +109,31 @@ export const ja: Messages = {
   emptyHintAndroid:
     "音声ファイルをMusicフォルダへ入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。フォルダの場所は ⋮ メニューの「ログを表示」に出ます。",
 
+  // --- Multi-select / bulk add ---
+  selectMode: "選択",
+  selectModeLabel: "複数の曲を選ぶ",
+  selectTrackLabel: (title) => `${title} を選択`,
+  selectAll: "すべて選択",
+  selectNone: "選択解除",
+  selectedCount: (n) => `${n}曲を選択中`,
+  addSelected: "キューに追加",
+  enqueueManyAdded: (n) => `${n}曲を追加しました`,
+  enqueueManySkipped: (n) => `${n}曲は既にキューにあります`,
+  enqueueManyRejected: (n) => `${n}曲は非Funkotです`,
+  enqueueManyNotes: (notes) => `（${notes}）`,
+  listSeparator: "、",
+
+  // --- History ---
+  historyHeading: "履歴",
+  historyByTrack: "曲ごと",
+  historyByTime: "再生順",
+  historyEmpty: "まだ何も再生していません",
+  historyLogEmpty:
+    "再生順の記録はまだありません。これ以降の再生順が残ります。それ以前の再生回数は「曲ごと」にあります。",
+  playCount: (n) => `${n}回`,
+  playedToday: (time) => `今日 ${time}`,
+  playedYesterday: (time) => `昨日 ${time}`,
+
   // --- Music folder ---
   pickMusicFolderPrompt: "Musicフォルダを選んでください",
   pickMusicFolder: "Musicフォルダを選ぶ",

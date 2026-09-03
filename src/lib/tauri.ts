@@ -384,6 +384,62 @@ export function queueNewArrivals(): Promise<number> {
   return invoke<number>("queue_new_arrivals");
 }
 
+/// Matches `store::PlayLogRow`: one play, in order.
+export interface PlayLogRow {
+  at_ms: number;
+  track_hash: string;
+  /// Empty when the track has left the library — pair with `missing`, and take
+  /// the stand-in wording from the message catalogue.
+  title: string;
+  artist: string;
+  /// Absolute path while the track is still in the library; `null` once it is
+  /// gone, which is also when it cannot be selected for the queue.
+  path: string | null;
+  missing: boolean;
+  /// `"manual"` / `"automatic"`, or `null` when it was not recorded. Nothing
+  /// displays it yet.
+  origin: string | null;
+}
+
+/// Matches `store::PlayedTrackRow`: one track, how much of it has been heard.
+export interface PlayedTrackRow {
+  track_hash: string;
+  title: string;
+  artist: string;
+  path: string | null;
+  missing: boolean;
+  count: number;
+  last_played_ms: number;
+}
+
+/// Matches `store::PlayHistory`. `tracks` comes from `history.json`, so plays
+/// from before the log existed are in it; only `log` starts empty on upgrade.
+export interface PlayHistory {
+  log: PlayLogRow[];
+  tracks: PlayedTrackRow[];
+  /// Entries in the file before `limit` was applied.
+  log_total: number;
+}
+
+export function listPlayHistory(limit: number): Promise<PlayHistory> {
+  return invoke<PlayHistory>("list_play_history", { limit });
+}
+
+/// Matches `EnqueueManyResult`. `rejected` is "the app refused it" (the
+/// non-Funkot gate), `skipped` is "it was already coming up".
+export interface EnqueueManyResult {
+  added: number;
+  rejected: number;
+  skipped: number;
+}
+
+/// Bulk counterpart of [`enqueue`]. Differs from it twice, on purpose: an
+/// already-queued path is skipped rather than duplicated, and a non-Funkot
+/// path is counted rather than rejecting the whole call.
+export function enqueueMany(paths: string[]): Promise<EnqueueManyResult> {
+  return invoke<EnqueueManyResult>("enqueue_many", { paths });
+}
+
 export function auditionTransition(
   fromPath: string,
   toPath: string,

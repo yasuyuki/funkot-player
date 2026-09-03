@@ -39,16 +39,20 @@ import {
   clearLabelsAndHistory as clearLabelsAndHistoryCmd,
   listNewArrivals as listNewArrivalsCmd,
   queueNewArrivals as queueNewArrivalsCmd,
+  listPlayHistory,
+  enqueueMany as enqueueManyCmd,
 } from "./tauri";
 import type {
   AnalysisProgress,
   AppDirs,
+  EnqueueManyResult,
   FlaggedTrackRow,
   FlagResult,
   ImportResult,
   LibraryScanProgress,
   NewArrival,
   PlayerState,
+  PlayHistory,
   QueueItem,
   QueueSnapshot,
   TrackRow,
@@ -75,6 +79,11 @@ const POLL_INTERVAL_MS = 500;
 
 /// How often the client-side elapsed-time interpolation between polls ticks.
 const INTERPOLATION_TICK_MS = 250;
+
+/// How many chronological plays the history pane asks for. The host clamps
+/// this to the log's own cap; the number here is the page the UI can render
+/// without a virtual list.
+const PLAY_HISTORY_LIMIT = 200;
 
 /// How long `doTakePendingImport` waits before retrying while
 /// `ImportResult.in_flight` is `true` (`Import.kt`'s copy thread has not
@@ -133,6 +142,10 @@ class PlayerStore {
   /// `PlayerState.history_revision` changes (fold; not on now-playing
   /// alone) and after a successful library walk (stamp).
   arrivals = $state<NewArrival[]>([]);
+  /// Both history views from `list_play_history`, or `null` before the first
+  /// pull. Loaded on demand by the history pane rather than by the poll loop:
+  /// it is a whole-library-sized answer that only changes once per track.
+  playHistory = $state<PlayHistory | null>(null);
 
   /// Wall-clock time (`Date.now()`) the current `player.position_secs` was
   /// read at, so `elapsed` can add "how long ago was that" on top of it
@@ -184,6 +197,11 @@ class PlayerStore {
   #arrivalsPullBusy = false;
   /// Generation guard for `loadFlaggedTracks` (legacy `flaggedLoadGen`).
   #flaggedGen = 0;
+  /// Generation guard and single-flight for `loadPlayHistory`. Deliberately
+  /// not the arrivals ones: both are driven by `history_revision`, so sharing
+  /// a guard would let either starve the other.
+  #playHistoryGen = 0;
+  #playHistoryBusy = false;
   /// Drops overlapping F/J/Space while a skip invoke is in flight, so the
   /// progress index cannot walk the library faster than playback.
   #labelSkipBusy = false;
@@ -761,6 +779,41 @@ class PlayerStore {
       await this.#refreshQueueNow();
     } catch (e) {
       this.lastError = String(e);
+    }
+  }
+
+  /// Bulk add. Returns the host's tally so the caller can say what happened;
+  /// `null` means the call itself failed, which is the error-banner case.
+  /// A gated or already-queued path is part of a successful result here, not
+  /// a rejection — see `enqueue_many` in `src-tauri/src/lib.rs`.
+  async doEnqueueMany(paths: string[]): Promise<EnqueueManyResult | null> {
+    try {
+      const result = await enqueueManyCmd(paths);
+      await this.#refreshQueueNow();
+      return result;
+    } catch (e) {
+      this.lastError = String(e);
+      return null;
+    }
+  }
+
+  /// Both history views, pulled on demand.
+  ///
+  /// Guarded by its own generation and single-flight flag rather than the
+  /// arrivals ones: both consume the same `history_revision`, and sharing a
+  /// guard would let one starve the other.
+  async loadPlayHistory(): Promise<void> {
+    if (this.#playHistoryBusy) return;
+    this.#playHistoryBusy = true;
+    this.#playHistoryGen += 1;
+    const gen = this.#playHistoryGen;
+    try {
+      const view = await listPlayHistory(PLAY_HISTORY_LIMIT);
+      if (gen === this.#playHistoryGen) this.playHistory = view;
+    } catch (e) {
+      this.lastError = String(e);
+    } finally {
+      this.#playHistoryBusy = false;
     }
   }
 

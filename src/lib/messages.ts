@@ -49,6 +49,25 @@ export function queueErrorMessage(t: Messages, code: string): string {
   }
 }
 
+/// `EnqueueManyResult` → toast text.
+///
+/// The two ways a path can fail mean different things, so they are reported
+/// separately rather than as one "some were not added": `skipped` is "already
+/// coming up", which is fine, while `rejected` means the app refused the
+/// track. A rejection should normally be impossible — the checkbox is
+/// disabled for gated rows — so seeing one means analysis finished between
+/// render and tap, and saying so beats staying silent.
+export function enqueueManyMessage(
+  t: Messages,
+  result: { added: number; rejected: number; skipped: number },
+): string {
+  const notes: string[] = [];
+  if (result.skipped > 0) notes.push(t.enqueueManySkipped(result.skipped));
+  if (result.rejected > 0) notes.push(t.enqueueManyRejected(result.rejected));
+  const added = t.enqueueManyAdded(result.added);
+  return notes.length === 0 ? added : `${added}${t.enqueueManyNotes(notes.join(t.listSeparator))}`;
+}
+
 /// `PlayerState.phase` → badge text. An unrecognised phase shows as-is: it
 /// can only come from a host newer than this bundle, and the raw
 /// discriminant is more useful to whoever is looking than a blank badge.
