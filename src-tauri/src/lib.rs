@@ -6463,7 +6463,18 @@ mod scan_tracks_tests {
 #[cfg(test)]
 mod arrivals_settings_rmw_tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Mutex, MutexGuard};
+
+    /// `ALLOW_NON_FUNKOT` is one atomic for the whole test binary, so a test
+    /// that asserts on it cannot run beside one that writes it. Every test in
+    /// this module that touches the atomic takes this first.
+    static ALLOW_NON_FUNKOT_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_allow_non_funkot() -> MutexGuard<'static, ()> {
+        ALLOW_NON_FUNKOT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     struct TempDir(PathBuf);
 
@@ -6490,6 +6501,7 @@ mod arrivals_settings_rmw_tests {
 
     #[test]
     fn refresh_baseline_commit_and_allow_false_both_orders() {
+        let _allow = lock_allow_non_funkot();
         for setter_first in [true, false] {
             let dir = TempDir::new(&format!("baseline-allow-{setter_first}"));
             let mut settings = store::Settings::default();
@@ -6572,6 +6584,7 @@ mod arrivals_settings_rmw_tests {
 
     #[test]
     fn consecutive_allow_setters_match_disk_and_atomic() {
+        let _allow = lock_allow_non_funkot();
         let dir = TempDir::new("allow-consecutive");
         store::save_settings(&dir.0, &store::Settings::default()).unwrap();
         for allow in [false, true, false, true, false] {
