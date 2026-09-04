@@ -182,10 +182,18 @@ export const en = {
       : on
         ? "Labeling mode: ON (plays the first 20 seconds only)"
         : "Labeling mode: OFF",
-  clearLabelsItem: "Clear labels and play history",
-  confirmClearLabels: "Clear all labels and play history?",
-  clearedLabels: "Cleared labels and play history",
-  clearLabelsFailed: "Could not clear labels and play history",
+  clearLabelsItem: "Clear labels",
+  confirmClearLabels: "Clear all labels?",
+  clearedLabels: "Cleared labels",
+  clearLabelsFailed: "Could not clear labels",
+  clearPlayLogItem: "Clear play order history",
+  confirmClearPlayLog: "Clear play order history?",
+  clearedPlayLog: "Cleared play order history",
+  clearPlayLogFailed: "Could not clear play order history",
+  clearPlayCountsItem: "Clear per-song play counts",
+  confirmClearPlayCounts: "Clear per-song play counts?",
+  clearedPlayCounts: "Cleared per-song play counts",
+  clearPlayCountsFailed: "Could not clear per-song play counts",
   sendFeedback: "Send feedback",
   languageItem: (name: string) => `Language: ${name}`,
 

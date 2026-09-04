@@ -36,7 +36,9 @@ import {
   setLabel as setLabelCmd,
   setFolderLabel as setFolderLabelCmd,
   undoLastFolderLabel as undoLastFolderLabelCmd,
-  clearLabelsAndHistory as clearLabelsAndHistoryCmd,
+  clearLabels as clearLabelsCmd,
+  clearPlayLog as clearPlayLogCmd,
+  clearPlayCounts as clearPlayCountsCmd,
   listNewArrivals as listNewArrivalsCmd,
   queueNewArrivals as queueNewArrivalsCmd,
   listPlayHistory,
@@ -656,17 +658,38 @@ class PlayerStore {
     }
   }
 
-  /// Wipe labels + play history, then quietly refresh the library list
+  /// Wipe labels, then quietly refresh the library list
   /// (`refresh_library(false)` — no analysis re-kick).
-  async doClearLabelsAndHistory(): Promise<boolean> {
+  async doClearLabels(): Promise<boolean> {
     try {
-      await clearLabelsAndHistoryCmd();
-      // The wipe bumps `history_revision` too, so the pane would refresh on
-      // its own within a poll; clearing the applied revision makes it empty
-      // immediately instead of half a second after the confirmation.
+      await clearLabelsCmd();
+      await this.#reloadLibraryQuiet();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /// Wipe chronological play log (`play-log.jsonl`), then reload history.
+  async doClearPlayLog(): Promise<boolean> {
+    try {
+      await clearPlayLogCmd();
       this.invalidatePlayHistory();
       await this.loadPlayHistory(null);
-      await this.#reloadLibraryQuiet();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /// Wipe per-track play counts (`history.json`), then reload history.
+  async doClearPlayCounts(): Promise<boolean> {
+    try {
+      await clearPlayCountsCmd();
+      this.invalidatePlayHistory();
+      await this.loadPlayHistory(null);
       return true;
     } catch (e) {
       this.lastError = String(e);

@@ -168,10 +168,18 @@ export const ja: Messages = {
       : on
         ? "ラベリングモード: ON（頭20秒だけ再生）"
         : "ラベリングモード: OFF",
-  clearLabelsItem: "ラベルと再生履歴を消す",
-  confirmClearLabels: "ラベルと再生履歴を全部消しますか？",
-  clearedLabels: "ラベルと再生履歴を消しました",
-  clearLabelsFailed: "ラベルと再生履歴を消せませんでした",
+  clearLabelsItem: "ラベルを消す",
+  confirmClearLabels: "ラベルを全部消しますか？",
+  clearedLabels: "ラベルを消しました",
+  clearLabelsFailed: "ラベルを消せませんでした",
+  clearPlayLogItem: "過去の再生順を消す",
+  confirmClearPlayLog: "過去の再生順を消しますか？",
+  clearedPlayLog: "過去の再生順を消しました",
+  clearPlayLogFailed: "過去の再生順を消せませんでした",
+  clearPlayCountsItem: "曲別の再生回数を消す",
+  confirmClearPlayCounts: "曲別の再生回数を消しますか？",
+  clearedPlayCounts: "曲別の再生回数を消しました",
+  clearPlayCountsFailed: "曲別の再生回数を消せませんでした",
   sendFeedback: "意見を送る",
   languageItem: (name) => `言語: ${name}`,
 

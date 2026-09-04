@@ -5793,8 +5793,8 @@ mod cache_state_tests {
     }
 
     #[test]
-    fn clear_labels_and_history_impl_empties_labels_and_history() {
-        let data = TempDir::new("clear-lh-data");
+    fn clear_labels_impl_empties_labels_and_keeps_history_and_play_log() {
+        let data = TempDir::new("clear-labels-data");
         let mut labels = store::Labels::new();
         labels.insert(
             "hash-a".into(),
@@ -5823,17 +5823,15 @@ mod cache_state_tests {
         )
         .unwrap();
 
-        clear_labels_and_history_impl(&data.0).unwrap();
+        clear_labels_impl(&data.0).unwrap();
 
         assert!(store::load_labels(&data.0).is_empty());
-        assert!(store::load_history(&data.0).is_empty());
-        // Both halves: leaving the timestamped log behind would mean "clear
-        // play history" did not.
-        assert!(store::load_play_log(&data.0).is_empty());
+        assert!(!store::load_history(&data.0).is_empty());
+        assert_eq!(store::load_play_log(&data.0).len(), 1);
     }
 
     #[test]
-    fn clear_labels_and_history_impl_keeps_intro_bars() {
+    fn clear_labels_impl_keeps_intro_bars() {
         let data = TempDir::new("clear-lh-keep-intro");
         let mut overrides = store::Overrides::new();
         overrides.insert(
@@ -5846,7 +5844,7 @@ mod cache_state_tests {
         );
         store::save_overrides(&data.0, &overrides).unwrap();
 
-        clear_labels_and_history_impl(&data.0).unwrap();
+        clear_labels_impl(&data.0).unwrap();
 
         let entry = store::load_overrides(&data.0)
             .get("hash-b")
@@ -5857,7 +5855,7 @@ mod cache_state_tests {
     }
 
     #[test]
-    fn clear_labels_and_history_impl_removes_funkot_only_override() {
+    fn clear_labels_impl_removes_funkot_only_override() {
         let data = TempDir::new("clear-lh-funkot-only");
         let mut overrides = store::Overrides::new();
         overrides.insert(
@@ -5869,9 +5867,47 @@ mod cache_state_tests {
         );
         store::save_overrides(&data.0, &overrides).unwrap();
 
-        clear_labels_and_history_impl(&data.0).unwrap();
+        clear_labels_impl(&data.0).unwrap();
 
         assert!(!store::load_overrides(&data.0).contains_key("hash-c"));
+    }
+
+    #[test]
+    fn clear_play_log_impl_clears_log_keeps_labels_and_history() {
+        let data = TempDir::new("clear-playlog-data");
+        let mut labels = store::Labels::new();
+        labels.insert(
+            "hash-a".into(),
+            store::TrackLabel {
+                verdict: true,
+                labeled_at_ms: 1,
+            },
+        );
+        store::save_labels(&data.0, &labels).unwrap();
+        let mut history = store::History::new();
+        history.insert(
+            "hash-a".into(),
+            store::PlayRecord {
+                count: 3,
+                last_played_ms: 99,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+        store::append_play_log(
+            &data.0,
+            &store::PlayLogEntry {
+                at_ms: 99,
+                hash: "hash-a".into(),
+                origin: None,
+            },
+        )
+        .unwrap();
+
+        clear_play_log_impl(&data.0).unwrap();
+
+        assert!(store::load_play_log(&data.0).is_empty());
+        assert!(!store::load_labels(&data.0).is_empty());
+        assert!(!store::load_history(&data.0).is_empty());
     }
 
     fn arrivals_entry(hash: &str, first_seen: Option<&str>) -> store::HashIndexEntry {
@@ -5888,7 +5924,7 @@ mod cache_state_tests {
     }
 
     #[test]
-    fn clear_labels_and_history_folds_played_keeps_unplayed_stamp() {
+    fn clear_play_counts_folds_played_keeps_unplayed_stamp_and_keeps_play_log() {
         let data = TempDir::new("clear-lh-fold-ab");
         let mut index = store::HashIndex::new();
         index.insert(
@@ -5909,9 +5945,18 @@ mod cache_state_tests {
             },
         );
         store::save_history(&data.0, &history).unwrap();
+        store::append_play_log(
+            &data.0,
+            &store::PlayLogEntry {
+                at_ms: 1,
+                hash: "hash-a".into(),
+                origin: None,
+            },
+        )
+        .unwrap();
 
         // No list/pull: revision stale, but fold still clears A's stamp.
-        clear_labels_and_history_impl(&data.0).unwrap();
+        clear_play_counts_impl(&data.0).unwrap();
 
         let loaded = store::load_hash_index(&data.0).index;
         assert!(loaded["/music/a.flac"].first_seen.is_none());
@@ -5920,6 +5965,9 @@ mod cache_state_tests {
             Some("2026-01-02T00:00:00Z")
         );
         assert!(store::load_history(&data.0).is_empty());
+        // Play log is NOT cleared by clear_play_counts:
+        assert_eq!(store::load_play_log(&data.0).len(), 1);
+
         // Without pull, A must not reappear as NEW after history wipe.
         let settings = store::Settings {
             arrivals_baseline_done: true,
@@ -5932,7 +5980,7 @@ mod cache_state_tests {
     }
 
     #[test]
-    fn clear_labels_and_history_keeps_history_when_index_save_fails() {
+    fn clear_play_counts_keeps_history_when_index_save_fails() {
         let data = TempDir::new("clear-lh-index-fail");
         let mut index = store::HashIndex::new();
         index.insert(
@@ -5950,7 +5998,7 @@ mod cache_state_tests {
         );
         store::save_history(&data.0, &history).unwrap();
 
-        let err = clear_labels_and_history_with_index_save(
+        let err = clear_play_counts_with_index_save(
             &data.0,
             |_dir, _idx| {
                 Err(std::io::Error::new(
@@ -5972,10 +6020,10 @@ mod cache_state_tests {
     }
 
     #[test]
-    fn clear_labels_and_history_bumps_history_revision_on_success() {
+    fn clear_play_counts_bumps_history_revision_on_success() {
         let data = TempDir::new("clear-lh-rev");
         let revision = AtomicU64::new(7);
-        clear_labels_and_history_with_index_save(&data.0, store::save_hash_index, &revision)
+        clear_play_counts_with_index_save(&data.0, store::save_hash_index, &revision)
             .unwrap();
         assert_eq!(revision.load(Ordering::Relaxed), 8);
     }
@@ -7501,15 +7549,65 @@ fn label_stats_impl(data_dir: &std::path::Path, music_dir: Option<&Path>) -> Lab
     }
 }
 
-/// Wipe all human labels and play history, and clear `BarOverride.funkot` mirrors.
+/// Wipe all human labels and clear `BarOverride.funkot` mirrors.
 ///
 /// Intro/outro hand edits are kept. Empty override entries (no intro, outro, or
 /// funkot) are removed — same rule as [`set_label_impl`]'s `None` branch.
+#[tauri::command(async)]
+fn clear_labels(app: tauri::AppHandle) -> Result<(), String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_labels_impl(&data_dir)?;
+    *LAST_FOLDER_LABEL_UNDO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    Ok(())
+}
+
+/// Core of [`clear_labels`], split for unit tests without `AppHandle`.
+fn clear_labels_impl(data_dir: &std::path::Path) -> Result<(), String> {
+    store::save_labels(data_dir, &store::Labels::new())
+        .map_err(|e| format!("cannot persist labels: {e}"))?;
+    let mut overrides = store::load_overrides(data_dir);
+    for entry in overrides.values_mut() {
+        entry.funkot = None;
+    }
+    overrides.retain(|_, entry| {
+        entry.intro_bars.is_some() || entry.outro_structure_bars.is_some()
+    });
+    store::save_overrides(data_dir, &overrides)
+        .map_err(|e| format!("cannot persist manual bars: {e}"))?;
+    Ok(())
+}
+
+/// Wipe the chronological play log (`play-log.jsonl`), keeping aggregate play counts.
+#[tauri::command(async)]
+fn clear_play_log(app: tauri::AppHandle) -> Result<(), String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_play_log_impl(&data_dir)?;
+    HISTORY_REVISION.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Core of [`clear_play_log`], split for unit tests without `AppHandle`.
+fn clear_play_log_impl(data_dir: &std::path::Path) -> Result<(), String> {
+    store::clear_play_log(data_dir).map_err(|e| format!("cannot clear play log: {e}"))?;
+    Ok(())
+}
+
+/// Wipe aggregate play counts (`history.json`), keeping the chronological play log.
 ///
-/// Before wiping history, folds played arrivals in the hash index (decision 8).
+/// Before wiping counts, folds played arrivals in the hash index (decision 8).
 /// Index save failure aborts the command and leaves history intact.
 #[tauri::command(async)]
-fn clear_labels_and_history(app: tauri::AppHandle) -> Result<(), String> {
+fn clear_play_counts(app: tauri::AppHandle) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
     let data_dir = PathBuf::from(&dirs.data_dir);
     let _index = INDEX_LOCK
@@ -7518,30 +7616,25 @@ fn clear_labels_and_history(app: tauri::AppHandle) -> Result<(), String> {
     let _saving = SAVE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    clear_labels_and_history_impl(&data_dir)?;
-    // A folder-label undo armed before the wipe would put part of the labels
-    // back, which is the opposite of what the user just confirmed.
-    *LAST_FOLDER_LABEL_UNDO
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    clear_play_counts_impl(&data_dir)?;
     Ok(())
 }
 
-/// Core of [`clear_labels_and_history`], split for unit tests without `AppHandle`.
+/// Core of [`clear_play_counts`], split for unit tests without `AppHandle`.
 ///
 /// Caller must hold `INDEX_LOCK` → `SAVE_LOCK` (or be single-threaded in tests).
-fn clear_labels_and_history_impl(data_dir: &std::path::Path) -> Result<(), String> {
-    clear_labels_and_history_with_index_save(
+fn clear_play_counts_impl(data_dir: &std::path::Path) -> Result<(), String> {
+    clear_play_counts_with_index_save(
         data_dir,
         store_cache::save_hash_index,
         &HISTORY_REVISION,
     )
 }
 
-/// Same as [`clear_labels_and_history_impl`], with injectable index save and
+/// Same as [`clear_play_counts_impl`], with injectable index save and
 /// revision counter so tests can prove history is kept on index-save failure
 /// and that revision bumps without racing the process-wide atomic.
-fn clear_labels_and_history_with_index_save(
+fn clear_play_counts_with_index_save(
     data_dir: &std::path::Path,
     save_index: impl FnOnce(&std::path::Path, &store::HashIndex) -> std::io::Result<()>,
     revision: &AtomicU64,
@@ -7553,26 +7646,7 @@ fn clear_labels_and_history_with_index_save(
     }
     store::save_history(data_dir, &store::History::new())
         .map_err(|e| format!("cannot persist history: {e}"))?;
-    // Both halves, or "clear play history" would leave a timestamped record of
-    // what was listened to sitting on disk after the counts were wiped.
-    if let Err(e) = store::clear_play_log(data_dir) {
-        log::warn!("cannot clear play log: {e}");
-    }
     revision.fetch_add(1, Ordering::Relaxed);
-
-    if let Err(e) = store::save_labels(data_dir, &store::Labels::new()) {
-        log::warn!("cannot persist labels: {e}");
-    }
-    let mut overrides = store::load_overrides(data_dir);
-    for entry in overrides.values_mut() {
-        entry.funkot = None;
-    }
-    overrides.retain(|_, entry| {
-        entry.intro_bars.is_some() || entry.outro_structure_bars.is_some()
-    });
-    if let Err(e) = store::save_overrides(data_dir, &overrides) {
-        log::warn!("cannot persist manual bars: {e}");
-    }
     Ok(())
 }
 
@@ -8808,7 +8882,9 @@ pub fn run() {
             set_folder_label,
             undo_last_folder_label,
             label_stats,
-            clear_labels_and_history,
+            clear_labels,
+            clear_play_log,
+            clear_play_counts,
             list_new_arrivals,
             queue_new_arrivals,
             list_play_history,

@@ -363,9 +363,19 @@ export function labelStats(): Promise<LabelStats> {
   return invoke<LabelStats>("label_stats");
 }
 
-/// Wipe all labels and play history (and `BarOverride.funkot` mirrors).
-export function clearLabelsAndHistory(): Promise<void> {
-  return invoke<void>("clear_labels_and_history");
+/// Wipe all human labels (and `BarOverride.funkot` mirrors).
+export function clearLabels(): Promise<void> {
+  return invoke<void>("clear_labels");
+}
+
+/// Wipe the chronological play log (`play-log.jsonl`).
+export function clearPlayLog(): Promise<void> {
+  return invoke<void>("clear_play_log");
+}
+
+/// Wipe aggregate play counts (`history.json`).
+export function clearPlayCounts(): Promise<void> {
+  return invoke<void>("clear_play_counts");
 }
 
 /// Matches `store::NewArrival`.

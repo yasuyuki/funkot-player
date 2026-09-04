@@ -17,6 +17,8 @@
   let allowNonFunkotBusy = $state(false);
   let labelingModeBusy = $state(false);
   let clearLabelsBusy = $state(false);
+  let clearPlayLogBusy = $state(false);
+  let clearPlayCountsBusy = $state(false);
   let localeBusy = $state(false);
 
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
@@ -123,13 +125,13 @@
     }
   }
 
-  async function onClearLabelsAndHistory() {
+  async function onClearLabels() {
     if (clearLabelsBusy) return;
     if (!window.confirm(t.confirmClearLabels)) return;
     clearLabelsBusy = true;
     ui.menuOpen = false;
     try {
-      const ok = await store.doClearLabelsAndHistory();
+      const ok = await store.doClearLabels();
       if (ok) {
         toast.notify(t.clearedLabels);
       } else {
@@ -137,6 +139,40 @@
       }
     } finally {
       clearLabelsBusy = false;
+    }
+  }
+
+  async function onClearPlayLog() {
+    if (clearPlayLogBusy) return;
+    if (!window.confirm(t.confirmClearPlayLog)) return;
+    clearPlayLogBusy = true;
+    ui.menuOpen = false;
+    try {
+      const ok = await store.doClearPlayLog();
+      if (ok) {
+        toast.notify(t.clearedPlayLog);
+      } else {
+        toast.notify(store.lastError ?? t.clearPlayLogFailed);
+      }
+    } finally {
+      clearPlayLogBusy = false;
+    }
+  }
+
+  async function onClearPlayCounts() {
+    if (clearPlayCountsBusy) return;
+    if (!window.confirm(t.confirmClearPlayCounts)) return;
+    clearPlayCountsBusy = true;
+    ui.menuOpen = false;
+    try {
+      const ok = await store.doClearPlayCounts();
+      if (ok) {
+        toast.notify(t.clearedPlayCounts);
+      } else {
+        toast.notify(store.lastError ?? t.clearPlayCountsFailed);
+      }
+    } finally {
+      clearPlayCountsBusy = false;
     }
   }
 
@@ -209,8 +245,14 @@
           {t.labelingModeItem(store.labelingMode, labelingModePending)}
         </button>
       {/if}
-      <button type="button" onclick={onClearLabelsAndHistory} disabled={clearLabelsBusy}>
+      <button type="button" onclick={onClearLabels} disabled={clearLabelsBusy}>
         {t.clearLabelsItem}
+      </button>
+      <button type="button" onclick={onClearPlayLog} disabled={clearPlayLogBusy}>
+        {t.clearPlayLogItem}
+      </button>
+      <button type="button" onclick={onClearPlayCounts} disabled={clearPlayCountsBusy}>
+        {t.clearPlayCountsItem}
       </button>
       <button type="button" onclick={onShowLog}>{t.showLog}</button>
       <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>{t.sendFeedback}</button>

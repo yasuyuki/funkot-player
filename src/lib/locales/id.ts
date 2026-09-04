@@ -168,10 +168,18 @@ export const id: Messages = {
       : on
         ? "Mode pelabelan: ON (hanya memutar 20 detik awal)"
         : "Mode pelabelan: OFF",
-  clearLabelsItem: "Hapus label dan riwayat putar",
-  confirmClearLabels: "Hapus semua label dan riwayat putar?",
-  clearedLabels: "Label dan riwayat putar dihapus",
-  clearLabelsFailed: "Tidak dapat menghapus label dan riwayat putar",
+  clearLabelsItem: "Hapus label",
+  confirmClearLabels: "Hapus semua label?",
+  clearedLabels: "Label telah dihapus",
+  clearLabelsFailed: "Tidak dapat menghapus label",
+  clearPlayLogItem: "Hapus riwayat urutan putar",
+  confirmClearPlayLog: "Hapus riwayat urutan putar?",
+  clearedPlayLog: "Riwayat urutan putar telah dihapus",
+  clearPlayLogFailed: "Tidak dapat menghapus riwayat urutan putar",
+  clearPlayCountsItem: "Hapus jumlah putar lagu",
+  confirmClearPlayCounts: "Hapus jumlah pemutaran per lagu?",
+  clearedPlayCounts: "Jumlah pemutaran lagu telah dihapus",
+  clearPlayCountsFailed: "Tidak dapat menghapus jumlah pemutaran per lagu",
   sendFeedback: "Kirim masukan",
   languageItem: (name) => `Bahasa: ${name}`,
 
