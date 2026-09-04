@@ -39,6 +39,8 @@ import {
   clearLabels as clearLabelsCmd,
   clearPlayLog as clearPlayLogCmd,
   clearPlayCounts as clearPlayCountsCmd,
+  clearTrackPlayCount as clearTrackPlayCountCmd,
+  removePlayLogEntry as removePlayLogEntryCmd,
   listNewArrivals as listNewArrivalsCmd,
   queueNewArrivals as queueNewArrivalsCmd,
   listPlayHistory,
@@ -688,6 +690,32 @@ class PlayerStore {
   async doClearPlayCounts(): Promise<boolean> {
     try {
       await clearPlayCountsCmd();
+      this.invalidatePlayHistory();
+      await this.loadPlayHistory(null);
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /// Wipe play count for one track (`history.json`), then reload history.
+  async doClearTrackPlayCount(hash: string): Promise<boolean> {
+    try {
+      await clearTrackPlayCountCmd(hash);
+      this.invalidatePlayHistory();
+      await this.loadPlayHistory(null);
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
+  /// Remove one playback entry from chronological play log, then reload history.
+  async doRemovePlayLogEntry(atMs: number): Promise<boolean> {
+    try {
+      await removePlayLogEntryCmd(atMs);
       this.invalidatePlayHistory();
       await this.loadPlayHistory(null);
       return true;

@@ -6029,6 +6029,106 @@ mod cache_state_tests {
     }
 
     #[test]
+    fn clear_track_play_count_clears_only_target_track_and_folds_arrival() {
+        let data = TempDir::new("clear-track-count");
+        let mut index = store::HashIndex::new();
+        index.insert(
+            "/music/a.flac".into(),
+            arrivals_entry("hash-a", Some("2026-01-01T00:00:00Z")),
+        );
+        index.insert(
+            "/music/b.flac".into(),
+            arrivals_entry("hash-b", Some("2026-01-02T00:00:00Z")),
+        );
+        store::save_hash_index(&data.0, &index).unwrap();
+
+        let mut history = store::History::new();
+        history.insert(
+            "hash-a".into(),
+            store::PlayRecord {
+                count: 5,
+                last_played_ms: 10,
+            },
+        );
+        history.insert(
+            "hash-b".into(),
+            store::PlayRecord {
+                count: 3,
+                last_played_ms: 20,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+
+        store::append_play_log(
+            &data.0,
+            &store::PlayLogEntry {
+                at_ms: 10,
+                hash: "hash-a".into(),
+                origin: None,
+            },
+        )
+        .unwrap();
+
+        clear_track_play_count_impl(&data.0, "hash-a").unwrap();
+
+        let loaded_history = store::load_history(&data.0);
+        assert!(!loaded_history.contains_key("hash-a"));
+        assert_eq!(loaded_history["hash-b"].count, 3);
+
+        let loaded_index = store::load_hash_index(&data.0).index;
+        assert!(loaded_index["/music/a.flac"].first_seen.is_none());
+        assert_eq!(
+            loaded_index["/music/b.flac"].first_seen.as_deref(),
+            Some("2026-01-02T00:00:00Z")
+        );
+
+        // Play log is untouched
+        assert_eq!(store::load_play_log(&data.0).len(), 1);
+    }
+
+    #[test]
+    fn remove_play_log_entry_removes_only_target_row_keeps_history() {
+        let data = TempDir::new("remove-log-entry");
+        store::append_play_log(
+            &data.0,
+            &store::PlayLogEntry {
+                at_ms: 100,
+                hash: "hash-a".into(),
+                origin: None,
+            },
+        )
+        .unwrap();
+        store::append_play_log(
+            &data.0,
+            &store::PlayLogEntry {
+                at_ms: 200,
+                hash: "hash-a".into(),
+                origin: None,
+            },
+        )
+        .unwrap();
+
+        let mut history = store::History::new();
+        history.insert(
+            "hash-a".into(),
+            store::PlayRecord {
+                count: 2,
+                last_played_ms: 200,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+
+        remove_play_log_entry_impl(&data.0, 100).unwrap();
+
+        let log = store::load_play_log(&data.0);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].at_ms, 200);
+
+        // History count is untouched
+        assert_eq!(store::load_history(&data.0)["hash-a"].count, 2);
+    }
+
+    #[test]
     fn list_new_arrivals_impl_folds_and_returns_unplayed() {
         let data = TempDir::new("list-arrivals");
         store::save_settings(
@@ -7650,6 +7750,71 @@ fn clear_play_counts_with_index_save(
     Ok(())
 }
 
+/// Remove one playback entry from the chronological play log (`play-log.jsonl`) by `at_ms`.
+#[tauri::command(async)]
+fn remove_play_log_entry(app: tauri::AppHandle, at_ms: u64) -> Result<(), String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    remove_play_log_entry_impl(&data_dir, at_ms)?;
+    HISTORY_REVISION.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Core of [`remove_play_log_entry`], split for unit tests without `AppHandle`.
+fn remove_play_log_entry_impl(data_dir: &std::path::Path, at_ms: u64) -> Result<(), String> {
+    store::remove_play_log_entry(data_dir, at_ms).map_err(|e| format!("cannot remove play log entry: {e}"))?;
+    Ok(())
+}
+
+/// Clear aggregate play count for one track (`history.json`) by content hash.
+///
+/// Folds the track's arrival in the hash index if it was played (decision 8).
+#[tauri::command(async)]
+fn clear_track_play_count(app: tauri::AppHandle, hash: String) -> Result<(), String> {
+    let dirs = resolve_dirs(&app)?;
+    let data_dir = PathBuf::from(&dirs.data_dir);
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_track_play_count_impl(&data_dir, &hash)?;
+    Ok(())
+}
+
+/// Core of [`clear_track_play_count`], split for unit tests without `AppHandle`.
+fn clear_track_play_count_impl(data_dir: &std::path::Path, hash: &str) -> Result<(), String> {
+    clear_track_play_count_with_index_save(
+        data_dir,
+        hash,
+        store_cache::save_hash_index,
+        &HISTORY_REVISION,
+    )
+}
+
+fn clear_track_play_count_with_index_save(
+    data_dir: &std::path::Path,
+    hash: &str,
+    save_index: impl FnOnce(&std::path::Path, &store::HashIndex) -> std::io::Result<()>,
+    revision: &AtomicU64,
+) -> Result<(), String> {
+    let mut history = store::load_history(data_dir);
+    if history.remove(hash).is_some() {
+        let mut index = store::load_hash_index(data_dir).index;
+        if store::fold_played_arrival_for_hash(&mut index, hash) {
+            save_index(data_dir, &index).map_err(|e| format!("cannot save hash-index: {e}"))?;
+        }
+        store::save_history(data_dir, &history)
+            .map_err(|e| format!("cannot persist history: {e}"))?;
+        revision.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 /// Both halves of play history for the 履歴 tab: the newest `limit` plays in
 /// order, plus the per-track aggregate.
 ///
@@ -8885,6 +9050,8 @@ pub fn run() {
             clear_labels,
             clear_play_log,
             clear_play_counts,
+            clear_track_play_count,
+            remove_play_log_entry,
             list_new_arrivals,
             queue_new_arrivals,
             list_play_history,

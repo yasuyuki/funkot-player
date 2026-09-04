@@ -10,6 +10,7 @@
   import { i18n } from "../lib/i18n.svelte";
   import { enqueueManyMessage } from "../lib/messages";
   import { toast } from "../lib/toast.svelte";
+  import type { PlayedTrackRow, PlayLogRow } from "../lib/tauri";
   import {
     calendarDaysAgo,
     groupPlaysByDay,
@@ -29,32 +30,89 @@
 
   let t = $derived(i18n.t);
 
+  type HistoryMenuTarget =
+    | {
+        kind: "track";
+        track_hash: string;
+        path: string | null;
+        title: string;
+      }
+    | {
+        kind: "log";
+        at_ms: number;
+        track_hash: string;
+        path: string | null;
+        title: string;
+      };
+
   let view = $state<"tracks" | "log">("tracks");
   let selectMode = $state(false);
   /// Keyed by path, like the library's: what gets queued is a path, and the
   /// log lists the same track once per play.
   let selected = $state<Set<string>>(new Set());
   let addManyBusy = $state(false);
-  let menu = $state<{ path: string; at: MenuPoint } | null>(null);
-  const press = createLongPress<string>((path, at) => {
-    menu = { path, at };
+  let menu = $state<(HistoryMenuTarget & { at: MenuPoint }) | null>(null);
+  const press = createLongPress<HistoryMenuTarget>((target, at) => {
+    menu = { ...target, at };
   });
 
-  function onRowPointerDown(
-    e: PointerEvent,
-    row: { missing: boolean; path: string | null },
-  ) {
-    if (!row.missing && row.path) press.down(e, row.path);
+  function onTrackRowPointerDown(e: PointerEvent, row: PlayedTrackRow) {
+    press.down(e, {
+      kind: "track",
+      track_hash: row.track_hash,
+      path: row.path,
+      title: titleOf(row),
+    });
   }
 
-  function onRowContextMenu(
-    e: MouseEvent,
-    row: { missing: boolean; path: string | null },
-  ) {
-    if (!row.missing && row.path) {
-      press.context(e, row.path);
+  function onTrackRowContextMenu(e: MouseEvent, row: PlayedTrackRow) {
+    press.context(e, {
+      kind: "track",
+      track_hash: row.track_hash,
+      path: row.path,
+      title: titleOf(row),
+    });
+  }
+
+  function onLogRowPointerDown(e: PointerEvent, row: PlayLogRow) {
+    press.down(e, {
+      kind: "log",
+      at_ms: row.at_ms,
+      track_hash: row.track_hash,
+      path: row.path,
+      title: titleOf(row),
+    });
+  }
+
+  function onLogRowContextMenu(e: MouseEvent, row: PlayLogRow) {
+    press.context(e, {
+      kind: "log",
+      at_ms: row.at_ms,
+      track_hash: row.track_hash,
+      path: row.path,
+      title: titleOf(row),
+    });
+  }
+
+  async function clearCurrentTrackPlayCount() {
+    if (!menu || menu.kind !== "track") return;
+    const hash = menu.track_hash;
+    const ok = await store.doClearTrackPlayCount(hash);
+    if (ok) {
+      toast.notify(t.clearedTrackPlayCount);
     } else {
-      e.preventDefault();
+      toast.notify(store.lastError ?? t.clearTrackPlayCountFailed);
+    }
+  }
+
+  async function removeCurrentPlayLogEntry() {
+    if (!menu || menu.kind !== "log") return;
+    const atMs = menu.at_ms;
+    const ok = await store.doRemovePlayLogEntry(atMs);
+    if (ok) {
+      toast.notify(t.removedTrackFromPlayLog);
+    } else {
+      toast.notify(store.lastError ?? t.removeTrackFromPlayLogFailed);
     }
   }
 
@@ -115,6 +173,7 @@
     // The two views list different things, so a selection made in one would
     // silently include rows the other does not show.
     selected = clearSelection();
+    menu = null;
   }
 
   function toggleSelectMode() {
@@ -194,11 +253,11 @@
           <li
             class="row"
             class:missing={row.missing}
-            onpointerdown={(e) => onRowPointerDown(e, row)}
+            onpointerdown={(e) => onTrackRowPointerDown(e, row)}
             onpointermove={press.move}
             onpointerup={press.cancel}
             onpointercancel={press.cancel}
-            oncontextmenu={(e) => onRowContextMenu(e, row)}
+            oncontextmenu={(e) => onTrackRowContextMenu(e, row)}
           >
             {#if selectMode}
               <input
@@ -234,11 +293,11 @@
           <li
             class="row"
             class:missing={row.missing}
-            onpointerdown={(e) => onRowPointerDown(e, row)}
+            onpointerdown={(e) => onLogRowPointerDown(e, row)}
             onpointermove={press.move}
             onpointerup={press.cancel}
             onpointercancel={press.cancel}
-            oncontextmenu={(e) => onRowContextMenu(e, row)}
+            oncontextmenu={(e) => onLogRowContextMenu(e, row)}
           >
             {#if selectMode}
               <input
@@ -264,7 +323,14 @@
   {/if}
 
   {#if menu}
-    <TrackMenu path={menu.path} at={menu.at} onclose={() => (menu = null)} />
+    <TrackMenu
+      path={menu.path}
+      title={menu.title}
+      at={menu.at}
+      onClearPlayCount={menu.kind === "track" ? clearCurrentTrackPlayCount : undefined}
+      onRemoveFromPlayLog={menu.kind === "log" ? removeCurrentPlayLogEntry : undefined}
+      onclose={() => (menu = null)}
+    />
   {/if}
 </section>
 

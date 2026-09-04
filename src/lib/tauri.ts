@@ -378,6 +378,16 @@ export function clearPlayCounts(): Promise<void> {
   return invoke<void>("clear_play_counts");
 }
 
+/// Clear aggregate play count for one track (`history.json`).
+export function clearTrackPlayCount(hash: string): Promise<void> {
+  return invoke<void>("clear_track_play_count", { hash });
+}
+
+/// Remove one playback entry from the chronological play log (`play-log.jsonl`).
+export function removePlayLogEntry(atMs: number): Promise<void> {
+  return invoke<void>("remove_play_log_entry", { atMs });
+}
+
 /// Matches `store::NewArrival`.
 export interface NewArrival {
   path: string;

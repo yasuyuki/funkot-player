@@ -13,15 +13,25 @@
   import { clampMenuPosition, shownVerdict, type MenuPoint } from "../lib/track-menu";
 
   let {
-    path,
+    path = null,
+    title: explicitTitle,
     at,
     onclose,
-  }: { path: string; at: MenuPoint; onclose: () => void } = $props();
+    onClearPlayCount,
+    onRemoveFromPlayLog,
+  }: {
+    path?: string | null;
+    title?: string;
+    at: MenuPoint;
+    onclose: () => void;
+    onClearPlayCount?: () => Promise<void> | void;
+    onRemoveFromPlayLog?: () => Promise<void> | void;
+  } = $props();
 
   let t = $derived(i18n.t);
-  let row = $derived(store.trackForPath(path));
+  let row = $derived(path ? store.trackForPath(path) : null);
   let current = $derived(shownVerdict(row));
-  let title = $derived(store.titleForPath(path));
+  let title = $derived(explicitTitle ?? (path ? store.titleForPath(path) : ""));
   let busy = $state(false);
   let menuEl = $state<HTMLDivElement | null>(null);
   /// Null until the popup has been measured — its size depends on the track
@@ -67,7 +77,7 @@
   });
 
   async function pick(verdict: boolean) {
-    if (busy) return;
+    if (busy || !path) return;
     busy = true;
     // Read before the await: `row` follows the store, which this call moves.
     const previous = row?.label ?? null;
@@ -78,6 +88,28 @@
         const restored = await store.doSetLabel(path, previous);
         return restored !== null;
       });
+    } finally {
+      busy = false;
+      onclose();
+    }
+  }
+
+  async function handleClearPlayCount() {
+    if (busy || !onClearPlayCount) return;
+    busy = true;
+    try {
+      await onClearPlayCount();
+    } finally {
+      busy = false;
+      onclose();
+    }
+  }
+
+  async function handleRemoveFromPlayLog() {
+    if (busy || !onRemoveFromPlayLog) return;
+    busy = true;
+    try {
+      await onRemoveFromPlayLog();
     } finally {
       busy = false;
       onclose();
@@ -97,26 +129,54 @@
   <!-- Which track this is about. The menu covers whatever it is drawn over,
        including the row it came from. -->
   <p class="for">{title}</p>
-  <button
-    type="button"
-    role="menuitemradio"
-    aria-checked={current === true}
-    disabled={busy}
-    onclick={() => pick(true)}
-  >
-    <span class="tick" aria-hidden="true">{current === true ? "✓" : ""}</span>
-    {t.funkot}
-  </button>
-  <button
-    type="button"
-    role="menuitemradio"
-    aria-checked={current === false}
-    disabled={busy}
-    onclick={() => pick(false)}
-  >
-    <span class="tick" aria-hidden="true">{current === false ? "✓" : ""}</span>
-    {t.notFunkot}
-  </button>
+  {#if path}
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={current === true}
+      disabled={busy}
+      onclick={() => pick(true)}
+    >
+      <span class="tick" aria-hidden="true">{current === true ? "✓" : ""}</span>
+      {t.funkot}
+    </button>
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={current === false}
+      disabled={busy}
+      onclick={() => pick(false)}
+    >
+      <span class="tick" aria-hidden="true">{current === false ? "✓" : ""}</span>
+      {t.notFunkot}
+    </button>
+  {/if}
+  {#if onClearPlayCount}
+    {#if path}
+      <div class="divider" role="separator"></div>
+    {/if}
+    <button
+      type="button"
+      role="menuitem"
+      disabled={busy}
+      onclick={handleClearPlayCount}
+    >
+      {t.clearTrackPlayCountItem}
+    </button>
+  {/if}
+  {#if onRemoveFromPlayLog}
+    {#if path}
+      <div class="divider" role="separator"></div>
+    {/if}
+    <button
+      type="button"
+      role="menuitem"
+      disabled={busy}
+      onclick={handleRemoveFromPlayLog}
+    >
+      {t.removeTrackFromPlayLogItem}
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -167,5 +227,11 @@
     flex: 0 0 auto;
     width: 1rem;
     color: var(--color-accent-text);
+  }
+
+  .divider {
+    height: 1px;
+    margin: var(--space-xs) 0;
+    background: var(--color-menu-border);
   }
 </style>

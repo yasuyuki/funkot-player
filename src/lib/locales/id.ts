@@ -132,6 +132,12 @@ export const id: Messages = {
   playCount: (n) => `${n}x diputar`,
   playedToday: (time) => `Hari ini ${time}`,
   playedYesterday: (time) => `Kemarin ${time}`,
+  clearTrackPlayCountItem: "Hapus jumlah putar lagu ini",
+  clearedTrackPlayCount: "Jumlah putar lagu ini dihapus",
+  clearTrackPlayCountFailed: "Tidak dapat menghapus jumlah putar",
+  removeTrackFromPlayLogItem: "Hapus lagu ini dari urutan main",
+  removedTrackFromPlayLog: "Lagu ini dihapus dari urutan main",
+  removeTrackFromPlayLogFailed: "Tidak dapat menghapus dari urutan main",
 
   // --- Music folder ---
   pickMusicFolderPrompt: "Pilih folder Musik",

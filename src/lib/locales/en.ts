@@ -146,6 +146,12 @@ export const en = {
   playCount: (n: number) => (n === 1 ? "1 play" : `${n} plays`),
   playedToday: (time: string) => `Today ${time}`,
   playedYesterday: (time: string) => `Yesterday ${time}`,
+  clearTrackPlayCountItem: "Clear play count for this song",
+  clearedTrackPlayCount: "Cleared play count for this song",
+  clearTrackPlayCountFailed: "Could not clear play count",
+  removeTrackFromPlayLogItem: "Remove this song from play order",
+  removedTrackFromPlayLog: "Removed this song from play order",
+  removeTrackFromPlayLogFailed: "Could not remove from play order",
 
   // --- Music folder ---
   pickMusicFolderPrompt: "Pick a Music folder",

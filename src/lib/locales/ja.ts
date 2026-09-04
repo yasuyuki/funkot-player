@@ -134,6 +134,12 @@ export const ja: Messages = {
   playCount: (n) => `${n}回`,
   playedToday: (time) => `今日 ${time}`,
   playedYesterday: (time) => `昨日 ${time}`,
+  clearTrackPlayCountItem: "この曲の再生回数を消す",
+  clearedTrackPlayCount: "この曲の再生回数を消しました",
+  clearTrackPlayCountFailed: "再生回数を消せませんでした",
+  removeTrackFromPlayLogItem: "この曲を再生順から消す",
+  removedTrackFromPlayLog: "この曲を再生順から消しました",
+  removeTrackFromPlayLogFailed: "再生順から消せませんでした",
 
   // --- Music folder ---
   pickMusicFolderPrompt: "Musicフォルダを選んでください",

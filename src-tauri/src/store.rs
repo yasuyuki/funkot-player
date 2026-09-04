@@ -866,6 +866,20 @@ pub fn fold_played_arrivals(index: &mut HashIndex, history: &History) -> bool {
     changed
 }
 
+/// Clear `first_seen` on entries whose content hash matches `hash`.
+///
+/// Returns `true` if any entry changed (caller should persist).
+pub fn fold_played_arrival_for_hash(index: &mut HashIndex, hash: &str) -> bool {
+    let mut changed = false;
+    for entry in index.values_mut() {
+        if entry.first_seen.is_some() && entry.hash == hash {
+            entry.first_seen = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// What a refresh commit should write after stamping / baseline markers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArrivalsCommitPlan {
@@ -1427,6 +1441,24 @@ pub fn clear_play_log(dir: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// Remove one entry matching `at_ms` from `play-log.jsonl`.
+pub fn remove_play_log_entry(dir: &Path, at_ms: u64) -> io::Result<bool> {
+    let entries = load_play_log(dir);
+    let original_len = entries.len();
+    let remaining: Vec<PlayLogEntry> = entries.into_iter().filter(|e| e.at_ms != at_ms).collect();
+    if remaining.len() == original_len {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    for entry in &remaining {
+        serde_json::to_writer(&mut bytes, entry)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        bytes.push(b'\n');
+    }
+    write_atomic(&dir.join(PLAY_LOG_FILE), &bytes)?;
+    Ok(true)
 }
 
 /// One chronological row: a single play, named.
@@ -4194,5 +4226,36 @@ mod tests {
         );
         assert!(index["/c"].first_seen.is_none());
         assert!(!fold_played_arrivals(&mut index, &history));
+    }
+
+    #[test]
+    fn fold_played_arrival_for_hash_clears_only_matching_hash() {
+        let mut index = HashIndex::new();
+        index.insert("/a".into(), entry("ha", Some("2026-01-01T00:00:00Z")));
+        index.insert("/b".into(), entry("hb", Some("2026-01-02T00:00:00Z")));
+
+        assert!(fold_played_arrival_for_hash(&mut index, "ha"));
+        assert!(index["/a"].first_seen.is_none());
+        assert_eq!(
+            index["/b"].first_seen.as_deref(),
+            Some("2026-01-02T00:00:00Z")
+        );
+        assert!(!fold_played_arrival_for_hash(&mut index, "ha"));
+    }
+
+    #[test]
+    fn remove_play_log_entry_removes_only_matching_timestamp() {
+        let dir = TempDir::new("play-log-remove-entry");
+        append_play_log(&dir.0, &play(100, "a", None)).unwrap();
+        append_play_log(&dir.0, &play(200, "b", None)).unwrap();
+        append_play_log(&dir.0, &play(300, "a", None)).unwrap();
+
+        assert!(remove_play_log_entry(&dir.0, 200).unwrap());
+        let entries = load_play_log(&dir.0);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].at_ms, 100);
+        assert_eq!(entries[1].at_ms, 300);
+
+        assert!(!remove_play_log_entry(&dir.0, 999).unwrap());
     }
 }
