@@ -74,8 +74,10 @@ rekordbox 書き出しはいずれもその出力口であり、それ自体が�
 
 ### 項目2の例外 — funkot 判定の手動 override
 
-`Settings.allow_non_funkot` は既定 `false` で、解析が非 Funkot と判定した曲は
-**enqueue もフォルダ drain も拒否される**（`allow_non_funkot`（`src-tauri/src/store.rs`））。判定を誤ると曲が
+`Settings.allow_non_funkot` は既定 `true` で、既定では非 Funkot 判定の曲も
+enqueue・フォルダ drain とも通る。この設定を明示的に `false` にした場合だけ、
+解析が非 Funkot と判定した曲は**enqueue もフォルダ drain も拒否される**
+（`allow_non_funkot`（`src-tauri/src/store.rs`））。判定を誤ると曲が
 丸ごと消える、あるいは混ざるはずのない曲が混ざる。小節数の誤りは1回のつなぎが
 悪くなるだけだが、こちらは母集合そのものが壊れる。
 
