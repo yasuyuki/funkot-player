@@ -6,7 +6,43 @@
 // field is renamed, added, or removed on the Rust side and not mirrored
 // here, playback data silently comes through as `undefined` instead of
 // failing to compile.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+import {
+  listen as nativeListen,
+  type EventCallback,
+  type EventName,
+  type UnlistenFn,
+} from "@tauri-apps/api/event";
+
+/// Narrow IPC seam for headless UI tests. Production uses the Tauri bindings.
+export interface TauriIpc {
+  invoke: typeof nativeInvoke;
+  listen: <T>(
+    event: EventName,
+    handler: EventCallback<T>,
+  ) => Promise<UnlistenFn>;
+}
+
+let ipc: TauriIpc = {
+  invoke: nativeInvoke,
+  listen: nativeListen,
+};
+
+/// Replaces the local Tauri bindings until the returned restore function runs.
+export function installIpcForTesting(next: TauriIpc): () => void {
+  const previous = ipc;
+  ipc = next;
+  return () => {
+    ipc = previous;
+  };
+}
+
+export function listen<T>(
+  event: EventName,
+  handler: EventCallback<T>,
+): Promise<UnlistenFn> {
+  return ipc.listen(event, handler);
+}
 
 /// Matches `AppDirs`.
 export interface AppDirs {
@@ -84,14 +120,14 @@ export interface TrackRow {
 }
 
 export function appDirs(): Promise<AppDirs> {
-  return invoke<AppDirs>("app_dirs");
+  return ipc.invoke<AppDirs>("app_dirs");
 }
 
 /// Opens the Music folder (explorer / open / xdg-open) and returns its
 /// absolute path. Desktop only: the UI hides the menu item on Android, where
 /// the folder cannot be opened at all (see `open_music_dir` in `lib.rs`).
 export function openMusicDir(): Promise<string> {
-  return invoke<string>("open_music_dir");
+  return ipc.invoke<string>("open_music_dir");
 }
 
 /// Matches `SetMusicDirResult`.
@@ -115,30 +151,30 @@ export interface SetMusicDirResult {
 /// and that one, plus `musicDirErrorMessage` in `src/lib/messages.ts`, must
 /// keep the exact strings in sync.
 export function setMusicDir(title: string): Promise<SetMusicDirResult> {
-  return invoke<SetMusicDirResult>("set_music_dir", { title });
+  return ipc.invoke<SetMusicDirResult>("set_music_dir", { title });
 }
 
 export function playerState(): Promise<PlayerState> {
-  return invoke<PlayerState>("player_state");
+  return ipc.invoke<PlayerState>("player_state");
 }
 
 // Tauri converts these camelCase argument names to the Rust commands'
 // snake_case parameters itself; see legacy/index.html's `invoke("start", …)`
 // call for the same convention.
 export function start(musicDir: string, cacheDir: string): Promise<string> {
-  return invoke<string>("start", { musicDir, cacheDir });
+  return ipc.invoke<string>("start", { musicDir, cacheDir });
 }
 
 export function togglePause(): Promise<boolean> {
-  return invoke<boolean>("toggle_pause");
+  return ipc.invoke<boolean>("toggle_pause");
 }
 
 export function skipNext(): Promise<void> {
-  return invoke<void>("skip_next");
+  return ipc.invoke<void>("skip_next");
 }
 
 export function refreshLibrary(kickAnalysis = true): Promise<TrackRow[]> {
-  return invoke<TrackRow[]>("refresh_library", { kickAnalysis });
+  return ipc.invoke<TrackRow[]>("refresh_library", { kickAnalysis });
 }
 
 export interface QueueItem {
@@ -191,44 +227,44 @@ export interface LibraryScanProgress {
 }
 
 export function queueState(): Promise<QueueSnapshot> {
-  return invoke<QueueSnapshot>("queue_state");
+  return ipc.invoke<QueueSnapshot>("queue_state");
 }
 
 export function enqueue(path: string): Promise<number> {
-  return invoke<number>("enqueue", { path });
+  return ipc.invoke<number>("enqueue", { path });
 }
 
 /// Current `settings.json` `allow_non_funkot` (also drives the live gate).
 export function getAllowNonFunkot(): Promise<boolean> {
-  return invoke<boolean>("get_allow_non_funkot");
+  return ipc.invoke<boolean>("get_allow_non_funkot");
 }
 
 /// Persist and apply `allow_non_funkot`. Returns the saved value.
 export function setAllowNonFunkot(allow: boolean): Promise<boolean> {
-  return invoke<boolean>("set_allow_non_funkot", { allow });
+  return ipc.invoke<boolean>("set_allow_non_funkot", { allow });
 }
 
 /// Stored UI language tag, or `null` when the listener has never picked one
 /// (the UI then follows the platform locale — see `src/lib/locale.ts`).
 export function getLocale(): Promise<string | null> {
-  return invoke<string | null>("get_locale");
+  return ipc.invoke<string | null>("get_locale");
 }
 
 /// Persist the UI language. Returns the saved tag. On Android this also
 /// re-publishes the playback notification in the new language.
 export function setLocale(locale: string): Promise<string> {
-  return invoke<string>("set_locale", { locale });
+  return ipc.invoke<string>("set_locale", { locale });
 }
 
 /// Current `settings.json` `labeling_mode`.
 export function getLabelingMode(): Promise<boolean> {
-  return invoke<boolean>("get_labeling_mode");
+  return ipc.invoke<boolean>("get_labeling_mode");
 }
 
 /// Persist `labeling_mode`. Fixed at engine construction (no live switch) —
 /// takes effect from the next engine startup, not the running session.
 export function setLabelingMode(on: boolean): Promise<boolean> {
-  return invoke<boolean>("set_labeling_mode", { on });
+  return ipc.invoke<boolean>("set_labeling_mode", { on });
 }
 
 // `index`/`from`/`to` below are indices into the *displayed* queue list
@@ -242,11 +278,11 @@ export function setLabelingMode(on: boolean): Promise<boolean> {
 // `src-tauri/src/lib.rs`) — this file and that one must keep the exact
 // strings in sync.
 export function dequeue(index: number, expect: QueueItem): Promise<QueueItem> {
-  return invoke<QueueItem>("dequeue", { index, expect });
+  return ipc.invoke<QueueItem>("dequeue", { index, expect });
 }
 
 export function reorder(from: number, to: number, expect: QueueItem): Promise<void> {
-  return invoke<void>("reorder", { from, to, expect });
+  return ipc.invoke<void>("reorder", { from, to, expect });
 }
 
 /// Matches `FlagResult`.
@@ -260,19 +296,19 @@ export interface FlagResult {
 /// playback (`src-tauri/src/lib.rs`'s `flag_last_transition_impl` doc
 /// comment: "Playback is untouched: no nav, pause, or engine call.").
 export function flagLastTransition(): Promise<FlagResult> {
-  return invoke<FlagResult>("flag_last_transition");
+  return ipc.invoke<FlagResult>("flag_last_transition");
 }
 
 /// Undoes the most recent `flagLastTransition` call (single-shot). Rejects
 /// with "nothing to undo" once already consumed or if nothing was flagged.
 export function undoLastFlag(): Promise<void> {
-  return invoke<void>("undo_last_flag");
+  return ipc.invoke<void>("undo_last_flag");
 }
 
 /// Drains whatever the audio thread has logged so far. Safe to call before
 /// `start()`; returns an empty array rather than failing.
 export function pollLog(): Promise<string[]> {
-  return invoke<string[]>("poll_log");
+  return ipc.invoke<string[]>("poll_log");
 }
 
 /// Matches `store::FlagPartner`.
@@ -304,17 +340,17 @@ export interface FlaggedTrackRow {
 }
 
 export function listFlaggedTracks(): Promise<FlaggedTrackRow[]> {
-  return invoke<FlaggedTrackRow[]>("list_flagged_tracks");
+  return ipc.invoke<FlaggedTrackRow[]>("list_flagged_tracks");
 }
 
 /// Hides one track×role from the flagged list. Returns `1` when a new dismiss
 /// key was recorded (undo armed); `0` when already dismissed / bad role.
 export function dismissFlags(trackHash: string, role: string): Promise<number> {
-  return invoke<number>("dismiss_flags", { trackHash, role });
+  return ipc.invoke<number>("dismiss_flags", { trackHash, role });
 }
 
 export function undoLastDismiss(): Promise<void> {
-  return invoke<void>("undo_last_dismiss");
+  return ipc.invoke<void>("undo_last_dismiss");
 }
 
 /// Writes intro and/or outro structure bars. A side left as `null` is untouched.
@@ -326,7 +362,7 @@ export function setBars(
   outroStructureBars: number | null,
   markManual?: boolean,
 ): Promise<TrackRow> {
-  return invoke<TrackRow>("set_bars", {
+  return ipc.invoke<TrackRow>("set_bars", {
     path,
     introBars,
     outroStructureBars,
@@ -344,48 +380,48 @@ export interface LabelStats {
 
 /// Set or clear one track's human Funkot label. `verdict: null` clears it.
 export function setLabel(path: string, verdict: boolean | null): Promise<TrackRow> {
-  return invoke<TrackRow>("set_label", { path, verdict });
+  return ipc.invoke<TrackRow>("set_label", { path, verdict });
 }
 
 /// Label every supported track under `dir` (recursive). Returns how many were
 /// labeled, and arms `undoLastFolderLabel`.
 export function setFolderLabel(dir: string, verdict: boolean): Promise<number> {
-  return invoke<number>("set_folder_label", { dir, verdict });
+  return ipc.invoke<number>("set_folder_label", { dir, verdict });
 }
 
 /// Restore what the last `setFolderLabel` overwrote (single-shot). Returns how
 /// many tracks were restored; rejects with `"nothing to undo"` once consumed.
 export function undoLastFolderLabel(): Promise<number> {
-  return invoke<number>("undo_last_folder_label");
+  return ipc.invoke<number>("undo_last_folder_label");
 }
 
 export function labelStats(): Promise<LabelStats> {
-  return invoke<LabelStats>("label_stats");
+  return ipc.invoke<LabelStats>("label_stats");
 }
 
 /// Wipe all human labels (and `BarOverride.funkot` mirrors).
 export function clearLabels(): Promise<void> {
-  return invoke<void>("clear_labels");
+  return ipc.invoke<void>("clear_labels");
 }
 
 /// Wipe the chronological play log (`play-log.jsonl`).
 export function clearPlayLog(): Promise<void> {
-  return invoke<void>("clear_play_log");
+  return ipc.invoke<void>("clear_play_log");
 }
 
 /// Wipe aggregate play counts (`history.json`).
 export function clearPlayCounts(): Promise<void> {
-  return invoke<void>("clear_play_counts");
+  return ipc.invoke<void>("clear_play_counts");
 }
 
 /// Clear aggregate play count for one track (`history.json`).
 export function clearTrackPlayCount(hash: string): Promise<void> {
-  return invoke<void>("clear_track_play_count", { hash });
+  return ipc.invoke<void>("clear_track_play_count", { hash });
 }
 
 /// Remove one playback entry from the chronological play log (`play-log.jsonl`).
 export function removePlayLogEntry(atMs: number): Promise<void> {
-  return invoke<void>("remove_play_log_entry", { atMs });
+  return ipc.invoke<void>("remove_play_log_entry", { atMs });
 }
 
 /// Matches `store::NewArrival`.
@@ -395,13 +431,13 @@ export interface NewArrival {
 }
 
 export function listNewArrivals(): Promise<NewArrival[]> {
-  return invoke<NewArrival[]>("list_new_arrivals");
+  return ipc.invoke<NewArrival[]>("list_new_arrivals");
 }
 
 /// Prepends gated new arrivals to the queue (after reserved). Returns how
 /// many tracks were actually added.
 export function queueNewArrivals(): Promise<number> {
-  return invoke<number>("queue_new_arrivals");
+  return ipc.invoke<number>("queue_new_arrivals");
 }
 
 /// Matches `store::PlayLogRow`: one play, in order.
@@ -442,7 +478,7 @@ export interface PlayHistory {
 }
 
 export function listPlayHistory(limit: number): Promise<PlayHistory> {
-  return invoke<PlayHistory>("list_play_history", { limit });
+  return ipc.invoke<PlayHistory>("list_play_history", { limit });
 }
 
 /// Matches `EnqueueManyResult`. `rejected` is "the app refused it" (the
@@ -457,7 +493,7 @@ export interface EnqueueManyResult {
 /// already-queued path is skipped rather than duplicated, and a non-Funkot
 /// path is counted rather than rejecting the whole call.
 export function enqueueMany(paths: string[]): Promise<EnqueueManyResult> {
-  return invoke<EnqueueManyResult>("enqueue_many", { paths });
+  return ipc.invoke<EnqueueManyResult>("enqueue_many", { paths });
 }
 
 export function auditionTransition(
@@ -466,7 +502,7 @@ export function auditionTransition(
   musicDir: string,
   cacheDir: string,
 ): Promise<void> {
-  return invoke<void>("audition_transition", {
+  return ipc.invoke<void>("audition_transition", {
     fromPath,
     toPath,
     musicDir,
@@ -475,11 +511,11 @@ export function auditionTransition(
 }
 
 export function auditionAgain(musicDir: string, cacheDir: string): Promise<void> {
-  return invoke<void>("audition_again", { musicDir, cacheDir });
+  return ipc.invoke<void>("audition_again", { musicDir, cacheDir });
 }
 
 export function resumeAutodj(): Promise<void> {
-  return invoke<void>("resume_autodj");
+  return ipc.invoke<void>("resume_autodj");
 }
 
 /// Matches `ShareFeedbackResult`.
@@ -493,7 +529,7 @@ export interface ShareFeedbackResult {
 /// Snapshot `library.json` / `flags.json` into a ZIP and share (Android) or
 /// return the staged path (desktop).
 export function shareFeedback(title: string): Promise<ShareFeedbackResult> {
-  return invoke<ShareFeedbackResult>("share_feedback", { title });
+  return ipc.invoke<ShareFeedbackResult>("share_feedback", { title });
 }
 
 /// Matches `ImportResult`.
@@ -516,5 +552,5 @@ export interface ImportResult {
 /// `music_dir`. Always `{ tracks: 0, skipped: 0, failed: 0, in_flight: false }`
 /// on desktop, since nothing ever stages anything there.
 export function takePendingImport(): Promise<ImportResult> {
-  return invoke<ImportResult>("take_pending_import");
+  return ipc.invoke<ImportResult>("take_pending_import");
 }

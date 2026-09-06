@@ -4,7 +4,6 @@
 // one poll loop and exactly one place a "what changed since last time" bug
 // can hide. Analysis / library-scan events are also listened to here only —
 // same reason.
-import { listen } from "@tauri-apps/api/event";
 import {
   appDirs,
   playerState,
@@ -45,6 +44,7 @@ import {
   queueNewArrivals as queueNewArrivalsCmd,
   listPlayHistory,
   enqueueMany as enqueueManyCmd,
+  listen,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -69,7 +69,7 @@ import {
   nextLibraryRefreshOwed,
   type RefreshAttempt,
 } from "./arrivals";
-import { preserveLibraryAddedOrder } from "./library-sort";
+import { applyAnalysisProgress, preserveLibraryAddedOrder } from "./library-sort";
 import { canSkipNext } from "./transportMode";
 import { toast } from "./toast.svelte";
 import { i18n } from "./i18n.svelte";
@@ -262,9 +262,9 @@ class PlayerStore {
       // we splice by path (no full folder walk per track); done reloads the
       // listing without re-kicking analysis (failures must not loop forever).
       await listen<AnalysisProgress>("analysis-progress", (event) => {
-        const { done, total, name, row } = event.payload;
-        this.analysis = { done, total, name };
-        this.#replaceLibraryRow(row);
+        const update = applyAnalysisProgress(this.library, event.payload);
+        this.library = update.library;
+        this.analysis = update.analysis;
       });
       await listen("analysis-done", () => {
         this.analysis = null;

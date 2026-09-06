@@ -1,4 +1,4 @@
-import type { TrackRow } from "./tauri";
+import type { AnalysisProgress, TrackRow } from "./tauri";
 
 export type LibrarySortKey = "recent" | "title" | "artist";
 
@@ -54,4 +54,28 @@ export function preserveLibraryAddedOrder(
     return incoming;
   }
   return { ...incoming, added_order: previous.added_order };
+}
+
+
+export function applyAnalysisProgress(
+  library: ReadonlyMap<string, TrackRow>,
+  progress: AnalysisProgress,
+): {
+  library: Map<string, TrackRow>;
+  analysis: { done: number; total: number; name: string };
+} {
+  const nextLibrary = new Map(library);
+  const previous = nextLibrary.get(progress.row.path);
+  nextLibrary.set(
+    progress.row.path,
+    preserveLibraryAddedOrder(previous, progress.row),
+  );
+  return {
+    library: nextLibrary,
+    analysis: {
+      done: progress.done,
+      total: progress.total,
+      name: progress.name,
+    },
+  };
 }
