@@ -208,9 +208,9 @@ intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
 ```
 
-**このバージョンの新機能（0.6.0）:**
+**このバージョンの新機能（0.7.0）:**
 ```text
-ライブラリから複数の曲を選んで一括でキューに追加できるようになりました。再生画面に「履歴」が加わり、再生した曲を時系列で確認できます。右クリックからFunkot判定を手動で切り替えられます。PCのウィンドウサイズを記憶し、広い画面ではライブラリとキューの2ペイン表示を標準にします。1曲だけでも再生を開始できます。
+保存したラベル、再生順の履歴、曲別の再生回数をそれぞれ独立して消去できるようになりました。履歴の右クリックメニューから、1曲の再生回数や再生順の1件だけを削除できます。音声ファイルは削除しません。
 ```
 
 ### English
@@ -256,9 +256,9 @@ Adjust intro / outro
 Flag a bad transition and keep a feedback ZIP
 ```
 
-**What's new in this version (0.6.0):**
+**What's new in this version (0.7.0):**
 ```text
-Select multiple tracks from the library and add them to the queue all at once. A new History screen lets you view past played tracks in chronological order. Right-click any row to toggle its Funkot label. On PC, the app remembers the window size and defaults to the two-pane view when wide. Playback can now start with a single track.
+Clear saved labels, the chronological play log, and per-track play counts independently. Use the history context menus to clear one track’s play count or remove a single play-log entry. Audio files are not deleted.
 ```
 
 ### Bahasa Indonesia
@@ -304,9 +304,9 @@ Sesuaikan intro / outro
 Tandai transisi yang tidak pas dan simpan ZIP masukan
 ```
 
-**Yang baru di versi ini (0.6.0):**
+**Yang baru di versi ini (0.7.0):**
 ```text
-Pilih beberapa lagu dari pustaka dan tambahkan ke antrean sekaligus. Layar Riwayat baru memungkinkan Anda melihat lagu yang diputar secara kronologis. Klik kanan baris mana saja untuk mengubah label Funkot. Di PC, aplikasi mengingat ukuran jendela dan secara baku menampilkan tampilan dua panel di layar lebar. Pemutaran kini dapat dimulai hanya dengan satu lagu.
+Hapus label tersimpan, log urutan pemutaran, dan jumlah pemutaran per lagu secara terpisah. Gunakan menu konteks riwayat untuk menghapus jumlah pemutaran satu lagu atau satu entri log pemutaran. Berkas audio tidak dihapus.
 ```
 
 ---
