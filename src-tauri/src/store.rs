@@ -1446,11 +1446,17 @@ pub fn clear_play_log(dir: &Path) -> io::Result<()> {
 /// Remove one entry matching `at_ms` from `play-log.jsonl`.
 pub fn remove_play_log_entry(dir: &Path, at_ms: u64) -> io::Result<bool> {
     let entries = load_play_log(dir);
-    let original_len = entries.len();
-    let remaining: Vec<PlayLogEntry> = entries.into_iter().filter(|e| e.at_ms != at_ms).collect();
-    if remaining.len() == original_len {
+    let matches = entries.iter().filter(|entry| entry.at_ms == at_ms).count();
+    if matches == 0 {
         return Ok(false);
     }
+    if matches > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("multiple {PLAY_LOG_FILE} entries have at_ms {at_ms}"),
+        ));
+    }
+    let remaining: Vec<PlayLogEntry> = entries.into_iter().filter(|entry| entry.at_ms != at_ms).collect();
     let mut bytes = Vec::new();
     for entry in &remaining {
         serde_json::to_writer(&mut bytes, entry)
@@ -4257,5 +4263,32 @@ mod tests {
         assert_eq!(entries[1].at_ms, 300);
 
         assert!(!remove_play_log_entry(&dir.0, 999).unwrap());
+    }
+
+    #[test]
+    fn remove_play_log_entry_rejects_duplicate_timestamp_for_different_tracks_without_rewrite() {
+        let dir = TempDir::new("play-log-remove-duplicate-different-tracks");
+        append_play_log(&dir.0, &play(200, "a", None)).unwrap();
+        append_play_log(&dir.0, &play(200, "b", None)).unwrap();
+        let path = dir.0.join(PLAY_LOG_FILE);
+        let before = fs::read(&path).unwrap();
+
+        let error = remove_play_log_entry(&dir.0, 200).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn remove_play_log_entry_rejects_identical_duplicate_timestamp_without_rewrite() {
+        let dir = TempDir::new("play-log-remove-identical-duplicate");
+        let entry = play(200, "a", None);
+        append_play_log(&dir.0, &entry).unwrap();
+        append_play_log(&dir.0, &entry).unwrap();
+        let path = dir.0.join(PLAY_LOG_FILE);
+        let before = fs::read(&path).unwrap();
+
+        let error = remove_play_log_entry(&dir.0, 200).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(path).unwrap(), before);
     }
 }

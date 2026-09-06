@@ -289,7 +289,7 @@
     {#each days as day (day.key)}
       <h3 class="day">{formatDayHeading(day.rows[0].at_ms)}</h3>
       <ul class="list">
-        {#each day.rows as row (`${row.at_ms}:${row.track_hash}`)}
+        {#each day.rows as row, index (`${row.at_ms}:${row.track_hash}:${index}`)}
           <li
             class="row"
             class:missing={row.missing}
