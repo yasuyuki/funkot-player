@@ -56,6 +56,17 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Test frontend and native library
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build NSIS and upload draft release
         if: github.event_name == 'push'
         uses: tauri-apps/tauri-action@v0
@@ -73,6 +84,9 @@ jobs:
       - name: Build NSIS (artifact only)
         if: github.event_name == 'workflow_dispatch'
         run: npm run tauri -- build --bundles nsis
+
+      - name: Smoke test native current-track endpoint
+        run: node --test scripts/current-track-process.test.mjs
 
       - name: Upload NSIS artifact
         if: github.event_name == 'workflow_dispatch'

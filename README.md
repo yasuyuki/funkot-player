@@ -134,6 +134,14 @@ cache, and your bar-count corrections stay on the phone.
 Bulk / resume-safe push from WSL over wireless adb (hundreds of tracks): see
 [docs/adb-music-transfer.md](docs/adb-music-transfer.md).
 
+## Local companion integration (Windows)
+
+An optional read-only [current-track API](docs/current-track-api.md) lets
+[DJ Live Text](https://github.com/yasuyuki/dj-live-text) obtain the current title,
+artist and playback state. It is disabled by default and binds only to loopback
+when `FUNKOT_CURRENT_TRACK_PORT` is explicitly set. Receiving metadata does not
+control playback or automatically display anything in the companion app.
+
 ## Using the app
 
 - **開始 / 一時停止 / 次の曲** — main transport. Playback continues in the

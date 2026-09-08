@@ -6,6 +6,8 @@
 mod queue;
 mod store;
 mod store_cache;
+#[cfg(any(target_os = "windows", test))]
+mod current_track_http;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -2051,6 +2053,33 @@ fn session_metadata() -> (String, String) {
     };
     *LAST_SESSION_META.lock().unwrap() = (now, meta.0.clone(), meta.1.clone());
     meta
+}
+
+/// Snapshot for the optional local current-track HTTP API. It copies the
+/// event-thread state, probes tags without holding `NOW`, then verifies that
+/// the same main track remains current before exposing it.
+#[cfg(any(target_os = "windows", test))]
+fn current_track_http_snapshot() -> current_track_http::CurrentTrackSnapshot {
+    let (path, auditioning) = {
+        let now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        (now.now.clone(), AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed))
+    };
+    let Some(path) = path else { return current_track_http::CurrentTrackSnapshot::empty(); };
+    if auditioning { return current_track_http::CurrentTrackSnapshot::empty(); }
+    let tags = cached_tags_for(&path);
+    let metadata = session_metadata_for(Some(path.as_path()), &tags);
+    // Sample the public state after metadata I/O. A later transition is
+    // naturally reflected by the next request; no audio lock is needed.
+    let now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if now.now.as_ref() != Some(&path) {
+        return current_track_http::CurrentTrackSnapshot::empty();
+    }
+    current_track_http::CurrentTrackSnapshot::from_state(
+        Some(metadata),
+        get_phase() == Phase::Playing,
+        is_paused(),
+        AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed),
+    )
 }
 
 /// Used by the Android `currentTitle` JNI entry; desktop builds only exercise
@@ -8973,6 +9002,9 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_dialog::init());
     builder
         .setup(|app| {
+            // Optional Windows endpoint: failure must never affect launch or audio.
+            #[cfg(target_os = "windows")]
+            current_track_http::start(current_track_http_snapshot);
             // Preload the queue tab before ▶ is pressed: `start_impl` is
             // otherwise the only place `queue.json` / `session.json` get
             // read, so without this the queue screen shows nothing until
