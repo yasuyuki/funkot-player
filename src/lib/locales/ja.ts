@@ -135,6 +135,10 @@ export const ja: Messages = {
   playedToday: (time) => `今日 ${time}`,
   playedYesterday: (time) => `昨日 ${time}`,
   clearTrackPlayCountItem: "この曲の再生回数を消す",
+  confirmClearTrackPlayCount: (title) =>
+    `「${title}」の再生回数を消しますか？再生順の履歴は残ります。この操作は取り消せません。`,
+  confirmRemovePlayLogEntry: (title, time) =>
+    `「${title}」の ${time} の再生記録1件を再生順から消しますか？曲の再生回数は残ります。この操作は取り消せません。`,
   clearedTrackPlayCount: "この曲の再生回数を消しました",
   clearTrackPlayCountFailed: "再生回数を消せませんでした",
   removeTrackFromPlayLogItem: "この曲を再生順から消す",

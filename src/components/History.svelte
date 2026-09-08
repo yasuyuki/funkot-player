@@ -97,6 +97,7 @@
   async function clearCurrentTrackPlayCount() {
     if (!menu || menu.kind !== "track") return;
     const hash = menu.track_hash;
+    if (!window.confirm(t.confirmClearTrackPlayCount(menu.title))) return;
     const ok = await store.doClearTrackPlayCount(hash);
     if (ok) {
       toast.notify(t.clearedTrackPlayCount);
@@ -108,6 +109,7 @@
   async function removeCurrentPlayLogEntry() {
     if (!menu || menu.kind !== "log") return;
     const atMs = menu.at_ms;
+    if (!window.confirm(t.confirmRemovePlayLogEntry(menu.title, formatPlayedAt(atMs)))) return;
     const ok = await store.doRemovePlayLogEntry(atMs);
     if (ok) {
       toast.notify(t.removedTrackFromPlayLog);

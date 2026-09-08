@@ -133,6 +133,10 @@ export const id: Messages = {
   playedToday: (time) => `Hari ini ${time}`,
   playedYesterday: (time) => `Kemarin ${time}`,
   clearTrackPlayCountItem: "Hapus jumlah putar lagu ini",
+  confirmClearTrackPlayCount: (title) =>
+    `Hapus jumlah putar untuk “${title}”? Riwayat urutan putar tetap disimpan. Tindakan ini tidak dapat dibatalkan.`,
+  confirmRemovePlayLogEntry: (title, time) =>
+    `Hapus satu catatan pemutaran “${title}” pada ${time} dari riwayat urutan putar? Jumlah putar lagu tetap disimpan. Tindakan ini tidak dapat dibatalkan.`,
   clearedTrackPlayCount: "Jumlah putar lagu ini dihapus",
   clearTrackPlayCountFailed: "Tidak dapat menghapus jumlah putar",
   removeTrackFromPlayLogItem: "Hapus lagu ini dari urutan main",

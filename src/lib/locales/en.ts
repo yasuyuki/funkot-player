@@ -147,6 +147,10 @@ export const en = {
   playedToday: (time: string) => `Today ${time}`,
   playedYesterday: (time: string) => `Yesterday ${time}`,
   clearTrackPlayCountItem: "Clear play count for this song",
+  confirmClearTrackPlayCount: (title: string) =>
+    `Clear the play count for “${title}”? Play order history will remain. This cannot be undone.`,
+  confirmRemovePlayLogEntry: (title: string, time: string) =>
+    `Remove the play of “${title}” at ${time} from play order history? The song's play count will remain. This cannot be undone.`,
   clearedTrackPlayCount: "Cleared play count for this song",
   clearTrackPlayCountFailed: "Could not clear play count",
   removeTrackFromPlayLogItem: "Remove this song from play order",
