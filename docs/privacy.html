@@ -13,7 +13,7 @@
 <body>
   <p><a href="privacy.md">Markdown 版 / Markdown version</a></p>
   <h1>プライバシーポリシー / Privacy Policy</h1>
-  <p><strong>アプリ名:</strong> Funkot<br /><strong>最終更新日:</strong> 2026-08-06</p>
+  <p><strong>アプリ名:</strong> Funkot<br /><strong>最終更新日:</strong> 2026-09-08</p>
   <p>開発者への連絡は <a href="https://github.com/yasuyuki/funkot-player/issues">GitHub Issues（yasuyuki/funkot-player）</a> へ。</p>
 
   <h2>収集・保存するデータ</h2>
@@ -23,6 +23,7 @@
     <li><strong>解析キャッシュ・再生キュー・手直し（intro/outro など）</strong> — いずれも端末ローカルに保存します。</li>
     <li><strong>再生履歴</strong> — どの曲をいつ再生したかを端末ローカルに記録します。アプリ内の「履歴」で見られ、⋮ メニューの「過去の再生順を消す」「曲別の再生回数を消す」で消せます。サーバーへ送信せず、「意見を送る」の ZIP にも含めません。</li>
     <li><strong>「意見を送る」</strong> — library / flags などを ZIP にまとめたファイルは、あなたが共有するまで端末内に留まります。アプリから自動でサーバー送信はしません。</li>
+    <li><strong>ローカル曲情報API</strong> — Windowsでは、環境変数で曲情報APIを有効化した場合だけ、曲名・アーティスト名・再生状態を同じPC上のアプリが読み取れます。APIは既定で無効で、外部ネットワークには公開しません。音源・ファイルのフルパス・再生履歴はAPIに含めません。</li>
   </ul>
 
   <h2>アンインストール時</h2>
@@ -30,5 +31,6 @@
 
   <h2>English (short)</h2>
   <p>Funkot stores music, analysis cache, queue, your bar corrections, and a play history (which track was played, and when) on-device only. There is no account, tracking, or ads. The play history is never uploaded and is not part of a feedback ZIP; ⋮ → clear play order history / clear per-song play counts deletes it. Feedback ZIPs stay on your device until you share them; the app does not upload them automatically. Uninstalling may remove app data. Contact: GitHub Issues on yasuyuki/funkot-player.</p>
+  <p>On Windows, an optional current-track API lets applications on the same PC read the title, artist, and playback state only when you enable it through an environment variable. It is disabled by default, binds only to loopback, and does not expose audio files, full file paths, or play history.</p>
 </body>
 </html>

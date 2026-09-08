@@ -1,7 +1,7 @@
 # プライバシーポリシー / Privacy Policy
 
 **アプリ名:** Funkot  
-**最終更新日:** 2026-08-06
+**最終更新日:** 2026-09-08
 
 開発者への連絡は [GitHub Issues（yasuyuki/funkot-player）](https://github.com/yasuyuki/funkot-player/issues) へ。
 
@@ -14,6 +14,8 @@ Funkot はアカウント登録を求めず、トラッキングや広告のた�
 - **再生履歴** — どの曲をいつ再生したかを端末ローカルに記録します。アプリ内の「履歴」で見られ、⋮ メニューの「過去の再生順を消す」「曲別の再生回数を消す」で消せます。サーバーへ送信せず、「意見を送る」の ZIP にも含めません。
 - **「意見を送る」** — `library.json` / `flags.json` などを ZIP にまとめたファイルは、あなたが共有するまで端末内に留まります。アプリから自動でサーバー送信はしません。
 
+- **ローカル曲情報API** — Windowsでは、環境変数で曲情報APIを有効化した場合だけ、曲名・アーティスト名・再生状態を同じPC上のアプリが読み取れます。APIは既定で無効で、外部ネットワークには公開しません。音源・ファイルのフルパス・再生履歴はAPIに含めません。
+
 ## アンインストール時
 
 アンインストールすると、アプリが保存したデータ（キャッシュ・キュー・手直しなど）が消える場合があります。Music フォルダ内の音源ファイルの扱いも環境により異なります。必要なデータは事前にバックアップしてください。
@@ -21,6 +23,8 @@ Funkot はアカウント登録を求めず、トラッキングや広告のた�
 ## English (short)
 
 Funkot stores music, analysis cache, queue, your bar corrections, and a play history (which track was played, and when) on-device only. There is no account, tracking, or ads. The play history is never uploaded and is not part of a feedback ZIP; ⋮ → clear play order history / clear per-song play counts deletes it. Feedback ZIPs stay on your device until you share them; the app does not upload them automatically. Uninstalling may remove app data. Contact: GitHub Issues on yasuyuki/funkot-player.
+
+On Windows, an optional current-track API lets applications on the same PC read the title, artist, and playback state only when you enable it through an environment variable. It is disabled by default, binds only to loopback, and does not expose audio files, full file paths, or play history.
 
 ---
 
