@@ -545,29 +545,34 @@ mod music_dir_tests {
         assert!(needed);
     }
 
+    fn shape_data_dir() -> PathBuf {
+        // Shape-only tests do no I/O, but Windows absolute paths require a drive.
+        std::env::current_dir().unwrap().join("shape-fixture").join("app")
+    }
+
     #[test]
     fn check_music_dir_shape_rejects_a_relative_path() {
-        let data_dir = Path::new("/data/app");
+        let data_dir = shape_data_dir();
         assert_eq!(
-            check_music_dir_shape(Path::new("relative/Music"), data_dir),
+            check_music_dir_shape(Path::new("relative/Music"), &data_dir),
             Err("not_absolute")
         );
     }
 
     #[test]
     fn check_music_dir_shape_rejects_a_parent_of_data_dir() {
-        let data_dir = Path::new("/data/app");
+        let data_dir = shape_data_dir();
         assert_eq!(
-            check_music_dir_shape(Path::new("/data"), data_dir),
+            check_music_dir_shape(data_dir.parent().unwrap(), &data_dir),
             Err("contains_app_data")
         );
     }
 
     #[test]
     fn check_music_dir_shape_accepts_a_sibling_of_data_dir() {
-        let data_dir = Path::new("/data/app");
+        let data_dir = shape_data_dir();
         assert_eq!(
-            check_music_dir_shape(Path::new("/data/Music"), data_dir),
+            check_music_dir_shape(&data_dir.with_file_name("Music"), &data_dir),
             Ok(())
         );
     }
@@ -578,15 +583,15 @@ mod music_dir_tests {
     /// break every fresh install.
     #[test]
     fn check_music_dir_shape_accepts_the_default_music_dir() {
-        let data_dir = Path::new("/data/app");
-        assert_eq!(check_music_dir_shape(&data_dir.join("Music"), data_dir), Ok(()));
+        let data_dir = shape_data_dir();
+        assert_eq!(check_music_dir_shape(&data_dir.join("Music"), &data_dir), Ok(()));
     }
 
     #[test]
     fn check_music_dir_shape_rejects_when_candidate_equals_data_dir() {
-        let data_dir = Path::new("/data/app");
+        let data_dir = shape_data_dir();
         assert_eq!(
-            check_music_dir_shape(data_dir, data_dir),
+            check_music_dir_shape(&data_dir, &data_dir),
             Err("contains_app_data")
         );
     }
