@@ -6,7 +6,8 @@ import { transformWithEsbuild } from "vite";
 const libDir = new URL(".", import.meta.url);
 
 async function importTypeScript(name, replacements = []) {
-  let source = await readFile(new URL(name, libDir), "utf8");
+  // Windows checkouts may use CRLF; imports are matched as logical lines.
+  let source = (await readFile(new URL(name, libDir), "utf8")).replace(/\r\n?/g, "\n");
   for (const [from, to] of replacements) {
     assert.ok(source.includes(from), "expected test replacement in " + name);
     source = source.replace(from, to);
