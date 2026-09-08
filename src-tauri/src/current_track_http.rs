@@ -167,7 +167,9 @@ fn classify_request(bytes: &[u8], port: u16) -> RequestKind {
             if host_seen { return RequestKind::Forbidden; }
             host_seen = true;
             let value = value.trim();
-            valid_host = value == expected_ip || value == expected_localhost;
+            valid_host = value == expected_ip
+                || value.eq_ignore_ascii_case(&expected_localhost)
+                || (port == 80 && (value == "127.0.0.1" || value.eq_ignore_ascii_case("localhost")));
         }
     }
     if !valid_host { return RequestKind::Forbidden; }
@@ -227,6 +229,9 @@ mod tests {
     fn request_filter_allows_only_local_host_get_without_origin() {
         assert_eq!(classify_request(b"GET /now-playing HTTP/1.1\r\nHost: localhost:43123\r\n\r\n", 43123), RequestKind::NowPlaying);
         assert_eq!(classify_request(b"GET /now-playing HTTP/1.1\r\nHost: 127.0.0.1:43123\r\n\r\n", 43123), RequestKind::NowPlaying);
+        // HTTP clients omit the default port from Host (including Node's http.get).
+        assert_eq!(classify_request(b"GET /now-playing HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 80), RequestKind::NowPlaying);
+        assert_eq!(classify_request(b"GET /now-playing HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 43123), RequestKind::Forbidden);
         assert_eq!(classify_request(b"GET /now-playing HTTP/1.1\r\n\r\n", 43123), RequestKind::Forbidden);
         assert_eq!(classify_request(b"GET /now-playing HTTP/1.1\r\nHost: localhost:1\r\n\r\n", 43123), RequestKind::Forbidden);
         assert_eq!(classify_request(b"GET /now-playing HTTP/1.1\r\nHost: evil.test\r\nHost: localhost:43123\r\n\r\n", 43123), RequestKind::Forbidden);

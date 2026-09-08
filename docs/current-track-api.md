@@ -26,6 +26,19 @@ button to send it. The app's existing current-track definition applies during mi
 `NOW.now` changes at the end of a transition, not when the incoming audio first starts.
 Title fallback is the filename when embedded title is absent; a missing artist is an empty string.
 
+The manual Windows workflow also uploads `funkot-player-windows-portable`: the exact executable
+used by the native smoke test and any adjacent DLLs. Extract the artifact to its own folder,
+close the existing Funkot instance, open PowerShell in that folder, and launch it without an
+installer:
+
+```powershell
+$env:FUNKOT_CURRENT_TRACK_PORT = '43123'
+& .\funkot-player.exe
+```
+
+This build uses Funkot's normal application data location, so do not run it alongside another
+Funkot instance. It is an unsigned development artifact, not a new Store release.
+
 This environment variable applies to the process launched from that shell. It does not enable
 an already running instance or imply support for Store activation. Any local process may read
 this optional endpoint. The endpoint has no LAN binding, authentication, artwork, paths or commands.

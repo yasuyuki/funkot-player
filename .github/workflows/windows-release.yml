@@ -95,3 +95,13 @@ jobs:
           name: funkot-player-windows-nsis
           path: funkot-player/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
+
+      - name: Upload tested portable executable
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: funkot-player-windows-portable
+          path: |
+            funkot-player/src-tauri/target/release/funkot-player.exe
+            funkot-player/src-tauri/target/release/*.dll
+          if-no-files-found: error
