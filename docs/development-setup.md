@@ -26,7 +26,17 @@ For Android builds, ADB, desktop GUI, and shipping, see [README.md § For develo
 export FUNKOT_CORE_REPO=/path/to/funkot-autodj-for-ui
 ```
 
-Clone or copy [funkot-autodj](https://github.com/yasuyuki/funkot-autodj) next to this repo as `funkot-autodj-for-ui` before the first build.
+Use this player's `main` and [funkot-autodj](https://github.com/yasuyuki/funkot-autodj)'s
+`master` as the integration branches. Start independent work from the latest fetched remote
+defaults in separate task worktrees, keeping the two sibling names above. Give the UI engine
+its own topic; do not share a checkout with independent engine development. Reuse the same
+worktrees for unfinished work and merge verified results back into their integration branches.
+Historical `develop` and `feat/player-ui` branches are not starting points for new work.
+
+In a managed working set, select the task's `WORKING-SET.json` from the registered launch
+workspace. Use its existing verifier and public branch registration commands before editing.
+The manifest describes placement; Git registration records the task, base, dependencies and
+integration destination. Outside a managed workspace, Git worktrees can use the same sibling layout.
 
 ## Install Docker
 
@@ -57,6 +67,8 @@ From the `funkot-player` repo root, with the sibling `../funkot-autodj-for-ui` p
 
 ```sh
 ./dev.sh npm install
+./dev.sh npm run check
+./dev.sh npm test
 ./dev.sh npm run build
 ./dev.sh cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
@@ -65,7 +77,9 @@ Notes:
 
 - The first run builds the `funkot-player-dev` image (Android NDK/SDK, GTK, and related deps). Expect on the order of tens of minutes.
 - Temporary crates.io timeouts can occur; re-run the same `cargo` command.
-- Frontend smoke here is `npm run build` (there is no `npm run check` script in this package).
+- `npm run check`, `npm test`, and `npm run build` cover the frontend. Run the invariant
+  scripts listed in `.github/workflows/checks.yml` as well. Engine changes also require its
+  own workspace tests and any real-audio acceptance required by its development instructions.
 
 ## Common failures
 
