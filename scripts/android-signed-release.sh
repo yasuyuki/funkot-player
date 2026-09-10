@@ -27,6 +27,13 @@ APK_REL=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-univer
 
 die() { echo "$*" >&2; exit 1; }
 
+require_official_core() {
+    player=$1
+    [ -z "${FUNKOT_CORE_CANDIDATE_SHA:-}" ] ||
+        die "FUNKOT_CORE_CANDIDATE_SHA is candidate-only and cannot produce a signed APK"
+    FUNKOT_CORE_CANDIDATE_SHA= "$player/scripts/check-funkot-core-commit.sh"
+}
+
 usage() {
     echo "usage: $0 prepare|build|install|pair|connect|status [args]" >&2
     echo "  pair <ip> <pair-port> <code> [connect-port]" >&2
@@ -153,7 +160,9 @@ cmd_prepare() {
     [ "$(id -un)" = "funkot-agent" ] || echo "warning: prepare is meant to run in the agent tree" >&2
 
     core=$player/../funkot-autodj-for-ui
-    [ -d "$core/.git" ] || die "missing sibling funkot-autodj-for-ui at $core"
+    [ -e "$core/.git" ] || die "missing sibling funkot-autodj-for-ui at $core"
+
+    require_official_core "$player"
 
     handoff=$(handoff_dir)
     drop=$(drop_apk)
@@ -199,11 +208,12 @@ cmd_build() {
         || die "HEAD is $(git rev-parse HEAD), expected $PLAYER_SHA"
 
     core=$player/../funkot-autodj-for-ui
-    [ -d "$core/.git" ] || die "missing $core — clone funkot-autodj as funkot-autodj-for-ui"
+    [ -e "$core/.git" ] || die "missing $core — clone funkot-autodj as funkot-autodj-for-ui"
     echo "sync engine $(printf '%.12s' "$ENGINE_SHA")"
     git -C "$core" fetch origin
     git -C "$core" checkout "$ENGINE_SHA"
 
+    require_official_core "$player"
     ./scripts/check-release-invariants.sh
     ./dev.sh npx tauri android build --target aarch64
     [ -f "$APK_REL" ] || die "signed APK not produced (unsigned-only cannot be installed)"

@@ -5,18 +5,9 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      engine_ref:
-        description: funkot-autodj ref to build against
-        required: true
-        default: player/v0.1.1
-        type: string
 
 permissions:
   contents: write
-
-env:
-  ENGINE_REF: ${{ github.event.inputs.engine_ref || vars.FUNKOT_ENGINE_REF || 'player/v0.1.1' }}
 
 defaults:
   run:
@@ -31,12 +22,21 @@ jobs:
         with:
           path: funkot-player
 
+      - id: core
+        name: Read adopted core commit
+        shell: pwsh
+        run: '"sha=$((Get-Content funkot-core.commit -Raw).Trim())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append'
+
       - name: Checkout funkot-autodj (sibling)
         uses: actions/checkout@v7
         with:
           repository: yasuyuki/funkot-autodj
-          ref: ${{ env.ENGINE_REF }}
+          ref: ${{ steps.core.outputs.sha }}
           path: funkot-autodj-for-ui
+
+      - name: Verify the official core selection
+        shell: bash
+        run: ./scripts/check-funkot-core-commit.sh
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

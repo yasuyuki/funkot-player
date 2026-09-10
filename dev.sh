@@ -5,9 +5,10 @@
 # funkot-autodj-for-ui checkout read-only at /work/funkot-autodj-for-ui, which
 # is what the `funkot-core` path dependency in src-tauri/Cargo.toml resolves to.
 #
-# funkot-autodj-for-ui is a second checkout of the funkot-autodj repo, kept for
-# this player so that engine work in the original checkout cannot change this
-# build by switching branches. Point FUNKOT_CORE_REPO elsewhere to override.
+# funkot-autodj-for-ui is a second checkout of the funkot-autodj repo. Official
+# builds require its clean HEAD to equal funkot-core.commit; point
+# FUNKOT_CORE_REPO at a clean sibling with that SHA, or use the explicit
+# FUNKOT_CORE_CANDIDATE_SHA route for an unmerged candidate.
 #
 # Usage:
 #   ./dev.sh npx tauri android build --debug --target aarch64
@@ -70,11 +71,22 @@ if [ ! -d "$CORE_DIR/funkot-core" ]; then
     exit 1
 fi
 
-# A path dependency builds whatever is checked out over there, so the engine in
-# this build is decided by that tree's current state and nothing records it.
-# Say which one it was: -dirty means uncommitted engine changes are baked in,
-# and the describe relates it to the player/vX.Y.Z tags CI builds from.
-echo "engine: $(git -C "$CORE_DIR" describe --tags --always --dirty 2>/dev/null || echo '?') ($(git -C "$CORE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'))" >&2
+FUNKOT_CORE_REPO="$CORE_DIR" ./scripts/check-funkot-core-commit.sh
+CANDIDATE_ENV=""
+if [ -n "${FUNKOT_CORE_CANDIDATE_SHA:-}" ]; then
+    # The preflight accepts only a 40-character lowercase SHA, so this
+    # deliberate argv expansion cannot split or reinterpret user input.
+    CANDIDATE_ENV="-e FUNKOT_CORE_CANDIDATE_SHA=$FUNKOT_CORE_CANDIDATE_SHA"
+fi
+CORE_GIT_COMMON=$(git -C "$CORE_DIR" rev-parse --git-common-dir)
+case "$CORE_GIT_COMMON" in
+    /*) ;;
+    *) CORE_GIT_COMMON=$(CDPATH= cd "$CORE_DIR/$CORE_GIT_COMMON" && pwd) ;;
+esac
+[ -d "$CORE_GIT_COMMON" ] || {
+    echo "cannot resolve core git metadata at $CORE_GIT_COMMON" >&2
+    exit 1
+}
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker build -t "$IMAGE" .
@@ -153,13 +165,17 @@ if [ "${GUI:-0}" = 1 ]; then
 fi
 
 # shellcheck disable=SC2086
-exec docker run --rm -i $NET $GUI_ARGS \
+exec docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
     -v "$PWD":/work/funkot-player \
     -v "$(cd "$CORE_DIR" && pwd)":/work/funkot-autodj-for-ui:ro \
+    -v "$CORE_GIT_COMMON":"$CORE_GIT_COMMON":ro \
     -v funkot-player-cargo-registry:/usr/local/cargo/registry \
     -v funkot-player-gradle:/root/.gradle \
     -v funkot-player-android-home:/root/.android \
     -e CARGO_TERM_COLOR=never \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/work/funkot-autodj-for-ui \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
     "$IMAGE" sh -c '"$@"; status=$?; '"$CHOWN"'; exit $status' -- "$@"

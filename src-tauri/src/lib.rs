@@ -5694,9 +5694,9 @@ mod cache_state_tests {
         assert!(!overrides.contains_key(&hash));
     }
 
-    /// Confirm / normal chip edit keeps pinning manual and writing library.json.
+    /// Confirm / normal chip edit survives fresh cache and library.json reads.
     #[test]
-    fn set_bars_mark_manual_true_keeps_override() {
+    fn set_bars_mark_manual_true_persists_across_reloads() {
         let cache = TempDir::new("set-bars-keep-cache");
         let data = TempDir::new("set-bars-keep-data");
         let (track, analysis) = track_with_analysis(&cache.0);
@@ -5718,6 +5718,92 @@ mod cache_state_tests {
                 .get(&hash)
                 .and_then(|e| e.intro_bars),
             Some(analysis.intro_bars + 4)
+        );
+        let reloaded = funkot_core::cache::load(&cache.0, &hash)
+            .expect("manual edit must persist in the cache entry");
+        assert_eq!(reloaded.intro_bars, analysis.intro_bars + 4);
+        assert!(reloaded.intro_bars_manual);
+    }
+
+    #[test]
+    fn reapply_overrides_does_not_resurrect_a_worker_start_override_after_undo() {
+        let cache = TempDir::new("reapply-undo-cache");
+        let data = TempDir::new("reapply-undo-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        set_bars_impl(
+            &cache.0,
+            &data.0,
+            &track,
+            Some(analysis.intro_bars + 4),
+            None,
+            true,
+        )
+        .unwrap();
+        let _worker_start_snapshot = store::load_overrides(&data.0);
+        set_bars_impl(
+            &cache.0,
+            &data.0,
+            &track,
+            Some(analysis.intro_bars),
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Simulate the worker writing a fresh automatic result after it had
+        // captured the old override, then reapply only what is now on disk.
+        store_for(&track, &cache.0, &analysis);
+        reapply_overrides(&track, &cache.0, &data.0);
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let reloaded = funkot_core::cache::load(&cache.0, &hash).unwrap();
+        assert_eq!(reloaded.intro_bars, analysis.intro_bars);
+        assert!(!reloaded.intro_bars_manual);
+        assert!(!store::load_overrides(&data.0).contains_key(&hash));
+    }
+
+    #[test]
+    fn reapply_overrides_uses_the_latest_manual_edit_after_worker_start() {
+        let cache = TempDir::new("reapply-latest-cache");
+        let data = TempDir::new("reapply-latest-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+
+        set_bars_impl(
+            &cache.0,
+            &data.0,
+            &track,
+            Some(analysis.intro_bars + 4),
+            None,
+            true,
+        )
+        .unwrap();
+        let _worker_start_snapshot = store::load_overrides(&data.0);
+        let current_intro = analysis.intro_bars + 12;
+        set_bars_impl(
+            &cache.0,
+            &data.0,
+            &track,
+            Some(current_intro),
+            None,
+            true,
+        )
+        .unwrap();
+
+        store_for(&track, &cache.0, &analysis);
+        reapply_overrides(&track, &cache.0, &data.0);
+
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let reloaded = funkot_core::cache::load(&cache.0, &hash).unwrap();
+        assert_eq!(reloaded.intro_bars, current_intro);
+        assert!(reloaded.intro_bars_manual);
+        assert_eq!(
+            store::load_overrides(&data.0)
+                .get(&hash)
+                .and_then(|entry| entry.intro_bars),
+            Some(current_intro)
         );
     }
 
@@ -7042,14 +7128,13 @@ fn analyze_these(
         return;
     }
     log::info!("{} track(s) need analysis", pending.len());
-    let overrides = store::load_overrides(data_dir);
     let labels = store::load_labels(data_dir);
     let history = store::load_history(data_dir);
     spawn_analysis_worker(
         app.clone(),
         pending,
         cache_dir.to_path_buf(),
-        overrides,
+        data_dir.to_path_buf(),
         labels,
         history,
     );
@@ -7281,13 +7366,15 @@ fn apply_override(
     hash: &str,
     o: &store::BarOverride,
 ) -> Result<(), String> {
-    if let Some(n) = o.intro_bars {
-        funkot_core::cache::set_manual_bars(cache_dir, hash, Some(n), None)
-            .map_err(|e| format!("cannot set intro bars: {e}"))?;
-    }
-    if let Some(n) = o.outro_structure_bars {
-        funkot_core::cache::set_manual_structure_bars(cache_dir, hash, n)
-            .map_err(|e| format!("cannot set outro bars: {e}"))?;
+    if o.intro_bars.is_some() || o.outro_structure_bars.is_some() {
+        funkot_core::cache::edit_bars(
+            cache_dir,
+            hash,
+            o.intro_bars,
+            o.outro_structure_bars,
+            true,
+        )
+        .map_err(|e| format!("cannot set manual bars: {e}"))?;
     }
     Ok(())
 }
@@ -7351,25 +7438,18 @@ fn set_bars_impl(
         outro_structure_bars,
         funkot: None,
     };
-    // The cache write comes first: if the track has no analysis yet there is
-    // nothing to edit, and storing the override anyway would leave the app
-    // claiming a correction the user cannot see taking effect.
-    apply_override(cache_dir, &hash, &edit)?;
-
-    if !mark_manual {
-        // `set_manual_*` always pins `*_manual = true`. For cancel/undo we still
-        // want its value/derive logic, then clear the touched side's flag.
-        let mut analysis = funkot_core::cache::load(cache_dir, &hash)
-            .ok_or_else(|| format!("no cache entry after override for hash '{hash}'"))?;
-        if intro_bars.is_some() {
-            analysis.intro_bars_manual = false;
-        }
-        if outro_structure_bars.is_some() {
-            analysis.outro_structure_bars_manual = false;
-        }
-        funkot_core::cache::store(cache_dir, &hash, &analysis)
-            .map_err(|e| format!("cannot clear manual flags: {e}"))?;
-    }
+    // `edit_bars` derives the trigger, changes the requested manual flags, and
+    // persists under the core cache lock. Keeping the undo path in that single
+    // operation prevents an old snapshot from overwriting a concurrent manual
+    // edit between apply_override/load/store.
+    funkot_core::cache::edit_bars(
+        cache_dir,
+        &hash,
+        edit.intro_bars,
+        edit.outro_structure_bars,
+        mark_manual,
+    )
+    .map_err(|e| format!("cannot edit cached bars: {e}"))?;
 
     let mut overrides = store::load_overrides(data_dir);
     if mark_manual {
@@ -8213,16 +8293,24 @@ struct AnalysisProgress {
 
 /// Re-apply this track's stored corrections onto a just-written cache entry.
 ///
-/// Skips hashing entirely when nothing is stored, so the common case (no
-/// corrections yet) costs nothing on top of the analysis run.
-fn reapply_overrides(path: &std::path::Path, cache_dir: &std::path::Path, o: &store::Overrides) {
-    if o.is_empty() {
+/// Skips hashing entirely when no corrections are stored, so the common case
+/// costs nothing on top of the analysis run.
+fn reapply_overrides(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+) {
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let overrides = store::load_overrides(data_dir);
+    if overrides.is_empty() {
         return;
     }
     let Ok(hash) = funkot_core::cache::content_hash(path) else {
         return;
     };
-    let Some(entry) = o.get(&hash) else {
+    let Some(entry) = overrides.get(&hash) else {
         return;
     };
     if let Err(e) = apply_override(cache_dir, &hash, entry) {
@@ -8285,7 +8373,7 @@ fn spawn_analysis_worker(
     app: tauri::AppHandle,
     paths: Vec<PathBuf>,
     cache_dir: PathBuf,
-    overrides: store::Overrides,
+    data_dir: PathBuf,
     labels: store::Labels,
     history: store::History,
 ) {
@@ -8331,15 +8419,21 @@ fn spawn_analysis_worker(
                             done: i + 1,
                             total,
                             name,
-                            row: track_row(
-                                path,
-                                &cache_dir,
-                                &overrides,
-                                &labels,
-                                &history,
-                                hash.as_deref(),
-                                None,
-                            ),
+                            row: {
+                                let _saving = SAVE_LOCK
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                let overrides = store::load_overrides(&data_dir);
+                                track_row(
+                                    path,
+                                    &cache_dir,
+                                    &overrides,
+                                    &labels,
+                                    &history,
+                                    hash.as_deref(),
+                                    None,
+                                )
+                            },
                         },
                     );
                     continue;
@@ -8350,7 +8444,7 @@ fn spawn_analysis_worker(
                         if let Err(e) = funkot_core::cache::fill_missing(path, &cache_dir, &buffer) {
                             log::warn!("analysis failed for {}: {e}", path.display());
                         } else {
-                            reapply_overrides(path, &cache_dir, &overrides);
+                            reapply_overrides(path, &cache_dir, &data_dir);
                         }
                         // `buffer` drops here, before the next track is decoded,
                         // so only one track's worth of samples (tens of MB) is
@@ -8363,15 +8457,21 @@ fn spawn_analysis_worker(
 
                 // Built after `reapply_overrides` so a successful run's row
                 // reflects the corrected numbers, not the analyzer's raw ones.
-                let row = track_row(
-                    path,
-                    &cache_dir,
-                    &overrides,
-                    &labels,
-                    &history,
-                    hash.as_deref(),
-                    None,
-                );
+                let row = {
+                    let _saving = SAVE_LOCK
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let overrides = store::load_overrides(&data_dir);
+                    track_row(
+                        path,
+                        &cache_dir,
+                        &overrides,
+                        &labels,
+                        &history,
+                        hash.as_deref(),
+                        None,
+                    )
+                };
                 let _ = app.emit(
                     "analysis-progress",
                     AnalysisProgress {
