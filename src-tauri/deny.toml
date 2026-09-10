@@ -1,0 +1,38 @@
+# This policy checks the player's lockfile. cargo-audit is not also run because
+# its advisory scan would duplicate cargo-deny's evidence.
+[advisories]
+# The first is transitive through Tauri's GTK stack. The remaining five are
+# transitive through Tauri's urlpattern, including Tauri's build-time stack.
+# The advisory database reports no safe upgrade; re-evaluate when Tauri
+# refreshes these dependencies. Vulnerabilities with a fix remain blocking.
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "Tauri's GTK stack requires proc-macro-error; advisory lists no safe upgrade." },
+    { id = "RUSTSEC-2025-0075", reason = "Tauri urlpattern transitively requires rust-unic; advisory lists no safe upgrade." },
+    { id = "RUSTSEC-2025-0080", reason = "Tauri urlpattern transitively requires rust-unic; advisory lists no safe upgrade." },
+    { id = "RUSTSEC-2025-0081", reason = "Tauri urlpattern transitively requires rust-unic; advisory lists no safe upgrade." },
+    { id = "RUSTSEC-2025-0098", reason = "Tauri urlpattern transitively requires rust-unic; advisory lists no safe upgrade." },
+    { id = "RUSTSEC-2025-0100", reason = "Tauri urlpattern transitively requires rust-unic; advisory lists no safe upgrade." },
+]
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
