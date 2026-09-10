@@ -38,8 +38,8 @@ zip = { version = "8", default-features = false }
 
 # Path dependency on purpose: the two repos are kept separate to stop sources
 # mixing, not to make this one build in isolation. ./dev.sh mounts the sibling
-# checkout at the matching location. Switch to a git dependency pinned to a tag
-# once funkot-autodj publishes the release carrying `Engine::new_with_source`.
+# checkout at the matching location. The exact adopted commit is tracked in
+# ../funkot-core.commit and verified by build.rs and the build entry points.
 #
 # The sibling is `funkot-autodj-for-ui`, a second checkout of the funkot-autodj
 # repo reserved for this player: a path dependency builds whatever is checked
