@@ -26,6 +26,20 @@ For Android builds, ADB, desktop GUI, and shipping, see [README.md § For develo
 export FUNKOT_CORE_REPO=/path/to/funkot-autodj-for-ui
 ```
 
+`funkot-core.commit` is the immutable core commit adopted by official player
+builds. `./scripts/check-funkot-core-commit.sh` (and the Rust build script)
+requires the sibling HEAD to match it; CI, the unsigned MSIX workflow, Android
+release entry points, and local official builds share that rule. To test an
+unmerged core candidate, check the sibling out at its full lowercase SHA and
+set `FUNKOT_CORE_CANDIDATE_SHA` to that exact SHA for the build. This is a
+candidate-only route: it never changes the tracked adoption file and cannot
+produce an official artifact through the CI release workflows.
+
+`dev.sh` checks the same rule before it starts Docker and mounts the sibling's
+Git metadata read-only when the sibling is a linked worktree. This lets the
+build script record and verify the adopted SHA without making the core source
+writable in the container.
+
 Use this player's `main` and [funkot-autodj](https://github.com/yasuyuki/funkot-autodj)'s
 `master` as the integration branches. Start independent work from the latest fetched remote
 defaults in separate task worktrees, keeping the two sibling names above. Give the UI engine
@@ -94,3 +108,43 @@ Notes:
 ## Next steps
 
 After the smoke commands succeed, continue with Android, ADB, desktop GUI, and release steps in [README.md § For developers](../README.md#for-developers). Do not duplicate those flows here.
+
+## Core adoption acceptance and device handoff
+
+The September 2026 review starts at player `1ffcc032abdda49165227207b7ddf377125729b1`
+and core `d2c1717c2385fccb2b6a5c06ac44bbda0f8fdff1`. The adopted core is recorded
+in `funkot-core.commit`; record the tested player HEAD with it in the handoff.
+The core review and synthetic render evidence live in its
+[`docs/review-2026-09.md`](https://github.com/yasuyuki/funkot-autodj/blob/master/docs/review-2026-09.md).
+
+Ordinary Checks validates the exact pair on Linux and Windows, including an
+unsigned Windows executable. Native regressions cover manual edit/undo after
+background analysis starts, persisted overrides and cache reloads, cold hash
+insertion, warm fingerprint reuse, and hash-index reload. These tests do not
+establish device playback or listening acceptance.
+
+For a device handoff, the core executor verifies the adopted commit in the
+dedicated sibling; the player executor changes only the player member. Use the
+existing registered environment and its Git handoff procedure. Do not replace
+an in-progress core topic or copy signing material into a development checkout.
+The receiving executor must verify both full SHAs and run
+`./scripts/check-funkot-core-commit.sh` in the player root with candidate mode unset.
+
+| Receiving executor / cwd | Existing operation | Required observation and side effects |
+|---|---|---|
+| Core executor with existing Docker/NDK; core root | `./cross-build.sh android` | Android arm64 SDK builds with the added dependency; generated `dist/android-arm64` contains shared/static core, header and `libc++_shared.so`. No device operation. |
+| Player executor in the existing Android agent checkout; player root | `./scripts/android-signed-release.sh prepare` | Creates the existing bundle/meta handoff for the exact adopted pair. Requires the declared Windows-visible handoff destination; does not sign. |
+| Existing signing owner; owner checkout | The `build` command printed by `prepare` | Signed APK uses the same pair. This command can install on an already connected matching phone; the owner must authorize that device operation before running it. No release publication is needed. |
+| Windows/Android device executor with a disposable test profile and available test tracks | Existing desktop/device procedures in README | Cold and warm startup, first sound, next/prev/repeated navigation, edit then restart, non-Funkot fallback and supported output formats pass. Verify cache, library overrides and displayed index agree; retain existing user data. |
+
+Keep Android dev-profile optimization, API 26 minimum, 16 KB alignment and shared
+C++ runtime. At 44.1/48 kHz record device/format, finite output, peaks/over-range
+samples and unexpected silence separately from listening results. Synthetic
+tests, failure injection and atomic replacement do not prove power-cut durability.
+An unavailable device, audio source or authorized signing environment remains
+an uncompleted acceptance item, not a pass.
+
+Classify/CLI/transition decomposition, full-file hash migration, peak processing,
+Stage 3 analysis adoption and streaming redesign remain independent later tasks.
+The dependency-policy exceptions are limited to six unmaintained Tauri
+transitives, with paths and reevaluation conditions in `src-tauri/deny.toml`.

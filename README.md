@@ -200,6 +200,12 @@ so a branch switch on the engine side would silently change this build. Anything
 `funkot-player` needs from `funkot-core` — a branch, a fix, a pull — is done in
 `funkot-autodj-for-ui`; the engine's own checkout is left alone.
 
+The adopted engine commit is recorded in [`funkot-core.commit`](funkot-core.commit).
+Official local builds and CI require the sibling checkout to be exactly that
+immutable SHA. For an unmerged integration candidate only, check the sibling
+out at its full SHA and set `FUNKOT_CORE_CANDIDATE_SHA` to the same SHA; this
+does not alter the adopted commit or the official release workflows.
+
 ### Build
 
 Everything runs in the container, so the host needs only Docker.
@@ -262,8 +268,8 @@ running on every push.
 **Android (manual).** Build the signed APK locally, then attach it to a draft
 Release for the tag before publishing:
 
-1. Check out the `funkot-autodj-for-ui` commit you intend to ship (path dep does
-   not pin it in `Cargo.lock`).
+1. Check out the `funkot-autodj-for-ui` commit in `funkot-core.commit` and run
+   `./scripts/check-funkot-core-commit.sh`.
 2. `./dev.sh npx tauri android build --target aarch64`
 3. Upload `app-universal-release.apk` to the draft release for the tag.
    **Release notes (the GitHub Release body) are English**, even if the chat is
@@ -279,9 +285,8 @@ an **unsigned** `.msix` artifact for Partner Center.
 
 **Windows NSIS (optional / not recommended for end users).** Tag push still
 runs [Windows Release](.github/workflows/windows-release.yml) and can attach an
-NSIS installer to a draft Release. Engine ref: `engine_ref` input,
-`FUNKOT_ENGINE_REF`, or default `player/v0.1.1`. Unsigned NSIS is often blocked
-by Smart App Control.
+NSIS installer to a draft Release. It checks out the immutable SHA in
+`funkot-core.commit`. Unsigned NSIS is often blocked by Smart App Control.
 
 Review assets on the draft, then **Publish release** (Android). Submit MSIX via
 Partner Center separately.

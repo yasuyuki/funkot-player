@@ -8,9 +8,15 @@ ignore 対象は、消えたときのコストで分かれる。**保護する�
 | 再生成可能 | `src-tauri/target/`、`src-tauri/gen/`、`node_modules/`、`dist/`、`packaging/msix/{out,staging}/` | 消してよい。ビルドで戻る |
 | 外部から再取得 | `.desktop-data/Music/`（267MB、手で入れた試聴用トラック）、`testdata/funkot-rel-paths.txt` | 消してよい。音源ルートから入れ直す |
 | 高コストな派生 | `testdata/*-shots/`（UI 確認のスクショ、計 27MB）、`testdata/funkot-transfer*.log`、`testdata/push_manifest_p10.txt` | 消してよい。smoke を流し直せば取れる |
-| キャッシュ・ローカル状態 | `.desktop-data/{CacheStorage,WebKitCache,funkot-cache,storage,logs,queue.json,session.json,window.json,history.json,play-log.jsonl}`、`.win-run.stamp` | 消してよい |
+| キャッシュ・ローカル状態 | `.desktop-data/{CacheStorage,WebKitCache,storage,logs,queue.json,session.json,window.json,history.json,play-log.jsonl}`、`.win-run.stamp` | 消してよい |
+| 手動編集を含む解析キャッシュ | `.desktop-data/funkot-cache/` | 自動解析だけとは限らない。下記の手動情報を確認して保全する |
 | **再生成不可** | `HANDOFF.md`、`ISSUES.md` | **リポジトリ外の private store が正。** 所在は `HANDOFF.md` |
 | 秘密 | `.secrets/upload-keystore.jks`、`src-tauri/gen/android/keystore.properties` | **リポジトリにもバックアップにも入れない。** 別途退避済み。`scripts/pack-signing-backup.sh` 参照 |
+
+player の手動補正は data directory の `library.json` に保存し、解析 cache にも反映する。
+`library.json`、ラベル、手動フラグを持つ cache を、再生成可能な自動解析だけとみなして
+消さない。core の `purge_auto` は手動側を残して再解析待ちにする。cache 全削除で代用しない。
+今回の検証は専用の使い捨てデータだけを使い、既存の手動データと hash-index は移行しない。
 
 ## 再生成
 
