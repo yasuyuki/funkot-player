@@ -1370,6 +1370,7 @@ dependencies = [
  "env_logger",
  "funkot-core",
  "jni 0.22.4",
+ "libc",
  "log",
  "ndk-context",
  "serde",

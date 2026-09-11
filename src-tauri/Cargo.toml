@@ -50,6 +50,8 @@ funkot-core = { path = "../../funkot-autodj-for-ui/funkot-core" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
+# End the Android process without WebView/graphics libc finalizers.
+libc = "0.2"
 # Only used to hand the Android Context to cpal's AAudio host; see JNI_OnLoad in
 # src/lib.rs. Versions must match what cpal 0.18 links against.
 jni = "0.22"
