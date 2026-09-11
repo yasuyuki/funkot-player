@@ -19,8 +19,9 @@ class MainActivity : TauriActivity() {
     // finishes this activity. tao then sees the last window destroyed and
     // calls process::exit, which kills the playback FGS along with the UI.
     // Background the task instead: the process, cpal stream, and
-    // PlaybackService stay up. Recents swipe still finishes the activity;
-    // Rust prevent_exit covers that path while the service is up.
+    // PlaybackService stay up. A Recents swipe instead finishes the activity;
+    // Tauri's default exit ends playback and lets the next launch create a
+    // fresh runtime and WebView.
     onBackPressedDispatcher.addCallback(
       this,
       object : OnBackPressedCallback(true) {

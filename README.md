@@ -147,6 +147,8 @@ control playback or automatically display anything in the companion app.
 - **開始 / 一時停止 / 次の曲** — main transport. Playback continues in the
   background. On Android, use the notification or lock-screen controls when
   the app is not on screen (Windows has in-app transport only).
+  Home and Back keep Android playback running; swiping Funkot away in Recents
+  ends playback. Opening it again starts a fresh player screen.
 - **次に再生 / ライブラリ** — the two play screens, switched by the tab row
   under the transport. The app opens on ライブラリ, so a long queue never
   buries the track list; search text, sort order and scroll position survive a
@@ -473,6 +475,12 @@ place it matters, but they are easy to undo by accident:
   backgrounded but the system mutes it, which `dumpsys audio` reports as
   `mutedState:opControlAudio` while still saying `state:started`. The service
   plays nothing itself; it exists to make the process foreground-privileged.
+- **Recents removal must let Tauri exit.** Home and the app's Back callback
+  move the task to the background without destroying the Activity. Removing
+  the task destroys the last window; tao then exits the process, stopping the
+  native audio thread too. Preventing that exit keeps sound running but leaves
+  a runtime with no WebView for the next Activity ([upstream issue](https://github.com/tauri-apps/tauri/issues/15671)).
+  Do not use the playback-service flag to keep that runtime alive.
 - **The MediaSession is not decoration either.** A plain ongoing notification,
   even with actions, lands in the silent section of the shade and gets collapsed
   into the icon strip at the bottom, where nobody will find it — the controls

@@ -148,3 +148,31 @@ Classify/CLI/transition decomposition, full-file hash migration, peak processing
 Stage 3 analysis adoption and streaming redesign remain independent later tasks.
 The dependency-policy exceptions are limited to six unmaintained Tauri
 transitives, with paths and reevaluation conditions in `src-tauri/deny.toml`.
+
+## Android Recents exit acceptance
+
+For [issue #7](https://github.com/yasuyuki/funkot-player/issues/7), build the
+candidate player commit with the exact core in `funkot-core.commit`, using the
+existing Android build and owner handoff above. Record both SHAs and the APK
+hash with the device model and Android version. Host tests cannot exercise
+Activity destruction or demonstrate that the relaunched WebView renders.
+
+On the affected Pixel 10 Pro / Android 17, use the existing device procedure in
+[README](../README.md#working-with-a-device) with a test profile and test tracks.
+Open Funkot from its launcher icon before each case. Do not force-stop, clear
+app data, or reinstall between removal and relaunch: those operations hide the
+same-process failure.
+
+| Initial state | Device action | Required observation |
+|---|---|---|
+| Playing | Go Home, then reopen Funkot from its launcher icon | Sound continues in the background; the player screen renders on return. |
+| Playing | Press Back, then reopen Funkot from its launcher icon | Same as Home; Back must not finish the task. |
+| Playing | Open Recents and swipe away Funkot, then tap its launcher icon | Sound stops on removal. The old PID exits; relaunch uses a fresh PID and displays the library and transport controls. Start playback again and confirm sound. |
+| Paused | Remove the task in Recents, then reopen Funkot | No old audio resumes; a fresh process displays working controls. Also test after Android has reaped the paused service. |
+| Playback never started | Remove the task in Recents, then reopen Funkot | The player screen renders and playback can be started. |
+
+Record the PID before removal and after relaunch, actual screen contents and
+sound, plus the media-session state. `Activity` being `RESUMED` alone is not a
+pass: the original failure reached that state with a blank screen. Repeat the
+playing removal/relaunch case to cover warm launches. Keep the issue open until
+both the stop and visible relaunch pass, along with Home/Back playback.
