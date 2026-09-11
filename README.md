@@ -475,10 +475,14 @@ place it matters, but they are easy to undo by accident:
   backgrounded but the system mutes it, which `dumpsys audio` reports as
   `mutedState:opControlAudio` while still saying `state:started`. The service
   plays nothing itself; it exists to make the process foreground-privileged.
-- **Recents removal must let Tauri exit.** Home and the app's Back callback
+- **Recents removal must end the Android process.** Home and the app's Back callback
   move the task to the background without destroying the Activity. Removing
-  the task destroys the last window; tao then exits the process, stopping the
-  native audio thread too. Preventing that exit keeps sound running but leaves
+  the task destroys the last window; the Android `RunEvent::Exit` handler calls
+  `_exit`, stopping the native audio thread too. It bypasses tao's usual
+  `std::process::exit`: libc finalizers can crash in WebView/Vulkan teardown
+  while Android render threads are still alive ([issue #7](https://github.com/yasuyuki/funkot-player/issues/7)).
+  State is persisted during use, not by exit finalizers.
+  Preventing that exit keeps sound running but leaves
   a runtime with no WebView for the next Activity ([upstream issue](https://github.com/tauri-apps/tauri/issues/15671)).
   Do not use the playback-service flag to keep that runtime alive.
 - **The MediaSession is not decoration either.** A plain ongoing notification,

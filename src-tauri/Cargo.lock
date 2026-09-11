@@ -1363,13 +1363,14 @@ dependencies = [
 
 [[package]]
 name = "funkot-player"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "android_logger",
  "cpal",
  "env_logger",
  "funkot-core",
  "jni 0.22.4",
+ "libc",
  "log",
  "ndk-context",
  "serde",
