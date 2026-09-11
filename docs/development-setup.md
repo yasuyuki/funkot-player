@@ -174,5 +174,10 @@ same-process failure.
 Record the PID before removal and after relaunch, actual screen contents and
 sound, plus the media-session state. `Activity` being `RESUMED` alone is not a
 pass: the original failure reached that state with a blank screen. Repeat the
-playing removal/relaunch case to cover warm launches. Keep the issue open until
-both the stop and visible relaunch pass, along with Home/Back playback.
+playing removal/relaunch case to cover warm launches. Capture the crash buffer
+and process/service events across removal: the old PID must not report SIGSEGV
+or another fatal crash. If Android recreates a service before relaunch, record
+whether it retires without playback; no orphan service, live playback session
+or playback notification should persist.
+A working new screen alone does not prove a clean exit. Keep the issue open until
+the stop, crash-free exit and visible relaunch pass, along with Home/Back playback.

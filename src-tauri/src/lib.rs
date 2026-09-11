@@ -9181,12 +9181,22 @@ pub fn run() {
         .run(|app, event| {
             #[cfg(not(target_os = "android"))]
             on_desktop_run_event(app, &event);
-            // Allow Tauri's default exit when Android destroys the activity.
-            // Keeping this process alive after a Recents swipe leaves the
-            // native audio playing but no WebView to restore on the next
-            // launch. Home/Back only background the task (see MainActivity),
-            // so they do not need ExitRequested to be prevented.
             #[cfg(target_os = "android")]
-            let _ = (app, event);
+            {
+                let _ = app;
+                if let tauri::RunEvent::Exit = event {
+                    // tao otherwise calls std::process::exit, running libc's
+                    // global finalizers while Android's WebView/render threads
+                    // are still alive. On Pixel this crashes in graphics
+                    // teardown (__cxa_finalize -> WebViewFunctor -> Vulkan).
+                    // Exit is the committed decision, after ExitRequested;
+                    // Home/Back only background the task and never reach it.
+                    // End all threads without running those finalizers, so
+                    // audio stops and the next launch gets a fresh runtime.
+                    // State is saved when changed, not by exit finalizers.
+                    // SAFETY: _exit has no preconditions and never returns.
+                    unsafe { libc::_exit(0) }
+                }
+            }
         });
 }
