@@ -9032,36 +9032,6 @@ fn on_desktop_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
     }
 }
 
-/// Keep the process after the last window is destroyed.
-///
-/// Android playback (cpal + the mediaPlayback FGS) lives in this process.
-/// tao's Android event loop calls `process::exit` once `ControlFlow::Exit`
-/// is set, which would tear down the FGS with the activity. Desktop must
-/// still quit when the window closes.
-fn keep_process_after_last_window(is_android: bool, service_running: bool) -> bool {
-    is_android && service_running
-}
-
-#[cfg(test)]
-mod last_window_exit_tests {
-    use super::*;
-
-    #[test]
-    fn desktop_quits_even_while_playback_is_up() {
-        assert!(!keep_process_after_last_window(false, true));
-    }
-
-    #[test]
-    fn android_quits_before_playback_service_starts() {
-        assert!(!keep_process_after_last_window(true, false));
-    }
-
-    #[test]
-    fn android_stays_up_while_playback_service_is_running() {
-        assert!(keep_process_after_last_window(true, true));
-    }
-}
-
 #[cfg(test)]
 mod desktop_window_default_tests {
     /// `tauri.conf.json` width must open the two-pane browse layout on a
@@ -9211,15 +9181,12 @@ pub fn run() {
         .run(|app, event| {
             #[cfg(not(target_os = "android"))]
             on_desktop_run_event(app, &event);
+            // Allow Tauri's default exit when Android destroys the activity.
+            // Keeping this process alive after a Recents swipe leaves the
+            // native audio playing but no WebView to restore on the next
+            // launch. Home/Back only background the task (see MainActivity),
+            // so they do not need ExitRequested to be prevented.
             #[cfg(target_os = "android")]
-            let _ = app;
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if keep_process_after_last_window(
-                    cfg!(target_os = "android"),
-                    SERVICE_RUNNING.load(Ordering::Relaxed),
-                ) {
-                    api.prevent_exit();
-                }
-            }
+            let _ = (app, event);
         });
 }
