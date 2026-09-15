@@ -71,6 +71,7 @@ fixtures contain generated silence and no copied recording.
 | `id3v23.mp3` | title/artist, recording year 2024, two native genres |
 | `id3v24.mp3` | title/artist, recording date 2023-02-03, two native genres |
 | `vorbis.flac` / `vorbis.ogg` | title/artist, generic date/year, repeated genres |
+| `no-year-pop.ogg` | no year, genre Pop; integration fixture C |
 | `release-only.m4a` | title/artist and genre; `©day` retained as release-only |
 | `riff-info.wav` | title/artist and RIFF INFO `ICRD`/`IGNR` |
 | `future.mp3`, `invalid.flac`, `conflicting.flac` | distinct future, invalid, and conflict states |
@@ -222,3 +223,13 @@ Synthetic browser evidence: [desktop](images/track-tags/filter-desktop.png),
 [English](images/track-tags/filter-narrow-en.png),
 [Indonesian](images/track-tags/filter-narrow-id.png). These are browser layouts,
 not real-device acceptance.
+
+## Identity and data protection
+
+Manual tags belong to the existing content hash, not a filename. Identical
+copies and renames share them. External metadata rewriting can change that
+hash; this release does not automatically transfer manual tags to a new hash.
+The player itself never writes embedded metadata. `track-tags.json` is user
+data and must survive cache cleanup and reanalysis. See [local data](local-data.md)
+for backup, corrupt/unknown-schema and stale-lock recovery. Tags are not
+exported/imported or added to the feedback ZIP by this feature.

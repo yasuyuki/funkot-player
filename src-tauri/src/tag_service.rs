@@ -282,4 +282,134 @@ mod tests {
         assert_eq!(state.metadata_status, "pending");
         assert_eq!(state.auto_year, None); assert!(state.effective.is_empty());
     }
+
+    #[test]
+    fn real_metadata_probe_preserves_manual_tags_across_rebuild_duplicate_and_restart() {
+        use std::time::Instant;
+
+        let dir = std::env::temp_dir().join(format!("funkot-tags-real-service-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/metadata");
+        let copies = [
+            ("a.flac", "vorbis.flac"),
+            ("b.ogg", "vorbis.ogg"),
+            ("c.ogg", "no-year-pop.ogg"),
+        ];
+        for (name, fixture) in copies { fs::copy(fixtures.join(fixture), dir.join(name)).unwrap(); }
+        fs::copy(dir.join("a.flac"), dir.join("duplicate.flac")).unwrap();
+        fs::rename(dir.join("duplicate.flac"), dir.join("renamed.flac")).unwrap();
+        for name in ["labels.json", "history.json", "manual-bars.json"] {
+            fs::write(dir.join(name), b"existing baseline user data").unwrap();
+        }
+        let sources: Vec<_> = ["a.flac", "b.ogg", "c.ogg", "renamed.flac"]
+            .into_iter().map(|name| dir.join(name)).collect();
+        let before: Vec<_> = sources.iter().map(|path| {
+            (path.clone(), fs::read(path).unwrap(), fs::metadata(path).unwrap().modified().unwrap())
+        }).collect();
+
+        let mut discovered = store::HashIndex::new();
+        for path in &sources { store::resolve_library_file(path, &mut discovered).unwrap(); }
+        for (position, entry) in discovered.values_mut().enumerate() {
+            entry.metadata_version = 0;
+            entry.embedded_metadata = None;
+            entry.metadata_error = None;
+            entry.tags_cached = true;
+            entry.first_seen = Some(format!("2020-01-01T00:00:0{position}Z"));
+            entry.added_order = Some(40 + position as u64);
+        }
+        let legacy_identity: BTreeMap<_, _> = discovered.iter().map(|(path, entry)| {
+            (path.clone(), (entry.hash.clone(), entry.first_seen.clone(), entry.added_order))
+        }).collect();
+        store::save_hash_index(&dir, &discovered).unwrap();
+        let mut index = store::load_hash_index(&dir).index;
+        let legacy_start = Instant::now();
+        for path in &sources { store::resolve_library_file(path, &mut index).unwrap(); }
+        let legacy_upgrade_elapsed = legacy_start.elapsed();
+        for (path, entry) in &index {
+            assert_eq!((entry.hash.clone(), entry.first_seen.clone(), entry.added_order), legacy_identity[path]);
+            assert_eq!(entry.metadata_version, store::METADATA_VERSION);
+            assert!(entry.embedded_metadata.is_some());
+            assert!(entry.metadata_error.is_none());
+        }
+        let warm_start = Instant::now();
+        for path in &sources { store::resolve_library_file(path, &mut index).unwrap(); }
+        let warm_elapsed = warm_start.elapsed();
+        let key = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let a = key("a.flac"); let b = key("b.ogg"); let c = key("c.ogg"); let renamed = key("renamed.flac");
+        assert_eq!(index[&a].embedded_metadata.as_ref().unwrap().genres, vec!["Funkot", "Breakbeat"]);
+        assert_eq!(index[&b].embedded_metadata.as_ref().unwrap().genres, vec!["Funkot", "Breakbeat"]);
+        assert_eq!(index[&c].embedded_metadata.as_ref().unwrap().genres, vec!["Pop"]);
+
+        let mut service = Service::new(&dir);
+        service.publish(index.iter().map(|(path, entry)| (path.clone(), Some(entry.clone()))).collect());
+        let initial = service.snapshot(2026);
+        assert_eq!(initial.tracks[&a].auto_year, Some(2024));
+        assert_eq!(initial.tracks[&b].auto_year, Some(2023));
+        assert_eq!(initial.tracks[&c].auto_year, None);
+
+        let request = |service: &Service, targets: Vec<&str>, patch: Patch| UpdateRequest {
+            targets: targets.into_iter().map(|path| Target {
+                path: path.into(), expected_hash: service.library[path].as_ref().unwrap().hash.clone(),
+            }).collect(),
+            expected_revision: service.revision(2026), patch,
+        };
+        let single_start = Instant::now();
+        assert_eq!(service.update(request(&service, vec![&a], Patch {
+            year_change: Some(tags::YearState::Set { value: 2022 }), ..Default::default()
+        }), 2026).unwrap().changed, 1);
+        let single_elapsed = single_start.elapsed();
+        assert_eq!(service.snapshot(2026).tracks[&a].effective[0].key, "year:2022");
+        let mut after_set = Service::new(&dir);
+        after_set.publish(index.iter().map(|(path, entry)| (path.clone(), Some(entry.clone()))).collect());
+        assert!(matches!(after_set.snapshot(2026).tracks[&a].manual.year, tags::YearState::Set { value: 2022 }));
+        assert_eq!(service.update(request(&service, vec![&a], Patch {
+            year_change: Some(tags::YearState::Auto), ..Default::default()
+        }), 2026).unwrap().changed, 1);
+        assert_eq!(service.snapshot(2026).tracks[&a].effective[0].key, "year:2024");
+        let batch_start = Instant::now();
+        let batch = service.update(request(&service, vec![&a, &b], Patch {
+            add: vec![tags::Tag::new(tags::TagKind::Custom, "配信候補").unwrap()], ..Default::default()
+        }), 2026).unwrap();
+        let batch_elapsed = batch_start.elapsed();
+        assert_eq!(batch.changed, 2); // One request is one logical tag-store transaction.
+        assert_eq!(batch.snapshot.tracks[&a].effective[0].key, "year:2024");
+        assert_eq!(batch.snapshot.tracks[&b].effective[0].key, "year:2023");
+        assert!(batch.snapshot.tracks[&renamed].effective.iter().any(|tag| tag.key == "custom:配信候補"));
+
+        assert_eq!(service.update(request(&service, vec![&a], Patch {
+            year_change: Some(tags::YearState::Unset),
+            remove: vec![tags::Tag::new(tags::TagKind::Genre, "Funkot").unwrap()],
+            ..Default::default()
+        }), 2026).unwrap().changed, 1);
+        let suppressed = service.snapshot(2026);
+        assert!(suppressed.tracks[&a].effective.iter().all(|tag| tag.key != "genre:funkot"));
+        let mut after_suppress = Service::new(&dir);
+        after_suppress.publish(index.iter().map(|(path, entry)| (path.clone(), Some(entry.clone()))).collect());
+        assert!(after_suppress.snapshot(2026).tracks[&a].effective.iter().all(|tag| tag.key != "genre:funkot"));
+        assert_eq!(service.update(request(&service, vec![&a], Patch {
+            add: vec![tags::Tag::new(tags::TagKind::Genre, "Funkot").unwrap()], ..Default::default()
+        }), 2026).unwrap().changed, 1);
+        assert!(service.snapshot(2026).tracks[&a].effective.iter().any(|tag| tag.key == "genre:funkot"));
+
+        let mut rebuilt = store::HashIndex::new();
+        for path in &sources { store::resolve_library_file(path, &mut rebuilt).unwrap(); }
+        let mut restarted = Service::new(&dir);
+        restarted.publish(rebuilt.iter().map(|(path, entry)| (path.clone(), Some(entry.clone()))).collect());
+        let restarted_snapshot = restarted.snapshot(2026);
+        assert!(matches!(restarted_snapshot.tracks[&a].manual.year, tags::YearState::Unset));
+        assert!(restarted_snapshot.tracks[&a].effective.iter().any(|tag| tag.key == "custom:配信候補"));
+        assert!(restarted_snapshot.tracks[&renamed].effective.iter().any(|tag| tag.key == "custom:配信候補"));
+
+        for (path, bytes, modified) in before {
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        }
+        for name in ["labels.json", "history.json", "manual-bars.json"] {
+            assert_eq!(fs::read(dir.join(name)).unwrap(), b"existing baseline user data");
+        }
+        eprintln!(
+            "track-tags #22 metrics: tracks=4 legacy_metadata_upgrade={legacy_upgrade_elapsed:?} warm_resolve={warm_elapsed:?} single_update={single_elapsed:?} batch_update={batch_elapsed:?}; probe/hash/decode and physical write counts are not instrumented"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

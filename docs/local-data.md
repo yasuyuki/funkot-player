@@ -15,6 +15,8 @@ ignore 対象は、消えたときのコストで分かれる。**保護する�
 
 `track-tags.json` の編集中は同じ directory の `track-tags.lock` で複数 process の read-modify-write を直列化する。lockfile が残っている場合は、タグ編集を busy として止め、既存の再生を続ける。クラッシュ後の復旧では、同じ data directory を使う player process がすべて終了していることを確認してから、その lockfile だけを除去する。破損または未知 schema の JSON はその前に別の安全な場所へコピーし、元ファイルを置換しない。
 
+正常な backup を復元するときも player を終了し、破損・未知 schema の原本を保全した後、backup の schema に対応する player で同じ data directory へ復元する。自動で空の JSON に置き換えない。今回タグの export/import 機能はなく、既存 feedback ZIP に `track-tags.json` を自動追加しない。共有範囲は別途判断する。
+
 player の手動補正は data directory の `library.json` に保存し、解析 cache にも反映する。
 `library.json`、ラベル、手動フラグを持つ cache を、再生成可能な自動解析だけとみなして
 消さない。core の `purge_auto` は手動側を残して再解析待ちにする。cache 全削除で代用しない。
