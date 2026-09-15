@@ -21,12 +21,25 @@
   import { createLongPress, type MenuPoint } from "../lib/track-menu";
   import { tagTargets, tagEditSelection, enqueueSelection } from "../lib/tag-edit";
   import { tagEditorSession } from "../lib/tag-editor.svelte";
+  import { buildTagIndex, matchesTagFilter, type TagChoice, type TagFilter as TagFilterState } from "../lib/tag-filter";
+  import TagFilter from "./TagFilter.svelte";
+  import TagChips from "./TagChips.svelte";
 
   let t = $derived(i18n.t);
 
   let query = $state("");
   let sortKey = $state<LibrarySortKey>("recent");
   let newOnly = $state(false);
+  let selectedTags = $state<TagChoice[]>([]);
+  let tagMode = $state<"all" | "any">("all");
+  let yearUnset = $state(false);
+  // This index depends on library/snapshot changes, never the search text.
+  let tagIndex = $derived(buildTagIndex(store.libraryList, store.trackTags));
+  let tagFilter = $derived<TagFilterState>({ keys: selectedTags.map(tag => tag.key), mode: tagMode, yearUnset });
+  function chooseTag(tag: TagChoice) {
+    if (!selectedTags.some(item => item.key === tag.key)) selectedTags = [...selectedTags, { key: tag.key, kind: tag.kind, value: tag.value }];
+  }
+  function clearTagFilters() { selectedTags = []; yearUnset = false; }
   let busy = $state<Record<string, boolean>>({});
   /// A mode rather than a permanent checkbox column: on a 412px phone the row
   /// already carries title, artist, duration and the `+` button, and a
@@ -71,7 +84,7 @@
     const arrivalPaths = store.newArrivalPaths;
     const filtered = store.libraryList.filter((r) => {
       if (newOnly && !arrivalPaths.has(r.path)) return false;
-      return matches(r, q);
+      return matches(r, q) && matchesTagFilter(tagIndex, r.path, tagFilter);
     });
     return sortLibraryRows(filtered, sortKey);
   });
@@ -248,6 +261,13 @@
     {/if}
   </div>
 
+  <TagFilter candidates={tagIndex.candidates} selected={selectedTags} mode={tagMode} {yearUnset}
+    onchoose={chooseTag} onremove={key => selectedTags = selectedTags.filter(tag => tag.key !== key)}
+    onmode={mode => tagMode = mode} onunset={enabled => yearUnset = enabled} onclear={clearTagFilters} />
+  {#if !store.trackTags || !store.trackTags.ready}<p class="progress" role="status">{t.tagMetadataStatus("pending")}</p>{/if}
+  {#if store.trackTagsError}<p class="progress" role="alert">{t.tagFilterLoadFailed}</p>{/if}
+  {#if store.libraryList.length > 0 && rows.length === 0}<p class="empty" role="status">{t.tagNoMatches}</p>{/if}
+
   {#if libraryScan && !musicDirNeeded}
     <p class="progress">
       {#if libraryScan.phase === "walking"}
@@ -297,7 +317,7 @@
       {/if}
     </div>
   {:else}
-    <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->
+    <!-- Rows grow to fit compact tags and identity status without overlap. -->
     <ul class="list">
       {#each rows as row (row.path)}
         <li
@@ -334,6 +354,8 @@
               <span class="artist">{row.artist || t.noLabel}</span>
               <span class="dur">{formatDuration(row.duration_secs)}</span>
             </div>
+            <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} onchoose={chooseTag}
+              ondetails={event => openTagEditor([row], row.title, event.currentTarget instanceof HTMLElement ? event.currentTarget : null)} />
           </div>
           {#if !selectMode}
             <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
@@ -485,7 +507,8 @@
     display: flex;
     align-items: center;
     gap: var(--space-md);
-    height: var(--library-row-height);
+    min-height: var(--library-row-height);
+    padding: var(--space-sm) 0;
     border-bottom: 1px solid var(--color-border);
     user-select: none;
     -webkit-user-select: none;

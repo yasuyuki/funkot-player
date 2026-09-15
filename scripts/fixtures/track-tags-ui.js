@@ -5,6 +5,20 @@ const row=(name,hash,extra={})=>({path:`/synthetic/${name}.mp3`,content_hash:has
 const rows=[row('Alpha','a'),row('Beta','b',{is_funkot:false}),row('Gamma','c',{analyzed:false}),row('Duplicate','a'),row('Unresolved',null)];
 const state=(r)=>({content_hash:r.content_hash,effective:r.content_hash?[{key:'year:2023',kind:'year',value:'2023',origin:'embedded'},{key:'genre:Funkot'.toLowerCase(),kind:'genre',value:'Funkot',origin:'embedded'}]:[],manual:{year:{mode:'auto'},manual_additions:[],suppressed_auto_tags:[]},auto_year:r.content_hash?2023:null,year_status:r.content_hash?'resolved':'missing',metadata_status:r.content_hash?'ready':'pending',candidates:r.content_hash?[{raw_key:'TYER',raw_value:'2023',semantic:'recording',rank:0},{raw_key:'TDRL',raw_value:'2024',semantic:'release',rank:2}]:[],diagnostics:[]});
 window.fixture={rows,snapshot:{revision:'fixture:1',ready:true,store_status:'ready',tracks:Object.fromEntries(rows.map(r=>[r.path,state(r)]))},calls:[],listeners:{},fail:null,delay:0};
+window.fixture.resetFilters=async()=>{
+  const f=window.fixture;
+  f.rows=[row('Alpha','a'),row('Beta','b',{is_funkot:false}),row('Gamma','c'),row('Delta','d'),row('Epsilon','e'),row('Pending','p'),row('Error','x')];
+  const specs=[['2024','Funkot','配信候補'],['2023','Funkot','練習'],['2024','Pop','配信候補'],[null,'Funkot',null],[null,null,null],[null,null,null],[null,null,null]];
+  f.snapshot={revision:'fixture:100',ready:true,store_status:'ready',tracks:Object.fromEntries(f.rows.map((r,i)=>{
+    const s=state(r),[year,genre,custom]=specs[i];
+    s.effective=[['year',year],['genre',genre],['custom',custom]].filter(([,value])=>value).map(([kind,value])=>({key:`${kind}:${value.replace(/[A-Z]/g,c=>c.toLowerCase())}`,kind,value,origin:kind==='custom'?'manual':'embedded'}));
+    s.auto_year=year?Number(year):null;s.year_status=year?'resolved':'missing';
+    s.candidates=year?[{raw_key:'TYER',raw_value:year,semantic:'recording',rank:0}]:i===4?[{raw_key:'©day',raw_value:'2020',semantic:'release',rank:2}]:[];
+    s.metadata_status=i===5?'pending':i===6?'error':'ready';s.diagnostics=i===6?['metadata_probe_failed']:[];
+    return [r.path,s];
+  }))};
+  await f.store.doRefreshLibrary();
+};
 installIpcForTesting({
   listen:async(name,handler)=>{window.fixture.listeners[name]=handler;return ()=>{};},
   invoke:async(command,args)=>{
