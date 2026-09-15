@@ -133,6 +133,9 @@ mod tests {
 
     fn entry(hash: &str, mtime_ms: u64, len: u64) -> HashIndexEntry {
         HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
             mtime_ms,
             len,
             hash: hash.into(),

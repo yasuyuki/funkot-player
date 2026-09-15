@@ -41,6 +41,8 @@ test("IPC wrappers preserve Tauri command names and argument shapes", async () =
     await tauri.start("/music", "/cache");
     await tauri.setBars("/music/a.mp3", 4, 8, false);
     await tauri.auditionTransition("/music/a.mp3", "/music/b.mp3", "/music", "/cache");
+    await tauri.listTrackTags();
+    await tauri.updateTrackTags({ targets: [{path: "/music/a.mp3", expected_hash: "hash"}], expected_revision: "opaque", patch: {year_change: {mode: "unset"}} });
   } finally {
     restore();
   }
@@ -48,6 +50,8 @@ test("IPC wrappers preserve Tauri command names and argument shapes", async () =
     { command: "start", args: { musicDir: "/music", cacheDir: "/cache" } },
     { command: "set_bars", args: { path: "/music/a.mp3", introBars: 4, outroStructureBars: 8, markManual: false } },
     { command: "audition_transition", args: { fromPath: "/music/a.mp3", toPath: "/music/b.mp3", musicDir: "/music", cacheDir: "/cache" } },
+    { command: "list_track_tags", args: undefined },
+    { command: "update_track_tags", args: { request: { targets: [{path: "/music/a.mp3", expected_hash: "hash"}], expected_revision: "opaque", patch: {year_change: {mode: "unset"}} } } },
   ]);
 });
 
@@ -93,4 +97,13 @@ test("analysis progress preserves visible library order and added order", async 
   assert.deepEqual(update.analysis, { done: 2, total: 5, name: "After" });
   assert.deepEqual([...update.library.keys()], ["/music/a.mp3", "/music/b.mp3"]);
   assert.deepEqual(update.library.get("/music/a.mp3"), { ...progress.row, added_order: 9 });
+});
+
+test("late analysis cannot replace a path identity or resurrect a removed row", async () => {
+  const { applyAnalysisProgress } = await importTypeScript("library-sort.ts");
+  const current = { path: "/music/a.mp3", content_hash: "new", title: "Replacement", added_order: 9 };
+  const progress = { done: 1, total: 1, name: "Old", row: { ...current, content_hash: "old", title: "Old" } };
+  const before = new Map([[current.path, current]]);
+  assert.deepEqual(applyAnalysisProgress(before, progress).library, before);
+  assert.equal(applyAnalysisProgress(new Map(), progress).library.size, 0);
 });
