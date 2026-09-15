@@ -14,12 +14,13 @@
     addAll,
     clearSelection,
     selectAllState,
-    selectedInOrder,
     toggleSelected,
   } from "../lib/selection";
   import SelectionBar from "./SelectionBar.svelte";
   import TrackMenu from "./TrackMenu.svelte";
   import { createLongPress, type MenuPoint } from "../lib/track-menu";
+  import { tagTargets, tagEditSelection, enqueueSelection } from "../lib/tag-edit";
+  import { tagEditorSession } from "../lib/tag-editor.svelte";
 
   let t = $derived(i18n.t);
 
@@ -80,18 +81,22 @@
   ///
   /// This -- not `rows` -- is the universe the bulk add works over, so typing
   /// in the search box cannot silently make the button add nothing.
-  let addOrder = $derived(
-    sortLibraryRows(store.libraryList, sortKey)
-      .filter((r) => !gated(r))
-      .map((r) => r.path),
-  );
+  let enqueuePaths = $derived(enqueueSelection(sortLibraryRows(store.libraryList, sortKey), selected, store.allowNonFunkot));
 
   /// Rows currently on screen: what "select all" acts on. Scoping a bulk
   /// action is what the search box is for; "select all 5,000" is never the
   /// intent.
-  let visiblePaths = $derived(rows.filter((r) => !gated(r)).map((r) => r.path));
+  // Tag editing is independent of playback eligibility: a non-Funkot row is
+  // still visible, selectable, and editable when it has a resolved hash.
+  let visiblePaths = $derived(rows.map((r) => r.path));
 
-  let selectedCount = $derived(selectedInOrder(selected, addOrder).length);
+  let selectedCount = $derived(selected.size);
+  let tagSelectedRows = $derived(tagEditSelection(rows, selected));
+  let enqueueCount = $derived(enqueuePaths.length);
+  let visibleTagCount = $derived(tagSelectedRows.filter((row) => {
+    const state = store.trackTags?.tracks[row.path];
+    return !!state?.content_hash && state.content_hash === row.content_hash;
+  }).length);
   let allState = $derived(selectAllState(selected, visiblePaths));
 
   function toggleSort() {
@@ -110,10 +115,17 @@
   function onToggleRow(path: string) {
     selected = toggleSelected(selected, path);
   }
+  function openTagEditor(rowsToEdit: TrackRow[], title: string, opener: HTMLElement | null) {
+    const snapshot = store.trackTags;
+    if (!snapshot) { toast.notify(t.tagError("identity_unavailable")); return; }
+    const targets = tagTargets(rowsToEdit, snapshot);
+    if (targets.length !== rowsToEdit.length) { toast.notify(t.tagError("identity_unavailable")); return; }
+    tagEditorSession.open({ targets, revision: snapshot.revision, title, initialStates: targets.map((target) => snapshot.tracks[target.path]!), opener });
+  }
 
   async function onAddSelected() {
     if (addManyBusy) return;
-    const paths = selectedInOrder(selected, addOrder);
+    const paths = enqueuePaths;
     if (paths.length === 0) return;
     addManyBusy = true;
     try {
@@ -222,12 +234,16 @@
     >{t.selectMode}</button>
     {#if selectMode}
       <SelectionBar
-        count={selectedCount}
+        totalSelected={selectedCount}
+        {enqueueCount}
+        {visibleTagCount}
+        tagUnavailable={visibleTagCount !== tagSelectedRows.length}
         {allState}
         busy={addManyBusy}
         onSelectAll={() => (selected = addAll(selected, visiblePaths))}
         onClear={() => (selected = clearSelection())}
         onAdd={onAddSelected}
+        onEditTags={(event) => openTagEditor(tagSelectedRows, t.tagEditSelected, event.currentTarget as HTMLElement)}
       />
     {/if}
   </div>
@@ -294,14 +310,12 @@
           oncontextmenu={(e) => press.context(e, row.path)}
         >
           {#if selectMode}
-            <!-- Disabled by the same predicate that disables `+`, so a gated
-                 row cannot be selected and the host's `rejected` count stays
-                 at zero unless analysis finished between render and tap. -->
+            <!-- Queue selection remains available; tag eligibility is checked
+                 independently against the committed tag snapshot. -->
             <input
               type="checkbox"
               class="pick"
               checked={selected.has(row.path)}
-              disabled={gated(row)}
               onchange={() => onToggleRow(row.path)}
               aria-label={t.selectTrackLabel(row.title)}
             />
@@ -313,6 +327,9 @@
                 <span class="new-badge">NEW</span>
               {/if}
             </div>
+            {#if selectMode && (!row.content_hash || store.trackTags?.tracks[row.path]?.content_hash !== row.content_hash)}
+              <span class="identity-unavailable">{t.tagIdentityUnavailable}</span>
+            {/if}
             <div class="sub">
               <span class="artist">{row.artist || t.noLabel}</span>
               <span class="dur">{formatDuration(row.duration_secs)}</span>
@@ -386,6 +403,7 @@
     background: var(--color-menu-bg);
     color: var(--color-text);
   }
+  .identity-unavailable { font-size: var(--font-size-sm); color: var(--color-text-dim); overflow-wrap: anywhere; }
 
   .filter,
   .sort {

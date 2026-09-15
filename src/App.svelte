@@ -20,6 +20,8 @@
   import FlaggedList from "./components/edit/FlaggedList.svelte";
   import FlaggedDetail from "./components/edit/FlaggedDetail.svelte";
   import AllTracks from "./components/edit/AllTracks.svelte";
+  import TagEditor from "./components/TagEditor.svelte";
+  import { tagEditorSession } from "./lib/tag-editor.svelte";
 
   /// True while the transport sentinel intersects the viewport. MiniBar
   /// flips on when this goes false (user scrolled the transport away).
@@ -490,3 +492,6 @@
     }
   }
 </style>
+{#if tagEditorSession.current}
+  <TagEditor {...tagEditorSession.current} onclose={tagEditorSession.close} />
+{/if}

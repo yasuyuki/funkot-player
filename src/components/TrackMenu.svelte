@@ -7,10 +7,13 @@
   // badge and the edit pane's label column write, with the same undo toast.
   // The label also moves `is_funkot`, which is what greys a library row out
   // and what the non-Funkot gate reads, so the answer is visible immediately.
+  import { untrack } from "svelte";
   import { store } from "../lib/state.svelte";
   import { toast } from "../lib/toast.svelte";
   import { i18n } from "../lib/i18n.svelte";
   import { clampMenuPosition, shownVerdict, type MenuPoint } from "../lib/track-menu";
+  import { tagTargets } from "../lib/tag-edit";
+  import { tagEditorSession } from "../lib/tag-editor.svelte";
 
   let {
     path = null,
@@ -30,6 +33,7 @@
 
   let t = $derived(i18n.t);
   let row = $derived(path ? store.trackForPath(path) : null);
+  let tagReady = $derived(!!row?.content_hash && !!store.trackTags?.ready && store.trackTags.tracks[row.path]?.content_hash === row.content_hash);
   let current = $derived(shownVerdict(row));
   let title = $derived(explicitTitle ?? (path ? store.titleForPath(path) : ""));
   let busy = $state(false);
@@ -38,6 +42,20 @@
   /// title, so where it fits cannot be worked out before it is in the DOM.
   /// Hidden rather than mispositioned for that one frame.
   let pos = $state<{ left: number; top: number } | null>(null);
+  // Capture before this popup covers the source row. Its menu item is removed
+  // on opening the editor and cannot be the focus-return target.
+  const sourceElement = untrack(() => document.elementFromPoint(at.x, at.y)?.closest<HTMLElement>("li")
+    ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null));
+  function editTags() {
+    if (!row || !store.trackTags) { toast.notify(t.tagError("identity_unavailable")); return; }
+    const targets = tagTargets([row], store.trackTags);
+    if (targets.length !== 1) { toast.notify(t.tagError("identity_unavailable")); return; }
+    const target = targets[0]!;
+    const opener = sourceElement;
+    if (opener) opener.tabIndex = -1;
+    tagEditorSession.open({ targets, revision: store.trackTags.revision, title, initialStates: [store.trackTags.tracks[target.path]!], opener });
+    onclose();
+  }
 
   $effect(() => {
     const el = menuEl;
@@ -130,6 +148,8 @@
        including the row it came from. -->
   <p class="for">{title}</p>
   {#if path}
+    <button type="button" role="menuitem" disabled={busy || !tagReady} title={!tagReady ? t.tagIdentityUnavailable : undefined} onclick={editTags}>{t.tagEdit}</button>
+    {#if !tagReady}<p class="for">{t.tagIdentityUnavailable}</p>{/if}
     <button
       type="button"
       role="menuitemradio"
