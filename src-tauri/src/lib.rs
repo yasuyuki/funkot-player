@@ -7,6 +7,8 @@ mod queue;
 mod store;
 mod store_cache;
 mod track_tags;
+mod audio_metadata;
+mod tag_service;
 #[cfg(any(target_os = "windows", test))]
 mod current_track_http;
 
@@ -4956,6 +4958,7 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
 /// already knows about it.
 #[derive(serde::Serialize, Clone)]
 struct TrackRow {
+    content_hash: Option<String>,
     /// Absolute path. Used as the UI's key.
     path: String,
     /// Tag TITLE, or file name when absent (same resolution as session metadata).
@@ -5221,6 +5224,7 @@ fn track_row(
         Some((hash, a)) => {
             let override_funkot = overrides.get(hash).and_then(|o| o.funkot);
             TrackRow {
+                content_hash: Some(hash.to_owned()),
                 path: path.to_string_lossy().into_owned(),
                 title,
                 artist,
@@ -5244,6 +5248,7 @@ fn track_row(
             }
         }
         None => TrackRow {
+            content_hash: hash.map(str::to_owned),
             path: path.to_string_lossy().into_owned(),
             title,
             artist,
@@ -5594,6 +5599,9 @@ mod cache_state_tests {
         index.insert(
             track.to_string_lossy().into_owned(),
             store::HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 0,
                 len: 0,
                 hash,
@@ -5634,6 +5642,9 @@ mod cache_state_tests {
         index.insert(
             track.to_string_lossy().into_owned(),
             store::HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 0,
                 len: 0,
                 hash,
@@ -6033,6 +6044,9 @@ mod cache_state_tests {
 
     fn arrivals_entry(hash: &str, first_seen: Option<&str>) -> store::HashIndexEntry {
         store::HashIndexEntry {
+            metadata_version: 0,
+            embedded_metadata: None,
+            metadata_error: None,
             mtime_ms: 0,
             len: 0,
             hash: hash.into(),
@@ -7089,6 +7103,9 @@ mod arrivals_settings_rmw_tests {
         index.insert(
             "/music/partial.flac".into(),
             store::HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 1,
                 len: 1,
                 hash: "p".into(),
@@ -7175,6 +7192,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
 
     let dirs = resolve_dirs(&app)?;
     if dirs.music_dir_needed {
+        tag_service::publish(Path::new(&dirs.data_dir), Default::default());
         return Ok(Vec::new());
     }
     let music_dir = PathBuf::from(&dirs.music_dir);
@@ -7301,13 +7319,32 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
             .get(&row.path)
             .and_then(|entry| entry.added_order);
     }
-    commit_arrivals_after_scan(
+    let mut index_saved = false;
+    let commit_result = commit_arrivals_after_scan(
         &data_dir,
         &hash_index,
         plan,
-        store_cache::save_hash_index,
+        |dir, index| {
+            store_cache::save_hash_index(dir, index)?;
+            index_saved = true;
+            Ok(())
+        },
         mark_arrivals_baseline_done,
-    )?;
+    );
+
+    // A later baseline-settings failure does not undo a successful index save.
+    // Publish that committed metadata revision before returning the error, so
+    // an editor cannot accept the old automatic snapshot against the new index.
+    if index_saved || !plan.save_index {
+      let committed = store_cache::with_index(&data_dir, |index| {
+        rows.iter().map(|row| {
+            let entry = index.get(&row.path).filter(|entry| Some(&entry.hash) == row.content_hash.as_ref()).cloned();
+            (row.path.clone(), entry)
+        }).collect()
+      });
+      tag_service::publish(&data_dir, committed);
+    }
+    commit_result?;
 
     if kick_analysis {
         // Reuse what `track_row` already worked out so we do not hash every
@@ -7323,6 +7360,18 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     }
 
     Ok(rows)
+}
+
+#[tauri::command(async)]
+fn list_track_tags(app: tauri::AppHandle) -> Result<tag_service::Snapshot, tag_service::CommandError> {
+    let dirs = resolve_dirs(&app).map_err(|_| tag_service::CommandError { code: "store_read_only", message: "data directory unavailable".into() })?;
+    Ok(tag_service::list(Path::new(&dirs.data_dir)))
+}
+
+#[tauri::command(async)]
+fn update_track_tags(app: tauri::AppHandle, request: tag_service::UpdateRequest) -> Result<tag_service::UpdateResult, tag_service::CommandError> {
+    let dirs = resolve_dirs(&app).map_err(|_| tag_service::CommandError { code: "store_read_only", message: "data directory unavailable".into() })?;
+    tag_service::update(Path::new(&dirs.data_dir), request)
 }
 
 /// Persist hash-index / baseline flag per [`store::ArrivalsCommitPlan`].
@@ -9150,6 +9199,8 @@ pub fn run() {
             dismiss_flags,
             undo_last_dismiss,
             refresh_library,
+            list_track_tags,
+            update_track_tags,
             set_bars,
             set_label,
             set_folder_label,

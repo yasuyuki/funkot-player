@@ -37,14 +37,10 @@
 //! anything still there (including `flags.json` if present).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::formats::probe::Hint;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataOptions, StandardTag};
 
 use crate::queue::{QueueItem, QueueOrigin};
 
@@ -623,8 +619,16 @@ pub fn save_overrides(dir: &Path, overrides: &Overrides) -> io::Result<()> {
 /// When `tags_cached` is true, `title`/`artist` were probed (both `None` means
 /// the file has no usable tags). Older `hash-index.json` entries lack these
 /// fields and deserialize as `tags_cached: false`.
+pub const METADATA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HashIndexEntry {
+    #[serde(default)]
+    pub metadata_version: u32,
+    #[serde(default)]
+    pub embedded_metadata: Option<crate::audio_metadata::Metadata>,
+    #[serde(default)]
+    pub metadata_error: Option<String>,
     pub mtime_ms: u64,
     pub len: u64,
     pub hash: String,
@@ -996,42 +1000,8 @@ fn file_mtime_ms_and_len(path: &Path) -> Option<(u64, u64)> {
 /// Successful probes include "no tags" (`Ok((None, None))`). I/O / probe
 /// errors are `Err` so callers can avoid marking `tags_cached`.
 pub fn probe_audio_tags(path: &Path) -> Result<(Option<String>, Option<String>), String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let mut format = symphonia::default::get_probe()
-        .probe(
-            &hint,
-            mss,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        )
-        .map_err(|e| e.to_string())?;
-    let mut title = None;
-    let mut artist = None;
-    if let Some(rev) = format.metadata().skip_to_latest() {
-        for tag in &rev.media.tags {
-            match &tag.std {
-                Some(StandardTag::TrackTitle(s)) if title.is_none() => {
-                    let t = s.trim();
-                    if !t.is_empty() {
-                        title = Some(t.to_string());
-                    }
-                }
-                Some(StandardTag::Artist(s)) if artist.is_none() => {
-                    let a = s.trim();
-                    if !a.is_empty() {
-                        artist = Some(a.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok((title, artist))
+    let metadata = crate::audio_metadata::probe(path)?;
+    Ok((metadata.title, metadata.artist))
 }
 
 /// Return `path`'s content hash, reusing [`HashIndex`] when mtime+size match.
@@ -1058,6 +1028,10 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
 
     if let Some((mtime_ms, len)) = fingerprint {
         let prior = index.get(&key).cloned();
+        let (metadata_version, embedded_metadata, metadata_error) = prior.as_ref()
+            .filter(|old| old.hash == hash)
+            .map(|old| (old.metadata_version, old.embedded_metadata.clone(), old.metadata_error.clone()))
+            .unwrap_or_default();
         let (first_seen, added_order, tags_cached, title, artist) = match prior {
             None => (None, None, false, None, None),
             Some(old) if old.hash == hash => {
@@ -1077,6 +1051,9 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
         index.insert(
             key,
             HashIndexEntry {
+                metadata_version,
+                embedded_metadata,
+                metadata_error,
                 mtime_ms,
                 len,
                 hash: hash.clone(),
@@ -1115,95 +1092,59 @@ pub fn fingerprint_hit(path: &Path, index: &HashIndex) -> Option<String> {
 ///
 /// Carry-forward on miss: no prior entry → `first_seen: None`; same hash →
 /// keep `first_seen`; different hash → stamp now and use probe results for tags.
-pub fn resolve_library_file(
+pub fn resolve_library_file(path: &Path, index: &mut HashIndex) -> io::Result<ResolvedLibraryFile> {
+    resolve_library_file_with(path, index,
+        |p| funkot_core::cache::content_hash(p).map_err(|e| e.to_string()),
+        crate::audio_metadata::probe)
+}
+
+fn resolve_library_file_with(
     path: &Path,
     index: &mut HashIndex,
+    mut hash_file: impl FnMut(&Path) -> Result<String, String>,
+    mut probe: impl FnMut(&Path) -> Result<crate::audio_metadata::Metadata, String>,
 ) -> io::Result<ResolvedLibraryFile> {
     let key = path.to_string_lossy().into_owned();
-    let fingerprint = file_mtime_ms_and_len(path);
-
-    if let Some((mtime_ms, len)) = fingerprint {
-        if let Some(entry) = index.get(&key) {
-            if entry.mtime_ms == mtime_ms && entry.len == len {
-                if entry.tags_cached {
-                    return Ok(ResolvedLibraryFile {
-                        hash: entry.hash.clone(),
-                        title: entry.title.clone(),
-                        artist: entry.artist.clone(),
-                    });
-                }
-                let hash = entry.hash.clone();
-                let first_seen = entry.first_seen.clone();
-                let added_order = entry.added_order;
-                match probe_audio_tags(path) {
-                    Ok((title, artist)) => {
-                        index.insert(
-                            key,
-                            HashIndexEntry {
-                                mtime_ms,
-                                len,
-                                hash: hash.clone(),
-                                tags_cached: true,
-                                title: title.clone(),
-                                artist: artist.clone(),
-                                first_seen,
-                                added_order,
-                            },
-                        );
-                        return Ok(ResolvedLibraryFile {
-                            hash,
-                            title,
-                            artist,
-                        });
-                    }
-                    Err(_) => {
-                        return Ok(ResolvedLibraryFile {
-                            hash,
-                            title: None,
-                            artist: None,
-                        });
-                    }
-                }
-            }
+    let fingerprint = file_mtime_ms_and_len(path)
+        .ok_or_else(|| io::Error::other("source fingerprint unavailable"))?;
+    let prior = index.get(&key).cloned();
+    let hit = prior.as_ref().is_some_and(|e| (e.mtime_ms, e.len) == fingerprint);
+    if hit {
+        let entry = prior.as_ref().unwrap();
+        if entry.tags_cached && entry.metadata_version == METADATA_VERSION
+            && entry.metadata_error.is_none() && entry.embedded_metadata.is_some() {
+            return Ok(ResolvedLibraryFile { hash: entry.hash.clone(), title: entry.title.clone(), artist: entry.artist.clone() });
         }
     }
-
-    let hash = funkot_core::cache::content_hash(path)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-    let (title, artist, tags_cached) = match probe_audio_tags(path) {
-        Ok((t, a)) => (t, a, true),
-        Err(_) => (None, None, false),
-    };
-
-    if let Some((mtime_ms, len)) = fingerprint {
-        let prior = index.get(&key).cloned();
-        let (first_seen, added_order) = match &prior {
-            None => (None, None),
-            Some(old) if old.hash == hash => (old.first_seen.clone(), old.added_order),
-            Some(_) => {
-                let now = utc_rfc3339_now();
-                (Some(now), None)
-            }
-        };
-        index.insert(
-            key,
-            HashIndexEntry {
-                mtime_ms,
-                len,
-                hash: hash.clone(),
-                tags_cached,
-                title: title.clone(),
-                artist: artist.clone(),
-                first_seen,
-                added_order,
-            },
-        );
+    let hash = if hit { prior.as_ref().unwrap().hash.clone() }
+        else { hash_file(path).map_err(io::Error::other)? };
+    let result = probe(path);
+    if file_mtime_ms_and_len(path) != Some(fingerprint) {
+        return Err(io::Error::other("source changed while reading metadata"));
     }
-    Ok(ResolvedLibraryFile {
-        hash,
-        title,
-        artist,
-    })
+    let same = prior.as_ref().filter(|old| old.hash == hash);
+    let first_seen = match &prior {
+        None => None,
+        Some(old) if old.hash == hash => old.first_seen.clone(),
+        Some(_) => Some(utc_rfc3339_now()),
+    };
+    let added_order = same.and_then(|old| old.added_order);
+    let (title, artist, embedded_metadata, metadata_error) = match result {
+        Ok(metadata) => (metadata.title.clone(), metadata.artist.clone(), Some(metadata), None),
+        Err(_) => (same.and_then(|e| e.title.clone()), same.and_then(|e| e.artist.clone()),
+            same.and_then(|e| e.embedded_metadata.clone()), Some("metadata_probe_failed".to_string())),
+    };
+    index.insert(key, HashIndexEntry { mtime_ms: fingerprint.0, len: fingerprint.1, hash: hash.clone(),
+        tags_cached: metadata_error.is_none(), title: title.clone(), artist: artist.clone(),
+        metadata_version: METADATA_VERSION, embedded_metadata, metadata_error, first_seen, added_order });
+    Ok(ResolvedLibraryFile { hash, title, artist })
+}
+
+/// Editing checks the existing lightweight identity fingerprint, never decodes
+/// or rehashes audio. Like the existing index it cannot detect same-size,
+/// same-mtime rewrites; the content hash's own partial-file limit also remains.
+pub fn fingerprint_matches(path: &Path, entry: &HashIndexEntry) -> bool {
+    file_mtime_ms_and_len(path) == Some((entry.mtime_ms, entry.len))
 }
 
 /// One automatic transition pair the listener flagged as bad.
@@ -2104,6 +2045,9 @@ mod tests {
         index.insert(
             "/music/a.flac".into(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 1_700_000_000_000,
                 len: 4096,
                 hash: "abc".into(),
@@ -2243,6 +2187,9 @@ mod tests {
         index.insert(
             "/music/kept.flac".into(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 1,
                 len: 10,
                 hash: "kept".into(),
@@ -2256,6 +2203,9 @@ mod tests {
         index.insert(
             "/music/gone.flac".into(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 2,
                 len: 20,
                 hash: "gone".into(),
@@ -2288,6 +2238,9 @@ mod tests {
         index.insert(
             key.clone(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms,
                 len,
                 hash: "stale-hash".into(),
@@ -2361,6 +2314,9 @@ mod tests {
         index.insert(
             key.clone(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms,
                 len,
                 hash: "kept-hash".into(),
@@ -2426,6 +2382,9 @@ mod tests {
         index.insert(
             key.clone(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms,
                 len,
                 hash: "h".into(),
@@ -2691,6 +2650,9 @@ mod tests {
         (
             path.into(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 1,
                 len: 1,
                 hash: hash.into(),
@@ -3804,6 +3766,9 @@ mod tests {
         index.insert(
             "/music/old.flac".into(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 1,
                 len: 1,
                 hash: "old".into(),
@@ -3818,6 +3783,9 @@ mod tests {
         index.insert(
             "/music/new.flac".into(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 2,
                 len: 2,
                 hash: "new".into(),
@@ -3848,6 +3816,9 @@ mod tests {
         index.insert(
             "/music/existing.flac".into(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 1,
                 len: 1,
                 hash: "e".into(),
@@ -3873,6 +3844,9 @@ mod tests {
         index.insert(
             "/music/a.flac".into(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: 1,
                 len: 1,
                 hash: "a".into(),
@@ -3954,6 +3928,9 @@ mod tests {
         index.insert(
             key.clone(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms: mtime_ms.saturating_sub(1),
                 len,
                 hash: hash.clone(),
@@ -3994,6 +3971,9 @@ mod tests {
         index.insert(
             key.clone(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms,
                 len,
                 hash: "old-hash".into(),
@@ -4027,6 +4007,9 @@ mod tests {
         index.insert(
             key.clone(),
             HashIndexEntry {
+                metadata_version: 0,
+                embedded_metadata: None,
+                metadata_error: None,
                 mtime_ms,
                 len,
                 hash: "kept-hash".into(),
@@ -4155,6 +4138,9 @@ mod tests {
 
     fn entry(hash: &str, first_seen: Option<&str>) -> HashIndexEntry {
         HashIndexEntry {
+            metadata_version: 0,
+            embedded_metadata: None,
+            metadata_error: None,
             mtime_ms: 0,
             len: 0,
             hash: hash.into(),
@@ -4290,5 +4276,64 @@ mod tests {
         let error = remove_play_log_entry(&dir.0, 200).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read(path).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod metadata_migration_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn legacy_cached_tags_probe_once_without_rehash_or_new_arrival() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("synthetic.wav");
+        fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/metadata/tagless.wav"), &path).unwrap();
+        let original = fs::read(&path).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut index = HashIndex::new();
+        let hash = resolve_content_hash(&path, &mut index).unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let entry = index.get_mut(&key).unwrap();
+        entry.tags_cached = true; // Old title/artist cache must still migrate.
+        entry.first_seen = Some("2024-01-01T00:00:00Z".into());
+        entry.added_order = Some(7);
+        let hashes = Cell::new(0); let probes = Cell::new(0);
+        let hash_file = |_: &Path| { hashes.set(hashes.get()+1); Ok(hash.clone()) };
+        let probe = |p: &Path| { probes.set(probes.get()+1); crate::audio_metadata::probe(p) };
+        let first = resolve_library_file_with(&path, &mut index, hash_file, probe).unwrap();
+        assert_eq!(first.hash, hash);
+        assert_eq!((hashes.get(), probes.get()), (0, 1));
+        let entry = &index[&key];
+        assert_eq!(entry.first_seen.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(entry.added_order, Some(7)); assert_eq!(entry.metadata_version, METADATA_VERSION);
+        let second = resolve_library_file_with(&path, &mut index, hash_file, probe).unwrap();
+        assert_eq!(second, first); assert_eq!((hashes.get(), probes.get()), (0, 1));
+        assert_eq!(fs::read(&path).unwrap(), original); assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    }
+
+    #[test]
+    fn probe_error_retries_next_scan_without_pretending_success() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("synthetic.wav");
+        fs::write(&path, b"readable test source").unwrap(); let mut index = HashIndex::new();
+        let hash = resolve_content_hash(&path, &mut index).unwrap();
+        let hash_file = |_: &Path| -> Result<String, String> { panic!("unchanged source was rehashed") };
+        let first = resolve_library_file_with(&path, &mut index, hash_file, |_| Err("probe failed".into())).unwrap();
+        assert_eq!(first.hash, hash); let key = path.to_string_lossy().into_owned();
+        assert!(!index[&key].tags_cached); assert_eq!(index[&key].metadata_error.as_deref(), Some("metadata_probe_failed"));
+        resolve_library_file_with(&path, &mut index, hash_file, |_| Ok(Default::default())).unwrap();
+        assert!(index[&key].tags_cached); assert_eq!(index[&key].metadata_error, None);
+    }
+
+    #[test]
+    fn source_change_during_probe_is_not_published_under_prior_hash() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("synthetic.wav");
+        fs::write(&path, b"original bytes").unwrap(); let mut index = HashIndex::new();
+        resolve_content_hash(&path, &mut index).unwrap(); let before = index.clone();
+        let result = resolve_library_file_with(&path, &mut index,
+            |_| panic!("unchanged source was rehashed"),
+            |path| { fs::write(path, b"changed file while metadata probe was in progress").unwrap(); Ok(Default::default()) });
+        assert!(result.is_err()); assert_eq!(index, before);
+        assert!(!fingerprint_matches(&path, index.values().next().unwrap()));
     }
 }

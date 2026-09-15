@@ -50,6 +50,9 @@ export function preserveLibraryAddedOrder(
   previous: TrackRow | undefined,
   incoming: TrackRow,
 ): TrackRow {
+  // Partial analysis/edit replies cannot introduce a different file identity.
+  // Only a committed library refresh may replace the path's content hash.
+  if (previous && previous.content_hash !== incoming.content_hash) return previous;
   if (incoming.added_order !== null || previous?.added_order == null) {
     return incoming;
   }
@@ -66,10 +69,13 @@ export function applyAnalysisProgress(
 } {
   const nextLibrary = new Map(library);
   const previous = nextLibrary.get(progress.row.path);
-  nextLibrary.set(
-    progress.row.path,
-    preserveLibraryAddedOrder(previous, progress.row),
-  );
+  // A late event for a removed/root-switched path must not resurrect the row.
+  if (previous) {
+    nextLibrary.set(
+      progress.row.path,
+      preserveLibraryAddedOrder(previous, progress.row),
+    );
+  }
   return {
     library: nextLibrary,
     analysis: {

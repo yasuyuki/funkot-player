@@ -9,6 +9,8 @@ import {
   playerState,
   queueState as queueStateCmd,
   refreshLibrary,
+  listTrackTags,
+  updateTrackTags,
   start as startCmd,
   togglePause as togglePauseCmd,
   skipNext as skipNextCmd,
@@ -60,6 +62,9 @@ import type {
   QueueItem,
   QueueSnapshot,
   TrackRow,
+  TrackTagsSnapshot,
+  TagUpdateRequest,
+  TagUpdateResult,
 } from "./tauri";
 import {
   actionableArrivals,
@@ -70,6 +75,7 @@ import {
   type RefreshAttempt,
 } from "./arrivals";
 import { applyAnalysisProgress, preserveLibraryAddedOrder } from "./library-sort";
+import { TrackTagsClient } from "./track-tags-client";
 import { canSkipNext } from "./transportMode";
 import { toast } from "./toast.svelte";
 import { i18n } from "./i18n.svelte";
@@ -107,6 +113,19 @@ class PlayerStore {
   /// last `refresh_library` response so `libraryList` stays stable for the
   /// play-tab list.
   library = $state<Map<string, TrackRow>>(new Map());
+  trackTags = $state<TrackTagsSnapshot | null>(null);
+  trackTagsError = $state<unknown>(null);
+  #tagClient = new TrackTagsClient({
+    list: listTrackTags,
+    update: updateTrackTags,
+    changed: (snapshot) => { this.trackTags = snapshot; this.trackTagsError = null; },
+    failed: (error) => { this.trackTagsError = error; },
+  });
+
+  async reloadTrackTags(): Promise<void> { await this.#tagClient.reload(); }
+  async saveTrackTags(request: TagUpdateRequest): Promise<TagUpdateResult> {
+    return this.#tagClient.save(request);
+  }
   /// Non-null while a background analysis run is in flight. Cleared on
   /// `analysis-done` (or overwritten by the next progress event).
   analysis = $state<{ done: number; total: number; name: string } | null>(null);
@@ -373,12 +392,15 @@ class PlayerStore {
     // concurrent music-dir / import owed).
     if (this.#libraryBusy) return;
     this.#libraryBusy = true;
+    const gen = ++this.#refreshGen;
     this.libraryScan = { phase: "walking", found: 0, done: 0 };
     let applied = false;
     try {
       // List only — do not re-queue analysis (would loop on permanent failures).
       const rows = await refreshLibrary(false);
+      if (gen !== this.#refreshGen) return;
       this.library = new Map(rows.map((r) => [r.path, r]));
+      await this.reloadTrackTags();
       applied = true;
     } catch (e) {
       // Ignore on analysis-done the same way legacy did: a stray error here
@@ -1003,6 +1025,7 @@ class PlayerStore {
         return { ok: false, error: "stale" };
       }
       this.library = new Map(rows.map((r) => [r.path, r]));
+      await this.reloadTrackTags();
       attempt = "success";
       this.#libraryRefreshOwed = nextLibraryRefreshOwed(
         this.#libraryRefreshOwed,
