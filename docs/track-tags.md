@@ -193,3 +193,32 @@ application dependency. This harness makes no native player, music, signing,
 installation, or device calls. It proves UI behavior against the typed IPC
 fixture; native tests prove persistence and source-file protection. A reduced
 browser viewport does not prove Android soft-keyboard or playback acceptance.
+
+## Filtering the library
+
+Open **Filter by tags**, choose a year, genre or custom tag, and add the
+condition. Row chips add the same exact backend key. **Match all (AND)**
+requires every selected tag; **Match any (OR)** requires at least one.
+**Year unset** is always an additional AND condition. Selecting two different
+years with AND therefore returns no tracks. Year, genre and custom tags are
+different kinds even when their displayed values are identical.
+
+Tag conditions also combine with the existing text and new-track filters.
+Remove an individual condition or clear all tag conditions to broaden the
+results. Selected conditions stay visible when editing removes their last
+matching track. Candidate counts come from the whole current library, before
+these filters, and update from committed tag snapshots after edits or scans.
+Pending metadata is shown separately from a confirmed unset year; an explicit
+manual unset remains searchable while automatic metadata is pending.
+
+Each row shows a representative chip for each available kind and an overflow
+button that opens the editor. Filtering does not change selection, queues or
+playback. Bulk tag editing still includes only visible selected tracks; its
+count can differ from the queue count. Search uses a cached in-memory index of
+backend keys and sends no tag-search IPC or music-file requests.
+
+Synthetic browser evidence: [desktop](images/track-tags/filter-desktop.png),
+[Japanese](images/track-tags/filter-narrow-ja.png),
+[English](images/track-tags/filter-narrow-en.png),
+[Indonesian](images/track-tags/filter-narrow-id.png). These are browser layouts,
+not real-device acceptance.

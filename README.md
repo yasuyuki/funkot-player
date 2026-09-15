@@ -14,6 +14,8 @@ actively supported but is not deliberately broken either.
 - Keeps playing with the screen off; transport controls appear in the
   notification shade and on the lock screen
 - Scans new tracks in the background and shows progress
+- Reads embedded year/genre metadata and lets you edit and filter player-only
+  tags without changing music files: [track tag guide](docs/track-tags.md)
 - Lets you queue, reorder, and drop tracks; the queue survives a restart
 - Lets you correct intro / outro bar counts; corrections stick across
   re-analysis
