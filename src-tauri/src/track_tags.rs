@@ -19,7 +19,10 @@ const SCHEMA_VERSION: u32 = 1;
 const MAX_TAGS: usize = 128;
 const MAX_SCALARS: usize = 128;
 #[cfg(test)]
-thread_local! { static FAIL_NEXT_PERSIST: Cell<u8> = const { Cell::new(0) }; }
+thread_local! {
+    static FAIL_NEXT_PERSIST: Cell<u8> = const { Cell::new(0) };
+    static SUCCESSFUL_PERSISTS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -301,6 +304,7 @@ fn persist_document(dir: &Path, doc: &Document) -> io::Result<()> {
     tmp.as_file().sync_all()?;
     #[cfg(test)] fail_persist_stage(3)?;
     tmp.persist(dir.join(FILE_NAME)).map_err(|error| error.error)?;
+    #[cfg(test)] SUCCESSFUL_PERSISTS.with(|count| count.set(count.get() + 1));
     Ok(())
 }
 
@@ -359,14 +363,18 @@ mod tests {
     }
 
     #[test] fn year_and_batch_patch_are_atomic() {
+        SUCCESSFUL_PERSISTS.with(|count| count.set(0));
         let d = TempDir::new("batch"); let s = TrackTagsStore::load(&d.0); let rev = s.snapshot().unwrap().revision;
         let r = s.apply_patch(&["a".into(), "a".into(), "b".into()], &rev, &TrackTagPatch { year_change: Some(YearState::Set { value: 2024 }), ..Default::default() }).unwrap();
         assert_eq!((r.changed, r.no_op), (2, 0));
+        assert_eq!(SUCCESSFUL_PERSISTS.with(Cell::get), 1);
         let before = s.snapshot().unwrap();
         assert!(matches!(s.apply_patch(&["a".into(), "b".into()], &before.revision, &TrackTagPatch { add: vec![genre("x")], remove: vec![genre("X")], ..Default::default() }), Err(StoreError::InvalidPatch)));
         assert_eq!(s.snapshot().unwrap(), before);
         let r = s.apply_patch(&["a".into(), "b".into()], &before.revision, &TrackTagPatch::default()).unwrap();
         assert_eq!((r.changed, r.no_op), (0, 2)); assert_eq!(r.revision, before.revision);
+        assert_eq!(SUCCESSFUL_PERSISTS.with(Cell::get), 1); // Invalid/no-op requests did not save again.
+        eprintln!("tag-store batch: unique_hashes=2 successful_json_replacements=1 invalid_and_noop_additional_saves=0");
     }
 
     #[test] fn round_trip_corrupt_and_schema_are_fail_closed() {

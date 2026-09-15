@@ -54,6 +54,13 @@ def main() -> None:
     tags["GENRE"] = ["Funkot", "Breakbeat"]
     tags.save()
 
+    path = encode("no-year-pop.ogg", "libvorbis")
+    tags = OggVorbis(path)
+    tags["TITLE"] = "No year Pop"
+    tags["ARTIST"] = "Fixture Artist"
+    tags["GENRE"] = ["Pop"]
+    tags.save()
+
     path = encode("vorbis.ogg", "libvorbis")
     tags = OggVorbis(path)
     tags["TITLE"] = "Synthetic Ogg"
