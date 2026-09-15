@@ -139,3 +139,57 @@ late list responses; a scan reload during a save waits for the save, then reads
 the committed state. Late analysis rows cannot replace a path's content hash or
 resurrect a removed row. Tag list/update do not join the playback polling loop
 and do not update queue, labels, history, or audio analysis.
+
+## Editing tags
+
+Choose **Edit tags** from a track menu, or enter selection mode and edit the
+currently visible selected tracks. The editor fixes its paths, content hashes,
+and opaque revision when it opens. A later filter or library refresh does not
+add or remove a batch target. Tracks without a resolved identity cannot be
+edited; a path is never used as a replacement identifier.
+
+Year controls distinguish no change, automatic, a fixed year, and fixed
+unset. Genre and custom values are patch additions or removals, never a whole
+collection replacement. Removing an embedded tag excludes it from the
+player's classification without modifying audio files. A failed save keeps the
+draft open. Reload is explicit after a stale revision so the UI never silently
+replays input against a different hash.
+
+The current effective year, manual mode, automatic candidates and tag sources
+are shown separately. Expanding **Year candidates** exposes recording, general,
+release and original values; choosing a candidate explicitly sets a manual year.
+Every batch starts with **Do not change** for the year. Tag presence shows
+whether the value is common or mixed. A removal patch applies to every target
+and also suppresses the same automatic tag after a later scan; other tags stay
+unchanged. A suppressed value can be restored by explicitly adding it.
+
+The selection bar shows separate queue and visible tag-edit counts. Non-Funkot
+tracks can be edited while their queue gate stays in force. Selected tracks
+hidden by a filter remain available to the existing queue action, but are never
+included in tag editing. An unresolved selected identity disables editing with
+an explanation. Duplicate copies with one content hash share a manual record;
+the dialog explains when the number of saved tracks differs from displayed rows.
+
+Save success and no-op have distinct notifications. On failure the draft stays
+open. **Reload tags** refreshes the displayed information and revision only if
+every original target still has the same hash; it does not change the draft or
+silently adopt a replacement track. Cancel discards the draft. Tab remains in
+the dialog, Escape cancels when no operation is pending, and focus returns to
+the opening row or selection button.
+
+### Browser acceptance
+
+`scripts/test-track-tags-ui.mjs` starts the existing Vite application with the
+synthetic IPC fixture in `scripts/fixtures/track-tags-ui.js`. It checks editing,
+typed requests, failure/reload behavior, selection scope, keyboard focus and
+ja/en/id narrow layouts. It records screenshots and `results.json` under
+`.desktop-data/tag-ui-evidence` (or the explicit `UI_EVIDENCE_DIR`).
+
+The optional browser tool is Playwright 1.63.0; prepare it in the test checkout
+with `npm install --no-save --package-lock=false playwright@1.63.0`, using an
+already approved Chromium runtime and its OS dependencies. Run
+`node scripts/test-track-tags-ui.mjs` from the player root. Playwright is not an
+application dependency. This harness makes no native player, music, signing,
+installation, or device calls. It proves UI behavior against the typed IPC
+fixture; native tests prove persistence and source-file protection. A reduced
+browser viewport does not prove Android soft-keyboard or playback acceptance.
