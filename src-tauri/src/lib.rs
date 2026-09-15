@@ -6,6 +6,7 @@
 mod queue;
 mod store;
 mod store_cache;
+mod track_tags;
 #[cfg(any(target_os = "windows", test))]
 mod current_track_http;
 
