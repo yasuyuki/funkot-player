@@ -34,3 +34,6 @@ Thumbs.db
 
 # Release signing keys (host-only, never commit)
 /.secrets/
+
+# Local UI review evidence (not screenshot baselines)
+/artifacts/ui-review/
