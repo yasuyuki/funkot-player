@@ -548,3 +548,12 @@ place it matters, but they are easy to undo by accident:
 ## Licence
 
 MIT.
+
+### Frontend UI review
+
+UI/layout/interaction changes use the project [UI design principles and review procedure](docs/ui-design.md)
+and [.claude/skills/ui-design/SKILL.md](.claude/skills/ui-design/SKILL.md).
+`npm run ui:capture` renders deterministic synthetic Library/tag states in Chromium
+at desktop and 412px widths. Review the captured screens; a successful capture
+alone is not a design approval. Setup, artifact paths and the small-change exception
+are in the procedure. No native Tauri process or music files are required.
