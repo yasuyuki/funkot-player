@@ -203,6 +203,7 @@ export const en = {
   tagLimits:
     "128 Unicode characters per value; 128 effective genre/custom tags.",
   tagDiagnostics: "Metadata details",
+  tagFilterToggle: "Tags",
   tagFilterTitle: "Filter by tags",
   tagFilterCandidate: "Tag candidate",
   tagFilterPick: "Choose a tag",

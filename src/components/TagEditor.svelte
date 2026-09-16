@@ -42,7 +42,7 @@
     // Opening data is deliberately frozen. Only explicit reload replaces it.
     displayed = initialStates;
     dialog.showModal();
-    dialog.querySelector<HTMLInputElement>("input")?.focus();
+    dialog.querySelector<HTMLElement>("select, input")?.focus();
     return () => {
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     };
@@ -138,46 +138,38 @@
   oncancel={(event) => { event.preventDefault(); close(); }}>
   <form onsubmit={(event) => { event.preventDefault(); void save(); }}>
     <header>
-      <h2>{t.tagEditorTitle(title)}</h2>
+      <h2 title={t.tagEditorTitle(title)}>{t.tagEditorTitle(title)}</h2>
       <p>{t.tagEditorScope(targets.length)}</p>
-      {#if uniqueCount !== targets.length}<p>{t.tagSharedIdentity(uniqueCount)}</p>{/if}
-      <p class="hint">{t.tagFileUntouched}</p>
     </header>
     {#if readOnly}<p role="alert">{t.tagError("store_read_only")}</p>{/if}
     {#if changedElsewhere}<p role="status">{t.tagSnapshotChanged}</p>{/if}
+    {#if changedElsewhere && !error}<button class="secondary" type="button" disabled={busy} onclick={reload}>{reloading ? t.tagReloading : t.tagReload}</button>{/if}
     <section aria-label={t.tagEffectiveYear}>
       <h3>{t.tagEffectiveYear}: {commonYear === undefined ? t.tagMixed : commonYear ?? t.tagUnset}</h3>
-      <p>{manualModes.size === 1 ? t.tagManualMode([...manualModes][0].split(":")[0]) : t.tagMixed}</p>
-      {#each displayed as state, index}
-        {#if displayed.length === 1 || state.metadata_status !== "ready" || !["resolved", "missing"].includes(state.year_status)}
-          <p class="hint">{displayed.length > 1 ? `${index + 1}. ` : ""}{t.tagMetadataStatus(state.metadata_status)} · {t.tagYearStatus(state.year_status)}</p>
+      <fieldset class="year-controls" disabled={busy || readOnly}>
+        <legend>{t.tagYear}</legend>
+        <select aria-label={t.tagYear} bind:value={mode}>
+          <option value="unchanged">{t.tagNoChange}</option>
+          <option value="auto">{t.tagYearAuto}</option>
+          <option value="unset">{t.tagYearUnset}</option>
+          <option value="set">{t.tagYearSet}</option>
+        </select>
+        {#if mode === "set"}
+          <label class="year-input">{t.tagYearSet}<input type="number" inputmode="numeric" min="1000" max="9999" step="1" bind:value={yearValue} /></label>
         {/if}
-      {/each}
+      </fieldset>
     </section>
-    <fieldset disabled={busy || readOnly}>
-      <legend>{t.tagYear}</legend>
-      <label class="choice"><input type="radio" name="tag-year" value="unchanged" bind:group={mode} />{t.tagNoChange}</label>
-      <label class="choice"><input type="radio" name="tag-year" value="auto" bind:group={mode} />{t.tagYearAuto}</label>
-      <label class="choice"><input type="radio" name="tag-year" value="unset" bind:group={mode} />{t.tagYearUnset}</label>
-      <label class="choice"><input type="radio" name="tag-year" value="set" bind:group={mode} />{t.tagYearSet}</label>
-      <label class="year-input">{t.tagYearSet}<input type="number" inputmode="numeric" min="1000" max="9999" step="1" bind:value={yearValue} oninput={() => mode = "set"} /></label>
-    </fieldset>
-    {#if displayed.length === 1}
-      <details>
-        <summary>{t.tagYearCandidates}</summary>
-        {#if !displayed[0].candidates.length}<p>{t.tagEmpty}</p>{/if}
-        {#each displayed[0].candidates as candidate}
-          {@const year = candidateYear(candidate.raw_value)}
-          <div class="candidate">
-            <span>{t.tagSemantic(candidate.semantic)} · {candidate.raw_key}: {candidate.raw_value}</span>
-            {#if year}<button type="button" disabled={busy || readOnly} onclick={() => { mode = "set"; yearValue = year; }}>{t.tagAdoptYear(year)}</button>{/if}
-          </div>
+    {#if displayed.some(state => state.metadata_status !== "ready" || !["resolved", "missing"].includes(state.year_status))}
+      <section class="warning" aria-label={t.tagDiagnostics}>
+        {#each displayed as state, index}
+          {#if state.metadata_status !== "ready" || !["resolved", "missing"].includes(state.year_status)}
+            <p role="status">{displayed.length > 1 ? `${index + 1}. ` : ""}{t.tagMetadataStatus(state.metadata_status)} · {t.tagYearStatus(state.year_status)}</p>
+          {/if}
         {/each}
-      </details>
+      </section>
     {/if}
     <section aria-label={t.tagCurrentTags}>
       <h3>{t.tagCurrentTags}</h3>
-      <p class="hint">{t.tagRemoveScope}</p>
       {#if !tags.length}<p>{t.tagEmpty}</p>{/if}
       <div class="chips">
         {#each tags as item (item.tag.key)}
@@ -186,23 +178,13 @@
           <button type="button" class:removing disabled={busy || readOnly} aria-pressed={removing}
             aria-label={removing ? `${t.tagUndo}: ${labelKind(tag.kind)}: ${tag.value}` : t.tagRemove(`${labelKind(tag.kind)}: ${tag.value}`)}
             onclick={() => toggleRemove(tag)}>
-            {labelKind(tag.kind)}: {tag.value} · {t.tagOrigin(item.tag.origin)}
+            {labelKind(tag.kind)}: {tag.value}
             {#if displayed.length > 1}<small>{t.tagPresent(item.count, displayed.length)}</small>{/if}
             <span aria-hidden="true">{removing ? "↶" : "×"}</span>
           </button>
         {/each}
       </div>
     </section>
-    {#if displayed.length === 1 && displayed[0].manual.suppressed_auto_tags.length}
-      <section>
-        <h3>{t.tagSuppressed}</h3>
-        <div class="chips">
-          {#each displayed[0].manual.suppressed_auto_tags as tag}
-            <button type="button" disabled={busy || readOnly} onclick={() => queueAdd(tag)}>{t.tagRestore}: {labelKind(tag.kind)}: {tag.value}</button>
-          {/each}
-        </div>
-      </section>
-    {/if}
     <fieldset disabled={busy || readOnly}>
       <legend>{t.tagAdd}</legend>
       <div class="add-fields">
@@ -211,19 +193,54 @@
         <button type="button" onclick={addTag}>{t.tagAdd}</button>
       </div>
       <p class="hint">{t.tagLimits}</p>
-      {#if add.length}<h4>{t.tagPendingAdds}</h4>{/if}
-      <div class="chips">{#each add as tag, index}<button type="button" onclick={() => add = add.filter((_, i) => i !== index)} aria-label={`${t.tagUndo}: ${labelKind(tag.kind)}: ${tag.value}`}>+ {labelKind(tag.kind)}: {tag.value} ×</button>{/each}</div>
-      {#if remove.length}<h4>{t.tagPendingRemovals}</h4>{/if}
-      <div class="chips">{#each remove as tag, index}<button type="button" onclick={() => remove = remove.filter((_, i) => i !== index)} aria-label={`${t.tagUndo}: ${labelKind(tag.kind)}: ${tag.value}`}>− {labelKind(tag.kind)}: {tag.value} ↶</button>{/each}</div>
+      {#if add.length}
+        <p class="hint">{t.tagPendingAdds}</p>
+        <div class="chips">{#each add as tag, index}<button type="button" onclick={() => add = add.filter((_, i) => i !== index)} aria-label={`${t.tagUndo}: ${labelKind(tag.kind)}: ${tag.value}`}>+ {labelKind(tag.kind)}: {tag.value} ×</button>{/each}</div>
+      {/if}
     </fieldset>
-    {#if displayed.some(state => state.diagnostics.length)}
-      <details><summary>{t.tagDiagnostics}</summary>{#each displayed as state}{#each state.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}{/each}</details>
-    {/if}
-    {#if error}<p role="alert">{t.tagError(error)}</p>{/if}
-    {#if reloaded}<p role="status">{t.tagReloaded}</p>{/if}
-    {#if error || changedElsewhere}<button type="button" disabled={busy} onclick={reload}>{reloading ? t.tagReloading : t.tagReload}</button>{/if}
+    <details class="details">
+      <summary>{t.tagDiagnostics}</summary>
+      <p class="hint">{t.tagFileUntouched}</p>
+      {#if uniqueCount !== targets.length}<p>{t.tagSharedIdentity(uniqueCount)}</p>{/if}
+      <p>{manualModes.size === 1 ? t.tagManualMode([...manualModes][0].split(":")[0]) : t.tagMixed}</p>
+      <h4>{t.tagCurrentTags}</h4>
+      {#each tags as item (item.tag.key)}
+        <p class="hint">{labelKind(item.tag.kind)}: {item.tag.value} · {t.tagOrigin(item.tag.origin)}</p>
+      {/each}
+      {#each displayed as state, index}
+        {#if displayed.length === 1 || state.metadata_status !== "ready" || !["resolved", "missing"].includes(state.year_status)}
+          <p class="hint">{displayed.length > 1 ? `${index + 1}. ` : ""}{t.tagMetadataStatus(state.metadata_status)} · {t.tagYearStatus(state.year_status)}</p>
+        {/if}
+      {/each}
+      {#if displayed.length === 1}
+        <h4>{t.tagYearCandidates}</h4>
+        {#if !displayed[0].candidates.length}<p>{t.tagEmpty}</p>{/if}
+        {#each displayed[0].candidates as candidate}
+          {@const year = candidateYear(candidate.raw_value)}
+          <div class="candidate">
+            <span>{t.tagSemantic(candidate.semantic)} · {candidate.raw_key}: {candidate.raw_value}</span>
+            {#if year}<button type="button" disabled={busy || readOnly} onclick={() => { mode = "set"; yearValue = year; }}>{t.tagAdoptYear(year)}</button>{/if}
+          </div>
+        {/each}
+        {#if displayed[0].manual.suppressed_auto_tags.length}
+          <h4>{t.tagSuppressed}</h4>
+          <div class="chips">
+            {#each displayed[0].manual.suppressed_auto_tags as tag}
+              <button type="button" disabled={busy || readOnly} onclick={() => queueAdd(tag)}>{t.tagRestore}: {labelKind(tag.kind)}: {tag.value}</button>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+      {#if displayed.some(state => state.diagnostics.length)}
+        <h4>{t.tagDiagnostics}</h4>
+        {#each displayed as state}{#each state.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}{/each}
+      {/if}
+    </details>
     <footer>
-      <button type="button" onclick={close} disabled={busy}>{t.cancelAction}</button>
+      {#if error}<p class="feedback" role="alert">{t.tagError(error)}</p>{/if}
+      {#if reloaded}<p class="feedback" role="status">{t.tagReloaded}</p>{/if}
+      {#if error}<button class="secondary" type="button" disabled={busy} onclick={reload}>{reloading ? t.tagReloading : t.tagReload}</button>{/if}
+      <button class="secondary" type="button" onclick={close} disabled={busy}>{t.cancelAction}</button>
       <button type="submit" class="save" disabled={busy || readOnly}>{saving ? t.tagSaving : t.tagSave}</button>
     </footer>
   </form>
@@ -234,26 +251,36 @@
   dialog::backdrop { background: #000a; }
   form { display: grid; gap: var(--space-md); min-width: 0; }
   h2,h3,h4,p { margin: 0; overflow-wrap: anywhere; }
-  h2 { font-size: var(--font-size-lg); }
+  h2 { display: -webkit-box; overflow: hidden; font-size: var(--font-size-lg); line-clamp: 2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   h3,h4 { font-size: var(--font-size-sm); }
   header,section,fieldset { display: grid; gap: var(--space-sm); min-width: 0; }
   fieldset { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-md); }
   legend { padding: 0 var(--space-xs); }
   label { display: grid; gap: var(--space-xs); min-width: 0; }
-  .choice { display: flex; align-items: center; }
-  .choice input { width: auto; }
   input,select { box-sizing: border-box; min-width: 0; width: 100%; }
+  .year-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(8rem, 12rem); align-items: end; gap: var(--space-sm); }
+  .year-controls > select { grid-column: 1; }
+  .year-controls .year-input { grid-column: 2; grid-row: 1; }
   .year-input { max-width: 12rem; }
   .hint,small { font-size: var(--font-size-sm); color: var(--color-text-dim); }
   .add-fields { display: grid; grid-template-columns: auto minmax(0,1fr); gap: var(--space-sm); }
   .add-fields button { grid-column: 1 / -1; }
   .chips { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
-  button { width: auto; overflow-wrap: anywhere; max-width: 100%; }
+  button { width: auto; overflow-wrap: anywhere; max-width: 100%; background: var(--color-menu-bg); color: var(--color-text); border: 1px solid var(--color-border); font-size: var(--font-size-sm); padding: var(--space-sm) var(--space-md); }
   .chips button { display: inline-flex; flex-wrap: wrap; gap: var(--space-xs); align-items: center; padding: var(--space-sm); text-align: start; font-size: var(--font-size-sm); }
   .chips small { flex-basis: 100%; }
   .removing { text-decoration: line-through; }
   .candidate { display: grid; gap: var(--space-xs); margin-top: var(--space-sm); overflow-wrap: anywhere; }
+  .warning { border-inline-start: 3px solid var(--color-border); padding-inline-start: var(--space-sm); }
+  .details[open] { display: grid; gap: var(--space-sm); }
   summary { cursor: pointer; }
-  footer { display: flex; justify-content: flex-end; gap: var(--space-sm); padding-top: var(--space-sm); }
+  footer { position: sticky; bottom: calc(var(--space-lg) * -1); display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-sm); margin-top: var(--space-sm); padding: var(--space-md) 0 var(--space-lg); background: var(--color-bg); border-top: 1px solid var(--color-border); }
+  .feedback { flex-basis: 100%; }
   .save { background: var(--color-accent-bg); color: var(--color-accent-text); }
+  @media (max-width: 30rem) {
+    .year-controls { grid-template-columns: 1fr; }
+    .year-controls .year-input { grid-column: 1; grid-row: auto; }
+    footer { justify-content: stretch; }
+    footer button { flex: 1; }
+  }
 </style>

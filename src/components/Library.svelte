@@ -245,6 +245,9 @@
       aria-label={t.selectModeLabel}
       onclick={toggleSelectMode}
     >{t.selectMode}</button>
+    <TagFilter candidates={tagIndex.candidates} selected={selectedTags} mode={tagMode} {yearUnset}
+      onchoose={chooseTag} onremove={key => selectedTags = selectedTags.filter(tag => tag.key !== key)}
+      onmode={mode => tagMode = mode} onunset={enabled => yearUnset = enabled} onclear={clearTagFilters} />
     {#if selectMode}
       <SelectionBar
         totalSelected={selectedCount}
@@ -261,9 +264,6 @@
     {/if}
   </div>
 
-  <TagFilter candidates={tagIndex.candidates} selected={selectedTags} mode={tagMode} {yearUnset}
-    onchoose={chooseTag} onremove={key => selectedTags = selectedTags.filter(tag => tag.key !== key)}
-    onmode={mode => tagMode = mode} onunset={enabled => yearUnset = enabled} onclear={clearTagFilters} />
   {#if !store.trackTags || !store.trackTags.ready}<p class="progress" role="status">{t.tagMetadataStatus("pending")}</p>{/if}
   {#if store.trackTagsError}<p class="progress" role="alert">{t.tagFilterLoadFailed}</p>{/if}
   {#if store.libraryList.length > 0 && rows.length === 0}<p class="empty" role="status">{t.tagNoMatches}</p>{/if}
@@ -354,8 +354,7 @@
               <span class="artist">{row.artist || t.noLabel}</span>
               <span class="dur">{formatDuration(row.duration_secs)}</span>
             </div>
-            <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} onchoose={chooseTag}
-              ondetails={event => openTagEditor([row], row.title, event.currentTarget instanceof HTMLElement ? event.currentTarget : null)} />
+            <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} />
           </div>
           {#if !selectMode}
             <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
@@ -416,7 +415,7 @@
   }
 
   .search {
-    flex: 1;
+    flex: 1 1 14rem;
     min-width: 0;
     font-size: var(--font-size-md);
     padding: var(--space-sm) var(--space-md);
