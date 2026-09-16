@@ -191,6 +191,7 @@ export const id: Messages = {
   tagRemove: (value) => `Hapus ${value}`,
   tagLimits: "128 karakter Unicode per nilai; 128 tag genre/kustom efektif.",
   tagDiagnostics: "Detail metadata",
+  tagFilterToggle: "Tag",
   tagFilterTitle: "Filter menurut tag",
   tagFilterCandidate: "Kandidat tag",
   tagFilterPick: "Pilih tag",

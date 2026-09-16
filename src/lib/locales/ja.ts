@@ -192,6 +192,7 @@ export const ja: Messages = {
   tagRemove: (value) => `${value} を削除`,
   tagLimits: "値は128 Unicode文字まで、ジャンルと任意タグの合計は128件までです。",
   tagDiagnostics: "メタデータ詳細",
+  tagFilterToggle: "タグ",
   tagFilterTitle: "タグで絞り込む",
   tagFilterCandidate: "タグ候補",
   tagFilterPick: "タグを選ぶ",
