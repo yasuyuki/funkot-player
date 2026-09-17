@@ -5,9 +5,9 @@ version: 2
 # intentionally omitted: src-tauri/Cargo.toml has a path dependency on that
 # separately pinned repository, so an isolated Cargo update would be invalid.
 #
-# These entries also do not cover the Gradle wrapper, Android SDK/build-tools,
-# JDK, NDK_VERSION, or CMDLINE_TOOLS pins in the generated Android project and
-# Dockerfile. Those values require a coordinated Tauri/Android build decision.
+# Gradle also detects wrapper updates. Android SDK/build-tools, JDK,
+# NDK_VERSION and CMDLINE_TOOLS are outside these updater entries and need
+# a coordinated Tauri/Android build decision.
 updates:
   - package-ecosystem: npm
     directory: /

@@ -159,9 +159,10 @@ or device/listening acceptance.
 
 Dependabot configuration alone does not establish successful bot execution. Review
 its update logs/PRs separately from the audit and build workflows. Docker checks
-image tags, not Debian apt packages or SDK/NDK/command-line-tools arguments. Gradle
-wrapper, SDK/Build Tools, Java selection and Rust/Android linkage settings still
-need explicit review; do not treat them as covered by the four updater entries.
+image tags, not Debian apt packages or SDK/NDK/command-line-tools arguments. The
+Gradle updater also detects wrapper versions, but wrapper/AGP/Kotlin/JDK
+compatibility still requires review. SDK/Build Tools, Java selection and
+Rust/Android linkage settings are outside these updater entries.
 
 ## Core adoption acceptance and device handoff
 
