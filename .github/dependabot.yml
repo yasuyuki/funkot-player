@@ -1,0 +1,75 @@
+version: 2
+
+# Dependabot covers the package managers with manifests that can be updated
+# without checking out the sibling funkot-core repository. Rust/Cargo is
+# intentionally omitted: src-tauri/Cargo.toml has a path dependency on that
+# separately pinned repository, so an isolated Cargo update would be invalid.
+#
+# These entries also do not cover the Gradle wrapper, Android SDK/build-tools,
+# JDK, NDK_VERSION, or CMDLINE_TOOLS pins in the generated Android project and
+# Dockerfile. Those values require a coordinated Tauri/Android build decision.
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 6
+    groups:
+      vite-svelte-peer-patches:
+        patterns:
+          - vite
+          - svelte
+          - '@sveltejs/vite-plugin-svelte'
+        update-types:
+          - patch
+      tauri-patches:
+        patterns:
+          - '@tauri-apps/*'
+        update-types:
+          - patch
+      npm-patches:
+        patterns:
+          - '*'
+        exclude-patterns:
+          - vite
+          - svelte
+          - '@sveltejs/vite-plugin-svelte'
+          - '@tauri-apps/*'
+        update-types:
+          - patch
+
+  - package-ecosystem: gradle
+    directory: /src-tauri/gen/android
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 4
+    groups:
+      gradle-patches:
+        patterns:
+          - '*'
+        update-types:
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 4
+    groups:
+      actions-patches:
+        patterns:
+          - '*'
+        update-types:
+          - patch
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      docker-patches:
+        patterns:
+          - '*'
+        update-types:
+          - patch

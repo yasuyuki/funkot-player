@@ -109,6 +109,60 @@ Notes:
 
 After the smoke commands succeed, continue with Android, ADB, desktop GUI, and release steps in [README.md § For developers](../README.md#for-developers). Do not duplicate those flows here.
 
+## Dependency maintenance
+
+Dependabot proposes weekly npm, Gradle, GitHub Actions and Docker image updates.
+Review and merge them explicitly. Vite/Svelte peer updates, Tauri's npm/Rust/Android
+pairing, AGP/Gradle/Kotlin/JDK and CPAL/JNI/NDK each need a compatibility decision;
+patch grouping is not proof of compatibility, especially for 0.x packages. Major
+updates remain separate proposals. Cargo is checked separately because its real
+pinned core lives in a sibling repository.
+
+The **Dependency audit and Cargo candidates** workflow runs weekly, manually, and
+on dependency changes. Its npm audit includes development dependencies and blocks
+high/critical findings; the report retains lower severities and registry errors.
+Rust uses the existing `deny.toml` with the player's locked graph, including its
+six documented Tauri exceptions. Reevaluate those paths when updating Tauri.
+
+From the player root with the clean, adopted core sibling:
+
+```sh
+./dev.sh python3 scripts/check-cargo-updates.py
+./dev.sh cargo update --manifest-path src-tauri/Cargo.toml -p <package> --precise <version>
+```
+
+The first command only reports candidates within current manifest constraints;
+it is not a complete major-version inventory. A failed pin, resolver, network or
+source-integrity check fails the command. The second is an intentional,
+package-specific lockfile update: replace the two placeholders with the reviewed
+package and version. The core's own lockfile does not govern the player graph.
+Run the existing frontend, locked native and invariant checks after updating.
+
+**Checks** builds/tests Linux with the normal Dockerfile and passes its actual
+Rust/Node/npm versions to Windows. Both jobs record the observed versions in
+Actions summaries; the Dockerfile remains the toolchain source. Rebuild a stale
+local image with `docker build -t funkot-player-dev .` before comparing results.
+
+For Android-affecting dependencies, **Android dependency build (no owner signing)**
+runs on matching PRs or manual dispatch. On an existing Docker/SDK host, the same
+build is:
+
+```sh
+./dev.sh npm ci
+./dev.sh npx tauri android build --ci --debug --apk --target aarch64 -- --locked
+```
+
+This uses the existing Gradle project and caches, creates a test APK with a generated
+debug key, and needs no owner credentials, device or installation. Do not run
+`android init` over the customized project. A host test does not replace this build
+or device/listening acceptance.
+
+Dependabot configuration alone does not establish successful bot execution. Review
+its update logs/PRs separately from the audit and build workflows. Docker checks
+image tags, not Debian apt packages or SDK/NDK/command-line-tools arguments. Gradle
+wrapper, SDK/Build Tools, Java selection and Rust/Android linkage settings still
+need explicit review; do not treat them as covered by the four updater entries.
+
 ## Core adoption acceptance and device handoff
 
 The September 2026 review starts at player `1ffcc032abdda49165227207b7ddf377125729b1`
