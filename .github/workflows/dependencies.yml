@@ -1,0 +1,111 @@
+name: Dependency audit and Cargo candidates
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+  push:
+    paths:
+      - 'package*.json'
+      - 'src-tauri/Cargo.*'
+      - 'src-tauri/deny.toml'
+      - 'funkot-core.commit'
+      - 'Dockerfile'
+      - 'scripts/*cargo*'
+      - '.github/workflows/dependencies.yml'
+  pull_request:
+    paths:
+      - 'package*.json'
+      - 'src-tauri/Cargo.*'
+      - 'src-tauri/deny.toml'
+      - 'funkot-core.commit'
+      - 'Dockerfile'
+      - 'scripts/*cargo*'
+      - '.github/workflows/dependencies.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  selection:
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.selection.outputs.core }}
+      rust: ${{ steps.selection.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: selection
+        run: |
+          echo "core=$(tr -d '\r\n' < funkot-core.commit)" >> "$GITHUB_OUTPUT"
+          rust=$(sed -n 's/^FROM rust:\([0-9.]*\)-.*$/\1/p' Dockerfile)
+          test -n "$rust"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - name: Audit the complete lockfile (high and critical block)
+        run: npm audit --package-lock-only --include=dev --audit-level=high --json > npm-audit.txt 2>&1
+      - name: Preserve all severities and errors
+        if: always()
+        run: |
+          echo '### npm audit (including development dependencies)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat npm-audit.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: npm-audit
+          path: npm-audit.txt
+          if-no-files-found: error
+
+  cargo-candidates:
+    runs-on: ubuntu-latest
+    needs: selection
+    defaults:
+      run:
+        working-directory: funkot-player
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - uses: actions/checkout@v7
+        with:
+          repository: yasuyuki/funkot-autodj
+          ref: ${{ needs.selection.outputs.core }}
+          path: funkot-autodj-for-ui
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.selection.outputs.rust }}
+      - name: Test candidate checker failure handling
+        run: python3 -m unittest discover -s scripts -p 'test_check_cargo_updates.py'
+      - name: Discover candidates without changing source or lockfiles
+        run: python3 scripts/check-cargo-updates.py
+
+  rust-audit:
+    # Push/PR Rust audits remain in Checks; run here when there is no commit.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: selection
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - uses: actions/checkout@v7
+        with:
+          repository: yasuyuki/funkot-autodj
+          ref: ${{ needs.selection.outputs.core }}
+          path: funkot-autodj-for-ui
+      - name: Verify official core selection
+        working-directory: funkot-player
+        run: ./scripts/check-funkot-core-commit.sh
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: funkot-player/src-tauri/Cargo.toml
+          command-arguments: advisories licenses sources
+          arguments: --locked

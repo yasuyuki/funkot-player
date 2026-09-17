@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ALSA for cpal when building the desktop target
     pkg-config \
     libasound2-dev \
-    openjdk-21-jdk-headless nodejs npm \
+    openjdk-21-jdk-headless nodejs npm python3 \
     curl unzip ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
