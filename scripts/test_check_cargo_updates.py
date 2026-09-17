@@ -60,6 +60,7 @@ class CargoUpdateCheckTest(unittest.TestCase):
         self.cargo.chmod(0o755)
         command = ["python3", "scripts/check-cargo-updates.py", "--cargo", str(self.cargo)]
         run_env = os.environ.copy()
+        run_env.pop("GITHUB_STEP_SUMMARY", None)
         if env:
             run_env.update(env)
         return subprocess.run(command, cwd=self.player, env=run_env, text=True, capture_output=True)
@@ -68,9 +69,14 @@ class CargoUpdateCheckTest(unittest.TestCase):
         result = self.invoke(cargo_output="Updating crates.io index\nLocking 123 packages to latest compatible versions\nnote: no changes")
         self.assertEqual(result.returncode, 0)
         self.assertIn("none", result.stdout)
-        result = self.invoke(cargo_output="    Updating serde v1.0.0 -> v1.0.1")
+        summary = Path(self.tmp.name) / "summary"
+        result = self.invoke(
+            cargo_output="    Updating serde v1.0.0 -> v1.0.1",
+            env={"GITHUB_STEP_SUMMARY": str(summary)},
+        )
         self.assertEqual(result.returncode, 0)
         self.assertIn("candidates", result.stdout)
+        self.assertIn("Updating serde v1.0.0 -> v1.0.1", summary.read_text())
 
     def test_network_resolution_and_mutation_failures(self):
         result = self.invoke(cargo_output="network timeout", exit_code=1)
@@ -100,7 +106,9 @@ class CargoUpdateCheckTest(unittest.TestCase):
 
     def test_missing_cargo_tool(self):
         command = ["python3", "scripts/check-cargo-updates.py", "--cargo", "does-not-exist-cargo"]
-        result = subprocess.run(command, cwd=self.player, text=True, capture_output=True)
+        run_env = os.environ.copy()
+        run_env.pop("GITHUB_STEP_SUMMARY", None)
+        result = subprocess.run(command, cwd=self.player, env=run_env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 5)
         self.assertIn("tool failure", result.stdout)
 
