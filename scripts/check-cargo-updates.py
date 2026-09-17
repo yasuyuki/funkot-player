@@ -42,8 +42,38 @@ def append_summary_output(output: str) -> None:
             handle.write("```text\n" + output.replace("```", "'''" ) + "\n```\n")
 
 
-def snapshot(repository: Path, label: str) -> dict[str, str]:
-    """Hash tracked inputs only; generated target directories are not inputs."""
+def snapshot_player(root: Path) -> dict[str, str]:
+    """Hash only the player's Cargo inputs, without player Git metadata.
+
+    This deliberately excludes generated Android trees (including local signing
+    configuration) and frontend files: Cargo update only resolves the manifest,
+    lockfile, configuration, build script, and Rust source inputs listed here.
+    """
+    result: dict[str, str] = {}
+    for path in (
+        root / "funkot-core.commit",
+        root / ".cargo" / "config",
+        root / ".cargo" / "config.toml",
+        root / "src-tauri" / "Cargo.toml",
+        root / "src-tauri" / "Cargo.lock",
+        root / "src-tauri" / "build.rs",
+        root / "src-tauri" / ".cargo" / "config",
+        root / "src-tauri" / ".cargo" / "config.toml",
+    ):
+        if path.is_file():
+            result[f"player/{path.relative_to(root)}"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    source = root / "src-tauri" / "src"
+    for directory, subdirectories, filenames in os.walk(source):
+        subdirectories[:] = [name for name in subdirectories if name != "target"]
+        for filename in filenames:
+            path = Path(directory) / filename
+            if path.is_file():
+                result[f"player/{path.relative_to(root)}"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+
+
+def snapshot_tracked(repository: Path, label: str) -> dict[str, str]:
+    """Hash the real core's tracked source, using its mounted Git metadata."""
     result: dict[str, str] = {}
     listed = subprocess.run(
         ["git", "-C", str(repository), "ls-files", "-z"], text=False, capture_output=True, check=True
@@ -81,14 +111,14 @@ def main() -> int:
         report("core failure", (core.stderr or core.stdout).strip().replace("\n", " "))
         return 20
 
-    before = snapshot(root, "player") | snapshot(expected_core, "core")
+    before = snapshot_player(root) | snapshot_tracked(expected_core, "core")
     command = [args.cargo, "update", "--manifest-path", "src-tauri/Cargo.toml", "--dry-run", "--color", "never"]
     try:
         cargo = subprocess.run(command, cwd=root, env=env, text=True, capture_output=True)
     except FileNotFoundError:
         report("tool failure", f"Cargo executable was not found: {args.cargo}")
         return 5
-    after = snapshot(root, "player") | snapshot(expected_core, "core")
+    after = snapshot_player(root) | snapshot_tracked(expected_core, "core")
     if before != after:
         changed = sorted(name for name in set(before) | set(after) if before.get(name) != after.get(name))
         report("mutation failure", "Cargo changed protected source, manifest, or lockfile: " + ", ".join(changed))

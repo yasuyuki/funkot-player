@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
@@ -48,10 +49,10 @@ class CargoUpdateCheckTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def invoke(self, *, cargo_output="", exit_code=0, env=None, mutate=False, mutate_core=False):
+    def invoke(self, *, cargo_output="", exit_code=0, env=None, mutate=None, mutate_core=False):
         body = "#!/bin/sh\n"
         if mutate:
-            body += "printf changed > src-tauri/Cargo.lock\n"
+            body += f"printf changed > {mutate}\n"
         if mutate_core:
             body += "printf changed > ../funkot-autodj-for-ui/core.rs\n"
         body += f"printf '%s\\n' {cargo_output!r}\nexit {exit_code}\n"
@@ -78,18 +79,36 @@ class CargoUpdateCheckTest(unittest.TestCase):
         result = self.invoke(cargo_output="failed to select a version", exit_code=1)
         self.assertEqual(result.returncode, 3)
         self.assertIn("resolution failure", result.stdout)
-        result = self.invoke(mutate=True)
-        self.assertEqual(result.returncode, 21)
-        self.assertIn("mutation failure", result.stdout)
+        for path in ("src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/src/lib.rs"):
+            with self.subTest(path=path):
+                result = self.invoke(mutate=path)
+                self.assertEqual(result.returncode, 21)
+                self.assertIn("mutation failure", result.stdout)
         result = self.invoke(mutate_core=True)
         self.assertEqual(result.returncode, 21)
         self.assertIn("core/core.rs", result.stdout)
+
+    def test_android_generated_tree_is_not_a_cargo_input(self):
+        credential = self.player / "src-tauri" / "gen" / "android" / "keystore.properties"
+        credential.parent.mkdir(parents=True)
+        credential.write_text("synthetic-not-read\n")
+        spec = importlib.util.spec_from_file_location("candidate_check", SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        self.assertNotIn("player/src-tauri/gen/android/keystore.properties", module.snapshot_player(self.player))
 
     def test_missing_cargo_tool(self):
         command = ["python3", "scripts/check-cargo-updates.py", "--cargo", "does-not-exist-cargo"]
         result = subprocess.run(command, cwd=self.player, text=True, capture_output=True)
         self.assertEqual(result.returncode, 5)
         self.assertIn("tool failure", result.stdout)
+
+    def test_player_snapshot_does_not_need_git_metadata(self):
+        (self.player / ".git").rename(self.player / ".git-not-mounted")
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("none", result.stdout)
 
     def test_rejects_candidate_and_wrong_sibling(self):
         result = self.invoke(env={"FUNKOT_CORE_CANDIDATE_SHA": PIN})
