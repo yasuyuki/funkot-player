@@ -2,7 +2,7 @@
 #
 # Everything the Android build needs lives in here so the host stays clean.
 # Prefer ./dev.sh over calling docker directly.
-FROM rust:1.93-slim-trixie
+FROM rust:1.98-slim-trixie
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # C++ toolchain and libclang for signalsmith-stretch (cc + bindgen)
