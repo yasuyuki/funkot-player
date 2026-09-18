@@ -1,6 +1,6 @@
 [package]
 name = "funkot-player"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 description = "Auto-DJ music player for Funkot, built on funkot-core"
@@ -27,6 +27,8 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+unicode-normalization = "0.1"
+tempfile = "3"
 cpal = "0.18"
 log = "0.4"
 # Embedded tags for Android MediaSession title/artist (probe only; no decode).

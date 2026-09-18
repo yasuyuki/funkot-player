@@ -10,8 +10,12 @@ ignore 対象は、消えたときのコストで分かれる。**保護する�
 | 高コストな派生 | `testdata/*-shots/`（UI 確認のスクショ、計 27MB）、`testdata/funkot-transfer*.log`、`testdata/push_manifest_p10.txt` | 消してよい。smoke を流し直せば取れる |
 | キャッシュ・ローカル状態 | `.desktop-data/{CacheStorage,WebKitCache,storage,logs,queue.json,session.json,window.json,history.json,play-log.jsonl}`、`.win-run.stamp` | 消してよい |
 | 手動編集を含む解析キャッシュ | `.desktop-data/funkot-cache/` | 自動解析だけとは限らない。下記の手動情報を確認して保全する |
-| **再生成不可** | `HANDOFF.md`、`ISSUES.md` | **リポジトリ外の private store が正。** 所在は `HANDOFF.md` |
+| **再生成不可** | `HANDOFF.md`、`ISSUES.md`、data directory の `track-tags.json` | **保全する。** `track-tags.json` は利用者が付けた制作年・タグ追加・自動タグの除外を content hash ごとに持つ。解析 cache の削除や再解析では再生成できない。破損・未知 schema のときは原本を上書きせず、タグ編集だけを停止して再生を続ける。 |
 | 秘密 | `.secrets/upload-keystore.jks`、`src-tauri/gen/android/keystore.properties` | **リポジトリにもバックアップにも入れない。** 別途退避済み。`scripts/pack-signing-backup.sh` 参照 |
+
+`track-tags.json` の編集中は同じ directory の `track-tags.lock` で複数 process の read-modify-write を直列化する。lockfile が残っている場合は、タグ編集を busy として止め、既存の再生を続ける。クラッシュ後の復旧では、同じ data directory を使う player process がすべて終了していることを確認してから、その lockfile だけを除去する。破損または未知 schema の JSON はその前に別の安全な場所へコピーし、元ファイルを置換しない。
+
+正常な backup を復元するときも player を終了し、破損・未知 schema の原本を保全した後、backup の schema に対応する player で同じ data directory へ復元する。自動で空の JSON に置き換えない。今回タグの export/import 機能はなく、既存 feedback ZIP に `track-tags.json` を自動追加しない。共有範囲は別途判断する。
 
 player の手動補正は data directory の `library.json` に保存し、解析 cache にも反映する。
 `library.json`、ラベル、手動フラグを持つ cache を、再生成可能な自動解析だけとみなして

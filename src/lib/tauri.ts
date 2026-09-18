@@ -97,6 +97,7 @@ export interface PlayerState {
 /// collide across subdirectories now that scanning is recursive).
 export interface TrackRow {
   path: string;
+  content_hash: string | null;
   title: string;
   artist: string;
   duration_secs: number | null;
@@ -117,6 +118,59 @@ export interface TrackRow {
   played_at_ms: number | null;
   /// Stable library-addition batch; null until a scan can persist it.
   added_order: number | null;
+}
+
+export type TagKind = "genre" | "custom";
+export interface Tag { kind: TagKind; value: string }
+export type TagYear = { mode: "auto" } | { mode: "set"; value: number } | { mode: "unset" };
+export interface TagPatch { year_change?: TagYear; add?: Tag[]; remove?: Tag[] }
+export interface TagTarget { path: string; expected_hash: string }
+export interface EffectiveTag {
+  key: string;
+  kind: TagKind | "year";
+  value: string;
+  origin: "embedded" | "manual" | "both";
+}
+export interface YearCandidate {
+  raw_key: string;
+  raw_value: string;
+  semantic: "recording" | "generic" | "release" | "original";
+  rank: number;
+}
+export interface TrackTagState {
+  content_hash: string | null;
+  effective: EffectiveTag[];
+  manual: { year: TagYear; manual_additions: Tag[]; suppressed_auto_tags: Tag[] };
+  auto_year: number | null;
+  year_status: "resolved" | "missing" | "future" | "conflict" | "invalid";
+  metadata_status: "pending" | "ready" | "error";
+  candidates: YearCandidate[];
+  diagnostics: string[];
+}
+export interface TrackTagsSnapshot {
+  revision: string;
+  ready: boolean;
+  store_status: string;
+  tracks: Record<string, TrackTagState>;
+}
+export interface TagUpdateRequest {
+  targets: TagTarget[];
+  expected_revision: string;
+  patch: TagPatch;
+}
+export interface TagUpdateResult {
+  snapshot: TrackTagsSnapshot;
+  changed: number;
+  no_op: number;
+}
+export type TagErrorCode = "invalid_input" | "identity_unavailable" | "identity_changed"
+  | "stale_revision" | "store_read_only" | "persist_failed" | "busy";
+export interface TagCommandError { code: TagErrorCode; message: string }
+export function listTrackTags(): Promise<TrackTagsSnapshot> {
+  return ipc.invoke("list_track_tags");
+}
+export function updateTrackTags(request: TagUpdateRequest): Promise<TagUpdateResult> {
+  return ipc.invoke("update_track_tags", { request });
 }
 
 export function appDirs(): Promise<AppDirs> {

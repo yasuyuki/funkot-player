@@ -114,6 +114,114 @@ export const en = {
     `Analyzing ${done}/${total}: ${name}`,
   noTracks: "No tracks",
   addToQueueLabel: (title: string) => `Add ${title} to the queue`,
+  tagEditorTitle: (title: string) => `Edit tags: ${title}`,
+  tagEditorScope: (count: number) =>
+    count === 1 ? "This track" : `${count} displayed selected tracks`,
+  tagEdit: "Edit tags",
+  tagEditSelected: "Edit tags",
+  tagEditCount: (count: number) => `Edit visible selected (${count})`,
+  tagEnqueueCount: (count: number) => `Add to queue (${count})`,
+  tagIdentityUnavailable:
+    "A resolved content identity is needed before tags can be edited.",
+  tagYear: "Production year",
+  tagNoChange: "Do not change",
+  tagYearAuto: "Use automatic year",
+  tagYearUnset: "Keep year unset",
+  tagYearSet: "Set year",
+  tagKind: "Kind",
+  tagGenre: "Genre",
+  tagCustom: "Custom",
+  tagValue: "Tag",
+  tagAdd: "Add tag",
+  tagSave: "Save",
+  tagSaving: "Saving…",
+  tagReload: "Reload tags",
+  tagError: (code: string) =>
+    ({
+      stale_revision:
+        "Tags changed elsewhere. Reload and review the same targets.",
+      store_read_only: "The tag store is read-only.",
+      busy: "Tag editing is busy.",
+      identity_changed: "A selected track changed.",
+      identity_unavailable: "This track is not ready for tag editing.",
+      persist_failed: "Could not save tags.",
+      invalid_input: "Check the tag value.",
+    })[code] ?? "Could not save tags",
+  tagSaved: (count: number) =>
+    count === 1 ? "Tag saved" : `Tags saved for ${count} tracks`,
+  tagNoop: "No tag changes",
+  tagFileUntouched:
+    "Tags classify tracks in this player. Audio files are not changed.",
+  tagSharedIdentity: (count: number) => `Copies of the same audio share tags; ${count} distinct tracks will be updated.`,
+  tagSnapshotChanged: "Tags changed elsewhere",
+  tagReloading: "Reloading tags…",
+  tagReloaded: "Tags reloaded",
+  tagEffectiveYear: "Effective year",
+  tagMixed: "Mixed",
+  tagUnset: "Unset",
+  tagEmpty: "None",
+  tagManualMode: (mode: string) =>
+    `Year mode: ${{ auto: "automatic", set: "set", unset: "unset" }[mode] ?? "automatic"}`,
+  tagOrigin: (origin: string) =>
+    `Source: ${{ embedded: "embedded metadata", manual: "manual", both: "both" }[origin] ?? "unknown"}`,
+  tagMetadataStatus: (status: string) =>
+    ({
+      pending: "Metadata pending",
+      ready: "Metadata ready",
+      error: "Metadata error",
+    })[status] ?? "Metadata unavailable",
+  tagYearStatus: (status: string) =>
+    ({
+      resolved: "Year resolved",
+      missing: "Year missing",
+      invalid: "Year invalid",
+      future: "Future year",
+      conflict: "Conflicting years",
+    })[status] ?? "Year unavailable",
+  tagSemantic: (semantic: string) =>
+    ({
+      recording: "Recording",
+      generic: "Date/year",
+      release: "Release",
+      original: "Original release",
+    })[semantic] ?? "Other",
+  tagYearCandidates: "Year candidates",
+  tagAdoptYear: (year: number) => `Use ${year}`,
+  tagCurrentTags: "Current tags",
+  tagPresent: (count: number, total: number) =>
+    count === total
+      ? `Common to all ${total}`
+      : `Present in ${count} of ${total} / mixed`,
+  tagRemoveScope:
+    "Removal applies to every selected track and suppresses a matching automatic tag after a scan.",
+  tagSuppressed: "Suppressed",
+  tagRestore: "Restore",
+  tagPendingAdds: "Pending additions",
+  tagPendingRemovals: "Pending removals",
+  tagUndo: "Undo",
+  tagRemove: (value: string) => `Remove ${value}`,
+  tagLimits:
+    "128 Unicode characters per value; 128 effective genre/custom tags.",
+  tagDiagnostics: "Metadata details",
+  tagFilterToggle: "Tags",
+  tagFilterTitle: "Filter by tags",
+  tagFilterCandidate: "Tag candidate",
+  tagFilterPick: "Choose a tag",
+  tagFilterAdd: "Add condition",
+  tagCandidatePopulation: "Candidates and counts cover the whole current library, before filtering.",
+  tagCandidateCount: (count: number) => `${count} tracks`,
+  tagFilterMode: "Match selected tags",
+  tagMatchAll: "AND — all selected tags",
+  tagMatchAny: "OR — any selected tag",
+  tagFilterUnset: "Production year unset",
+  tagSelectedFilters: "Selected tag conditions",
+  tagFilterClear: "Clear tag conditions",
+  tagFilterChoose: (kind: string, value: string) => `Filter by ${kind}: ${value}`,
+  tagFilterRemove: (kind: string, value: string) => `Remove condition ${kind}: ${value}`,
+  tagMore: (count: number) => `View ${count} more tags`,
+  tagYearsAllHint: "A track cannot have two production years. Use OR to match either year.",
+  tagFilterLoadFailed: "Tags could not be loaded. Existing results may be out of date; rescan to retry.",
+  tagNoMatches: "No matching tracks. Adjust the text, new-only or tag conditions.",
   emptyHintDesktop:
     "Open the Music folder, put audio files in it, then pick “Rescan” from the ⋮ menu to bring them into the library.",
   emptyHintAndroid:

@@ -14,18 +14,32 @@
     addAll,
     clearSelection,
     selectAllState,
-    selectedInOrder,
     toggleSelected,
   } from "../lib/selection";
   import SelectionBar from "./SelectionBar.svelte";
   import TrackMenu from "./TrackMenu.svelte";
   import { createLongPress, type MenuPoint } from "../lib/track-menu";
+  import { tagTargets, tagEditSelection, enqueueSelection } from "../lib/tag-edit";
+  import { tagEditorSession } from "../lib/tag-editor.svelte";
+  import { buildTagIndex, matchesTagFilter, type TagChoice, type TagFilter as TagFilterState } from "../lib/tag-filter";
+  import TagFilter from "./TagFilter.svelte";
+  import TagChips from "./TagChips.svelte";
 
   let t = $derived(i18n.t);
 
   let query = $state("");
   let sortKey = $state<LibrarySortKey>("recent");
   let newOnly = $state(false);
+  let selectedTags = $state<TagChoice[]>([]);
+  let tagMode = $state<"all" | "any">("all");
+  let yearUnset = $state(false);
+  // This index depends on library/snapshot changes, never the search text.
+  let tagIndex = $derived(buildTagIndex(store.libraryList, store.trackTags));
+  let tagFilter = $derived<TagFilterState>({ keys: selectedTags.map(tag => tag.key), mode: tagMode, yearUnset });
+  function chooseTag(tag: TagChoice) {
+    if (!selectedTags.some(item => item.key === tag.key)) selectedTags = [...selectedTags, { key: tag.key, kind: tag.kind, value: tag.value }];
+  }
+  function clearTagFilters() { selectedTags = []; yearUnset = false; }
   let busy = $state<Record<string, boolean>>({});
   /// A mode rather than a permanent checkbox column: on a 412px phone the row
   /// already carries title, artist, duration and the `+` button, and a
@@ -70,7 +84,7 @@
     const arrivalPaths = store.newArrivalPaths;
     const filtered = store.libraryList.filter((r) => {
       if (newOnly && !arrivalPaths.has(r.path)) return false;
-      return matches(r, q);
+      return matches(r, q) && matchesTagFilter(tagIndex, r.path, tagFilter);
     });
     return sortLibraryRows(filtered, sortKey);
   });
@@ -80,18 +94,22 @@
   ///
   /// This -- not `rows` -- is the universe the bulk add works over, so typing
   /// in the search box cannot silently make the button add nothing.
-  let addOrder = $derived(
-    sortLibraryRows(store.libraryList, sortKey)
-      .filter((r) => !gated(r))
-      .map((r) => r.path),
-  );
+  let enqueuePaths = $derived(enqueueSelection(sortLibraryRows(store.libraryList, sortKey), selected, store.allowNonFunkot));
 
   /// Rows currently on screen: what "select all" acts on. Scoping a bulk
   /// action is what the search box is for; "select all 5,000" is never the
   /// intent.
-  let visiblePaths = $derived(rows.filter((r) => !gated(r)).map((r) => r.path));
+  // Tag editing is independent of playback eligibility: a non-Funkot row is
+  // still visible, selectable, and editable when it has a resolved hash.
+  let visiblePaths = $derived(rows.map((r) => r.path));
 
-  let selectedCount = $derived(selectedInOrder(selected, addOrder).length);
+  let selectedCount = $derived(selected.size);
+  let tagSelectedRows = $derived(tagEditSelection(rows, selected));
+  let enqueueCount = $derived(enqueuePaths.length);
+  let visibleTagCount = $derived(tagSelectedRows.filter((row) => {
+    const state = store.trackTags?.tracks[row.path];
+    return !!state?.content_hash && state.content_hash === row.content_hash;
+  }).length);
   let allState = $derived(selectAllState(selected, visiblePaths));
 
   function toggleSort() {
@@ -110,10 +128,17 @@
   function onToggleRow(path: string) {
     selected = toggleSelected(selected, path);
   }
+  function openTagEditor(rowsToEdit: TrackRow[], title: string, opener: HTMLElement | null) {
+    const snapshot = store.trackTags;
+    if (!snapshot) { toast.notify(t.tagError("identity_unavailable")); return; }
+    const targets = tagTargets(rowsToEdit, snapshot);
+    if (targets.length !== rowsToEdit.length) { toast.notify(t.tagError("identity_unavailable")); return; }
+    tagEditorSession.open({ targets, revision: snapshot.revision, title, initialStates: targets.map((target) => snapshot.tracks[target.path]!), opener });
+  }
 
   async function onAddSelected() {
     if (addManyBusy) return;
-    const paths = selectedInOrder(selected, addOrder);
+    const paths = enqueuePaths;
     if (paths.length === 0) return;
     addManyBusy = true;
     try {
@@ -220,17 +245,28 @@
       aria-label={t.selectModeLabel}
       onclick={toggleSelectMode}
     >{t.selectMode}</button>
+    <TagFilter candidates={tagIndex.candidates} selected={selectedTags} mode={tagMode} {yearUnset}
+      onchoose={chooseTag} onremove={key => selectedTags = selectedTags.filter(tag => tag.key !== key)}
+      onmode={mode => tagMode = mode} onunset={enabled => yearUnset = enabled} onclear={clearTagFilters} />
     {#if selectMode}
       <SelectionBar
-        count={selectedCount}
+        totalSelected={selectedCount}
+        {enqueueCount}
+        {visibleTagCount}
+        tagUnavailable={visibleTagCount !== tagSelectedRows.length}
         {allState}
         busy={addManyBusy}
         onSelectAll={() => (selected = addAll(selected, visiblePaths))}
         onClear={() => (selected = clearSelection())}
         onAdd={onAddSelected}
+        onEditTags={(event) => openTagEditor(tagSelectedRows, t.tagEditSelected, event.currentTarget as HTMLElement)}
       />
     {/if}
   </div>
+
+  {#if !store.trackTags || !store.trackTags.ready}<p class="progress" role="status">{t.tagMetadataStatus("pending")}</p>{/if}
+  {#if store.trackTagsError}<p class="progress" role="alert">{t.tagFilterLoadFailed}</p>{/if}
+  {#if store.libraryList.length > 0 && rows.length === 0}<p class="empty" role="status">{t.tagNoMatches}</p>{/if}
 
   {#if libraryScan && !musicDirNeeded}
     <p class="progress">
@@ -281,7 +317,7 @@
       {/if}
     </div>
   {:else}
-    <!-- Fixed row height keeps a virtual-list swap possible later (YAGNI now). -->
+    <!-- Rows grow to fit compact tags and identity status without overlap. -->
     <ul class="list">
       {#each rows as row (row.path)}
         <li
@@ -294,14 +330,12 @@
           oncontextmenu={(e) => press.context(e, row.path)}
         >
           {#if selectMode}
-            <!-- Disabled by the same predicate that disables `+`, so a gated
-                 row cannot be selected and the host's `rejected` count stays
-                 at zero unless analysis finished between render and tap. -->
+            <!-- Queue selection remains available; tag eligibility is checked
+                 independently against the committed tag snapshot. -->
             <input
               type="checkbox"
               class="pick"
               checked={selected.has(row.path)}
-              disabled={gated(row)}
               onchange={() => onToggleRow(row.path)}
               aria-label={t.selectTrackLabel(row.title)}
             />
@@ -313,10 +347,14 @@
                 <span class="new-badge">NEW</span>
               {/if}
             </div>
+            {#if selectMode && (!row.content_hash || store.trackTags?.tracks[row.path]?.content_hash !== row.content_hash)}
+              <span class="identity-unavailable">{t.tagIdentityUnavailable}</span>
+            {/if}
             <div class="sub">
               <span class="artist">{row.artist || t.noLabel}</span>
               <span class="dur">{formatDuration(row.duration_secs)}</span>
             </div>
+            <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} />
           </div>
           {#if !selectMode}
             <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
@@ -377,7 +415,7 @@
   }
 
   .search {
-    flex: 1;
+    flex: 1 1 14rem;
     min-width: 0;
     font-size: var(--font-size-md);
     padding: var(--space-sm) var(--space-md);
@@ -386,6 +424,7 @@
     background: var(--color-menu-bg);
     color: var(--color-text);
   }
+  .identity-unavailable { font-size: var(--font-size-sm); color: var(--color-text-dim); overflow-wrap: anywhere; }
 
   .filter,
   .sort {
@@ -467,7 +506,8 @@
     display: flex;
     align-items: center;
     gap: var(--space-md);
-    height: var(--library-row-height);
+    min-height: var(--library-row-height);
+    padding: var(--space-sm) 0;
     border-bottom: 1px solid var(--color-border);
     user-select: none;
     -webkit-user-select: none;

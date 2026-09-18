@@ -9,3 +9,7 @@ before changing the member.
 This interactive working-set boundary is separate from isolated
 `wsl-agent-lifecycle` clone management. Do not access `.secrets/`, copy
 authentication, or handle signing material. Android builds, signing, Docker
+
+For UI/layout/interaction changes, use [.claude/skills/ui-design/SKILL.md](.claude/skills/ui-design/SKILL.md)
+and [docs/ui-design.md](docs/ui-design.md) before implementation and for rendered-screen review.
+The skill defines the lightweight exception for changes with no layout or hierarchy impact.

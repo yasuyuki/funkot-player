@@ -1,0 +1,56 @@
+name: Android dependency build (no owner signing)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'package*.json'
+      - 'src-tauri/Cargo.*'
+      - 'funkot-core.commit'
+      - 'src-tauri/gen/android/**'
+      - 'src-tauri/tauri*.json'
+      - 'src-tauri/build.rs'
+      - 'Dockerfile'
+      - 'dev.sh'
+      - '.github/workflows/android-dependencies.yml'
+  push:
+    paths:
+      - '.github/workflows/android-dependencies.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - id: core
+        working-directory: funkot-player
+        run: echo "sha=$(tr -d '\r\n' < funkot-core.commit)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: yasuyuki/funkot-autodj
+          ref: ${{ steps.core.outputs.sha }}
+          path: funkot-autodj-for-ui
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: funkot-player
+          load: true
+          tags: funkot-player-dev
+          cache-from: type=gha,scope=player-dev
+          cache-to: type=gha,mode=max,scope=player-dev
+      - name: Build Android arm64 with the existing Gradle project
+        working-directory: funkot-player
+        run: |
+          ./dev.sh sh -ec 'npm ci; npx tauri android build --ci --debug --apk --target aarch64 -- --locked'
+          git diff --exit-code -- src-tauri/Cargo.lock package-lock.json src-tauri/gen/android
+      - name: Retain the test APK (generated debug key, no installation)
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-arm64-debug
+          path: funkot-player/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

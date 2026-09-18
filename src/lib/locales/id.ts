@@ -103,6 +103,113 @@ export const id: Messages = {
   analyzing: (done, total, name) => `Menganalisis ${done}/${total}: ${name}`,
   noTracks: "Tidak ada lagu",
   addToQueueLabel: (title) => `Tambahkan ${title} ke antrean`,
+  tagEditorTitle: (title) => `Sunting tag: ${title}`,
+  tagEditorScope: (count) =>
+    count === 1 ? "Lagu ini" : `${count} lagu terpilih yang terlihat`,
+  tagEdit: "Sunting tag",
+  tagEditSelected: "Sunting tag",
+  tagEditCount: (count) => `Sunting pilihan terlihat (${count})`,
+  tagEnqueueCount: (count) => `Tambahkan ke antrean (${count})`,
+  tagIdentityUnavailable:
+    "Identitas konten yang sudah terselesaikan diperlukan untuk menyunting tag.",
+  tagYear: "Tahun produksi",
+  tagNoChange: "Jangan ubah",
+  tagYearAuto: "Gunakan tahun otomatis",
+  tagYearUnset: "Biarkan tahun kosong",
+  tagYearSet: "Atur tahun",
+  tagKind: "Jenis",
+  tagGenre: "Genre",
+  tagCustom: "Kustom",
+  tagValue: "Tag",
+  tagAdd: "Tambah tag",
+  tagSave: "Simpan",
+  tagSaving: "Menyimpan…",
+  tagReload: "Muat ulang tag",
+  tagError: (code) =>
+    ({
+      stale_revision:
+        "Tag berubah di tempat lain. Muat ulang dan periksa target yang sama.",
+      store_read_only: "Penyimpanan tag hanya-baca.",
+      busy: "Penyuntingan tag sedang sibuk.",
+      identity_changed: "Lagu yang dipilih telah berubah.",
+      identity_unavailable: "Lagu ini belum siap disunting.",
+      persist_failed: "Tidak dapat menyimpan tag.",
+      invalid_input: "Periksa nilai tag.",
+    })[code] ?? "Tidak dapat menyimpan tag.",
+  tagSaved: (count) =>
+    count === 1 ? "Tag disimpan" : `Tag disimpan untuk ${count} lagu`,
+  tagNoop: "Tidak ada perubahan tag",
+  tagFileUntouched:
+    "Tag mengelompokkan lagu di pemutar ini. Berkas audio tidak diubah.",
+  tagSharedIdentity: (count) => `Salinan audio yang sama berbagi tag; ${count} lagu berbeda akan diperbarui.`,
+  tagSnapshotChanged: "Tag berubah",
+  tagReloading: "Memuat ulang tag…",
+  tagReloaded: "Tag dimuat ulang",
+  tagEffectiveYear: "Tahun efektif",
+  tagMixed: "Campuran",
+  tagUnset: "Kosong",
+  tagEmpty: "Tidak ada",
+  tagManualMode: (mode) =>
+    `Manual: ${{ auto: "otomatis", set: "diatur", unset: "kosong tetap" }[mode] ?? "otomatis"}`,
+  tagOrigin: (origin) =>
+    `Sumber: ${{ embedded: "metadata tertanam", manual: "manual", both: "keduanya" }[origin] ?? "tidak diketahui"}`,
+  tagMetadataStatus: (status) =>
+    ({
+      pending: "Metadata menunggu",
+      ready: "Metadata siap",
+      error: "Metadata bermasalah",
+    })[status] ?? "Metadata tidak tersedia",
+  tagYearStatus: (status) =>
+    ({
+      resolved: "Tahun ditentukan",
+      missing: "Tahun tidak ada",
+      invalid: "Tahun tidak valid",
+      future: "Tahun masa depan",
+      conflict: "Tahun bertentangan",
+    })[status] ?? "Tahun tidak tersedia",
+  tagSemantic: (semantic) =>
+    ({
+      recording: "Rekaman",
+      generic: "Tanggal/tahun",
+      release: "Rilis",
+      original: "Rilis asli",
+    })[semantic] ?? "Lainnya",
+  tagYearCandidates: "Kandidat tahun",
+  tagAdoptYear: (year) => `Gunakan ${year}`,
+  tagCurrentTags: "Tag saat ini",
+  tagPresent: (count, total) =>
+    count === total
+      ? `Umum untuk semua ${total}`
+      : `Ada pada ${count} dari ${total} / campuran`,
+  tagRemoveScope:
+    "Penghapusan berlaku untuk semua lagu terpilih dan menekan tag otomatis yang sama setelah pemindaian.",
+  tagSuppressed: "Ditekan",
+  tagRestore: "Pulihkan",
+  tagPendingAdds: "Tambahan tertunda",
+  tagPendingRemovals: "Penghapusan tertunda",
+  tagUndo: "Urungkan",
+  tagRemove: (value) => `Hapus ${value}`,
+  tagLimits: "128 karakter Unicode per nilai; 128 tag genre/kustom efektif.",
+  tagDiagnostics: "Detail metadata",
+  tagFilterToggle: "Tag",
+  tagFilterTitle: "Filter menurut tag",
+  tagFilterCandidate: "Kandidat tag",
+  tagFilterPick: "Pilih tag",
+  tagFilterAdd: "Tambahkan kondisi",
+  tagCandidatePopulation: "Kandidat dan jumlah mencakup seluruh pustaka saat ini sebelum difilter.",
+  tagCandidateCount: (count) => `${count} lagu`,
+  tagFilterMode: "Cocokkan tag yang dipilih",
+  tagMatchAll: "AND — semua tag yang dipilih",
+  tagMatchAny: "OR — salah satu tag yang dipilih",
+  tagFilterUnset: "Tahun produksi kosong",
+  tagSelectedFilters: "Kondisi tag yang dipilih",
+  tagFilterClear: "Hapus semua kondisi tag",
+  tagFilterChoose: (kind, value) => `Filter menurut ${kind}: ${value}`,
+  tagFilterRemove: (kind, value) => `Hapus kondisi ${kind}: ${value}`,
+  tagMore: (count) => `Lihat ${count} tag lainnya`,
+  tagYearsAllHint: "Satu lagu hanya memiliki satu tahun produksi. Pilih OR untuk mencocokkan salah satu tahun.",
+  tagFilterLoadFailed: "Tag tidak dapat dimuat. Hasil mungkin sudah lama; pindai ulang untuk mencoba lagi.",
+  tagNoMatches: "Tidak ada lagu yang cocok. Ubah teks, lagu baru, atau kondisi tag.",
   emptyHintDesktop:
     "Buka folder Musik, taruh berkas audio di dalamnya, lalu pilih “Pindai ulang” dari menu ⋮ untuk memasukkannya ke pustaka.",
   emptyHintAndroid:

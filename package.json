@@ -1,19 +1,21 @@
 {
   "name": "funkot-player",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --test src/lib/arrivals.test.mjs src/lib/library-empty.test.mjs src/lib/library-sort.test.mjs src/lib/locale.test.mjs src/lib/play-history.test.mjs src/lib/selection.test.mjs src/lib/track-menu.test.mjs src/lib/tauri.test.mjs src/lib/history-confirm.test.mjs",
-    "tauri": "tauri"
+    "test": "node --test src/lib/arrivals.test.mjs src/lib/library-empty.test.mjs src/lib/library-sort.test.mjs src/lib/locale.test.mjs src/lib/play-history.test.mjs src/lib/selection.test.mjs src/lib/track-menu.test.mjs src/lib/tauri.test.mjs src/lib/history-confirm.test.mjs src/lib/track-tags-client.test.mjs src/lib/tag-edit.test.mjs src/lib/tag-filter.test.mjs",
+    "tauri": "tauri",
+    "ui:capture": "playwright test"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@sveltejs/vite-plugin-svelte": "^5",
     "@tauri-apps/cli": "^2",
     "svelte": "^5",
