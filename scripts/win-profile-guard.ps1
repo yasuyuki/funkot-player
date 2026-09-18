@@ -225,7 +225,7 @@ function Invoke-Restore {
 
 function Invoke-Run {
     if (-not (Test-Path -LiteralPath $Exe)) {
-        throw "exe missing: $Exe (deploy with ./scripts/win-run.sh first)"
+        throw "exe missing: $Exe (deploy with .\scripts\win-build.ps1 first)"
     }
     if ((Get-FunkotTestProcesses)) {
         throw "funkot-player already running: $Exe"

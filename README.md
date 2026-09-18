@@ -365,14 +365,31 @@ GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
 - This is the Linux path. **Windows installers are built in CI** (see Shipping a
   GitHub Release). **macOS builds are still untried.**
 
-### Windows host smoke (WSL → native exe)
+### Windows host smoke (native checkout)
 
-Build/deploy to `C:\funkot-player-test`, then run with an AppData guard so the
-live profile is restored when the window closes:
+Use the Windows-native `funkot-player` checkout in the selected managed working
+set, with its declared `funkot-autodj-for-ui` sibling at the required core
+revision. Verify that working set before building. If those checkouts are not
+available, provision them through the workspace's registered work/branch entry;
+this product does not create or synchronize a Windows source mirror.
 
-```sh
-./scripts/win-run.sh                         # build if needed, deploy
-./scripts/win-profile-guard.sh -Run -ReplaceBackup
+Open PowerShell in that player checkout and build/deploy to
+`C:\funkot-player-test`:
+
+```powershell
+.\scripts\win-build.ps1
+```
+
+The former `win-run.sh` synchronization entry has been removed: its fixed
+`C:\src` copies were outside the managed working set and could overwrite native
+Git metadata with a Linux worktree's `.git` file. Do not recreate those mirrors
+or rsync a source checkout onto a native Git checkout.
+
+In the same PowerShell and native checkout, the profile guard restores the live
+profile when the window closes:
+
+```powershell
+.\scripts\win-profile-guard.ps1 -Run -ReplaceBackup
 ```
 
 `-Run` backs up settings JSON + `Music\` + `funkot-cache\` to
