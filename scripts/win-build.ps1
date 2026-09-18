@@ -89,7 +89,7 @@ if (-not $DeployOnly) {
         if (-not $libclangBin) {
             throw @"
 libclang.dll not found (needed for bindgen / signalsmith-stretch).
-Install LLVM once on Windows, then re-run ./scripts/win-run.sh:
+Install LLVM once on Windows, then re-run .\scripts\win-build.ps1:
 
   winget install --id LLVM.LLVM -e
 "@
