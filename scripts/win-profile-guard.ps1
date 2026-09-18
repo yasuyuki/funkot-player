@@ -11,7 +11,7 @@
 # .guard-stash. The next -Backup / -Restore / -Run puts that stash back
 # before touching backup or live.
 #
-# Usage (from Windows or via scripts/win-profile-guard.sh):
+# Usage (PowerShell in the managed Windows player checkout):
 #   .\scripts\win-profile-guard.ps1 -Backup
 #   .\scripts\win-profile-guard.ps1 -Restore
 #   .\scripts\win-profile-guard.ps1 -Run -ReplaceBackup
