@@ -2,17 +2,18 @@
 """Generate small, silent, synthetic audio metadata fixtures.
 
 The script requires an ffmpeg binary supplied by FIXTURE_FFMPEG.  It never
-reads music from the network and writes only beneath src-tauri/tests/data.
+reads music from the network and writes only beneath src-tauri/tests/fixtures/metadata.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 from mutagen.flac import FLAC
-from mutagen.id3 import ID3, TCON, TDAT, TDRC, TIME, TIT2, TORY, TPE1
+from mutagen.id3 import ID3, TCON, TDAT, TDRC, TIME, TIT2, TORY, TPE1, TYER
 from mutagen.mp4 import MP4
 from mutagen.oggvorbis import OggVorbis
 
@@ -32,6 +33,22 @@ def encode(name: str, codec: str, extra: list[str] | None = None) -> Path:
     cmd.extend(["-y", str(path)])
     subprocess.run(cmd, check=True)
     return path
+
+
+def observed_year_fixtures() -> None:
+    """Reuse synthetic silence to reproduce anonymized embedded value shapes."""
+    path = OUT / "release-year.m4a"
+    shutil.copyfile(OUT / "release-only.m4a", path)
+    tags = MP4(path)
+    tags["\xa9day"] = ["2024"]
+    tags.save()
+
+    path = OUT / "duplicate-year.mp3"
+    shutil.copyfile(OUT / "id3v23.mp3", path)
+    tags = ID3(path, translate=False)
+    tags.delall("TYER")
+    tags.add(TYER(encoding=1, text=["2024", "2024"]))
+    tags.save(path, v2_version=3, v23_sep=None)
 
 
 def main() -> None:
@@ -122,6 +139,7 @@ def main() -> None:
          "-metadata", "ICRD=2024", "-metadata", "IGNR=Funkot"],
     )
     encode("tagless.wav", "pcm_s16le")
+    observed_year_fixtures()
 
 
 if __name__ == "__main__":

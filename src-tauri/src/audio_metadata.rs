@@ -19,7 +19,7 @@ use symphonia::{
     default::get_probe,
 };
 
-/// The meaning of a date candidate, in decreasing production-year priority.
+/// The meaning of a date candidate, in decreasing automatic-year priority.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum YearSemantic {
@@ -40,8 +40,8 @@ impl YearSemantic {
         }
     }
 
-    fn is_production_year(self) -> bool {
-        matches!(self, Self::Recording | Self::Generic)
+    fn is_auto_year(self) -> bool {
+        matches!(self, Self::Recording | Self::Generic | Self::Release)
     }
 }
 
@@ -60,7 +60,7 @@ impl YearCandidate {
     }
 }
 
-/// The time-dependent outcome of selecting a production year.
+/// The time-dependent outcome of selecting an automatic year.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum YearResolution {
@@ -319,44 +319,30 @@ fn year_semantic(tag: &Tag, raw_key: &str) -> Option<YearSemantic> {
     }
 }
 
-/// Resolve production year with an injected clock. Release/original values are
-/// preserved as candidates but never silently promoted to production years.
+/// Select the best available embedded year. Original dates stay diagnostic-only.
+/// A present but invalid/conflicting/future higher priority is not hidden by fallback.
 pub fn resolve_year(candidates: &[YearCandidate], current_year: u16) -> YearResolution {
-    let production: Vec<_> = candidates
-        .iter()
-        .filter(|candidate| candidate.semantic.is_production_year())
-        .cloned()
-        .collect();
-    if production.is_empty() {
+    let Some(best_rank) = candidates.iter().filter(|c| c.semantic.is_auto_year())
+        .map(|c| c.semantic.rank()).min() else {
         return YearResolution::Missing;
-    }
-
-    // `rank` is persisted for diagnostics, but resolution derives priority from
-    // the semantic enum so malformed old data cannot elevate a release date.
-    let best_rank = production.iter().map(|candidate| candidate.semantic.rank()).min().unwrap();
-    let best_candidates: Vec<_> = production
-        .into_iter()
-        .filter(|candidate| candidate.semantic.rank() == best_rank)
-        .collect();
-    let best: Vec<_> = best_candidates
-        .iter()
-        .filter_map(|candidate| parse_year(&candidate.raw_value).map(|year| (candidate, year)))
-        .collect();
-    if best.len() != best_candidates.len() {
+    };
+    // The persisted rank is diagnostic; derive priority from the semantic enum.
+    let best_candidates: Vec<_> = candidates.iter()
+        .filter(|c| c.semantic.rank() == best_rank).cloned().collect();
+    // Symphonia RawValue::StringList serializes with newline separators. Resolve
+    // those already-cached elements individually without changing extraction.
+    let values: Option<Vec<u16>> = best_candidates.iter()
+        .flat_map(|c| c.raw_value.split('\n').map(parse_year)).collect();
+    let Some(values) = values else {
         return YearResolution::Invalid { candidates: best_candidates };
-    }
-    let values: Vec<u16> = best.iter().map(|(_, year)| *year).collect();
+    };
     if values.iter().any(|year| *year != values[0]) {
-        return YearResolution::Conflict {
-            candidates: best.into_iter().map(|(candidate, _)| candidate.clone()).collect(),
-        };
+        return YearResolution::Conflict { candidates: best_candidates };
     }
     if values[0] > current_year {
-        return YearResolution::Future {
-            candidates: best.into_iter().map(|(candidate, _)| candidate.clone()).collect(),
-        };
+        return YearResolution::Future { candidates: best_candidates };
     }
-    YearResolution::Ready { year: best[0].1, semantic: best[0].0.semantic }
+    YearResolution::Ready { year: values[0], semantic: best_candidates[0].semantic }
 }
 
 fn parse_year(value: &str) -> Option<u16> {
@@ -472,13 +458,65 @@ mod tests {
     }
 
     #[test]
-    fn only_recording_and_generic_candidates_can_resolve_production_year() {
-        assert_eq!(resolve_year(&[candidate("1999", YearSemantic::Release)], 2026), YearResolution::Missing);
+    fn recording_generic_and_release_resolve_but_original_stays_diagnostic() {
+        assert_eq!(resolve_year(&[candidate("1999", YearSemantic::Release)], 2026), YearResolution::Ready { year: 1999, semantic: YearSemantic::Release });
         assert_eq!(resolve_year(&[candidate("2000", YearSemantic::Original)], 2026), YearResolution::Missing);
         assert_eq!(
             resolve_year(&[candidate("2024", YearSemantic::Recording)], 2026),
             YearResolution::Ready { year: 2024, semantic: YearSemantic::Recording }
         );
+    }
+
+    #[test]
+    fn priority_and_protections_apply_to_release_fallback() {
+        for semantic in [YearSemantic::Recording, YearSemantic::Generic] {
+            let mut higher = candidate("2023", semantic);
+            higher.rank = 99; // serialized rank cannot change precedence.
+            let mut lower = candidate("2024", YearSemantic::Release);
+            lower.rank = 0;
+            assert_eq!(resolve_year(&[lower.clone(), higher], 2026),
+                YearResolution::Ready { year: 2023, semantic });
+            assert!(matches!(resolve_year(&[lower.clone(), candidate("bad", semantic)], 2026), YearResolution::Invalid { .. }));
+            assert!(matches!(resolve_year(&[lower.clone(), candidate("2027", semantic)], 2026), YearResolution::Future { .. }));
+            assert!(matches!(resolve_year(&[lower, candidate("2022", semantic), candidate("2023", semantic)], 2026), YearResolution::Conflict { .. }));
+        }
+        assert_eq!(resolve_year(&[candidate("2023", YearSemantic::Recording), candidate("2024", YearSemantic::Generic)], 2026),
+            YearResolution::Ready { year: 2023, semantic: YearSemantic::Recording });
+        assert!(matches!(resolve_year(&[candidate("2027", YearSemantic::Release)], 2026), YearResolution::Future { .. }));
+        assert!(matches!(resolve_year(&[candidate("2024-02-30", YearSemantic::Release)], 2026), YearResolution::Invalid { .. }));
+        assert!(matches!(resolve_year(&[candidate("2023", YearSemantic::Release), candidate("2024", YearSemantic::Release)], 2026), YearResolution::Conflict { .. }));
+    }
+
+    #[test]
+    fn native_multiple_year_values_preserve_conflicts_and_invalid_elements() {
+        let duplicate = candidate("2024\n2024", YearSemantic::Recording);
+        assert_eq!(resolve_year(&[duplicate.clone()], 2026), YearResolution::Ready { year: 2024, semantic: YearSemantic::Recording });
+        for (raw, status) in [("2023\n2024", "conflict"), ("2024\nbad", "invalid"),
+            ("2024\n\n2024", "invalid"), ("2024\n", "invalid"), ("\n2024", "invalid"), ("2027\n2027", "future"), ("", "invalid")] {
+            let c = candidate(raw, YearSemantic::Recording);
+            let result = resolve_year(&[c.clone()], 2026);
+            let (actual, retained) = match result {
+                YearResolution::Conflict { candidates } => ("conflict", candidates),
+                YearResolution::Invalid { candidates } => ("invalid", candidates),
+                YearResolution::Future { candidates } => ("future", candidates),
+                other => panic!("unexpected {other:?}"),
+            };
+            assert_eq!(actual, status);
+            assert_eq!(retained, vec![c]);
+        }
+    }
+
+    #[test]
+    fn observed_shapes_resolve_from_synthetic_audio() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/metadata");
+        for (name, key, raw, semantic) in [
+            ("release-year.m4a", "©day", "2024", YearSemantic::Release),
+            ("duplicate-year.mp3", "TYER", "2024\n2024", YearSemantic::Recording),
+        ] {
+            let m = probe(&fixtures.join(name)).unwrap();
+            assert!(m.year_candidates.iter().any(|c| c.raw_key == key && c.raw_value == raw && c.semantic == semantic));
+            assert_eq!(resolve_year(&m.year_candidates, 2026), YearResolution::Ready { year: 2024, semantic });
+        }
     }
 
     #[test]
@@ -507,6 +545,12 @@ mod tests {
         assert_eq!(year_semantic(&time, &time.raw.key), None);
         assert_eq!(year_semantic(&date, &date.raw.key), None);
         assert_eq!(year_semantic(&digitized, &digitized.raw.key), None);
+        for standard in [StandardTag::EncodingDate(Arc::new("2024".into())),
+            StandardTag::TaggingDate(Arc::new("2024".into())),
+            StandardTag::DigitizedDate(Arc::new("2024".into()))] {
+            let tag = Tag::new_from_parts("non-year", "2024", Some(standard));
+            assert_eq!(year_semantic(&tag, &tag.raw.key), None);
+        }
     }
 
     #[test]
@@ -528,6 +572,8 @@ mod tests {
             ("vorbis.flac", "Synthetic FLAC"),
             ("vorbis.ogg", "Synthetic Ogg"),
             ("release-only.m4a", "Synthetic M4A"),
+            ("release-year.m4a", "Synthetic M4A"),
+            ("duplicate-year.mp3", "Synthetic 3"),
             ("riff-info.wav", "Synthetic WAV"),
         ] {
             let path = fixtures.join(name);
@@ -550,7 +596,7 @@ mod tests {
         assert!(matches!(resolve_year(&probe(&fixtures.join("future.mp3")).unwrap().year_candidates, 2026), YearResolution::Future { .. }));
         assert!(matches!(resolve_year(&probe(&fixtures.join("invalid.flac")).unwrap().year_candidates, 2026), YearResolution::Invalid { .. }));
         assert!(matches!(resolve_year(&probe(&fixtures.join("conflicting.flac")).unwrap().year_candidates, 2026), YearResolution::Conflict { .. }));
-        assert_eq!(resolve_year(&probe(&fixtures.join("release-only.m4a")).unwrap().year_candidates, 2026), YearResolution::Missing);
+        assert_eq!(resolve_year(&probe(&fixtures.join("release-only.m4a")).unwrap().year_candidates, 2026), YearResolution::Ready { year: 2022, semantic: YearSemantic::Release });
         assert_eq!(resolve_year(&probe(&fixtures.join("original-only.mp3")).unwrap().year_candidates, 2026), YearResolution::Missing);
         assert_eq!(resolve_year(&probe(&fixtures.join("id3-time-only.mp3")).unwrap().year_candidates, 2026), YearResolution::Missing);
         assert_eq!(probe(&fixtures.join("tagless.wav")).unwrap(), Metadata::default());

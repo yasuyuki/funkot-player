@@ -284,6 +284,45 @@ mod tests {
     }
 
     #[test]
+    fn cached_release_year_keeps_manual_priority_and_genre_suppression_after_restart() {
+        let mut f = Fixture::new();
+        let source = fs::read(&f.path).unwrap();
+        let modified = fs::metadata(&f.path).unwrap().modified().unwrap();
+        let metadata = f.entry.embedded_metadata.as_mut().unwrap();
+        metadata.year_candidates = vec![audio_metadata::YearCandidate {
+            raw_key: "TDRL".into(), raw_value: "2024".into(),
+            semantic: audio_metadata::YearSemantic::Release, rank: 0,
+        }];
+
+        let mut service = f.service();
+        assert_eq!(service.snapshot(2026).tracks[&f.path].auto_year, Some(2024));
+        assert_eq!(service.update(f.request(&service, Patch {
+            year_change: Some(tags::YearState::Set { value: 2022 }), ..Default::default()
+        }), 2026).unwrap().snapshot.tracks[&f.path].effective[0].key, "year:2022");
+        let mut restarted_after_set = f.service();
+        assert_eq!(restarted_after_set.snapshot(2026).tracks[&f.path].effective[0].key, "year:2022");
+        assert_eq!(restarted_after_set.update(f.request(&restarted_after_set, Patch {
+            year_change: Some(tags::YearState::Auto), ..Default::default()
+        }), 2026).unwrap().snapshot.tracks[&f.path].effective[0].key, "year:2024");
+        restarted_after_set.publish(BTreeMap::from([(f.path.clone(), Some(f.entry.clone()))]));
+        let mut restarted_after_auto = f.service();
+        assert_eq!(restarted_after_auto.snapshot(2026).tracks[&f.path].effective[0].key, "year:2024");
+        assert_eq!(restarted_after_auto.update(f.request(&restarted_after_auto, Patch {
+            year_change: Some(tags::YearState::Unset),
+            remove: vec![tags::Tag::new(tags::TagKind::Genre, "Funkot").unwrap()],
+            ..Default::default()
+        }), 2026).unwrap().changed, 1);
+
+        restarted_after_auto.publish(BTreeMap::from([(f.path.clone(), Some(f.entry.clone()))]));
+        let restarted = f.service();
+        let state = &restarted.snapshot(2026).tracks[&f.path];
+        assert!(matches!(state.manual.year, tags::YearState::Unset));
+        assert!(state.effective.iter().all(|tag| tag.kind != "year" && tag.key != "genre:funkot"));
+        assert_eq!(fs::read(&f.path).unwrap(), source);
+        assert_eq!(fs::metadata(&f.path).unwrap().modified().unwrap(), modified);
+    }
+
+    #[test]
     fn real_metadata_probe_preserves_manual_tags_across_rebuild_duplicate_and_restart() {
         use std::time::Instant;
 
