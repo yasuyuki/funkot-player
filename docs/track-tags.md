@@ -18,25 +18,35 @@ malformed length is an error. A successful probe with no tags is still a
 successful extraction; an I/O or parser error is reported to the scanner as an
 error and must not be cached as a success.
 
-| Format | Native fields read by Symphonia | Production-year treatment | Genre treatment |
+| Format | Native fields read by Symphonia | Automatic-year treatment | Genre treatment |
 | --- | --- | --- | --- |
 | MP3 ID3v2.3 | `TYER` / `TYE`, `TCON` | recording candidate | preserve each native value |
 | MP3 ID3v2.4 | `TDRC`, `TCON` | recording candidate | preserve each native value |
 | FLAC | `DATE`, `YEAR`, `GENRE` Vorbis comments | generic candidate | preserve repeated `GENRE` values |
 | Ogg Vorbis | `DATE`, `YEAR`, `GENRE` comments | generic candidate | preserve repeated `GENRE` values |
-| M4A/MP4 | `©day`, `©gen` | `©day` is release-only and is not auto-adopted | preserve native value |
+| M4A/MP4 | `©day`, `©gen` | `©day` is adopted when recording/generic candidates are absent | preserve native value |
 | WAV RIFF INFO | `INAM`, `IART`, `ICRD`, `IGNR` | recording candidate | preserve native value |
 
 The source facts are kept as `raw_key`, `raw_value`, semantic kind and rank.
-Only recording dates (rank 0) and general `DATE`/`YEAR` (rank 1) can produce a
-production year.  Release and original dates remain visible candidates but are
-never silently substituted.  The resolver accepts only `YYYY`, `YYYY-MM`,
-`YYYY-MM-DD`, or an ISO date-time with a valid calendar date, `HH`, `HH:MM` or
-`HH:MM:SS` time (optional fractional seconds), and optional `Z` or `±HH:MM`
-offset.  Years before 1000 are invalid.  It
-returns distinct `missing`, `invalid`, `future`, and same-rank `conflict`
-states.  `TDAT`/`TDA` (day/month) and `TIME`/`TIM` (hour/minute) are never year
-keys.
+Automatic year means the best available embedded year: recording dates (rank 0),
+then general `DATE`/`YEAR` (rank 1), then release dates (rank 2). Original dates
+remain visible candidates but are not automatically adopted. A present higher
+priority with invalid, future, or conflicting values keeps that diagnostic;
+a lower priority does not hide it. Same-priority values must agree on the year.
+
+The resolver accepts `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or an ISO date-time with a
+valid calendar date, `HH`, `HH:MM` or `HH:MM:SS` time (optional fractional seconds),
+and optional `Z` or `±HH:MM` offset. Years before 1000 are invalid. Symphonia's
+newline-joined native string lists are evaluated element by element: duplicate
+years resolve, different years conflict, and invalid elements stay invalid.
+This uses saved candidates without changing extraction or `metadata_version`.
+It returns distinct `missing`, `invalid`, `future`, and same-rank `conflict`
+states. `TDAT`/`TDA` (day/month), `TIME`/`TIM` (hour/minute), encoding, tagging,
+and digitized dates are never year sources. Filenames and filesystem dates are
+not used. Manual set/unset takes precedence; returning to auto uses these rules.
+
+The [real-metadata observation and adoption decision](https://github.com/yasuyuki/funkot-player/issues/19#issuecomment-5725256387)
+records the anonymized evidence for release fallback and repeated year values.
 
 Genres are not split on punctuation, slash, or semicolon and are not
 deduplicated at extraction time. Extraction uses the tag store's `Tag::new`
@@ -47,8 +57,8 @@ value produces one diagnostic without discarding its siblings.
 
 Fixture audio is synthetic and contains no third-party song.  The set covers
 MP3 ID3v2.3, MP3 ID3v2.4, FLAC, Ogg Vorbis, M4A, and WAV, plus tagless, invalid,
-future, conflicting, release-only, original-only, and `TDAT`/`TIME` negative
-cases.
+future, conflicting, release-only and repeated-year cases, plus original-only
+and `TDAT`/`TIME` negative cases.
 Fixture generation is an offline preparation step; application tests open the
 committed files read-only.  Tests record each file's bytes and mtime before
 probing and assert that both remain unchanged afterwards.
@@ -72,10 +82,11 @@ fixtures contain generated silence and no copied recording.
 | `id3v24.mp3` | title/artist, recording date 2023-02-03, two native genres |
 | `vorbis.flac` / `vorbis.ogg` | title/artist, generic date/year, repeated genres |
 | `no-year-pop.ogg` | no year, genre Pop; integration fixture C |
-| `release-only.m4a` | title/artist and genre; `©day` retained as release-only |
+| `release-only.m4a` | title/artist and genre; release fallback year 2022 from `©day` |
+| `release-year.m4a` / `duplicate-year.mp3` | observed `YYYY` release and duplicate native `YYYY` list both resolve to 2024 |
 | `riff-info.wav` | title/artist and RIFF INFO `ICRD`/`IGNR` |
 | `future.mp3`, `invalid.flac`, `conflicting.flac` | distinct future, invalid, and conflict states |
-| `original-only.mp3`, `id3-time-only.mp3`, `tagless.wav` | no adopted production year |
+| `original-only.mp3`, `id3-time-only.mp3`, `tagless.wav` | no adopted automatic year |
 
 ## Index migration and identity
 

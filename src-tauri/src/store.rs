@@ -4285,6 +4285,45 @@ mod metadata_migration_tests {
     use std::cell::Cell;
 
     #[test]
+    fn current_cached_release_metadata_resolves_without_reading_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("synthetic.wav");
+        fs::write(&path, b"cached release metadata must not reopen this source").unwrap();
+        let mut index = HashIndex::new();
+        let hash = resolve_content_hash(&path, &mut index).unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let entry = index.get_mut(&key).unwrap();
+        entry.metadata_version = METADATA_VERSION;
+        entry.tags_cached = true;
+        entry.title = Some("Cached title".into());
+        entry.artist = Some("Cached artist".into());
+        entry.first_seen = Some("2024-01-01T00:00:00Z".into());
+        entry.added_order = Some(7);
+        entry.embedded_metadata = Some(crate::audio_metadata::Metadata {
+            year_candidates: vec![crate::audio_metadata::YearCandidate {
+                raw_key: "TDRL".into(), raw_value: "2024".into(),
+                semantic: crate::audio_metadata::YearSemantic::Release, rank: 0,
+            }],
+            ..Default::default()
+        });
+        let identity = (entry.hash.clone(), entry.first_seen.clone(), entry.added_order);
+
+        let resolved = resolve_library_file_with(
+            &path,
+            &mut index,
+            |_| -> Result<String, String> { panic!("cached source was rehashed") },
+            |_| -> Result<crate::audio_metadata::Metadata, String> { panic!("cached source was reprobed") },
+        ).unwrap();
+
+        assert_eq!(resolved.hash, hash);
+        assert_eq!(resolved.title.as_deref(), Some("Cached title"));
+        assert_eq!((index[&key].hash.clone(), index[&key].first_seen.clone(), index[&key].added_order), identity);
+        let candidates = &index[&key].embedded_metadata.as_ref().unwrap().year_candidates;
+        assert!(matches!(crate::audio_metadata::resolve_year(candidates, 2026),
+            crate::audio_metadata::YearResolution::Ready { year: 2024, .. }));
+    }
+
+    #[test]
     fn legacy_cached_tags_probe_once_without_rehash_or_new_arrival() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("synthetic.wav");
