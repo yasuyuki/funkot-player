@@ -8,7 +8,7 @@
 // dedicated browser profile that lives outside the repo (see PROFILE below).
 // That profile holds a live Microsoft session: treat it like a credential.
 //
-//   node scripts/store-draft.mjs setup              # sign in once, record the page URLs
+//   node scripts/store-draft.mjs setup              # record the page URLs (per submission)
 //   node scripts/store-draft.mjs probe              # dump those pages for selector work
 //   node scripts/store-draft.mjs stage --msix <path> [--version x.y.z] [--dry]
 //
@@ -115,7 +115,11 @@ async function dump(page, dir, name) {
 async function fail(page, step, message) {
   const dir = path.join(STATE, `failed-${step}-${Date.now()}`);
   await dump(page, dir, step);
-  throw new Error(`${message}\nwhat the page looked like: ${dir}`);
+  throw new Error(
+    `${message}\nat ${page.url()}\nwhat the page looked like: ${dir}\n` +
+      'Partner Center page URLs belong to one submission: if this release opened a new one, ' +
+      're-run `node scripts/store-draft.mjs setup`.',
+  );
 }
 
 // --- setup ------------------------------------------------------------------
@@ -130,8 +134,10 @@ async function setup() {
     console.log('Sign in if asked. This profile keeps the session, so this is a one-time step.');
     await ask('\nSigned in? Press Enter... ');
 
+    // These URLs carry the submission id, so they are re-recorded per release.
+    // Four Enter presses beats hunting for the ids from the outside.
     const config = { listings: {} };
-    await ask('Open the product\'s Packages page for a submission, then press Enter... ');
+    await ask('Open the product\'s Packages page for this submission, then press Enter... ');
     config.packagesUrl = page.url();
 
     for (const lang of LANGUAGES) {
