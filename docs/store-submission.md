@@ -96,7 +96,9 @@ node scripts\store-draft.mjs probe                        # 画面が変わっ�
 ```
 
 `setup` は Packages と各言語の Store listing の URL を人に開いてもらって記録する。
-Partner Center の URL は id を含み、script からは推測できないため。
+Partner Center の URL は id を含み、script からは推測できないため。**この URL は submission 単位**
+なので、新しい提出を始めたら `setup` をもう一度回す（ページを 4 枚開いて Enter を押すだけ）。
+記録が古いと `stage` はその段で止まり、同じことを案内する。
 
 状態は `%LOCALAPPDATA%\funkot-store-draft\` に置く。プロファイルには**サインイン済みの
 Microsoft セッション**が入るので、資格情報と同じ扱いにする（repo に入れない、共有しない）。
