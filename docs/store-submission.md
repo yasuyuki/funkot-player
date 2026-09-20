@@ -208,9 +208,9 @@ intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
 ```
 
-**このバージョンの新機能（0.7.0）:**
+**このバージョンの新機能（0.8.0）:**
 ```text
-保存したラベル、再生順の履歴、曲別の再生回数をそれぞれ独立して消去できるようになりました。履歴の右クリックメニューから、1曲の再生回数や再生順の1件だけを削除できます。音声ファイルは削除しません。
+曲にアプリ内だけのタグを付けられるようになりました。1曲ずつでもまとめてでも編集でき、付けたタグでライブラリを絞り込めます。音楽ファイルは書き換えません。ファイルに埋め込まれた発売年の読み取りも改善しました。
 ```
 
 ### English
@@ -256,9 +256,9 @@ Adjust intro / outro
 Flag a bad transition and keep a feedback ZIP
 ```
 
-**What's new in this version (0.7.0):**
+**What's new in this version (0.8.0):**
 ```text
-Clear saved labels, the chronological play log, and per-track play counts independently. Use the history context menus to clear one track’s play count or remove a single play-log entry. Audio files are not deleted.
+You can now tag tracks inside the app. Edit tags one track at a time or in bulk, and filter the library by a tag. Your music files are never modified. Release years embedded in files are also read more reliably.
 ```
 
 ### Bahasa Indonesia
@@ -304,9 +304,9 @@ Sesuaikan intro / outro
 Tandai transisi yang tidak pas dan simpan ZIP masukan
 ```
 
-**Yang baru di versi ini (0.7.0):**
+**Yang baru di versi ini (0.8.0):**
 ```text
-Hapus label tersimpan, log urutan pemutaran, dan jumlah pemutaran per lagu secara terpisah. Gunakan menu konteks riwayat untuk menghapus jumlah pemutaran satu lagu atau satu entri log pemutaran. Berkas audio tidak dihapus.
+Kini Anda dapat memberi tag pada lagu di dalam aplikasi. Tag dapat diubah satu per satu atau sekaligus, dan pustaka dapat disaring berdasarkan tag. Berkas musik tidak diubah. Tahun rilis yang tertanam pada berkas juga dibaca lebih andal.
 ```
 
 ---
