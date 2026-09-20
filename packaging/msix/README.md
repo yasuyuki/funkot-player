@@ -4,7 +4,7 @@ Unsigned MSIX for Partner Center upload. Not a substitute for the NSIS GitHub
 Release installer.
 
 **Submission.** Each Store update:
-[`docs/store-submission.md`](../../docs/store-submission.md) — `scripts/store-publish.ps1`
+[`docs/store-submission.md`](../../docs/store-submission.md) — `scripts/store-draft.mjs`
 stages the draft, the owner presses Submit for certification. First-time Partner
 Center setup: [`docs/store-first-submission.md`](../../docs/store-first-submission.md).
 
