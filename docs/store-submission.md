@@ -20,10 +20,18 @@ Windows の本配布は **MSIX + Partner Center**。署名は提出後に Micros
 3. Partner Center で **今 Store に出ている版数** を確認する。HANDOFF の「認証待ち」は古くなりうる。
    認証中の提出があるなら、終わるか取り消すまで次を出さない。
 4. `main` に push する。CI `Checks` が版数の一致と新機能文の対象 OS を見る。
-5. `windows-msix` を回す。**`engine_ref` を必ず明示する**（未指定は `player/v0.1.1`）。
-6. その run の未署名 MSIX を Partner Center の新しい提出に上げ、新機能を貼って
-   **Submit for certification**。
-7. 認証通過後、下の「公開後の実機確認」。
+5. `windows-msix` を回す（`workflow_dispatch`、入力なし。sibling は `funkot-core.commit` の
+   SHA で checkout される）。その run の未署名 MSIX を取る。
+6. Windows で下書きを作る。`msstore` を設定済みの user から:
+
+   ```powershell
+   pwsh scripts/store-publish.ps1 -Msix <その run の .msix>
+   ```
+
+   版数・Identity・三言語の新機能文を照合し、パッケージを上げて listing の新機能を書き、
+   **下書きのまま止まる**。`-DryRun` は API を一切叩かず照合だけする。
+7. Partner Center で下書きを目視し、**Submit for certification** を押す。
+8. 認証通過後、下の「公開後の実機確認」。
 
 Properties / Age ratings / Pricing / 短い説明 / 説明 / アプリの機能は、
 **前回から変わっていなければ触らない。** UI が大きく変わったときだけスクショを差し替える。
@@ -47,7 +55,8 @@ Privacy policy URL: https://yasuyuki.github.io/funkot-player/privacy.html
 ### CI（正）
 
 1. GitHub → Actions → **Windows MSIX**（`.github/workflows/windows-msix.yml`）。
-2. **Run workflow**: branch `main`、`engine_ref` は焼くエンジンのタグまたは SHA。
+2. **Run workflow**: 提出する版の branch か tag を選ぶ。入力は無く、sibling は
+   `funkot-core.commit` の SHA で checkout される。
 3. artifact **`funkot-player-windows-msix`** を **この提出の版数の run** から取る。古い run を使わない。
 4. 中身（例）`Funkot_0.5.0.0_x64.msix` を **そのまま** アップロードする（自分で署名しない）。
 
@@ -68,15 +77,39 @@ npm ci
 
 ---
 
+## msstore の設定（一度きり）
+
+[`scripts/store-publish.ps1`](../scripts/store-publish.ps1) は Microsoft Store Developer CLI
+(`msstore`) 経由で Partner Center API を叩く。preview 版で、**アプリ更新 API は無料アプリのみ**
+対応（Funkot は無料なので該当する）。
+
+1. Partner Center に Entra ID テナントを関連付け、そのテナントにアプリ登録を作り、Partner Center 側で
+   **Manager** ロールを与える。サインイン自体は個人 MSA のままでよい
+   （[store-first-submission.md](store-first-submission.md) の work アカウントの注意を参照）。
+2. `winget install Microsoft.DotNet.DesktopRuntime.9` と
+   `winget install "Microsoft Store Developer CLI"`。
+3. `msstore reconfigure --tenantId … --sellerId … --clientId … --clientSecret …` を**本人が**実行する。
+
+資格情報はローカルの msstore 設定にだけ置く。**この repo は public なので、TenantId / SellerId /
+ClientId / ClientSecret を docs にも script にも書かない。** product id は `msstore apps list` から
+Identity Name で引くので、通常は指定不要（`-ProductId` で上書きできる）。
+
+script は **Submit for certification を押さない**。認証中・保留中の提出を見つけたら止まり、
+`-Force` を付けたときだけ続行する（`msstore publish` は保留中の下書きを作り直すため）。
+
+---
+
 ## Partner Center
 
-エージェントはログインできない。**ブラウザ操作。**
+サインインと **Submit for certification** はブラウザ操作。エージェントはログインできない。
+手順 6 の script を使った場合、Packages と「このバージョンの新機能」は下書きに入っている。
 
-1. https://aka.ms/submitwindowsapp → **Funkot** → **Start submission**（または **Resume**）。
-2. **Packages** に、この版の未署名 `.msix` を上げる。Identity は上の固定値と一致すること。
-3. **Store listings** の各言語で「このバージョンの新機能」だけを下のドラフトから貼る。
-4. テスター向けの動きが変わっていれば **Notes for certification** を下の認証メモで更新する。
-5. チェックリストが揃ったら **Submit for certification**。
+1. https://aka.ms/submitwindowsapp → **Funkot** → **Resume**（script が作った下書き）。
+   script を使わない場合は **Start submission** し、**Packages** にこの版の未署名 `.msix` を上げ、
+   **Store listings** の各言語に下のドラフトの「このバージョンの新機能」を貼る。
+2. **Packages** の版数と Identity、各言語の「このバージョンの新機能」が、この版のものか目視する。
+3. テスター向けの動きが変わっていれば **Notes for certification** を下の認証メモで更新する。
+4. チェックリストが揃ったら **Submit for certification**。
 
 提出後:
 
