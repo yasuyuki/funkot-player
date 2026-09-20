@@ -22,14 +22,14 @@ Windows の本配布は **MSIX + Partner Center**。署名は提出後に Micros
 4. `main` に push する。CI `Checks` が版数の一致と新機能文の対象 OS を見る。
 5. `windows-msix` を回す（`workflow_dispatch`、入力なし。sibling は `funkot-core.commit` の
    SHA で checkout される）。その run の未署名 MSIX を取る。
-6. Windows で下書きを作る。`msstore` を設定済みの user から:
+6. Windows で下書きを作る（下の「下書きの自動化」。初回だけ `setup` が要る）:
 
    ```powershell
-   pwsh scripts/store-publish.ps1 -Msix <その run の .msix>
+   node scripts\store-draft.mjs stage --msix <その run の .msix>
    ```
 
-   版数・Identity・三言語の新機能文を照合し、パッケージを上げて listing の新機能を書き、
-   **下書きのまま止まる**。`-DryRun` は API を一切叩かず照合だけする。
+   版数・三言語の新機能文を照合し、パッケージを上げて listing の新機能を書き、
+   **下書きのまま止まる**。`--dry` はブラウザを開かず照合だけする。
 7. Partner Center で下書きを目視し、**Submit for certification** を押す。
 8. 認証通過後、下の「公開後の実機確認」。
 
@@ -77,11 +77,37 @@ npm ci
 
 ---
 
-## msstore の設定（一度きり）
+## 下書きの自動化
 
-[`scripts/store-publish.ps1`](../scripts/store-publish.ps1) は Microsoft Store Developer CLI
-(`msstore`) 経由で Partner Center API を叩く。preview 版で、**アプリ更新 API は無料アプリのみ**
-対応（Funkot は無料なので該当する）。
+Partner Center の API は Entra ID の資格情報を要求し、このアカウントはテナントを持たない。
+そのため **今の既定はブラウザ経路**で、テナントが取れた時点で API 経路へ移る。
+どちらも **Submit for certification は押さない**。
+
+### 今の経路: ブラウザ（[`scripts/store-draft.mjs`](../scripts/store-draft.mjs)）
+
+この repo が既に持つ Playwright で、専用プロファイルの Chromium を動かす。パスワードは扱わない。
+サインインは初回だけ人が行い、そのプロファイルに残る。
+
+```powershell
+node scripts\store-draft.mjs setup                        # 初回: サインインと各ページ URL の記録
+node scripts\store-draft.mjs stage --msix <.msix>         # 下書き作成
+node scripts\store-draft.mjs stage --msix <.msix> --dry   # ブラウザを開かず照合だけ
+node scripts\store-draft.mjs probe                        # 画面が変わったとき要素を出力する
+```
+
+`setup` は Packages と各言語の Store listing の URL を人に開いてもらって記録する。
+Partner Center の URL は id を含み、script からは推測できないため。
+
+状態は `%LOCALAPPDATA%\funkot-store-draft\` に置く。プロファイルには**サインイン済みの
+Microsoft セッション**が入るので、資格情報と同じ扱いにする（repo に入れない、共有しない）。
+段が一致しなかったときは screenshot と要素一覧を同じ場所へ残して止まるので、それを見て
+selector を直す。Partner Center の UI は変わるので、壊れること自体は想定内とする。
+
+### テナント取得後: msstore（[`scripts/store-publish.ps1`](../scripts/store-publish.ps1)）
+
+Microsoft Store Developer CLI (`msstore`) 経由で Partner Center API を叩く。preview 版で、
+**アプリ更新 API は無料アプリのみ**対応（Funkot は無料なので該当する）。**現時点では未使用**で、
+下の設定が済むまで動かない。
 
 1. Partner Center に Entra ID テナントを関連付け、そのテナントにアプリ登録を作り、Partner Center 側で
    **Manager** ロールを与える。サインイン自体は個人 MSA のままでよい

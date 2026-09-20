@@ -1,15 +1,15 @@
 # Stage a Microsoft Store update as a draft submission, then stop.
 #
-# Partner Center stays a browser for the one step that matters: pressing
-# Submit for certification. Everything before it -- uploading the package and
-# writing the three "what's new" texts -- goes through the Microsoft Store
-# Developer CLI (msstore), which talks to the Partner Center APIs.
+# This is the API path, and it needs Entra ID credentials in msstore. The
+# account does not have a tenant yet, so the browser path in
+# scripts/store-draft.mjs is what runs today; this one waits for the tenant
+# (docs/store-submission.md).
 #
 #   pwsh scripts/store-publish.ps1 -Msix C:\path\Funkot_0.8.0.0_x64.msix
 #   pwsh scripts/store-publish.ps1 -Msix ... -DryRun   # no API call at all
 #
-# The listing text is not duplicated here: it is read from the three paste
-# blocks in docs/store-submission.md, the same blocks
+# The listing text is not duplicated here: scripts/store-notes.mjs reads it
+# from the paste blocks in docs/store-submission.md, the same blocks
 # scripts/check-doc-claims.sh already guards. Edit the document, not a copy.
 #
 # msstore must already hold Entra ID credentials (`msstore reconfigure`, run by
@@ -24,18 +24,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$docPath = Join-Path $repoRoot 'docs\store-submission.md'
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).ProviderPath
 $packageManifest = Join-Path $repoRoot 'packaging\msix\Package.appxmanifest'
 $tauriConf = Join-Path $repoRoot 'src-tauri\tauri.conf.json'
-
-# Heading -> Store listing language. The version in the heading is captured so
-# a stale block cannot be shipped with a new package.
-$blockHeadings = [ordered]@{
-    ja = 'このバージョンの新機能（(?<ver>[0-9][^）]*)）'
-    en = "What's new in this version \((?<ver>[0-9][^)]*)\)"
-    id = 'Yang baru di versi ini \((?<ver>[0-9][^)]*)\)'
-}
+$languages = 'ja', 'en', 'id'
 
 function Get-MsixIdentity {
     param([string]$Path)
@@ -53,45 +45,6 @@ function Get-MsixIdentity {
     } finally { $zip.Dispose() }
 
     return $xml.Package.Identity
-}
-
-function Get-WhatsNewBlocks {
-    param([string]$Path)
-
-    $lines = Get-Content -LiteralPath $Path
-    $blocks = @{}
-    $versions = @{}
-    $fence = [string]::new([char]0x60, 3)
-
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        foreach ($lang in $blockHeadings.Keys) {
-            if ($lines[$i] -notmatch $blockHeadings[$lang]) { continue }
-            if ($blocks.ContainsKey($lang)) { throw "two $lang what's-new blocks in $Path" }
-
-            $versions[$lang] = $Matches['ver']
-            $j = $i + 1
-            while ($j -lt $lines.Count -and -not $lines[$j].StartsWith($fence)) { $j++ }
-            if ($j -ge $lines.Count) { throw "no fenced block after the $lang heading in $Path" }
-
-            $body = @()
-            $j++
-            while ($j -lt $lines.Count -and -not $lines[$j].StartsWith($fence)) {
-                $body += $lines[$j]
-                $j++
-            }
-            if ($j -ge $lines.Count) { throw "unterminated $lang fenced block in $Path" }
-            if ($body.Count -eq 0) { throw "the $lang what's-new block is empty in $Path" }
-
-            $blocks[$lang] = ($body -join "`n").Trim()
-            $i = $j
-        }
-    }
-
-    foreach ($lang in $blockHeadings.Keys) {
-        if (-not $blocks.ContainsKey($lang)) { throw "no $lang what's-new block in $Path" }
-    }
-
-    return @{ Text = $blocks; Versions = $versions }
 }
 
 function Get-LanguageForLocale {
@@ -115,10 +68,10 @@ function Invoke-MsStore {
     return ($output | Out-String)
 }
 
-# --- 1. version and identity ------------------------------------------------
+# --- 1. version, identity, listing text -------------------------------------
 
 if (-not (Test-Path -LiteralPath $Msix)) { throw "no package at $Msix" }
-$msixPath = (Resolve-Path -LiteralPath $Msix).Path
+$msixPath = (Resolve-Path -LiteralPath $Msix).ProviderPath
 
 if (-not $Version) {
     $Version = (Get-Content -LiteralPath $tauriConf -Raw | ConvertFrom-Json).version
@@ -137,19 +90,18 @@ foreach ($field in 'Name', 'Publisher') {
     }
 }
 
-$whatsNew = Get-WhatsNewBlocks -Path $docPath
-foreach ($lang in $blockHeadings.Keys) {
-    if ($whatsNew.Versions[$lang] -ne $Version) {
-        throw "the $lang what's-new heading says $($whatsNew.Versions[$lang]), package is $Version -- update docs/store-submission.md"
-    }
-}
+# store-notes.mjs also fails when a heading names a different version, so a
+# stale block cannot be shipped with a new package.
+$notesJson = & node (Join-Path $repoRoot 'scripts\store-notes.mjs') $Version 2>&1
+if ($LASTEXITCODE -ne 0) { throw "scripts/store-notes.mjs failed:`n$($notesJson | Out-String)" }
+$notes = ($notesJson | Out-String | ConvertFrom-Json).notes
 
 Write-Host "package  $msixPath"
 Write-Host "identity $($identity.Name) $($identity.Version)"
-foreach ($lang in $blockHeadings.Keys) {
+foreach ($lang in $languages) {
     Write-Host ''
     Write-Host "what's new [$lang]:"
-    Write-Host $whatsNew.Text[$lang]
+    Write-Host $notes.$lang
 }
 
 if ($DryRun) {
@@ -203,7 +155,7 @@ $applied = @()
 foreach ($listing in $submission.Listings.PSObject.Properties) {
     $lang = Get-LanguageForLocale -Locale $listing.Name
     if (-not $lang) { throw "no what's-new block maps to Store locale $($listing.Name)" }
-    $listing.Value.BaseListing.ReleaseNotes = $whatsNew.Text[$lang]
+    $listing.Value.BaseListing.ReleaseNotes = $notes.$lang
     $applied += "$($listing.Name) <- $lang"
 }
 
