@@ -6,8 +6,8 @@ test("Library and tag review states", async ({ page }, testInfo) => {
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   await page.clock.setFixedTime(new Date("2026-01-01T00:00:00Z"));
   await page.goto("/tests/ui/");
-  const library = page.locator(".library");
-  await expect(library.locator("li.row")).toHaveCount(6);
+  const library = page.locator("section.library");
+  await expect(library.locator("li.row")).toHaveCount(6, { timeout: 15000 });
   await expect(library.locator(".tag-summary")).toHaveCount(5);
   await expect(library.locator(".tag-summary button")).toHaveCount(0);
   const toggle = library.getByRole("button", { name: /^Tags/ });
@@ -23,6 +23,74 @@ test("Library and tag review states", async ({ page }, testInfo) => {
     await testInfo.attach(name, { path, contentType: "image/jpeg" });
   }
   await capture("library");
+  const queue = page.locator("section.queue");
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Up next" }).click();
+  await expect(queue).toBeVisible();
+  await capture("playlist-active");
+  if (testInfo.project.name === "desktop") {
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await expect(library).toBeVisible();
+    await expect(queue).toBeVisible();
+    const left = await library.boundingBox(), right = await queue.boundingBox();
+    expect(left && right && left.x + left.width <= right.x).toBeTruthy();
+    await capture("playlist-two-column");
+    await page.getByRole("tab", { name: "History" }).click();
+    await expect(page.locator("section.history")).toBeVisible();
+    await page.getByRole("tab", { name: "Library" }).click();
+    await page.setViewportSize({ width: 1280, height: 900 });
+  }
+  await queue.getByRole("button", { name: "Playlist actions" }).click();
+  await queue.getByRole("button", { name: "Show and edit all tracks" }).click();
+  await expect(queue.getByText(/Played/)).toBeVisible();
+  await expect(queue.getByText("The file is missing.")).toBeVisible();
+  await capture("playlist-full-edit");
+  await queue.getByRole("button", { name: "Close" }).click();
+  await queue.locator(".source .choose").click();
+  await queue.getByRole("button", { name: "Browse Empty list" }).click();
+  await expect(queue.getByText("Browse all tracks: Empty list")).toBeVisible();
+  await capture("playlist-inactive-edit");
+  await queue.getByRole("button", { name: "Close" }).click();
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.queue = { ...store.queue, playlist: { ...store.queue.playlist, rows: [], ended: true, skipped: 2 } };
+    store.catalog = { ...store.catalog, active_id: "night" };
+    window.__uiFixture.setReply("queue_state", store.queue);
+    window.__uiFixture.setReply("playlist_catalog", store.catalog);
+  });
+  await expect(queue.getByRole("button", { name: "Start over (current song keeps playing)" })).toBeVisible();
+  await capture("playlist-ended-empty");
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.queue = { ...store.queue, playlist: null, source: { playlist_id: null, generation: 3, revision: 5 } };
+    store.catalog = { ...store.catalog, active_id: null };
+    window.__uiFixture.setReply("queue_state", store.queue);
+    window.__uiFixture.setReply("playlist_catalog", store.catalog);
+  });
+  await expect(queue.getByText("Queue is empty — auto-select keeps going", { exact: true })).toBeVisible();
+  await queue.getByRole("button", { name: "Playlist actions" }).click();
+  await queue.getByRole("button", { name: "Save queue as playlist" }).click();
+  await expect(queue.getByRole("textbox")).toBeVisible();
+  await expect(queue.getByText(/The current song is excluded/)).toBeVisible();
+  await capture("playlist-normal-save");
+  await page.keyboard.press("Escape");
+  if (testInfo.project.name === "narrow") {
+    await page.getByRole("tab", { name: "Library" }).click();
+    await library.locator(".source .choose").click();
+    await expect(page.getByRole("dialog", { name: "Choose what plays next" })).toBeVisible();
+    await capture("playlist-selector");
+    await page.keyboard.press("Escape");
+    await page.getByRole("tab", { name: "Up next" }).click();
+  }
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.catalog = { ...store.catalog, store_status: "corrupt" };
+    store.queue = { ...store.queue, playlist_store_status: "corrupt" };
+    window.__uiFixture.setReply("queue_state", store.queue);
+    window.__uiFixture.setReply("playlist_catalog", store.catalog);
+  });
+  await expect(queue.getByRole("alert")).toContainText("read-only");
+  await capture("playlist-save-error");
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
   await toggle.click();
   await library.getByLabel("Tag candidate", { exact: true }).selectOption("genre:funkot");
   await library.getByRole("button", { name: "Add condition", exact: true }).click();

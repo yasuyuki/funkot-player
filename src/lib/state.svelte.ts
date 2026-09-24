@@ -16,9 +16,9 @@ import {
   skipNext as skipNextCmd,
   flagLastTransition as flagLastTransitionCmd,
   undoLastFlag as undoLastFlagCmd,
-  enqueue as enqueueCmd,
-  dequeue as dequeueCmd,
-  reorder as reorderCmd,
+  playlistCatalog as playlistCatalogCmd,
+  playlistEntries as playlistEntriesCmd,
+  playlistCommand as playlistCommandCmd,
   listFlaggedTracks as listFlaggedTracksCmd,
   dismissFlags as dismissFlagsCmd,
   undoLastDismiss as undoLastDismissCmd,
@@ -43,15 +43,16 @@ import {
   clearTrackPlayCount as clearTrackPlayCountCmd,
   removePlayLogEntry as removePlayLogEntryCmd,
   listNewArrivals as listNewArrivalsCmd,
-  queueNewArrivals as queueNewArrivalsCmd,
   listPlayHistory,
-  enqueueMany as enqueueManyCmd,
   listen,
 } from "./tauri";
 import type {
   AnalysisProgress,
   AppDirs,
-  EnqueueManyResult,
+  PlaylistCatalogSnapshot,
+  PlaylistCommandErrorCode,
+  PlaylistCommandResult,
+  PlaylistAction,
   FlaggedTrackRow,
   FlagResult,
   ImportResult,
@@ -106,6 +107,8 @@ class PlayerStore {
   dirs = $state<AppDirs | null>(null);
   player = $state<PlayerState | null>(null);
   queue = $state<QueueSnapshot | null>(null);
+  catalog = $state<PlaylistCatalogSnapshot | null>(null);
+  browsedPlaylist = $state<import("./tauri").PlaylistDetails | null>(null);
   /// Keyed by absolute path (`TrackRow.path`), matching
   /// `PlayerState.now_playing` / `.previous` and `TransitionInfo.from` /
   /// `.to`. Basenames can collide across subdirectories now that scanning is
@@ -209,6 +212,10 @@ class PlayerStore {
   /// Poll / refresh responses whose captured gen no longer matches are
   /// discarded so a slow poll cannot overwrite a fresher post-mutation snapshot.
   #queueGen = 0;
+  #catalogGen = 0;
+  #catalogRevision: number | null = null;
+  #browseGen = 0;
+  #browseTarget: import("./tauri").SourceTarget | null = null;
   /// Generation guard for `#pullArrivals` (stale responses discarded).
   #arrivalsGen = 0;
   /// Last `history_revision` successfully applied to `arrivals`. `null`
@@ -310,6 +317,10 @@ class PlayerStore {
     // and without `#poll` the UI would keep `phase ?? "idle"` / miss
     // `now_playing` even though audio is already running. Title can fall
     // back to basename; artist waits for a library row.
+    // The catalog is auxiliary to first paint. Do not hold the existing
+    // library startup path behind it: source mutations stay disabled until
+    // `queue_state` supplies a real SourceTarget.
+    void this.#refreshCatalog();
     this.#poll();
     setInterval(() => {
       this.#tickNow = Date.now();
@@ -339,7 +350,10 @@ class PlayerStore {
     try {
       const gen = this.#queueGen;
       const q = await queueStateCmd();
-      if (gen === this.#queueGen) this.queue = q;
+      if (gen === this.#queueGen) {
+        this.queue = q;
+        if (q.catalog_revision !== undefined && q.catalog_revision !== this.#catalogRevision) void this.#refreshCatalog();
+      }
     } catch (e) {
       this.lastError = String(e);
     }
@@ -438,6 +452,10 @@ class PlayerStore {
 
   /// Banner count: gate + every playing, handed-off, or queued path excluded.
   get actionableNewArrivalCount(): number {
+    return this.actionableNewArrivals.length;
+  }
+
+  get actionableNewArrivals(): NewArrival[] {
     return actionableArrivals(
       this.arrivals,
       this.library,
@@ -446,7 +464,7 @@ class PlayerStore {
       this.queue?.reserved?.path ?? null,
       this.queue?.pending.map((item) => item.path) ?? [],
       this.queue?.in_flight.map((item) => item.path) ?? [],
-    ).length;
+    );
   }
 
   isNewArrival(path: string): boolean {
@@ -848,34 +866,98 @@ class PlayerStore {
     const gen = this.#queueGen;
     try {
       const q = await queueStateCmd();
-      if (gen === this.#queueGen) this.queue = q;
+      if (gen === this.#queueGen) {
+        this.queue = q;
+        if (q.catalog_revision !== undefined && q.catalog_revision !== this.#catalogRevision) await this.#refreshCatalog();
+      }
     } catch (e) {
       this.lastError = String(e);
     }
   }
 
-  async doEnqueue(path: string): Promise<void> {
+  async #refreshCatalog(): Promise<void> {
+    const gen = ++this.#catalogGen;
     try {
-      await enqueueCmd(path);
+      const catalog = await playlistCatalogCmd();
+      if (gen === this.#catalogGen) { this.catalog = catalog; this.#catalogRevision = catalog.revision; }
+    } catch (e) { this.lastError = String(e); }
+  }
+
+  #target(): import("./tauri").SourceTarget | null {
+    return this.queue?.source ?? null;
+  }
+
+  #requestId(): string { return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`; }
+
+  #errorCode(error: unknown): PlaylistCommandErrorCode | string {
+    if (typeof error === "object" && error && "code" in error) return String((error as { code: unknown }).code);
+    const text = String(error);
+    try { const parsed = JSON.parse(text); return typeof parsed.code === "string" ? parsed.code : text; } catch { return text; }
+  }
+
+  async #command(action: PlaylistAction, target = this.#target()): Promise<PlaylistCommandResult | null> {
+    if (!target) { this.lastError = "busy"; return null; }
+    try {
+      const result = await playlistCommandCmd({ request_id: this.#requestId(), target, action });
       await this.#refreshQueueNow();
+      if (action.kind === "delete" && this.browsedPlaylist?.id === action.id) this.closeBrowsedPlaylist();
+      else if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id)))
+        await this.browsePlaylist(this.browsedPlaylist.id);
+      return result;
     } catch (e) {
-      this.lastError = String(e);
+      this.lastError = this.#errorCode(e);
+      await this.#refreshQueueNow();
+      if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id)))
+        await this.browsePlaylist(this.browsedPlaylist.id);
+      return null;
     }
   }
+
+  get activePlaylist() { return this.queue?.playlist ?? null; }
+  get destinationName() {
+    const id = this.queue?.source?.playlist_id;
+    if (id === undefined) return i18n.t.playlistLoading;
+    if (id === null) return i18n.t.playlistNormal;
+    return (this.activePlaylist?.id === id ? this.activePlaylist.name : null)
+      ?? this.catalog?.lists.find((list) => list.id === id)?.name
+      ?? i18n.t.playlistLoading;
+  }
+  get destinationLabel() { return this.destinationName; }
+  get playlistStoreStatus() { return this.queue?.playlist_store_status ?? this.catalog?.store_status ?? "ready"; }
+  get canPlaylistMutate() { return this.queue?.source !== undefined && ["ready", "missing", "persist_failed"].includes(this.playlistStoreStatus); }
+  get canAddToSource() {
+    const id = this.queue?.source?.playlist_id;
+    return id === null || (id !== undefined && this.canPlaylistMutate && (this.activePlaylist?.id === id || !!this.catalog?.lists.some((list) => list.id === id)));
+  }
+
+  async doPlaylist(action: PlaylistAction): Promise<PlaylistCommandResult | null> {
+    const anchored = ["rename", "duplicate", "delete", "move", "remove"].includes(action.kind)
+      && "id" in action && action.id === this.browsedPlaylist?.id;
+    return this.#command(action, anchored ? this.#browseTarget : this.#target());
+  }
+  closeBrowsedPlaylist(): void { ++this.#browseGen; this.browsedPlaylist = null; this.#browseTarget = null; }
+  async browsePlaylist(id: string): Promise<void> {
+    const gen = ++this.#browseGen;
+    const target = this.#target();
+    const browseTarget = target ? { ...target } : null;
+    try {
+      const details = await playlistEntriesCmd(id);
+      if (gen === this.#browseGen && details.id === id) {
+        this.browsedPlaylist = details;
+        this.#browseTarget = browseTarget;
+      }
+    }
+    catch (e) { if (gen === this.#browseGen) this.lastError = this.#errorCode(e); }
+  }
+  async doEnqueue(path: string): Promise<PlaylistCommandResult | null> { return this.#command({ kind: "append", tracks: [{ path, expected_hash: this.trackForPath(path)?.content_hash ?? null }], mode: "single" }); }
 
   /// Bulk add. Returns the host's tally so the caller can say what happened;
   /// `null` means the call itself failed, which is the error-banner case.
   /// A gated or already-queued path is part of a successful result here, not
   /// a rejection — see `enqueue_many` in `src-tauri/src/lib.rs`.
-  async doEnqueueMany(paths: string[]): Promise<EnqueueManyResult | null> {
-    try {
-      const result = await enqueueManyCmd(paths);
-      await this.#refreshQueueNow();
-      return result;
-    } catch (e) {
-      this.lastError = String(e);
-      return null;
-    }
+  async doEnqueueMany(paths: string[], mode: "many" | "arrivals" = "many"): Promise<PlaylistCommandResult | null> {
+    const target = this.#target();
+    return this.#command({ kind: "append", tracks: paths.map((path) => ({ path, expected_hash: this.trackForPath(path)?.content_hash ?? null })), mode }, target);
   }
 
   /// Both history views, pulled on demand.
@@ -972,30 +1054,18 @@ class PlayerStore {
   /// than the guess that just failed.
   async doDequeue(index: number, expect: QueueItem): Promise<string | null> {
     try {
-      await dequeueCmd(index, expect);
-      await this.#refreshQueueNow();
-      return null;
-    } catch (e) {
-      const message = String(e);
-      this.lastError = message;
-      await this.#refreshQueueNow();
-      return message;
-    }
+      const result = await this.#command({ kind: "queue_remove", index, expect });
+      return result ? null : this.lastError ?? "busy";
+    } catch { return this.lastError ?? "busy"; }
   }
 
   /// As `doDequeue`, for `Move`. `from`/`to` are displayed-list indices;
   /// `expect` is the item shown at `from`.
   async doReorder(from: number, to: number, expect: QueueItem): Promise<string | null> {
     try {
-      await reorderCmd(from, to, expect);
-      await this.#refreshQueueNow();
-      return null;
-    } catch (e) {
-      const message = String(e);
-      this.lastError = message;
-      await this.#refreshQueueNow();
-      return message;
-    }
+      const result = await this.#command({ kind: "queue_move", from, to, expect });
+      return result ? null : this.lastError ?? "busy";
+    } catch { return this.lastError ?? "busy"; }
   }
 
   /// ⋮ 再スキャン. Refuses a second call while one is already in flight.
@@ -1064,13 +1134,8 @@ class PlayerStore {
   /// Queuing an unanalysed arrival can stall playback: the loader may run a
   /// synchronous analysis. The banner button stays enabled; kick-less paths
   /// (quiet reload / after clearing history) do not start background analysis.
-  async doQueueNewArrivals(): Promise<void> {
-    try {
-      await queueNewArrivalsCmd();
-      await this.#refreshQueueNow();
-    } catch (e) {
-      this.lastError = String(e);
-    }
+  async doQueueNewArrivals(): Promise<PlaylistCommandResult | null> {
+    return this.doEnqueueMany(this.actionableNewArrivals.map((row) => row.path), "arrivals");
   }
 
   /// Drains files staged by the Android share sheet (`Import.kt`) into

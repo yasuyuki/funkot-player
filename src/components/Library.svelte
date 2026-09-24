@@ -17,6 +17,7 @@
     toggleSelected,
   } from "../lib/selection";
   import SelectionBar from "./SelectionBar.svelte";
+  import PlaylistSource from "./PlaylistSource.svelte";
   import TrackMenu from "./TrackMenu.svelte";
   import { createLongPress, type MenuPoint } from "../lib/track-menu";
   import { tagTargets, tagEditSelection, enqueueSelection } from "../lib/tag-edit";
@@ -140,15 +141,16 @@
     if (addManyBusy) return;
     const paths = enqueuePaths;
     if (paths.length === 0) return;
+    const destination = store.destinationLabel;
     addManyBusy = true;
     try {
       const result = await store.doEnqueueMany(paths);
       if (result) {
-        toast.notify(enqueueManyMessage(t, result));
+        toast.notify(t.playlistAddResult(enqueueManyMessage(t, result), destination));
         // The rows are queued or knowingly refused; leaving forty boxes
         // ticked is worse than re-selecting. The mode stays on.
         selected = clearSelection();
-      }
+      } else toast.notify(t.playlistError(store.lastError ?? "busy"));
     } finally {
       addManyBusy = false;
     }
@@ -156,9 +158,12 @@
 
   async function onAdd(path: string) {
     if (busy[path]) return;
+    const destination = store.destinationLabel;
     busy = { ...busy, [path]: true };
     try {
-      await store.doEnqueue(path);
+      const result = await store.doEnqueue(path);
+      if (result) toast.notify(t.playlistAddResult(enqueueManyMessage(t, result), destination));
+      else toast.notify(t.playlistError(store.lastError ?? "busy"));
     } finally {
       const next = { ...busy };
       delete next[path];
@@ -179,7 +184,7 @@
   }
 
   function addDisabled(row: TrackRow): boolean {
-    return !!busy[row.path] || gated(row);
+    return !!busy[row.path] || gated(row) || !store.canAddToSource;
   }
 
   async function onSetMusicDir() {
@@ -216,7 +221,7 @@
 </script>
 
 <section class="library">
-  <h2 class="heading">{t.libraryHeading}</h2>
+  <div class="heading-line"><h2 class="heading">{t.libraryHeading}</h2><PlaylistSource compact /></div>
 
   <!-- Sticky so search stays reachable while scrolling hundreds of rows. -->
   <div class="toolbar">
@@ -256,6 +261,8 @@
         tagUnavailable={visibleTagCount !== tagSelectedRows.length}
         {allState}
         busy={addManyBusy}
+        addDisabled={!store.canAddToSource}
+        addLabel={t.playlistAddLabel(t.playlistTrackCount(enqueueCount), store.destinationLabel)}
         onSelectAll={() => (selected = addAll(selected, visiblePaths))}
         onClear={() => (selected = clearSelection())}
         onAdd={onAddSelected}
@@ -363,7 +370,7 @@
               class="add"
               disabled={addDisabled(row)}
               onclick={() => onAdd(row.path)}
-              aria-label={t.addToQueueLabel(row.title)}
+              aria-label={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)}
             >+</button>
           {/if}
         </li>
@@ -387,6 +394,8 @@
     font-weight: 600;
     color: var(--color-text);
   }
+  .heading-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-md); }
+  .heading-line .heading { margin-bottom: 0; }
 
   .toolbar {
     position: sticky;

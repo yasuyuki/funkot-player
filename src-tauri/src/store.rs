@@ -3149,6 +3149,7 @@ mod tests {
         let dir = TempDir::new("feedback-zip");
         let library = br#"{"aaa":{"intro_bars":16}}"#;
         fs::write(dir.0.join(LIBRARY_FILE), library).unwrap();
+        fs::write(dir.0.join("playlists.json"), br#"{"name":"private set","path":"private/music.wav"}"#).unwrap();
         // flags.json deliberately absent → `{}`
 
         let meta = FeedbackMeta {
@@ -3164,8 +3165,9 @@ mod tests {
 
         {
             let file = fs::File::open(&dest).unwrap();
-            let archive = zip::ZipArchive::new(file).unwrap();
+            let mut archive = zip::ZipArchive::new(file).unwrap();
             assert_eq!(archive.len(), 3);
+            assert!(archive.by_name("playlists.json").is_err());
         }
         assert_eq!(read_zip_entry(&dest, LIBRARY_FILE), library);
         assert_eq!(read_zip_entry(&dest, FLAGS_FILE), b"{}");

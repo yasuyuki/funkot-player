@@ -159,6 +159,22 @@ pub fn replace_pending<T: Into<QueueItem>>(queue: &SharedQueue, items: Vec<T>) {
     q.pending = items.into_iter().map(Into::into).collect();
 }
 
+pub(crate) fn pending_snapshot(queue: &SharedQueue) -> Vec<QueueItem> {
+    queue.lock().unwrap().pending.iter().cloned().collect()
+}
+
+pub(crate) fn reserved_item(queue: &SharedQueue) -> Option<QueueItem> {
+    queue.lock().unwrap().reserved.clone()
+}
+
+/// Used only after the engine's future fence has returned all old claims.
+pub(crate) fn restore_all(queue: &SharedQueue, items: Vec<QueueItem>) {
+    let mut q = queue.lock().unwrap();
+    q.pending = items.into();
+    q.reserved = None;
+    q.reserved_is_next = false;
+}
+
 /// Judge and insert under one queue lock: keep `candidates` order, prepend
 /// survivors to `pending`, leave `reserved` alone.
 ///
