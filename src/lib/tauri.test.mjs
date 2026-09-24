@@ -55,6 +55,17 @@ test("IPC wrappers preserve Tauri command names and argument shapes", async () =
   ]);
 });
 
+test("playlist commands retain the clicked source target and repeated paths", async () => {
+  const tauri = await importTypeScript("tauri.ts", tauriImports);
+  const calls = [];
+  const restore = tauri.installIpcForTesting({ invoke: async (command, args) => { calls.push({ command, args }); return { added: 2, rejected: 0, skipped: 0, created_id: null, undo_id: null }; }, listen: async () => () => {} });
+  try {
+    const target = { playlist_id: "night", generation: 7, revision: 3 };
+    await tauri.playlistCommand({ request_id: "click-1", target, action: { kind: "append", mode: "many", tracks: [{ path: "/music/a.mp3", expected_hash: "a" }, { path: "/music/a.mp3", expected_hash: "a" }] } });
+  } finally { restore(); }
+  assert.deepEqual(calls, [{ command: "playlist_command", args: { request: { request_id: "click-1", target: { playlist_id: "night", generation: 7, revision: 3 }, action: { kind: "append", mode: "many", tracks: [{ path: "/music/a.mp3", expected_hash: "a" }, { path: "/music/a.mp3", expected_hash: "a" }] } } } }]);
+});
+
 test("IPC listener wrapper forwards callback and unlisten", async () => {
   const tauri = await importTypeScript("tauri.ts", tauriImports);
   let handler;

@@ -261,6 +261,35 @@ export interface QueueSnapshot {
   folder_pos: number;
   /// Folder-track count for this playback session. `0` before first start.
   folder_len: number;
+  /** The source that produced this snapshot. Present on playlist-capable hosts. */
+  source?: SourceTarget;
+  playlist?: PlaylistDetails | null;
+  catalog_revision?: number;
+  playlist_store_status?: string;
+}
+
+export interface SourceTarget { playlist_id: string | null; generation: number; revision: number; }
+export interface PlaylistSummary { id: string; name: string; revision: number; total: number; remaining: number; }
+export interface PlaylistCatalogSnapshot { revision: number; active_id: string | null; generation: number; store_status: string; lists: PlaylistSummary[]; }
+export interface PlaylistEntryView { entry_id: string; path: string; title: string; artist: string; status: "pending" | "preparing" | "prepared" | "missing" | "unplayable" | "played" | "current"; reason: string | null; }
+export interface PlaylistDetails { id: string; name: string; revision: number; run_id: number; total: number; ended: boolean; skipped: number; rows: PlaylistEntryView[]; }
+export type PlaylistAction =
+  | { kind: "select"; id: string | null } | { kind: "create"; name: string }
+  | { kind: "save_queue"; name: string } | { kind: "rename"; id: string; name: string }
+  | { kind: "duplicate"; id: string } | { kind: "delete"; id: string; confirm_name: string }
+  | { kind: "restart"; id: string } | { kind: "remove"; id: string; entry_id: string }
+  | { kind: "undo_remove"; undo_id: string } | { kind: "move"; id: string; entry_id: string; to: number; scope: "remaining" | "all" }
+  | { kind: "append"; tracks: Array<{ path: string; expected_hash: string | null }>; mode: "single" | "many" | "arrivals" }
+  | { kind: "queue_move"; from: number; to: number; expect: QueueItem }
+  | { kind: "queue_remove"; index: number; expect: QueueItem };
+export interface PlaylistCommandResult { created_id: string | null; undo_id: string | null; added: number; rejected: number; skipped: number; }
+export type PlaylistCommandErrorCode = "stale" | "invalid_input" | "not_found" | "active_list" | "store_read_only" | "persist_failed" | "busy" | "transition_in_progress" | "active_upgrade_pending" | "navigation_pending" | "no_runway" | "auditioning" | "identity_unavailable" | "identity_changed" | "duplicate_undo";
+export interface PlaylistCommandError { code: PlaylistCommandErrorCode; message: string; }
+
+export function playlistCatalog(): Promise<PlaylistCatalogSnapshot> { return ipc.invoke("playlist_catalog"); }
+export function playlistEntries(id: string): Promise<PlaylistDetails> { return ipc.invoke("playlist_entries", { id }); }
+export function playlistCommand(request: { request_id: string; target: SourceTarget; action: PlaylistAction }): Promise<PlaylistCommandResult> {
+  return ipc.invoke("playlist_command", { request });
 }
 
 /// Matches `AnalysisProgress`. Emitted as `analysis-progress`; `row` is the

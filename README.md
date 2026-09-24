@@ -16,7 +16,8 @@ actively supported but is not deliberately broken either.
 - Scans new tracks in the background and shows progress
 - Reads embedded year/genre metadata and lets you edit and filter player-only
   tags without changing music files: [track tag guide](docs/track-tags.md)
-- Lets you queue, reorder, and drop tracks; the queue survives a restart
+- Saves named playlists with reusable track order and a separate playback
+  position; the normal queue remains available when you switch back
 - Lets you correct intro / outro bar counts; corrections stick across
   re-analysis
 - Lets you share feedback (`library.json` / `flags.json` / `meta.json`) via
@@ -158,6 +159,18 @@ control playback or automatically display anything in the companion app.
 - **次に再生** — the playback order, restored from the previous run at launch.
   Reorder with ↑↓, drop with ✕, and set the next track. Near a transition,
   some edits lock for a short window.
+  Choose a named playlist here to make every Library / History add button
+  append to that list; the destination stays visible on narrow screens too.
+  Playing a track removes it from the remaining view while keeping its saved
+  place. The list menu opens the full order, rename, duplicate, restart and
+  delete actions. Restart uses the saved order after the current track.
+  A finished playlist stops; adding more tracks waits for Play. Switching back
+  to the normal queue restores its pending tracks and automatic selection.
+  After reopening the app, Play resumes the previous current track from its
+  beginning. A save or busy error leaves the rejected edit unapplied.
+  **Save queue as playlist** copies the pending tracks, including prepared and
+  automatic tracks, without the current track or future automatic choices;
+  it leaves the normal queue and selected source in place.
 - **編集** — fix intro / outro bar counts on a transition that sounded wrong.
   Corrections are kept and re-applied after a fresh analysis.
 - **⋮ → 再スキャン** — pick up tracks added since the last scan.

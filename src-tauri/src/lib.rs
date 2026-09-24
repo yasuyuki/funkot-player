@@ -9,6 +9,10 @@ mod store_cache;
 mod track_tags;
 mod audio_metadata;
 mod tag_service;
+mod playlists;
+mod playlist_service;
+#[cfg(test)]
+mod playlist_engine_contract_tests;
 #[cfg(any(target_os = "windows", test))]
 mod current_track_http;
 
@@ -242,6 +246,12 @@ fn get_phase() -> Phase {
 /// one place both `toggle_pause` (in-app) and the notification's JNI
 /// callback flip pause, so it is the one place that needs to.
 fn flip_paused(paused: &AtomicBool) -> bool {
+    if paused.load(Ordering::Relaxed) {
+        if let Some(playback) = PLAYBACK.get() {
+            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+            if render.engine.is_finished() { render.engine.resume(); }
+        }
+    }
     // fetch_xor(true) returns the *previous* value; the new state is its negation.
     let now_paused = !paused.fetch_xor(true, Ordering::Relaxed);
     if now_paused && get_phase() != Phase::Disconnected {
@@ -2360,9 +2370,10 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
             }
             PlaybackEvent::Engine {
-                event: EngineEvent::TrackStarted { path, .. },
+                event: EngineEvent::TrackStarted { index, path },
                 audition,
             } => {
+                if !audition { playlist_service::started(index); }
                 // See the `MAIN_FRAMES` comment on the TransitionStarted arm
                 // above — same reasoning applies here.
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
@@ -2386,15 +2397,17 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
             }
             PlaybackEvent::Engine {
-                event: EngineEvent::TrackFailed { path, message },
-                ..
+                event: EngineEvent::TrackFailed { index, path, message },
+                audition,
             } => {
+                if !audition { playlist_service::failed(index, &message); }
                 log::warn!("track failed: {} ({message})", path.display());
             }
             PlaybackEvent::Engine {
                 event: EngineEvent::Finished,
-                ..
+                audition,
             } => {
+                if !audition { playlist_service::finished(); }
                 log::info!("engine reports finished");
             }
             PlaybackEvent::TransitionEnded { audition } => {
@@ -2577,7 +2590,10 @@ fn open_output_stream(
                 // engine had nothing prepared for this buffer; see `StallWatch`.
                 let silent = out.iter().all(|s| *s == 0.0);
                 let total_frames = (out.len() / 2) as u64;
-                let phase = state.stall.observe(total_frames, silent);
+                let phase = if !audition && state.engine.is_finished() {
+                    paused.store(true, Ordering::Relaxed);
+                    Phase::Paused
+                } else { state.stall.observe(total_frames, silent) };
                 set_phase(phase);
 
                 for ev in events {
@@ -2684,6 +2700,7 @@ fn audio_thread(
     // this same thread, to say whether the track `HostSource::next` just
     // reserved was already analyzed.
     let cache_dir_for_log = cache_dir.clone();
+    let playlist_cache = cache_dir_for_log.clone();
     options.cache_dir = cache_dir;
     options.head_only_secs = labeling_mode.then_some(LABELING_HEAD_SECS);
 
@@ -2783,6 +2800,8 @@ fn audio_thread(
         .on_folder_pos(Box::new(|pos| {
             FOLDER_POS.store(pos, Ordering::Relaxed);
         }));
+    let source_owner = playlist_service::get(&data_dir, &playlist_cache, &queue_for_priority);
+    let source = playlist_service::configure(&source_owner, source);
     let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
         Err(e) => {
@@ -3445,10 +3464,9 @@ fn start_impl(
     let dir = PathBuf::from(music_dir);
     let (paths, _complete): (Vec<PathBuf>, bool) = scan_tracks(&dir)?;
 
-    if let Err(error) = ensure_tracks_available(&paths, &dir) {
-        // Early error: nothing has been set up yet, so the phase is left at
-        // whatever it already was (Idle, on a fresh launch).
-        return Err(error);
+    if !playlist_service::existing().is_some_and(|s| s.lock().unwrap_or_else(|e|e.into_inner()).has_playlist()) {
+        // A normal folder source needs music; an empty finite list may end.
+        ensure_tracks_available(&paths, &dir)?;
     }
 
     let (tx, rx) = mpsc::channel();
@@ -3494,7 +3512,9 @@ fn start_impl(
         &data,
         ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
     );
-    queue::replace_pending(&state.queue, restored);
+    let source_owner = playlist_service::get(&data, &cache, &state.queue);
+    let normal_resume = source_owner.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
+    queue::replace_pending(&state.queue, normal_resume.as_ref().map(|n| n.items.clone()).unwrap_or(restored));
     // Mirror the restored queue to `queue.json` *before* clearing
     // `SESSION.in_flight` below, not after: from here until that clear,
     // `queue.json` still doesn't list the tracks that were `in_flight` (they
@@ -3529,7 +3549,7 @@ fn start_impl(
     // `store::restored_folder_pos`. Computed here, before `paths` moves into
     // `audio_thread` below, from `in_flight`'s *last* entry (the most
     // recently reserved track, whichever queue it came from).
-    let folder_pos =
+    let folder_pos = normal_resume.as_ref().and_then(|n| n.folder_pos).unwrap_or_else(||
         store::restored_folder_pos(
             &paths,
             session
@@ -3538,7 +3558,7 @@ fn start_impl(
                 .rev()
                 .find(|item| item.origin == QueueOrigin::Automatic)
                 .map(|item| item.path.as_path()),
-        );
+        ));
     let queue = Arc::clone(&state.queue);
 
     // Set before the audio thread starts: any in-flight analysis worker
@@ -4454,6 +4474,10 @@ mod manual_priority_tests {
 /// Snapshot of the playback queue, for the UI.
 #[derive(serde::Serialize, Clone)]
 struct QueueSnapshot {
+    source: playlist_service::SourceTarget,
+    playlist: Option<playlist_service::Details>,
+    catalog_revision: u64,
+    playlist_store_status: String,
     /// Reserved = already handed to the engine to play next. `None` while the
     /// only reserved track is the first of a run (being prepared as current,
     /// not as next-up).
@@ -4535,6 +4559,7 @@ fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
 /// pass. Tracks already in the queue are never removed by this gate.
 #[tauri::command(async)]
 fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
+    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let dirs = resolve_dirs(&app)?;
     let path_buf = PathBuf::from(&path);
     if !ALLOW_NON_FUNKOT.load(Ordering::Relaxed)
@@ -4814,6 +4839,7 @@ fn reorder(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
     }
@@ -4865,6 +4891,7 @@ fn dequeue(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<QueueItem, String> {
+    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
     }
@@ -4901,17 +4928,23 @@ fn dequeue(
 }
 
 /// Current queue contents, for the UI to render.
-#[tauri::command]
-fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
-    // Fixed order: SESSION → queue. Hold both just long enough to produce a
-    // mutually consistent snapshot for the frontend's exclusion union.
-    let (reserved, pending, in_flight) = {
-        let session = SESSION
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (reserved, pending) = queue::state_snapshot(&state.queue);
-        (reserved, pending, session.in_flight.clone())
+#[tauri::command(async)]
+fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
+    // The source owner serializes claims, progress and all destination edits.
+    // Reconcile against the engine before publishing the displayed revision.
+    let service = match playlist_service::existing() {
+        Some(service) => service,
+        None => { let dirs = resolve_dirs(&app)?;
+            playlist_service::get(Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue) }
     };
+    let mut owner = service.lock().unwrap_or_else(|e|e.into_inner());
+    owner.reconcile();
+    let source = owner.target();
+    let catalog_revision = source.revision;
+    let playlist_store_status = owner.store_status();
+    let playlist = owner.active().map(|id|owner.details(id, false)).transpose().map_err(|e| e.code)?;
+    let (reserved, pending, in_flight) = if playlist.is_some() { (None, vec![], vec![]) } else { owner.normal_view() };
+    drop(owner);
     let auditioning =
         AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed);
     let frames = FRAMES_UNTIL_TRANSITION.load(Ordering::Relaxed);
@@ -4943,6 +4976,10 @@ fn queue_state(state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
     let reserved_prepared = reserved.is_some()
         && (auditioning || paused || NEXT_PREPARED.load(Ordering::Relaxed));
     Ok(QueueSnapshot {
+        source,
+        playlist,
+        catalog_revision,
+        playlist_store_status,
         reserved,
         pending,
         in_flight,
@@ -5165,7 +5202,9 @@ fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
         ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
     );
     let state = app.state::<AppState>();
-    queue::replace_pending(&state.queue, restored);
+    let service = playlist_service::get(&data, cache_dir, &state.queue);
+    let normal = service.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
+    queue::replace_pending(&state.queue, normal.map(|n|n.items).unwrap_or(restored));
 
     // The preload is not only a view: from this point the restored entries
     // are editable as ordinary pending rows. Commit that ownership transfer
@@ -7369,6 +7408,30 @@ fn list_track_tags(app: tauri::AppHandle) -> Result<tag_service::Snapshot, tag_s
 }
 
 #[tauri::command(async)]
+fn playlist_catalog(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<playlist_service::CatalogView, playlist_service::CommandError> {
+    let dirs = resolve_dirs(&app).map_err(|message| playlist_service::CommandError { code: "store_read_only".into(), message })?;
+    let service = playlist_service::get(Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue);
+    let owner = service.lock().unwrap_or_else(|e|e.into_inner());
+    Ok(owner.catalog_view())
+}
+
+#[tauri::command(async)]
+fn playlist_entries(id: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<playlist_service::Details, playlist_service::CommandError> {
+    let dirs = resolve_dirs(&app).map_err(|message| playlist_service::CommandError { code: "store_read_only".into(), message })?;
+    let service = playlist_service::get(Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue);
+    let mut owner = service.lock().unwrap_or_else(|e|e.into_inner());
+    owner.reconcile();
+    owner.inspect_entries(&id)
+}
+
+#[tauri::command(async)]
+fn playlist_command(request: playlist_service::Request, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<playlist_service::CommandResult, playlist_service::CommandError> {
+    let dirs = resolve_dirs(&app).map_err(|message| playlist_service::CommandError { code: "store_read_only".into(), message })?;
+    let service = playlist_service::get(Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue);
+    playlist_service::command(&service, request)
+}
+
+#[tauri::command(async)]
 fn update_track_tags(app: tauri::AppHandle, request: tag_service::UpdateRequest) -> Result<tag_service::UpdateResult, tag_service::CommandError> {
     let dirs = resolve_dirs(&app).map_err(|_| tag_service::CommandError { code: "store_read_only", message: "data directory unavailable".into() })?;
     tag_service::update(Path::new(&dirs.data_dir), request)
@@ -8066,6 +8129,7 @@ fn queue_new_arrivals(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<u32, String> {
+    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let added = queue_new_arrivals_locked(&app, &state)?;
     let mut prioritized = false;
     if added > 0 {
@@ -8212,6 +8276,7 @@ fn enqueue_many(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<EnqueueManyResult, String> {
+    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let result = enqueue_many_locked(&app, &state, &paths)?;
     let mut prioritized = false;
     if result.added > 0 {
@@ -9200,6 +9265,9 @@ pub fn run() {
             undo_last_dismiss,
             refresh_library,
             list_track_tags,
+            playlist_catalog,
+            playlist_entries,
+            playlist_command,
             update_track_tags,
             set_bars,
             set_label,

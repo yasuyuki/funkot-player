@@ -15,10 +15,12 @@
     count,
     allState,
     busy = false,
+    addDisabled = false,
     onSelectAll,
     onClear,
     onAdd,
     onEditTags,
+    addLabel,
   }: {
     totalSelected?: number;
     enqueueCount?: number;
@@ -27,10 +29,12 @@
     count?: number;
     allState: "none" | "some" | "all";
     busy?: boolean;
+    addDisabled?: boolean;
     onSelectAll: () => void;
     onClear: () => void;
     onAdd: () => void;
     onEditTags?: (event: MouseEvent) => void;
+    addLabel?: string;
   } = $props();
 
   let t = $derived(i18n.t);
@@ -56,9 +60,9 @@
   <button
     type="button"
     class="add"
-    disabled={busy || queuedTotal === 0}
+    disabled={busy || addDisabled || queuedTotal === 0}
     onclick={onAdd}
-  >{onEditTags ? t.tagEnqueueCount(queuedTotal) : t.addSelected}</button>
+  >{addLabel ?? (onEditTags ? t.tagEnqueueCount(queuedTotal) : t.addSelected)}</button>
   {#if onEditTags}
     <button type="button" class="mini" disabled={busy || editableTotal === 0 || tagUnavailable}
       title={tagUnavailable ? t.tagIdentityUnavailable : undefined} onclick={onEditTags}>{t.tagEditCount(editableTotal)}</button>

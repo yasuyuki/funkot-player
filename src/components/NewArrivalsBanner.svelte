@@ -1,6 +1,8 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
   import { i18n } from "../lib/i18n.svelte";
+  import { toast } from "../lib/toast.svelte";
+  import { enqueueManyMessage } from "../lib/messages";
 
   let t = $derived(i18n.t);
 
@@ -14,9 +16,12 @@
 
   async function onQueue() {
     if (busy) return;
+    const destination = store.destinationLabel;
     busy = true;
     try {
-      await store.doQueueNewArrivals();
+      const result = await store.doQueueNewArrivals();
+      if (result) toast.notify(t.playlistAddResult(enqueueManyMessage(t, result), destination));
+      else toast.notify(t.playlistError(store.lastError ?? "busy"));
     } finally {
       busy = false;
     }
@@ -25,7 +30,7 @@
 
 {#if count > 0}
   <div class="banner">
-    <button type="button" class="action" onclick={onQueue}>
+    <button type="button" class="action" disabled={!store.canAddToSource} onclick={onQueue}>
       {t.queueNewArrivals(count)}
     </button>
   </div>

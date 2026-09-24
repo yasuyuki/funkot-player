@@ -4,6 +4,7 @@
   import ChipEditor from "./ChipEditor.svelte";
   import type { TrackRow } from "../../lib/tauri";
   import { i18n } from "../../lib/i18n.svelte";
+  import { enqueueManyMessage } from "../../lib/messages";
 
   let t = $derived(i18n.t);
 
@@ -190,9 +191,12 @@
 
   async function onAdd(path: string) {
     if (busy) return;
+    const destination = store.destinationLabel;
     busy = true;
     try {
-      await store.doEnqueue(path);
+      const result = await store.doEnqueue(path);
+      if (result) toast.notify(t.playlistAddResult(enqueueManyMessage(t, result), destination));
+      else toast.notify(t.playlistError(store.lastError ?? "busy"));
     } finally {
       busy = false;
     }
@@ -203,11 +207,12 @@
   }
 
   function addDisabled(row: TrackRow): boolean {
-    return busy || (isNonFunkot(row) && !store.allowNonFunkot);
+    return busy || !store.canAddToSource || (isNonFunkot(row) && !store.allowNonFunkot);
   }
 </script>
 
 <div class="wrap">
+  <p class="destination">{t.playlistDestination(store.destinationLabel || t.playlistNormal)}</p>
   <table class="table">
     <thead>
       <tr>
@@ -290,6 +295,8 @@
                 class="add"
                 disabled={addDisabled(row)}
                 onclick={() => onAdd(row.path)}
+                aria-label={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)}
+                title={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)}
               >+</button>
             </td>
           </tr>
@@ -320,6 +327,7 @@
     margin-top: var(--space-md);
     overflow-x: auto;
   }
+  .destination { margin: 0 0 var(--space-sm); color: var(--color-text-dim); font-size: var(--font-size-sm); overflow-wrap: anywhere; }
 
   .table {
     width: 100%;
