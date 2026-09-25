@@ -422,7 +422,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         let playback = playback.unwrap(); let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
         let token = if crate::AUDITIONING.load(Ordering::Relaxed) || crate::AUDITION_PREPARING.load(Ordering::Relaxed) || render.audition.is_some() {
             Err(error("auditioning"))
-        } else { render.engine.begin_future_update().map_err(CommandError::from) };
+        } else { render.engine.begin_future_update().map_err(|reason| {
+            if reason == FutureUpdateBusy::Transition && playback.paused.load(Ordering::Relaxed) {
+                error("transition_paused")
+            } else { reason.into() }
+        }) };
         match token {
             Ok(token) => {
                 // A callback may have started a track since reconcile. Fail

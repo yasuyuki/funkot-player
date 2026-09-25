@@ -270,6 +270,31 @@ fn removing_unprepared_row_during_transition_does_not_require_a_source_fence() {
 }
 
 #[test]
+fn paused_transition_rejects_source_switch_with_actionable_reason() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav"); let b = fixture.file("b.wav");
+    let id = fixture.install("playing", vec![Fixture::track(&a), Fixture::track(&b)]);
+    let other = fixture.install("other", vec![]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let first = source.next().unwrap(); let second = source.next().unwrap();
+    let player = playback(&[first, second], 4096);
+    {
+        let mut render = player.render.lock().unwrap();
+        render.engine.request_nav(funkot_core::engine::NavAction::TransitionToNext);
+        render.engine.render(&mut [0.0; 128]);
+        assert!(render.engine.transition_frames_into().is_some());
+    }
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+    player.paused.store(true, Ordering::Relaxed);
+    let before = fixture.service.lock().unwrap().catalog.clone();
+    let request = fixture.request("switch-while-paused", Action::Select { id: Some(other) });
+    assert_eq!(command_with(&fixture.service, request, Some(&player)).err().unwrap().code, "transition_paused");
+    assert_eq!(fixture.service.lock().unwrap().catalog, before);
+    assert!(player.render.lock().unwrap().engine.transition_frames_into().is_some());
+}
+
+#[test]
 fn ended_restart_is_saved_without_resuming_engine_or_destroying_definition() {
     let fixture = Fixture::new(); let a = fixture.file("a.wav");
     let id = fixture.install("set", vec![Fixture::track(&a)]);
