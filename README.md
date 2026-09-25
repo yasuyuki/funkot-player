@@ -247,10 +247,16 @@ do not copy the keystore here. From this tree, write a Windows-side bundle;
 the owner builds and the APK comes back through a drop directory:
 
 ```sh
-./scripts/android-signed-release.sh prepare    # this tree
+./scripts/android-signed-release.sh plan       # next=prepare|build|reuse
+./scripts/android-signed-release.sh prepare    # this tree, when plan says prepare
 # then the one-liner it prints, as the owner (sync + signed build + install)
 ./scripts/android-signed-release.sh install    # if the phone was not on adb yet
 ```
+
+`plan` reads `FUNKOT_OWNER_PLAYER` or `owner.path` in the handoff directory.
+It does not fall back to `$HOME/Projects/funkot-player`. A drop whose
+`.identity` matches `p.meta` is `next=reuse`. Pairing is `apk.sh pair` as the
+owner. There is no host `adb` on the agent machine.
 
 Pairing is still a phone-in-hand step (`pair` / `connect` subcommands). The
 release key fingerprint is checked before `adb install -r`.

@@ -9,15 +9,19 @@
 #   build    — owner (yasuyuki): sync, signed build, drop APK, install if a
 #              matching phone is already on adb
 #   install  — either user: verify cert and adb install -r
-#   pair / connect / status
+#   pair / connect / status / plan
+#
+# `plan` prints the next stage from the handoff and drop already on disk.
+# It does not search for a checkout, probe adb, or call GitHub.
+# Pairing on a host without adb is `apk.sh pair` as the owner.
 #
 # Human leftovers: wireless-debug pairing (code is only on the phone), and
 # running `build` as the owner so Gradle can read the keystore in that tree.
 #
 # Host paths default to this machine and are overridable:
-#   FUNKOT_HANDOFF_DIR  Windows-visible dir (bundle + apk.sh)
+#   FUNKOT_HANDOFF_DIR  Windows-visible dir (bundle + apk.sh + owner.path)
 #   FUNKOT_APK_DROP     signed APK destination
-#   FUNKOT_OWNER_PLAYER owner funkot-player checkout
+#   FUNKOT_OWNER_PLAYER owner funkot-player checkout, else handoff owner.path
 #   FUNKOT_ADB_ADDR     adb selector (skip model search)
 #   FUNKOT_RELEASE_MODEL  adb devices -l model: token (default Pixel_10_Pro)
 set -eu
@@ -35,7 +39,7 @@ require_official_core() {
 }
 
 usage() {
-    echo "usage: $0 prepare|build|install|pair|connect|status [args]" >&2
+    echo "usage: $0 prepare|build|install|pair|connect|status|plan [args]" >&2
     echo "  pair <ip> <pair-port> <code> [connect-port]" >&2
     echo "  connect <ip:port>" >&2
 }
@@ -60,16 +64,24 @@ drop_apk() {
     printf '%s\n' /srv/funkot-agent/incoming-apk/app-universal-release.apk
 }
 
+owner_path_file() {
+    printf '%s\n' "$(handoff_dir)/owner.path"
+}
+
 owner_player() {
     if [ -n "${FUNKOT_OWNER_PLAYER:-}" ]; then
         printf '%s\n' "$FUNKOT_OWNER_PLAYER"
         return
     fi
-    if [ -d "$HOME/Projects/funkot-player" ]; then
-        printf '%s\n' "$HOME/Projects/funkot-player"
-        return
+    file=$(owner_path_file)
+    if [ -f "$file" ]; then
+        path=$(tr -d '\r\n' < "$file")
+        if [ -n "$path" ] && [ -d "$path" ]; then
+            printf '%s\n' "$path"
+            return
+        fi
     fi
-    die "set FUNKOT_OWNER_PLAYER to the signing funkot-player checkout"
+    die "set FUNKOT_OWNER_PLAYER or $(owner_path_file) to the signing funkot-player checkout"
 }
 
 # Source tree that has ./dev.sh. prepare uses the checkout we were started from
@@ -88,7 +100,7 @@ player_root() {
 }
 
 require_owner_user() {
-    [ "$(id -un)" != "funkot-agent" ] || die "run build/pair as the owner, not funkot-agent"
+    [ "$(id -un)" != "funkot-agent" ] || die "run build/pair as the owner via apk.sh pair, not funkot-agent and not host adb"
 }
 
 load_meta() {
@@ -222,6 +234,7 @@ cmd_build() {
     mkdir -p "$(dirname "$drop")"
     cp -f "$APK_REL" "$drop"
     chmod 644 "$drop"
+    printf 'PLAYER_SHA=%s\nENGINE_SHA=%s\n' "$PLAYER_SHA" "$ENGINE_SHA" > "$drop.identity"
     echo "copied $drop"
 
     if pick_addr "$player" >/dev/null; then
@@ -278,6 +291,47 @@ cmd_connect() {
     adb_do "$player" devices -l
 }
 
+drop_matches_meta() {
+    meta=$(handoff_dir)/p.meta
+    drop=$(drop_apk)
+    [ -f "$meta" ] && [ -f "$drop" ] && [ -f "$drop.identity" ] || return 1
+    meta_player=$(sed -n 's/^PLAYER_SHA=//p' "$meta")
+    meta_engine=$(sed -n 's/^ENGINE_SHA=//p' "$meta")
+    id_player=$(sed -n 's/^PLAYER_SHA=//p' "$drop.identity")
+    id_engine=$(sed -n 's/^ENGINE_SHA=//p' "$drop.identity")
+    [ -n "$meta_player" ] && [ "$meta_player" = "$id_player" ] && [ "$meta_engine" = "$id_engine" ]
+}
+
+owner_configured() {
+    if [ -n "${FUNKOT_OWNER_PLAYER:-}" ]; then
+        return 0
+    fi
+    file=$(owner_path_file)
+    [ -f "$file" ] || return 1
+    [ -n "$(tr -d '\r\n' < "$file")" ]
+}
+
+cmd_plan() {
+    if [ ! -f "$(handoff_dir)/p.meta" ]; then
+        next=prepare
+    elif drop_matches_meta; then
+        next=reuse
+    else
+        next=build
+    fi
+    if [ "$next" = "prepare" ]; then
+        owner=n/a
+    elif owner_configured; then
+        owner=set
+    else
+        owner=missing
+    fi
+    printf 'next=%s\n' "$next"
+    printf 'owner=%s\n' "$owner"
+    printf 'pair=use-apk-sh\n'
+    printf 'github_read=connector-or-approved-gh\n'
+}
+
 cmd_status() {
     handoff=$(handoff_dir)
     drop=$(drop_apk)
@@ -309,5 +363,6 @@ case "$cmd" in
     pair) cmd_pair "$@" ;;
     connect) cmd_connect "$@" ;;
     status) cmd_status "$@" ;;
+    plan) cmd_plan "$@" ;;
     *) usage; exit 1 ;;
 esac
