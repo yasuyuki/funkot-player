@@ -111,7 +111,7 @@ export const ja: Messages = {
   playlistEmpty: "このプレイリストは空です",
   playlistRemoveLabel: (title) => `${title} をこのプレイリストから削除`,
   playlistRemoved: "プレイリストから削除しました",
-  playlistError: (code) => ({ stale: "リストが変更されました。確認してからやり直してください。", invalid_input: "プレイリスト名を確認してください。", not_found: "プレイリストが見つかりません。", active_list: "このリストを削除する前に、別の再生元へ切り替えてください。", store_read_only: "プレイリストは読み取り専用です。", persist_failed: "プレイリストを保存できませんでした。", busy: "プレイリストの変更処理中です。", transition_in_progress: "曲の切替が終わってからやり直してください。", active_upgrade_pending: "現在の曲の準備が終わってからやり直してください。", navigation_pending: "次の曲への移行が終わってからやり直してください。", no_runway: "次の曲が近いため変更できません。次の曲が始まってからやり直してください。", auditioning: "試聴中はプレイリストを変更できません。", identity_unavailable: "この曲をプレイリスト用に識別できません。", identity_changed: "保存先の曲が変わりました。ライブラリを再読込してやり直してください。", duplicate_undo: "この削除はすでに取り消されています。" })[code] ?? "プレイリストを更新できませんでした",
+  playlistError: (code) => ({ stale: "リストが変更されました。確認してからやり直してください。", invalid_input: "プレイリスト名を確認してください。", not_found: "プレイリストが見つかりません。", active_list: "このリストを削除する前に、別の再生元へ切り替えてください。", store_read_only: "プレイリストは読み取り専用です。", persist_failed: "プレイリストを保存できませんでした。", busy: "プレイリストの変更処理中です。", transition_in_progress: "曲の切替が終わってからやり直してください。", transition_paused: "一時停止中は曲の切替が進みません。再生を再開し、切替が終わってからやり直してください。", active_upgrade_pending: "現在の曲の準備が終わってからやり直してください。", navigation_pending: "次の曲への移行が終わってからやり直してください。", no_runway: "次の曲が近いため変更できません。次の曲が始まってからやり直してください。", auditioning: "試聴中はプレイリストを変更できません。", identity_unavailable: "この曲をプレイリスト用に識別できません。", identity_changed: "保存先の曲が変わりました。ライブラリを再読込してやり直してください。", duplicate_undo: "この削除はすでに取り消されています。" })[code] ?? "プレイリストを更新できませんでした",
   playlistBrowse: "全曲を閲覧",
   playlistBrowseLabel: (name) => `${name} を閲覧`,
   playlistRename: "名前を変更",
