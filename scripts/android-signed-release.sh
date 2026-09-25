@@ -9,11 +9,12 @@
 #   build    — owner (yasuyuki): sync, signed build, drop APK, install if a
 #              matching phone is already on adb
 #   install  — either user: verify cert and adb install -r
-#   pair / connect / status / plan
+#   pair / connect / status / plan / owner-set
 #
 # `plan` prints the next stage from the handoff and drop already on disk.
 # It does not search for a checkout, probe adb, or call GitHub.
 # Pairing on a host without adb is `apk.sh pair` as the owner.
+# `owner-set` records the signing checkout path in handoff owner.path.
 #
 # Human leftovers: wireless-debug pairing (code is only on the phone), and
 # running `build` as the owner so Gradle can read the keystore in that tree.
@@ -39,9 +40,10 @@ require_official_core() {
 }
 
 usage() {
-    echo "usage: $0 prepare|build|install|pair|connect|status|plan [args]" >&2
+    echo "usage: $0 prepare|build|install|pair|connect|status|plan|owner-set [args]" >&2
     echo "  pair <ip> <pair-port> <code> [connect-port]" >&2
     echo "  connect <ip:port>" >&2
+    echo "  owner-set [path]" >&2
 }
 
 handoff_dir() {
@@ -68,6 +70,11 @@ owner_path_file() {
     printf '%s\n' "$(handoff_dir)/owner.path"
 }
 
+# funkot-player identity: ./dev.sh and src-tauri/Cargo.toml.
+player_checkout_ok() {
+    [ -f "$1/dev.sh" ] && [ -f "$1/src-tauri/Cargo.toml" ]
+}
+
 owner_player() {
     if [ -n "${FUNKOT_OWNER_PLAYER:-}" ]; then
         printf '%s\n' "$FUNKOT_OWNER_PLAYER"
@@ -76,23 +83,23 @@ owner_player() {
     file=$(owner_path_file)
     if [ -f "$file" ]; then
         path=$(tr -d '\r\n' < "$file")
-        if [ -n "$path" ] && [ -d "$path" ]; then
+        if [ -n "$path" ] && [ -d "$path" ] && player_checkout_ok "$path"; then
             printf '%s\n' "$path"
             return
         fi
     fi
-    die "set FUNKOT_OWNER_PLAYER or $(owner_path_file) to the signing funkot-player checkout"
+    die "owner checkout missing or invalid; re-run owner-set (or apk.sh owner-set)"
 }
 
 # Source tree that has ./dev.sh. prepare uses the checkout we were started from
 # when this file lives in scripts/; otherwise cwd if it looks like the player.
 player_root() {
     d=$(CDPATH= cd "$(dirname "$0")" && pwd)
-    if [ -f "$d/../dev.sh" ] && [ -f "$d/../src-tauri/Cargo.toml" ]; then
+    if player_checkout_ok "$d/.."; then
         CDPATH= cd "$d/.." && pwd
         return
     fi
-    if [ -f "$PWD/dev.sh" ] && [ -f "$PWD/src-tauri/Cargo.toml" ]; then
+    if player_checkout_ok "$PWD"; then
         printf '%s\n' "$PWD"
         return
     fi
@@ -332,6 +339,36 @@ cmd_plan() {
     printf 'github_read=connector-or-approved-gh\n'
 }
 
+cmd_owner_set() {
+    [ "$(id -un)" != "funkot-agent" ] ||
+        die "run owner-set as the owner, not as funkot-agent"
+    if [ "$#" -eq 0 ]; then
+        player=$(player_root)
+    elif [ "$#" -eq 1 ]; then
+        [ -d "$1" ] || die "not a directory: $1"
+        player=$(CDPATH= cd -- "$1" && pwd)
+        player_checkout_ok "$player" ||
+            die "not a funkot-player checkout (need ./dev.sh and src-tauri/Cargo.toml)"
+    else
+        die "usage: $0 owner-set [path]"
+    fi
+    [ -f "$player/src-tauri/gen/android/keystore.properties" ] ||
+        die "missing keystore.properties in the checkout"
+    [ -f "$player/.secrets/upload-keystore.jks" ] ||
+        die "missing .secrets/upload-keystore.jks in the checkout"
+
+    file=$(owner_path_file)
+    dir=$(dirname "$file")
+    mkdir -p "$dir"
+    tmp=$file.tmp.$$
+    printf '%s\n' "$player" > "$tmp" || {
+        rm -f "$tmp"
+        die "failed to write $file"
+    }
+    mv "$tmp" "$file"
+    printf '%s\n' "$player"
+}
+
 cmd_status() {
     handoff=$(handoff_dir)
     drop=$(drop_apk)
@@ -364,5 +401,6 @@ case "$cmd" in
     connect) cmd_connect "$@" ;;
     status) cmd_status "$@" ;;
     plan) cmd_plan "$@" ;;
+    owner-set) cmd_owner_set "$@" ;;
     *) usage; exit 1 ;;
 esac
