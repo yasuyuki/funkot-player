@@ -76,8 +76,9 @@ Windows アプリが Funkot と判定済みの曲だけ送る場合の例:
 
 ## 3. 転送スクリプト
 
-コンテナ内パス固定版。ホストのリポジトリを `/work/funkot-player`、音源を
-`/music` にマウントして使う。
+ホストのリポジトリをコンテナへマウントし、音源を `/music` に載せて使う。
+リストとログの既定パスはスクリプト自身の位置から解決するので、コンテナ内の
+リポジトリ path は任意でよい（下のレシピは従来どおり `/work/funkot-player`）。
 
 `scripts/adb-push-music-list.py`:
 
@@ -86,10 +87,10 @@ Windows アプリが Funkot と判定済みの曲だけ送る場合の例:
 """Push relative paths under /music to the app Music dir via adb.
 
 Usage (inside funkot-player-dev with mounts described in docs/adb-music-transfer.md):
-  python3 /work/funkot-player/scripts/adb-push-music-list.py <adb-addr> [list-file]
+  python3 <repo>/scripts/adb-push-music-list.py <adb-addr> [list-file]
 
-Default list: /work/funkot-player/testdata/funkot-rel-paths.txt
-Log:          /work/funkot-player/testdata/funkot-transfer.log
+Default list and log paths are derived from this script's location
+(<repo>/testdata/...), so any container mount of the repo root works.
 Same-size remote files are skipped (resume-safe).
 """
 from __future__ import annotations
@@ -98,11 +99,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parents[1]
 ADDR = sys.argv[1]
-LIST = Path(sys.argv[2] if len(sys.argv) > 2 else "/work/funkot-player/testdata/funkot-rel-paths.txt")
+LIST = Path(sys.argv[2] if len(sys.argv) > 2 else REPO / "testdata" / "funkot-rel-paths.txt")
 DEST = "/storage/emulated/0/Android/data/jp.hatsuboshi.funkotplayer/files/Music"
 ROOT = Path("/music")
-LOG = Path("/work/funkot-player/testdata/funkot-transfer.log")
+LOG = REPO / "testdata" / "funkot-transfer.log"
 
 
 def sh(*args: str) -> subprocess.CompletedProcess[str]:

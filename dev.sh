@@ -1,9 +1,9 @@
 #!/bin/sh
 # Run a command inside the build container.
 #
-# This repo is mounted at /work/funkot-player and the sibling
-# funkot-autodj-for-ui checkout read-only at /work/funkot-autodj-for-ui, which
-# is what the `funkot-core` path dependency in src-tauri/Cargo.toml resolves to.
+# This repo and the sibling funkot-autodj-for-ui checkout are mounted under
+# /work/by-core… so each host worktree gets a distinct container path (PackageId)
+# while ../../funkot-autodj-for-ui from src-tauri still resolves to the core mount.
 #
 # funkot-autodj-for-ui is a second checkout of the funkot-autodj repo. Official
 # builds require its clean HEAD to equal funkot-core.commit; point
@@ -47,7 +47,7 @@
 # cargo does not rebuild when only dist/ changed:
 #   ./dev.sh npm run build
 #   ./dev.sh cargo build --manifest-path src-tauri/Cargo.toml --release --features custom-protocol
-#   GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
+#   GUI=1 ./dev.sh /cargo-target/release/funkot-player
 #
 # /root/.android is a named volume on every run, not just for adb: the debug
 # keystore lives there, and letting it be regenerated per build changes the APK
@@ -88,6 +88,26 @@ esac
     exit 1
 }
 
+# INVARIANT: STORE_MOUNT is fixed. Cargo bakes absolute OUT_DIR paths into
+# replayed build-script outputs; changing it invalidates the store.
+STORE_MOUNT=/cargo-target
+FUNKOT_CARGO_TARGET=${FUNKOT_CARGO_TARGET:-funkot-player-cargo-target}
+
+# Host realpaths -> one path segment each (no hash). Core path is keyed by the
+# core checkout, so two player worktrees that share a core share CORE_MOUNT.
+core_host=$(CDPATH= cd "$CORE_DIR" && pwd -P)
+player_host=$(pwd -P)
+core_seg=$(printf '%s' "$core_host" | tr '/' '_')
+player_seg=$(printf '%s' "$player_host" | tr '/' '_')
+bind_parent=/work/by-core${core_seg}
+PLAYER_MOUNT=${bind_parent}/${player_seg}
+CORE_MOUNT=${bind_parent}/funkot-autodj-for-ui
+
+# Leftover worktree target dirs are not the Cargo output under this design.
+if [ -d "$PWD/src-tauri/target" ] && [ ! -L "$PWD/src-tauri/target" ]; then
+    echo "note: $PWD/src-tauri/target is not the Cargo output; container store is $STORE_MOUNT" >&2
+fi
+
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker build -t "$IMAGE" .
 fi
@@ -105,7 +125,7 @@ if docker info --format '{{range .SecurityOptions}}{{.}}{{"\n"}}{{end}}' 2>/dev/
     | grep -qx 'name=rootless'; then
     CHOWN=':'
 else
-    CHOWN="chown -R \"\$HOST_UID:\$HOST_GID\" /work/funkot-player 2>/dev/null || true"
+    CHOWN="chown -R --one-file-system \"\$HOST_UID:\$HOST_GID\" '$PLAYER_MOUNT' 2>/dev/null || true"
 fi
 
 if [ "${ADB:-0}" = 1 ]; then
@@ -166,16 +186,19 @@ fi
 
 # shellcheck disable=SC2086
 exec docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
-    -v "$PWD":/work/funkot-player \
-    -v "$(cd "$CORE_DIR" && pwd)":/work/funkot-autodj-for-ui:ro \
+    -v "$PWD":"$PLAYER_MOUNT" \
+    -v "$core_host":"$CORE_MOUNT":ro \
+    -w "$PLAYER_MOUNT" \
     -v "$CORE_GIT_COMMON":"$CORE_GIT_COMMON":ro \
     -v funkot-player-cargo-registry:/usr/local/cargo/registry \
     -v funkot-player-gradle:/root/.gradle \
     -v funkot-player-android-home:/root/.android \
+    -v "$FUNKOT_CARGO_TARGET":"$STORE_MOUNT" \
+    -e CARGO_TARGET_DIR="$STORE_MOUNT" \
     -e CARGO_TERM_COLOR=never \
     -e GIT_CONFIG_COUNT=1 \
     -e GIT_CONFIG_KEY_0=safe.directory \
-    -e GIT_CONFIG_VALUE_0=/work/funkot-autodj-for-ui \
+    -e GIT_CONFIG_VALUE_0="$CORE_MOUNT" \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
     "$IMAGE" sh -c '"$@"; status=$?; '"$CHOWN"'; exit $status' -- "$@"
