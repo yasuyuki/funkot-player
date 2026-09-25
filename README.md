@@ -358,8 +358,14 @@ phone. On WSL, `GUI=1` hands the container WSLg's X11 and PulseAudio sockets:
 ```sh
 ./dev.sh cargo build --manifest-path src-tauri/Cargo.toml --release
 cp <tracks> .desktop-data/Music/                      # created on first run
-GUI=1 ./dev.sh ./src-tauri/target/release/funkot-player
+GUI=1 ./dev.sh /cargo-target/release/funkot-player
 ```
+
+`./dev.sh` sets `CARGO_TARGET_DIR` to the shared Docker volume
+`funkot-player-cargo-target` (override with `FUNKOT_CARGO_TARGET`). The Linux
+binary lives at `/cargo-target/release/funkot-player` inside the container, not
+under `src-tauri/target`. Windows native builds still use
+`src-tauri\target\release`.
 
 - **Audio goes out through ALSA's pulse plugin**, not a sound card. cpal's Linux
   host is ALSA, the container has no device, and `/etc/asound.conf` in the image
