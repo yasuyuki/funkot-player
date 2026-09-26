@@ -14,6 +14,7 @@ mod playlists;
 mod playlist_progress;
 mod playlist_service;
 mod engine_observation;
+mod playback_diagnostics;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
 #[cfg(any(target_os = "windows", test))]
@@ -2659,6 +2660,29 @@ mod stale_audition_event_tests {
     }
 }
 
+fn log_playback_diagnostics(sample_rate: u32, snapshot: playback_diagnostics::DiagnosticsSnapshot) {
+    if let Some(upgrade) = snapshot.upgrade {
+        log::info!(
+            "playback diagnostics: sample_rate={sample_rate} render_lock_misses={} render_lock_missed_frames={} preview_wait_frames={} preview_upgrades={} playlist_index={} playhead={} preview_frames={} main_callback_frame={}",
+            snapshot.render_lock_misses,
+            snapshot.render_lock_missed_frames,
+            snapshot.preview_wait_frames,
+            upgrade.count,
+            upgrade.playlist_index,
+            upgrade.playhead,
+            upgrade.preview_frames,
+            upgrade.main_callback_frame,
+        );
+    } else {
+        log::info!(
+            "playback diagnostics: sample_rate={sample_rate} render_lock_misses={} render_lock_missed_frames={} preview_wait_frames={} preview_upgrades=0",
+            snapshot.render_lock_misses,
+            snapshot.render_lock_missed_frames,
+            snapshot.preview_wait_frames,
+        );
+    }
+}
+
 /// Open (or reopen) the default output device at the engine's sample rate.
 ///
 /// Looks up `default_output_device` every call so a reconnect after Bluetooth
@@ -2671,6 +2695,7 @@ fn open_output_stream(
     paused: Arc<AtomicBool>,
     event_tx: SyncSender<PlaybackEvent>,
     observation: Arc<engine_observation::EngineObservation>,
+    diagnostics: Arc<playback_diagnostics::PlaybackDiagnostics>,
     err_log: Sender<String>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
@@ -2692,6 +2717,7 @@ fn open_output_stream(
         buffer_size: cpal::BufferSize::Default,
     };
     let mut transport_fade = transport_fade::TransportFade::new(sample_rate);
+    let mut core_diagnostics = playback_diagnostics::CoreDiagnosticsPublisher::new(&diagnostics);
     let stream = device
         .build_output_stream(
             config,
@@ -2703,6 +2729,7 @@ fn open_output_stream(
                 // try_lock: never block the realtime callback on the audio
                 // thread's reopen / drop path (same idea as funkot-cli ClipPlayer).
                 let Ok(mut state) = render.try_lock() else {
+                    diagnostics.record_render_lock_miss((out.len() / 2) as u64);
                     out.fill(0.0);
                     return;
                 };
@@ -2720,7 +2747,7 @@ fn open_output_stream(
                 // so the engine borrow ends before `stall` / `was_in_transition`.
                 // Stamp `audition` at send time from this buffer's engine choice.
                 let audition = state.audition.is_some();
-                let (events, in_transition) = {
+                let (events, in_transition, render_diagnostics) = {
                     let engine = match state.audition.as_mut() {
                         Some(aud) => aud,
                         None => &mut state.engine,
@@ -2774,8 +2801,12 @@ fn open_output_stream(
                     // the display the moment the second one starts rather than
                     // waiting for an end edge that will never come.
                     let in_transition = engine.transition_frames_into().is_some();
-                    (events, in_transition)
+                    let render_diagnostics = (!audition).then(|| engine.render_diagnostics());
+                    (events, in_transition, render_diagnostics)
                 };
+                if let Some(render_diagnostics) = render_diagnostics {
+                    core_diagnostics.observe(render_diagnostics, || MAIN_FRAMES.load(Ordering::Relaxed), &diagnostics);
+                }
                 // Publish the main engine before its events are sent. Audition
                 // leaves the main observation unchanged while it is frozen.
                 if !audition {
@@ -3050,6 +3081,14 @@ fn audio_thread(
     // callback. It is not the same "touches no lock at all" guarantee the
     // rest of the callback holds to; it is a bet that this particular,
     // rare, uncontended lock is fine.
+    let diagnostics = Arc::new(playback_diagnostics::PlaybackDiagnostics::new());
+    let mut diagnostics_seen = playback_diagnostics::DiagnosticsSnapshot {
+        render_lock_misses: 0,
+        render_lock_missed_frames: 0,
+        preview_wait_frames: 0,
+        upgrade: None,
+    };
+    log_playback_diagnostics(sample_rate, diagnostics_seen);
     let (event_tx, event_rx) = mpsc::sync_channel::<PlaybackEvent>(64);
     if let Err(e) = std::thread::Builder::new()
         .name("funkot-events".into())
@@ -3064,6 +3103,7 @@ fn audio_thread(
         Arc::clone(&paused),
         event_tx.clone(),
         Arc::clone(&observation),
+        Arc::clone(&diagnostics),
         log.clone(),
     ) {
         Ok(s) => Some(s),
@@ -3125,6 +3165,13 @@ fn audio_thread(
             persist_session();
         }
 
+        if let Some(snapshot) = diagnostics.read() {
+            if snapshot != diagnostics_seen {
+                log_playback_diagnostics(sample_rate, snapshot);
+                diagnostics_seen = snapshot;
+            }
+        }
+
         // No open stream: stay Disconnected and retry reopen on the cooldown.
         // Do not set `Failed` — that is for the initial setup path only.
         if stream.is_none() {
@@ -3145,6 +3192,7 @@ fn audio_thread(
                     Arc::clone(&paused),
                     event_tx.clone(),
                     Arc::clone(&observation),
+                    Arc::clone(&diagnostics),
                     log.clone(),
                 ) {
                     Ok(s) => {
