@@ -91,7 +91,10 @@ esac
 # INVARIANT: STORE_MOUNT is fixed. Cargo bakes absolute OUT_DIR paths into
 # replayed build-script outputs; changing it invalidates the store.
 STORE_MOUNT=/cargo-target
+FUNKOT_CARGO_TARGET_EXPLICIT=0
+[ -n "${FUNKOT_CARGO_TARGET+x}" ] && FUNKOT_CARGO_TARGET_EXPLICIT=1
 FUNKOT_CARGO_TARGET=${FUNKOT_CARGO_TARGET:-funkot-player-cargo-target}
+export FUNKOT_CARGO_TARGET_EXPLICIT
 
 # Host realpaths -> one path segment each (no hash). Core path is keyed by the
 # core checkout, so two player worktrees that share a core share CORE_MOUNT.
@@ -110,6 +113,45 @@ fi
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker build -t "$IMAGE" .
+fi
+
+# A lifecycle-managed invocation receives an opaque v1 context from the public
+# runner. The specialized owner creates and registers exactly one task generation
+# before Docker can create its dedicated Cargo volume. Ordinary invocations keep
+# the long-lived shared target volume above unchanged.
+MANAGED_OWNER=0
+if [ -n "${WORKSPACE_LIFECYCLE_CONTEXT:-}" ]; then
+    OWNER_INTERPRETER=$(python3 -c 'import json, os; print(json.loads(os.environ["WORKSPACE_LIFECYCLE_CONTEXT"])["owner_receipt_argv"][0])') || {
+        echo "invalid WORKSPACE_LIFECYCLE_CONTEXT" >&2
+        exit 2
+    }
+    case "$OWNER_INTERPRETER" in
+        /*) ;;
+        *) echo "managed lifecycle interpreter must be absolute" >&2; exit 2 ;;
+    esac
+    OWNER_LOCK_DIR=$("$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["WORKSPACE_LIFECYCLE_CONTEXT"])["owner_receipt_dir"])') || exit $?
+    exec 9>"$OWNER_LOCK_DIR/.funkot-player-build.lock"
+    flock -x 9
+    export FUNKOT_PLAYER_OWNER_OUTER_LEASE=1
+    OWNER_RECORD=$("$OWNER_INTERPRETER" "$PWD/scripts/lifecycle-product-owner.py" prepare) || exit $?
+    OWNER_GENERATION=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["generation"])') || exit $?
+    FUNKOT_CARGO_TARGET=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["cargo_target"])') || exit $?
+    OWNER_NODE_VOLUME=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["node_volume"]["name"])') || exit $?
+    OWNER_DIST=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["dist"])') || exit $?
+    OWNER_TAURI_SCHEMAS=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["tauri_schemas"])') || exit $?
+    OWNER_ANDROID_PROJECT_BUILD=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_project_build"])') || exit $?
+    OWNER_ANDROID_BUILDSRC_BUILD=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_buildsrc_build"])') || exit $?
+    OWNER_ANDROID_BUILDSRC_GRADLE=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_buildsrc_gradle"])') || exit $?
+    OWNER_ANDROID_BUILD=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_build"])') || exit $?
+    OWNER_ANDROID_GRADLE=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_gradle"])') || exit $?
+    OWNER_ANDROID_GENERATED_JAVA=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_generated_java"])') || exit $?
+    OWNER_ANDROID_GENERATED_ASSETS=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_generated_assets"])') || exit $?
+    OWNER_ANDROID_PROGUARD_TAURI=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_proguard_tauri"])') || exit $?
+    OWNER_ANDROID_TAURI_BUILD_GRADLE=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_tauri_build_gradle"])') || exit $?
+    OWNER_ANDROID_TAURI_PROPERTIES=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_tauri_properties"])') || exit $?
+    OWNER_ANDROID_TAURI_SETTINGS=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_tauri_settings"])') || exit $?
+    OWNER_ANDROID_JNI_VOLUME=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["jni_volume"]["name"])') || exit $?
+    MANAGED_OWNER=1
 fi
 
 # The container runs as root; hand back ownership of anything it wrote here.
@@ -185,7 +227,8 @@ if [ "${GUI:-0}" = 1 ]; then
 fi
 
 # shellcheck disable=SC2086
-exec docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
+if [ "$MANAGED_OWNER" != 1 ]; then
+    exec docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
     -v "$PWD":"$PLAYER_MOUNT" \
     -v "$core_host":"$CORE_MOUNT":ro \
     -w "$PLAYER_MOUNT" \
@@ -202,3 +245,47 @@ exec docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
     "$IMAGE" sh -c '"$@"; status=$?; '"$CHOWN"'; exit $status' -- "$@"
+fi
+
+# Managed failures still must remove empty Docker-created mountpoint dirs.
+set +e
+# shellcheck disable=SC2086
+docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
+    -v "$PWD":"$PLAYER_MOUNT" \
+    -v "$core_host":"$CORE_MOUNT":ro \
+    -w "$PLAYER_MOUNT" \
+    -v "$CORE_GIT_COMMON":"$CORE_GIT_COMMON":ro \
+    -v funkot-player-cargo-registry:/usr/local/cargo/registry \
+    -v funkot-player-gradle:/root/.gradle \
+    -v funkot-player-android-home:/root/.android \
+    -v "$FUNKOT_CARGO_TARGET":"$STORE_MOUNT" \
+    -v "$OWNER_NODE_VOLUME":"$PLAYER_MOUNT/node_modules" \
+    -v "$OWNER_DIST":"$PLAYER_MOUNT/dist" \
+    -v "$OWNER_TAURI_SCHEMAS":"$PLAYER_MOUNT/src-tauri/gen/schemas" \
+    -v "$OWNER_ANDROID_PROJECT_BUILD":"$PLAYER_MOUNT/src-tauri/gen/android/build" \
+    -v "$OWNER_ANDROID_BUILDSRC_BUILD":"$PLAYER_MOUNT/src-tauri/gen/android/buildSrc/build" \
+    -v "$OWNER_ANDROID_BUILDSRC_GRADLE":"$PLAYER_MOUNT/src-tauri/gen/android/buildSrc/.gradle" \
+    -v "$OWNER_ANDROID_BUILD":"$PLAYER_MOUNT/src-tauri/gen/android/app/build" \
+    -v "$OWNER_ANDROID_GRADLE":"$PLAYER_MOUNT/src-tauri/gen/android/.gradle" \
+    -v "$OWNER_ANDROID_GENERATED_JAVA":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/java/jp/hatsuboshi/funkotplayer/generated" \
+    -v "$OWNER_ANDROID_GENERATED_ASSETS":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/assets" \
+    -v "$OWNER_ANDROID_PROGUARD_TAURI":"$PLAYER_MOUNT/src-tauri/gen/android/app/proguard-tauri.pro" \
+    -v "$OWNER_ANDROID_TAURI_BUILD_GRADLE":"$PLAYER_MOUNT/src-tauri/gen/android/app/tauri.build.gradle.kts" \
+    -v "$OWNER_ANDROID_TAURI_PROPERTIES":"$PLAYER_MOUNT/src-tauri/gen/android/app/tauri.properties" \
+    -v "$OWNER_ANDROID_TAURI_SETTINGS":"$PLAYER_MOUNT/src-tauri/gen/android/tauri.settings.gradle" \
+    -v "$OWNER_ANDROID_JNI_VOLUME":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/jniLibs" \
+    -e CARGO_TARGET_DIR="$STORE_MOUNT" \
+    -e CARGO_TERM_COLOR=never \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0="$CORE_MOUNT" \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
+    "$IMAGE" sh -c '"$@"; status=$?; '"$CHOWN"'; exit $status' -- "$@"
+status=$?
+set -e
+if [ "$MANAGED_OWNER" = 1 ]; then
+    "$OWNER_INTERPRETER" "$PWD/scripts/lifecycle-product-owner.py" seal \
+        --generation "$OWNER_GENERATION" --image "$IMAGE" --status "$status" -- "$@" || exit $?
+fi
+exit "$status"
