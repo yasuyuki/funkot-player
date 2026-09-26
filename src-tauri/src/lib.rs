@@ -10,6 +10,7 @@ mod track_tags;
 mod audio_metadata;
 mod tag_service;
 mod playlists;
+mod playlist_progress;
 mod playlist_service;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
