@@ -503,6 +503,9 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     // Appending to an ended list makes new pending work, but core remains
     // naturally stopped until the existing Play control explicitly resumes.
     if force_source && playback.is_none() { owner.ended = false; }
+    // A reopened terminal list has no exhausted source yet, but new pending
+    // entries still replace the ended display after their save succeeds.
+    if append_action && result.added > 0 && owner.active().is_some() { owner.ended = false; }
     owner.receipts.insert(request.request_id, (fingerprint, result.clone()));
     Ok(result)
 }

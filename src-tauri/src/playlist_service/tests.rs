@@ -536,6 +536,65 @@ fn paused_transition_rejects_source_switch_with_actionable_reason() {
 }
 
 #[test]
+fn append_after_terminal_service_restart_clears_ended_without_starting_playback() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav"); let b = fixture.file("b.wav");
+    let normal = vec![QueueItem::manual(fixture.file("normal.wav"))];
+    queue::replace_pending(&fixture.queue, normal.clone());
+    let id = fixture.install("set", vec![Fixture::track(&a)]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let (index, _) = source.next().unwrap(); assert!(source.next().is_none());
+    {
+        let mut owner = fixture.service.lock().unwrap();
+        owner.started(index);
+        owner.reconcile_snapshot(crate::engine_observation::EngineSnapshot { current: None, finished: true });
+        assert!(owner.details(&id, false).unwrap().ended);
+    }
+    let Fixture { data, cache, queue, service } = fixture;
+    drop(source); drop(service);
+    let service = Arc::new(Mutex::new(Service::new(data.path(), cache.path(), queue.clone())));
+    let fixture = Fixture { data, cache, queue, service };
+    let before = {
+        let owner = fixture.service.lock().unwrap();
+        assert!(owner.details(&id, false).unwrap().ended);
+        assert!(!owner.exhausted);
+        owner.catalog.clone()
+    };
+    fixture.command("empty", Action::Append { tracks: vec![], mode: "many".into() }).unwrap();
+    assert!(fixture.service.lock().unwrap().details(&id, false).unwrap().ended);
+    let action = Action::Append { tracks: vec![a, b].into_iter().map(|path| TrackTarget {
+        path: path.to_string_lossy().into(), expected_hash: None,
+    }).collect(), mode: "many".into() };
+    let file = fixture.data.path().join("playlists.json"); let saved = fs::read(&file).unwrap();
+    fs::write(&file, b"external update").unwrap();
+    assert_eq!(fixture.command("failed-append", action.clone()).err().unwrap().code, "stale");
+    assert!(fixture.service.lock().unwrap().details(&id, false).unwrap().ended);
+    assert_eq!(fs::read(&file).unwrap(), b"external update");
+    fs::write(&file, saved).unwrap();
+    assert_eq!(fixture.command("append", action).unwrap().added, 2);
+    let after = {
+        let owner = fixture.service.lock().unwrap();
+        let details = owner.details(&id, false).unwrap();
+        assert!(!details.ended);
+        assert_eq!(details.total, 3); assert_eq!(details.rows.len(), 2);
+        assert!(details.rows.iter().all(|row| row.status == "pending"));
+        assert_eq!(owner.catalog.runs, before.runs);
+        assert_eq!(&owner.catalog.definition(&id).unwrap().entries[..1], &before.definition(&id).unwrap().entries);
+        assert_eq!(owner.catalog.normal, before.normal);
+        assert_eq!(queue::pending_snapshot(&fixture.queue), normal);
+        assert!(owner.catalog.current.is_none() && owner.restored.is_none() && owner.current_index.is_none());
+        assert!(owner.claims.is_empty() && owner.normal_source.is_none());
+        owner.catalog.clone()
+    };
+    let Fixture { data, cache, queue, service } = fixture; drop(service);
+    let reopened = Service::new(data.path(), cache.path(), queue);
+    assert_eq!(reopened.catalog, after);
+    assert!(!reopened.details(&id, false).unwrap().ended);
+    assert!(reopened.restored.is_none() && reopened.current_index.is_none());
+}
+
+#[test]
 fn ended_restart_is_saved_without_resuming_engine_or_destroying_definition() {
     let fixture = Fixture::new(); let a = fixture.file("a.wav");
     let id = fixture.install("set", vec![Fixture::track(&a)]);
