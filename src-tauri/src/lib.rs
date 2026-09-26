@@ -4,6 +4,7 @@
 //! the engine, and its contents survive a restart via `store.rs`.
 
 mod queue;
+mod transport_fade;
 mod store;
 mod store_cache;
 mod track_tags;
@@ -2617,6 +2618,9 @@ fn open_output_stream(
         sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
+    let mut transport_fade = transport_fade::TransportFade::new(
+        sample_rate, paused.load(Ordering::Relaxed),
+    );
     let stream = device
         .build_output_stream(
             config,
@@ -2631,7 +2635,10 @@ fn open_output_stream(
                     out.fill(0.0);
                     return;
                 };
-                if paused.load(Ordering::Relaxed) {
+                // Snapshot once: a control arriving during this buffer takes
+                // effect next time, continuing from the same fade level.
+                let requested_pause = paused.load(Ordering::Relaxed);
+                if requested_pause && transport_fade.is_silent() {
                     out.fill(0.0);
                     state.stall.reset_silence();
                     set_phase(Phase::Paused);
@@ -2647,11 +2654,10 @@ fn open_output_stream(
                         Some(aud) => aud,
                         None => &mut state.engine,
                     };
-                    let frames = engine.render(out);
-                    let written = frames * 2;
-                    if written < out.len() {
-                        out[written..].fill(0.0);
-                    }
+                    // Render only the audible pause tail, then freeze the
+                    // engine. Its events and playhead still account for every
+                    // rendered frame through the normal path below.
+                    let frames = transport_fade.render(out, requested_pause, |out| engine.render(out));
                     // Only the main engine advances the playhead `player_state`
                     // reports as `position_secs` — see `MAIN_FRAMES`'s doc
                     // comment for why this must not run in the audition branch.
@@ -2705,6 +2711,10 @@ fn open_output_stream(
                 let total_frames = (out.len() / 2) as u64;
                 let phase = if !audition && state.engine.is_finished() {
                     paused.store(true, Ordering::Relaxed);
+                    transport_fade.silence();
+                    Phase::Paused
+                } else if requested_pause {
+                    state.stall.reset_silence();
                     Phase::Paused
                 } else { state.stall.observe(total_frames, silent) };
                 set_phase(phase);
