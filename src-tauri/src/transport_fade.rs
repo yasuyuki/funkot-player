@@ -15,10 +15,12 @@ pub(super) struct TransportFade {
 }
 
 impl TransportFade {
-    pub(super) fn new(sample_rate: u32, paused: bool) -> Self {
+    pub(super) fn new(sample_rate: u32) -> Self {
         let frames = (f64::from(sample_rate) * 0.010).round().max(2.0) as usize;
         let full = frames - 1;
-        Self { level: if paused { 0 } else { full }, full, muted: paused }
+        // A new/reopened output stream also starts after silence. Its first
+        // Play must fade in; an initially paused stream remains frozen.
+        Self { level: 0, full, muted: true }
     }
 
     pub(super) fn is_silent(&self) -> bool { self.muted }
@@ -69,7 +71,9 @@ mod tests {
     }
 
     fn cycle(rate: u32, chunk: usize) -> (Vec<f32>, Vec<f32>, usize) {
-        let mut fade = TransportFade::new(rate, false);
+        let mut fade = TransportFade::new(rate);
+        let mut warmup = vec![0.0; ((rate as f64 * 0.010).round() as usize) * 2];
+        fade.render(&mut warmup, false, |out| { out.fill(0.1); out.len() / 2 });
         let mut position = 17;
         let mut tail = Vec::new();
         while !fade.is_silent() {
@@ -134,7 +138,9 @@ mod tests {
 
     #[test]
     fn reversing_a_partial_fade_never_jumps_and_short_render_keeps_progress() {
-        let mut fade = TransportFade::new(48_000, false);
+        let mut fade = TransportFade::new(48_000);
+        let mut warmup = [0.0; 960];
+        fade.render(&mut warmup, false, |out| { out.fill(0.1); out.len() / 2 });
         let mut unchanged = [0.25, -0.75, 0.8, -0.1];
         let expected = unchanged;
         fade.render(&mut unchanged, false, |out| out.len() / 2);
@@ -161,8 +167,39 @@ mod tests {
     }
 
     #[test]
+    fn first_play_on_a_new_stream_fades_in_without_skipping_source_frames() {
+        for rate in [44_100, 48_000] {
+            let span = (rate as f64 * 0.010).round() as usize;
+            for chunk in [1, 17, 192, 4096] {
+                let mut fade = TransportFade::new(rate);
+                let mut position = 17;
+                let mut output = Vec::new();
+                while output.len() < (span + 20) * 2 {
+                    let n = chunk.min(span + 20 - output.len() / 2);
+                    let mut out = vec![99.0; n * 2];
+                    assert_eq!(fade.render(&mut out, false, |out| {
+                        for frame in out.chunks_exact_mut(2) {
+                            frame.copy_from_slice(&wave(position, rate));
+                            position += 1;
+                        }
+                        out.len() / 2
+                    }), n);
+                    output.extend(out);
+                }
+                assert_eq!(position, 17 + span + 20);
+                assert_eq!(&output[..2], &[0.0; 2]);
+                for (i, frame) in output.chunks_exact(2).enumerate() {
+                    let gain = i.min(span - 1) as f32 / (span - 1) as f32;
+                    let raw = wave(17 + i, rate);
+                    assert_eq!(frame, [raw[0] * gain, raw[1] * gain]);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn paused_open_and_finished_stay_silent_until_play() {
-        let mut fade = TransportFade::new(48_000, true);
+        let mut fade = TransportFade::new(48_000);
         let mut out = [99.0; 32];
         assert_eq!(fade.render(&mut out, true, |_| panic!("paused open rendered")), 0);
         assert_eq!(out, [0.0; 32]);

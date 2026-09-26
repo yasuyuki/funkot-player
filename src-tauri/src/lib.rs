@@ -2618,9 +2618,7 @@ fn open_output_stream(
         sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
-    let mut transport_fade = transport_fade::TransportFade::new(
-        sample_rate, paused.load(Ordering::Relaxed),
-    );
+    let mut transport_fade = transport_fade::TransportFade::new(sample_rate);
     let stream = device
         .build_output_stream(
             config,
