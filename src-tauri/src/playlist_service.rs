@@ -191,15 +191,19 @@ impl Service {
         self.ended = false; self.save_progress();
     }
     fn observe_started(&mut self, index: usize, playback: Option<&crate::Playback>) {
-        let actual = playback.and_then(|p| p.render.lock().unwrap_or_else(|e|e.into_inner()).engine.current_index());
-        if actual == Some(index) { self.started(index); return; }
+        let snapshot = playback.and_then(|p| p.observation.read());
+        if snapshot.is_some_and(|snapshot| snapshot.current == Some(index)) {
+            self.started(index);
+            return;
+        }
         // Events may lag a polling snapshot or a whole short track. Consume
         // the exact event occurrence, but never move current playback backward.
         if let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled) {
             if self.current_index != Some(index) { claim.live = false; }
             self.catalog.observe_progress(claim.progress(index), Observation::Started(index), None);
         }
-        self.reconcile_with(playback); self.save_progress();
+        if let Some(snapshot) = snapshot { self.reconcile_snapshot(snapshot); }
+        self.save_progress();
     }
     fn failed(&mut self, index: usize, message: &str) {
         let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled && c.live) else { return; };
@@ -213,9 +217,11 @@ impl Service {
     }
     pub fn reconcile(&mut self) { self.reconcile_with(crate::PLAYBACK.get()); }
     fn reconcile_with(&mut self, playback: Option<&crate::Playback>) {
-        let Some(playback) = playback else { return; };
-        let (current, finished) = { let render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-            (render.engine.current_index(), render.engine.is_finished()) };
+        let Some(snapshot) = playback.and_then(|playback| playback.observation.read()) else { return; };
+        self.reconcile_snapshot(snapshot);
+    }
+    fn reconcile_snapshot(&mut self, snapshot: crate::engine_observation::EngineSnapshot) {
+        let (current, finished) = (snapshot.current, snapshot.finished);
         if let Some(index) = current { self.started(index); }
         if finished {
             let had_current = self.current_index.take();
@@ -441,7 +447,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
             Ok(token) => {
                 // A callback may have started a track since reconcile. Fail
                 // before save instead of editing a different displayed row.
-                if token.current_index() != owner.current_index { render.engine.abort_future_update(token); return Err(error("stale")); }
+                if token.current_index() != owner.current_index {
+                    render.engine.abort_future_update(token);
+                    playback.publish_engine_observation(&render.engine);
+                    return Err(error("stale"));
+                }
                 Some(token)
             }
             Err(_) if normal_append && !force_source => {
@@ -457,7 +467,12 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         store::save_queue(&owner.data, &normal.iter().cloned().collect()).map_err(|e| PlaylistError::PersistFailed { message: e.to_string() })
     } else { owner.disk.persist(&next) };
     if let Err(failure) = saved {
-        if let Some(token) = fence { playback.unwrap().render.lock().unwrap_or_else(|e|e.into_inner()).engine.abort_future_update(token); }
+        if let Some(token) = fence {
+            let playback = playback.unwrap();
+            let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
+            render.engine.abort_future_update(token);
+            playback.publish_engine_observation(&render.engine);
+        }
         return Err(failure.into());
     }
     owner.catalog = next; owner.progress_error = false;
@@ -475,8 +490,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         for (i, claim) in owner.claims.iter_mut() { if Some(*i) != current_index && claim.live { claim.cancelled = true; claim.live = false; } }
         queue::restore_all(&owner.queue, normal);
         owner.epoch = next_epoch; owner.exhausted = false;
-        let retired = { let mut render = playback.unwrap().render.lock().unwrap_or_else(|e|e.into_inner());
-            render.engine.commit_future_update(fence.unwrap(), prepared.unwrap()) };
+        let playback = playback.unwrap();
+        let retired = { let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
+            let retired = render.engine.commit_future_update(fence.unwrap(), prepared.unwrap());
+            playback.publish_engine_observation(&render.engine);
+            retired };
         drop(retired);
     } else if normal != old_normal {
         let claimed = owner.future_claims().iter().filter(|(_,c)|c.source.is_none()).count();

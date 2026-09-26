@@ -13,6 +13,7 @@ mod tag_service;
 mod playlists;
 mod playlist_progress;
 mod playlist_service;
+mod engine_observation;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
 #[cfg(any(target_os = "windows", test))]
@@ -44,7 +45,21 @@ struct Playback {
     /// Shared with the cpal callback so Tauri commands can install / clear an
     /// audition `Engine` without touching the main one.
     render: Arc<Mutex<RenderState>>,
+    observation: Arc<engine_observation::EngineObservation>,
     sample_rate: u32,
+}
+
+impl Playback {
+    // Callers serialize publication with the render mutex.
+    fn publish_engine_observation(&self, engine: &Engine) {
+        self.observation.publish(engine.current_index(), engine.is_finished());
+    }
+
+    fn resume_finished_engine(&self) {
+        let mut render = self.render.lock().unwrap_or_else(|e| e.into_inner());
+        if render.engine.is_finished() { render.engine.resume(); }
+        self.publish_engine_observation(&render.engine);
+    }
 }
 
 static PLAYBACK: OnceLock<Playback> = OnceLock::new();
@@ -260,8 +275,7 @@ fn persist_pause_state(paused: &AtomicBool) {
 /// established render-lock ordering for explicit play and toggle requests.
 fn resume_finished_engine_before_play() {
     if let Some(playback) = PLAYBACK.get() {
-        let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-        if render.engine.is_finished() { render.engine.resume(); }
+        playback.resume_finished_engine();
     }
 }
 
@@ -2656,6 +2670,7 @@ fn open_output_stream(
     render: Arc<Mutex<RenderState>>,
     paused: Arc<AtomicBool>,
     event_tx: SyncSender<PlaybackEvent>,
+    observation: Arc<engine_observation::EngineObservation>,
     err_log: Sender<String>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
@@ -2761,6 +2776,11 @@ fn open_output_stream(
                     let in_transition = engine.transition_frames_into().is_some();
                     (events, in_transition)
                 };
+                // Publish the main engine before its events are sent. Audition
+                // leaves the main observation unchanged while it is frozen.
+                if !audition {
+                    observation.publish(state.engine.current_index(), state.engine.is_finished());
+                }
                 // Bit-exact silence is the one signal a host gets that the
                 // engine had nothing prepared for this buffer; see `StallWatch`.
                 let silent = out.iter().all(|s| *s == 0.0);
@@ -2999,6 +3019,7 @@ fn audio_thread(
     // engine never becomes audible before the audition engine is installed.
     let paused = Arc::new(AtomicBool::new(initial_paused));
     let nav_tx = engine.nav_sender();
+    let observation = Arc::new(engine_observation::EngineObservation::new(engine.current_index(), engine.is_finished()));
     let render = Arc::new(Mutex::new(RenderState {
         engine,
         audition: None,
@@ -3009,6 +3030,7 @@ fn audio_thread(
         paused: Arc::clone(&paused),
         nav_tx,
         render: Arc::clone(&render),
+        observation: Arc::clone(&observation),
         sample_rate,
     });
 
@@ -3041,6 +3063,7 @@ fn audio_thread(
         Arc::clone(&render),
         Arc::clone(&paused),
         event_tx.clone(),
+        Arc::clone(&observation),
         log.clone(),
     ) {
         Ok(s) => Some(s),
@@ -3121,6 +3144,7 @@ fn audio_thread(
                     Arc::clone(&render),
                     Arc::clone(&paused),
                     event_tx.clone(),
+                    Arc::clone(&observation),
                     log.clone(),
                 ) {
                     Ok(s) => {

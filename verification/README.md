@@ -77,8 +77,11 @@ progress. The adapter and source cancellation/epoch behavior are covered by
 normal Rust tests, not by a proof of the collection implementation.
 
 Both the non-audition `TrackStarted` route and the authoritative
-`Engine::current_index` snapshot route use this transition. Loader/gate failures
-also use it. Finished/exhausted, pending-empty, in-flight-empty and lifecycle
+`Engine::current_index` snapshot route use this transition. The host publishes
+current/finished together after main-engine rendering and control changes;
+observers read that coherent snapshot without taking the render mutex. Native
+regressions cover this publication boundary; Kani does not prove its concurrency.
+Loader/gate failures also use the progress transition. Finished/exhausted, pending-empty, in-flight-empty and lifecycle
 notifications do not create start evidence; the driver's passive input models
 that absence of a progress update. A service call can apply a delayed event and
 then a newer snapshot: these are two separately justified observations.
