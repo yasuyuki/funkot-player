@@ -220,6 +220,7 @@ def main():
     check({name: owner.file_sha256(ROOT / name, (ROOT / name).stat()) for name in tracked} == tracked_hashes,
           "focused owner test changed tracked Android sources")
     mountpoint_recovery_tests()
+    fifo_refusal_tests()
     print("lifecycle product owner: OK")
 
 
@@ -407,12 +408,52 @@ def mountpoint_recovery_tests():
             dangling = parent / entry["tombstone"]
             dangling.symlink_to(parent / "absent")
             try: owner.cleanup_mountpoints(intent, owner.read_json(intent))
-            except OSError: pass
+            except (OSError, owner.OwnerError): pass
             else: raise AssertionError("unexpected dangling tombstone was overwritten")
             check(target.exists() and dangling.is_symlink(), "unknown tombstone or original was removed")
     finally:
         owner.host_target_specs = original_specs
         owner._checkpoint = original_checkpoint
+
+
+def fifo_refusal_tests():
+    # Keep blocking regressions in bounded children, never in the test owner process.
+    child = r"""
+import importlib.util, os, stat, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("owner", sys.argv[1])
+owner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(owner)
+target = Path(sys.argv[2])
+if sys.argv[3] == "static":
+    os.mkfifo(target)
+else:
+    target.touch()
+    original_stat = os.stat
+    def replace_after_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == target.name and kwargs.get("follow_symlinks") is False:
+            target.unlink()
+            os.mkfifo(target)
+        return result
+    owner.os.stat = replace_after_stat
+try:
+    owner.path_identity(target, "file")
+except owner.OwnerError as exc:
+    assert "type" in str(exc), str(exc)
+else:
+    raise AssertionError("FIFO was accepted as a regular mountpoint")
+assert stat.S_ISFIFO(target.lstat().st_mode), "refusal removed the FIFO"
+print("FIFO refused and retained")
+"""
+    with tempfile.TemporaryDirectory() as temporary:
+        for mode in ("static", "after-stat"):
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", child, str(ROOT / "scripts/lifecycle-product-owner.py"),
+                 str(Path(temporary) / mode), mode],
+                capture_output=True, text=True, timeout=5)
+            check(result.returncode == 0, mode + ": " + result.stderr)
+            check("FIFO refused and retained" in result.stdout, mode + " did not complete refusal")
 
 
 if __name__ == "__main__":

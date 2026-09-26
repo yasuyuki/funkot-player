@@ -85,12 +85,18 @@ def path_identity(path: Path, kind: str, parent_fd: int | None = None) -> dict:
     if owned_parent:
         parent_fd = open_parent(path)
     assert parent_fd is not None
-    flags = os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if kind == "dir" else 0)
-    descriptor = os.open(path.name, flags, dir_fd=parent_fd)
-    info = os.fstat(descriptor)
-    expected = stat.S_ISREG(info.st_mode) if kind == "file" else stat.S_ISDIR(info.st_mode)
-    parent = os.fstat(parent_fd)
+    descriptor = None
     try:
+        before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        expected = stat.S_ISREG(before.st_mode) if kind == "file" else stat.S_ISDIR(before.st_mode)
+        if not expected:
+            die("managed mountpoint type changed: " + str(path))
+        # A FIFO substituted after stat must not block while holding the owner lease.
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_DIRECTORY if kind == "dir" else 0)
+        descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+        info = os.fstat(descriptor)
+        expected = stat.S_ISREG(info.st_mode) if kind == "file" else stat.S_ISDIR(info.st_mode)
+        parent = os.fstat(parent_fd)
         if not expected or (kind == "file" and info.st_nlink != 1):
             die("managed mountpoint type or hardlink count changed: " + str(path))
         if info.st_dev != parent.st_dev or fd_mount_id(descriptor) != fd_mount_id(parent_fd):
@@ -99,7 +105,7 @@ def path_identity(path: Path, kind: str, parent_fd: int | None = None) -> dict:
                 "mount_id": fd_mount_id(parent_fd), "mount_session": mount_session(),
                 "kind": kind, "path": str(path)}
     finally:
-        os.close(descriptor)
+        if descriptor is not None: os.close(descriptor)
         if owned_parent: os.close(parent_fd)
 
 
