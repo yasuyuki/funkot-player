@@ -235,6 +235,13 @@ fn record_pause_change(paused: &AtomicBool, now_paused: bool) {
     if now_paused && get_phase() != Phase::Disconnected {
         set_phase(Phase::Paused);
     }
+    persist_pause_state(paused);
+}
+
+/// Mirror the current pause flag off the audio thread. Finished events can
+/// arrive after an explicit play, so do not restore an event-time snapshot or
+/// change the observed phase here.
+fn persist_pause_state(paused: &AtomicBool) {
     {
         let mut session = SESSION
             .lock()
@@ -1504,6 +1511,47 @@ mod flip_paused_tests {
     }
 
     #[test]
+    fn finished_pause_is_mirrored_to_session() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        let paused = AtomicBool::new(false);
+        set_phase(Phase::Playing);
+        persist_pause_state(&paused);
+        assert!(!SESSION.lock().unwrap().paused);
+
+        // The callback reaches the finite source's end before emitting Finished.
+        paused.store(true, Ordering::Relaxed);
+        set_phase(Phase::Paused);
+        persist_pause_state(&paused);
+        assert!(SESSION.lock().unwrap().paused);
+        assert!(get_phase() == Phase::Paused);
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
+    fn delayed_finished_mirror_preserves_newer_play_and_phase() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        let paused = AtomicBool::new(true);
+        persist_pause_state(&paused);
+        assert!(SESSION.lock().unwrap().paused);
+
+        // An explicit play wins before the Finished event is processed.
+        paused.store(false, Ordering::Relaxed);
+        set_phase(Phase::Playing);
+        persist_pause_state(&paused);
+        assert!(!SESSION.lock().unwrap().paused);
+        assert!(!paused.load(Ordering::Relaxed));
+        assert!(get_phase() == Phase::Playing);
+
+        // Mirroring also must not overwrite the output-device state.
+        paused.store(true, Ordering::Relaxed);
+        set_phase(Phase::Disconnected);
+        persist_pause_state(&paused);
+        assert!(SESSION.lock().unwrap().paused);
+        assert!(get_phase() == Phase::Disconnected);
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
     fn pack_native_control_state_encodes_paused_and_phase() {
         // Pure encoder; does not touch `PHASE`.
         assert!(
@@ -2463,7 +2511,16 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 event: EngineEvent::Finished,
                 audition,
             } => {
-                if !audition { playlist_service::finished(); }
+                if !audition {
+                    playlist_service::finished();
+                    // The callback paused before sending Finished. Mirror its
+                    // current flag without putting persistence or JNI in the
+                    // callback, and without undoing a newer explicit play.
+                    if let Some(playback) = PLAYBACK.get() {
+                        persist_pause_state(&playback.paused);
+                    }
+                    service_sync_state();
+                }
                 log::info!("engine reports finished");
             }
             PlaybackEvent::TransitionEnded { audition } => {
