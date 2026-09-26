@@ -46,6 +46,13 @@ impl TransportFade {
         }
         let frames = render(&mut out[..wanted * 2]);
         for frame in out[..frames * 2].chunks_exact_mut(2) {
+            // Realtime engine startup can return a full buffer of silence
+            // while the loader works. Keep the attack armed until real audio
+            // arrives, including silence ending partway through a callback.
+            // Pause tails still finish even if their waveform becomes silent.
+            if !paused && self.level == 0 && frame[0] == 0.0 && frame[1] == 0.0 {
+                continue;
+            }
             let gain = self.level as f32 / self.full as f32;
             frame[0] *= gain;
             frame[1] *= gain;
@@ -167,31 +174,38 @@ mod tests {
     }
 
     #[test]
-    fn first_play_on_a_new_stream_fades_in_without_skipping_source_frames() {
+    fn first_play_waits_for_audio_without_skipping_source_frames() {
         for rate in [44_100, 48_000] {
             let span = (rate as f64 * 0.010).round() as usize;
-            for chunk in [1, 17, 192, 4096] {
-                let mut fade = TransportFade::new(rate);
-                let mut position = 17;
-                let mut output = Vec::new();
-                while output.len() < (span + 20) * 2 {
-                    let n = chunk.min(span + 20 - output.len() / 2);
-                    let mut out = vec![99.0; n * 2];
-                    assert_eq!(fade.render(&mut out, false, |out| {
-                        for frame in out.chunks_exact_mut(2) {
-                            frame.copy_from_slice(&wave(position, rate));
-                            position += 1;
-                        }
-                        out.len() / 2
-                    }), n);
-                    output.extend(out);
-                }
-                assert_eq!(position, 17 + span + 20);
-                assert_eq!(&output[..2], &[0.0; 2]);
-                for (i, frame) in output.chunks_exact(2).enumerate() {
-                    let gain = i.min(span - 1) as f32 / (span - 1) as f32;
-                    let raw = wave(17 + i, rate);
-                    assert_eq!(frame, [raw[0] * gain, raw[1] * gain]);
+            // Includes complete loader-wait callbacks and a partial silent
+            // prefix, reproducing Engine::render returning want_frames at zero.
+            for leading_silence in [0, span * 2 + 3] {
+                for chunk in [1, 17, 192, 4096] {
+                    let mut fade = TransportFade::new(rate);
+                    let mut position = 0;
+                    let mut output = Vec::new();
+                    let total = leading_silence + span + 20;
+                    while output.len() < total * 2 {
+                        let n = chunk.min(total - output.len() / 2);
+                        let mut out = vec![99.0; n * 2];
+                        assert_eq!(fade.render(&mut out, false, |out| {
+                            for frame in out.chunks_exact_mut(2) {
+                                let raw = if position < leading_silence { [0.0; 2] }
+                                    else { wave(17 + position - leading_silence, rate) };
+                                frame.copy_from_slice(&raw);
+                                position += 1;
+                            }
+                            out.len() / 2
+                        }), n);
+                        output.extend(out);
+                    }
+                    assert_eq!(position, total);
+                    assert!(output[..(leading_silence + 1) * 2].iter().all(|x| *x == 0.0));
+                    for (i, frame) in output[leading_silence * 2..].chunks_exact(2).enumerate() {
+                        let gain = i.min(span - 1) as f32 / (span - 1) as f32;
+                        let raw = wave(17 + i, rate);
+                        assert_eq!(frame, [raw[0] * gain, raw[1] * gain]);
+                    }
                 }
             }
         }
