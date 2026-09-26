@@ -368,11 +368,13 @@ under `src-tauri/target`. Windows native builds still use
 `src-tauri\target\release`.
 
 When launched by workspace-lifecycle 0.4 or later, `dev.sh` registers generated
-build output before starting Docker. The task owns a separate node_modules
-volume and an external generation root for dist, Gradle project output,
-Android app/build (including test APKs), and generated JNI libraries. The
-tracked Android project stays in the checkout. The external intent records the
-exact output paths, source revisions, command, file hashes, and Docker identity.
+build output before starting Docker. The task owns separate node_modules and
+generated-JNI Docker volumes plus an external generation root for dist, Gradle
+project output, and Android app/build (including test APKs). JNI uses a volume
+because Tauri generates links to the task Cargo target and NDK; the immutable
+volume proof records those links without following them. The tracked Android
+project stays in the checkout. The external intent records the exact output
+paths, source revisions, command, file hashes, and Docker identity.
 All managed users must use the same owner lease; arbitrary external writers are
 not covered by this cleanup contract.
 

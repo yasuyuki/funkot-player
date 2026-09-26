@@ -194,9 +194,9 @@ def owner_lock(directory: Path):
 def output_mounts(repo: Path, root: Path) -> dict[str, str]:
     worktree = {"dist": repo / "dist",
                 "android_build": repo / "src-tauri/gen/android/app/build",
-                "android_gradle": repo / "src-tauri/gen/android/.gradle",
-                "android_jni": repo / "src-tauri/gen/android/app/src/main/jniLibs"}
-    for path in worktree.values():
+                "android_gradle": repo / "src-tauri/gen/android/.gradle"}
+    checked = [*worktree.values(), repo / "src-tauri/gen/android/app/src/main/jniLibs"]
+    for path in checked:
         if path.exists() or path.is_symlink():
             die("managed output path already exists: " + str(path))
     return {key: str(root / key) for key in worktree}
@@ -324,6 +324,30 @@ def prepare(context: dict) -> dict:
     else:
         exact_volume_identity({"volume": record["node_volume"]}, node, daemon, endpoint)
     atomic_json(intent_path, record)
+    jni_name = "funkot-player-jni-" + sha256(context["task"] + "\0" + generation)[:32]
+    jni = inspect_volume(jni_name)
+    if jni is None:
+        if record.get("jni_volume") is not None:
+            die("recorded managed JNI volume disappeared")
+        expected = labels(context["task"], generation, daemon, endpoint)
+        record["jni_create_expected"] = {"name": jni_name, "labels": expected, "daemon_id": daemon, "endpoint": endpoint}
+        atomic_json(intent_path, record)
+        args = ["volume", "create", "--name", jni_name]
+        for key, value in sorted(expected.items()): args.extend(["--label", key + "=" + value])
+        docker(*args); jni = inspect_volume(jni_name)
+        if jni is None: die("created managed JNI volume cannot be inspected")
+        actual = dict(sorted((jni.get("Labels") or {}).items()))
+        if actual != expected or not jni.get("CreatedAt"): die("created managed JNI volume does not have its exact identity")
+        record["jni_volume"] = {"name": jni_name, "created_at": jni["CreatedAt"], "labels": actual, "daemon_id": daemon, "endpoint": endpoint}
+    elif record.get("jni_volume") is None:
+        pending = record.get("jni_create_expected")
+        actual = {"name": jni.get("Name"), "labels": dict(sorted((jni.get("Labels") or {}).items())), "daemon_id": daemon, "endpoint": endpoint}
+        if not isinstance(pending, dict) or actual != pending:
+            die("refusing to claim a preexisting custom JNI volume")
+        record["jni_volume"] = {**actual, "created_at": jni.get("CreatedAt")}
+    else:
+        exact_volume_identity({"volume": record["jni_volume"]}, jni, daemon, endpoint)
+    atomic_json(intent_path, record)
     if root.is_symlink():
         die("managed generation root became a link")
     if not root.exists():
@@ -338,7 +362,7 @@ def prepare(context: dict) -> dict:
         if record["identity"].get("root") != [root_info.st_dev, root_info.st_ino]:
             die("managed generation root identity changed")
     if record.get("state") == "sealed":
-        for key in ("host_manifest", "host_capture", "volume_proof", "node_volume_proof", "sha256", "image"):
+        for key in ("host_manifest", "host_capture", "volume_proof", "node_volume_proof", "jni_volume_proof", "sha256", "image"):
             record.pop(key, None)
     record["state"] = "active"
     atomic_json(intent_path, record)
@@ -440,7 +464,9 @@ def seal(context: dict, generation: str, image: str, argv: list[str]) -> None:
     record["volume_proof"] = {"members": members, "sha256": digest}
     node_members, node_digest = stable_volume_digest(record["node_volume"], image)
     record["node_volume_proof"] = {"members": node_members, "sha256": node_digest}
-    record["sha256"] = sha256(compact({"manifest": manifest, "capture": capture, "volume": record["volume_proof"], "node_volume": record["node_volume_proof"]}))
+    jni_members, jni_digest = stable_volume_digest(record["jni_volume"], image)
+    record["jni_volume_proof"] = {"members": jni_members, "sha256": jni_digest}
+    record["sha256"] = sha256(compact({"manifest": manifest, "capture": capture, "volume": record["volume_proof"], "node_volume": record["node_volume_proof"], "jni_volume": record["jni_volume_proof"]}))
     record["state"] = "sealed"
     atomic_json(intent_path, record)
 
@@ -451,10 +477,10 @@ def persist_completion(receipt: Path, record: dict, result_ref: str, state: str)
         "generation": record["generation"], "owner": OWNER, "output": record["output"],
         "receipt": str(receipt), "state": state, "hold": False,
         "source_revision": record["source_revision"], "inputs": record.get("inputs", []),
-        "identity": {"root": record["identity"]["root"], "volume": record["volume"], "node_volume": record["node_volume"]},
+        "identity": {"root": record["identity"]["root"], "volume": record["volume"], "node_volume": record["node_volume"], "jni_volume": record["jni_volume"]},
         "sha256": record["sha256"], "completion_result_ref": result_ref,
         "host_manifest": record["host_manifest"],
-        "host_capture": record["host_capture"], "volume_proof": record["volume_proof"], "node_volume_proof": record["node_volume_proof"],
+        "host_capture": record["host_capture"], "volume_proof": record["volume_proof"], "node_volume_proof": record["node_volume_proof"], "jni_volume_proof": record["jni_volume_proof"],
         "accepted_proof": result_ref, "released_proof": result_ref,
     })
     atomic_json(receipt, receipt_record)
@@ -553,6 +579,23 @@ def reclaim(receipt: Path, generation: str, result_ref: str) -> None:
         docker("volume", "rm", node["name"])
         if inspect_volume(node["name"]) is not None:
             die("managed node volume still exists after rm")
+    jni = record["identity"]["jni_volume"]
+    checked = inspect_volume(jni["name"])
+    if checked is None:
+        if not record.get("jni_volume_delete_intended"):
+            die("managed JNI volume disappeared before deletion intent")
+    else:
+        exact_volume_identity({"volume": jni}, checked, daemon, endpoint)
+        if volume_has_containers(jni["name"]):
+            die("refusing to remove managed JNI volume referenced by a container")
+        jni_members, jni_digest = stable_volume_digest(jni, intent["image"])
+        if {"members": jni_members, "sha256": jni_digest} != record["jni_volume_proof"]:
+            die("managed JNI volume content changed after sealing")
+        record["jni_volume_delete_intended"] = True
+        atomic_json(receipt, record)
+        docker("volume", "rm", jni["name"])
+        if inspect_volume(jni["name"]) is not None:
+            die("managed JNI volume still exists after rm")
     record = persist_completion(receipt, intent, result_ref, "reclaimed")
     print(compact({"reclaimed": True, "generation": generation, "receipt": str(receipt)}))
 

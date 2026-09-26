@@ -100,11 +100,13 @@ def main():
         check(interrupted.get("cargo_create_expected"), "cargo create intent was not durable before create")
         record = owner.prepare(context)
         volume = record["volume"]["name"]
+        node_volume = record["node_volume"]["name"]
+        jni_volume = record["jni_volume"]["name"]
         check(registered == ["g" * 32], "one output was not registered")
         check(fake.events.index(("register", "g" * 32)) < next(i for i, e in enumerate(fake.events) if e[:2] == ("volume", "create")), "volume created before register")
         check(volume == "owner-test-cargo", "explicit Cargo target was not preserved")
         check(owner.prepare(context)["generation"] == record["generation"], "active generation was not reused")
-        check(len([e for e in fake.events if e[:2] == ("volume", "create")]) == 2, "reuse created another volume")
+        check(len([e for e in fake.events if e[:2] == ("volume", "create")]) == 3, "reuse created another volume")
         saved_target = os.environ.pop("FUNKOT_CARGO_TARGET")
         try:
             owner.prepare(context)
@@ -154,6 +156,7 @@ def main():
         owner.seal(context, record["generation"], "funkot-player-dev", [])
         intent = owner.read_json(receipts / (owner.OWNER + "-" + record["generation"] + ".intent.json"))
         check(intent["state"] == "sealed" and intent["host_manifest"], "seal did not persist immutable proof")
+        check(intent["jni_volume_proof"]["sha256"] == "b" * 64, "seal did not persist JNI volume proof")
         receipt = Path(record["receipt"])
         check(not receipt.exists(), "callback receipt unexpectedly preexisted")
         try:
@@ -164,7 +167,7 @@ def main():
         check(pending["state"] == "reclaim-pending" and pending["host_delete_intended"], "partial deletion was not durably journaled")
         owner.reclaim(receipt, record["generation"], "result-ref")
         complete = owner.read_json(receipt)
-        check(complete["state"] == "reclaimed" and volume not in fake.volumes, "retry did not complete exact receipt")
+        check(complete["state"] == "reclaimed" and all(name not in fake.volumes for name in (volume, node_volume, jni_volume)), "retry did not complete exact receipt")
         check("funkot-player-cargo-registry" not in [str(e) for e in fake.events], "shared registry was touched")
         check("funkot-player-gradle" not in [str(e) for e in fake.events], "shared Gradle cache was touched")
         check("funkot-player-android-home" not in [str(e) for e in fake.events], "shared Android home was touched")
@@ -186,6 +189,9 @@ def main():
     for shared in ("funkot-player-cargo-registry", "funkot-player-gradle", "funkot-player-android-home"):
         check(shared in text, "unmanaged shared volume missing: " + shared)
     check("WORKSPACE_LIFECYCLE_CONTEXT" in text and "lifecycle-product-owner.py" in text, "managed dev integration missing")
+    check('"$OWNER_ANDROID_JNI_VOLUME":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/jniLibs"' in text,
+          "managed JNI output is not mounted from its owned volume")
+    check('"mounts"]["android_jni"]' not in text, "managed JNI output still uses the host generation root")
     print("lifecycle product owner: OK")
 
 

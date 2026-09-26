@@ -140,7 +140,7 @@ if [ -n "${WORKSPACE_LIFECYCLE_CONTEXT:-}" ]; then
     OWNER_DIST=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["dist"])') || exit $?
     OWNER_ANDROID_BUILD=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_build"])') || exit $?
     OWNER_ANDROID_GRADLE=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_gradle"])') || exit $?
-    OWNER_ANDROID_JNI=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_jni"])') || exit $?
+    OWNER_ANDROID_JNI_VOLUME=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["jni_volume"]["name"])') || exit $?
     MANAGED_OWNER=1
 fi
 
@@ -253,7 +253,7 @@ docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
     -v "$OWNER_DIST":"$PLAYER_MOUNT/dist" \
     -v "$OWNER_ANDROID_BUILD":"$PLAYER_MOUNT/src-tauri/gen/android/app/build" \
     -v "$OWNER_ANDROID_GRADLE":"$PLAYER_MOUNT/src-tauri/gen/android/.gradle" \
-    -v "$OWNER_ANDROID_JNI":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/jniLibs" \
+    -v "$OWNER_ANDROID_JNI_VOLUME":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/jniLibs" \
     -e CARGO_TARGET_DIR="$STORE_MOUNT" \
     -e CARGO_TERM_COLOR=never \
     -e GIT_CONFIG_COUNT=1 \
