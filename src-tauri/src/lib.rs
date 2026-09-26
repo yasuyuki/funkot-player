@@ -226,35 +226,12 @@ fn get_phase() -> Phase {
     Phase::from_u8(PHASE.load(Ordering::Relaxed))
 }
 
-/// Flips a `Playback`'s paused flag and reports the new state. Shared between
-/// `toggle_pause` (in-app button) and `onNativeControl` action 0 (the
-/// notification's play/pause) so the two cannot drift on what pausing or
-/// resuming does to `PHASE` — they used to duplicate this and disagree.
-///
-/// Pausing writes `Phase::Paused` here immediately — except when already
-/// `Disconnected`: the flag still flips (so reconnect resumes paused), but
-/// overwriting `PHASE` would briefly show `paused` in the UI until
-/// `audio_thread`'s ~1s watchdog writes `Disconnected` back.
-///
-/// Resuming writes nothing to `PHASE`. If the callback is alive it publishes
-/// `Playing`, `Starting`, or `Stalled` itself within about one buffer
-/// (~21ms), and if it is not, `audio_thread`'s watchdog (`CallbackWatch`)
-/// catches that within a few seconds and sets `Phase::Disconnected` (then
-/// retries reopen). Writing `Playing` here would assert something nobody has
-/// confirmed yet.
-///
-/// Also records the new state into `SESSION` and persists it — this is the
-/// one place both `toggle_pause` (in-app) and the notification's JNI
-/// callback flip pause, so it is the one place that needs to.
-fn flip_paused(paused: &AtomicBool) -> bool {
-    if paused.load(Ordering::Relaxed) {
-        if let Some(playback) = PLAYBACK.get() {
-            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-            if render.engine.is_finished() { render.engine.resume(); }
-        }
-    }
-    // fetch_xor(true) returns the *previous* value; the new state is its negation.
-    let now_paused = !paused.fetch_xor(true, Ordering::Relaxed);
+/// Persist a real pause-state change shared by toggle, play, and pause.
+/// The caller has already performed any resume work, so this never takes the
+/// render lock while holding `SESSION`. Pausing preserves `Disconnected`; on
+/// resume it does not claim `Playing`, leaving the audio callback or watchdog
+/// to publish the observed phase.
+fn record_pause_change(paused: &AtomicBool, now_paused: bool) {
     if now_paused && get_phase() != Phase::Disconnected {
         set_phase(Phase::Paused);
     }
@@ -262,10 +239,51 @@ fn flip_paused(paused: &AtomicBool) -> bool {
         let mut session = SESSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        session.paused = now_paused;
+        // Read the atomic under the session lock: a caller's desired state is
+        // not authoritative if another control changed it first.
+        session.paused = paused.load(Ordering::Relaxed);
     }
     persist_session();
+}
+
+/// Resume a finished engine before clearing the pause flag, preserving the
+/// established render-lock ordering for explicit play and toggle requests.
+fn resume_finished_engine_before_play() {
+    if let Some(playback) = PLAYBACK.get() {
+        let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+        if render.engine.is_finished() { render.engine.resume(); }
+    }
+}
+
+/// Flips a `Playback`'s paused flag and reports the new state. Shared between
+/// `toggle_pause` (in-app button) and `onNativeControl` action 0.
+fn flip_paused(paused: &AtomicBool) -> bool {
+    if paused.load(Ordering::Relaxed) {
+        resume_finished_engine_before_play();
+    }
+    // fetch_xor(true) returns the previous value; the new state is its negation.
+    let now_paused = !paused.fetch_xor(true, Ordering::Relaxed);
+    record_pause_change(paused, now_paused);
     now_paused
+}
+
+/// Set a `Playback` pause state. Returns whether it changed. Repeated
+/// dedicated play/pause requests do no engine resume or persistence work.
+#[cfg(any(target_os = "android", test))]
+fn set_paused(paused: &AtomicBool, desired: bool) -> bool {
+    let prior = paused.load(Ordering::Relaxed);
+    if prior == desired {
+        return false;
+    }
+    if prior && !desired {
+        resume_finished_engine_before_play();
+    }
+    let previous = paused.swap(desired, Ordering::Relaxed);
+    if previous == desired {
+        return false;
+    }
+    record_pause_change(paused, desired);
+    true
 }
 
 /// Pause/play transport is refused while auditioning or preparing an
@@ -1445,6 +1463,43 @@ mod flip_paused_tests {
         assert!(flip_paused(&paused));
         assert!(paused.load(Ordering::Relaxed));
         assert!(get_phase() == Phase::Paused);
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
+    fn set_pause_and_play_are_idempotent() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        set_phase(Phase::Playing);
+        let paused = AtomicBool::new(false);
+        assert!(set_paused(&paused, true));
+        assert!(paused.load(Ordering::Relaxed));
+        assert!(!set_paused(&paused, true));
+        assert!(set_paused(&paused, false));
+        assert!(!paused.load(Ordering::Relaxed));
+        assert!(!set_paused(&paused, false));
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
+    fn toggle_remains_compatible_with_set_pause() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        set_phase(Phase::Playing);
+        let paused = AtomicBool::new(false);
+        assert!(flip_paused(&paused));
+        assert!(!set_paused(&paused, true));
+        assert!(!flip_paused(&paused));
+        assert!(!set_paused(&paused, false));
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
+    fn set_pause_while_disconnected_keeps_phase() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        set_phase(Phase::Disconnected);
+        let paused = AtomicBool::new(false);
+        assert!(set_paused(&paused, true));
+        assert!(paused.load(Ordering::Relaxed));
+        assert!(get_phase() == Phase::Disconnected);
         set_phase(Phase::Idle);
     }
 
@@ -8947,7 +9002,7 @@ static LAST_FLAG_OK: AtomicBool = AtomicBool::new(false);
 
 /// Called from `PlaybackService`'s notification actions. `action` is
 /// 0 = toggle play/pause, 1 = skip to next track, 2 = query only,
-/// 3 = flag last automatic transition (no playback change).
+/// 3 = flag last automatic transition, 4 = play, 5 = pause.
 #[cfg(target_os = "android")]
 #[no_mangle]
 /// Returns packed `paused` + `phase` *after* the action so Kotlin can keep
@@ -8978,15 +9033,20 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
         return pack_native_control_state(false, get_phase());
     };
     match action {
-        0 => {
-            // Audition transport is 〔再開〕 only — do not flip shared paused.
+        0 | 4 | 5 => {
+            // Audition transport is 〔再開〕 only — do not change shared pause.
             if ensure_pause_allowed(
                 AUDITIONING.load(Ordering::Relaxed),
                 AUDITION_PREPARING.load(Ordering::Relaxed),
             )
             .is_ok()
             {
-                flip_paused(&playback.paused);
+                match action {
+                    0 => { flip_paused(&playback.paused); }
+                    4 => { set_paused(&playback.paused, false); }
+                    5 => { set_paused(&playback.paused, true); }
+                    _ => unreachable!(),
+                }
             }
         }
         1 => {
