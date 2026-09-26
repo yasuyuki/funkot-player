@@ -151,16 +151,6 @@ if [ -n "${WORKSPACE_LIFECYCLE_CONTEXT:-}" ]; then
     OWNER_ANDROID_TAURI_PROPERTIES=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_tauri_properties"])') || exit $?
     OWNER_ANDROID_TAURI_SETTINGS=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_tauri_settings"])') || exit $?
     OWNER_ANDROID_JNI_VOLUME=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["jni_volume"]["name"])') || exit $?
-    create_owner_file_mountpoint() {
-        (set -C; : > "$1") || {
-            echo "managed output file mountpoint already exists: $1" >&2
-            exit 2
-        }
-    }
-    create_owner_file_mountpoint "$PWD/src-tauri/gen/android/app/proguard-tauri.pro"
-    create_owner_file_mountpoint "$PWD/src-tauri/gen/android/app/tauri.build.gradle.kts"
-    create_owner_file_mountpoint "$PWD/src-tauri/gen/android/app/tauri.properties"
-    create_owner_file_mountpoint "$PWD/src-tauri/gen/android/tauri.settings.gradle"
     MANAGED_OWNER=1
 fi
 
@@ -295,32 +285,7 @@ docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
 status=$?
 set -e
 if [ "$MANAGED_OWNER" = 1 ]; then
-    for path in "$PWD/src-tauri/gen/android/app/proguard-tauri.pro" \
-                "$PWD/src-tauri/gen/android/app/tauri.build.gradle.kts" \
-                "$PWD/src-tauri/gen/android/app/tauri.properties" \
-                "$PWD/src-tauri/gen/android/tauri.settings.gradle"; do
-        [ -f "$path" ] && [ ! -s "$path" ] && [ ! -L "$path" ] || {
-            echo "managed output file mountpoint contains unexpected host bytes: $path" >&2
-            exit 2
-        }
-        rm -- "$path"
-    done
-    rmdir "$PWD/src-tauri/gen/android/app/src/main/jniLibs" \
-          "$PWD/src-tauri/gen/android/app/src/main/java/jp/hatsuboshi/funkotplayer/generated" \
-          "$PWD/src-tauri/gen/android/app/src/main/assets" \
-          "$PWD/src-tauri/gen/android/app/build" \
-          "$PWD/src-tauri/gen/android/buildSrc/.gradle" \
-          "$PWD/src-tauri/gen/android/buildSrc/build" \
-          "$PWD/src-tauri/gen/android/build" \
-          "$PWD/src-tauri/gen/schemas" \
-          "$PWD/src-tauri/gen/android/.gradle" "$PWD/dist" \
-          "$PWD/node_modules" 2>/dev/null || {
-        echo "managed output mountpoints contain unexpected host bytes" >&2
-        exit 2
-    }
-fi
-if [ "$MANAGED_OWNER" = 1 ] && [ "$status" -eq 0 ]; then
     "$OWNER_INTERPRETER" "$PWD/scripts/lifecycle-product-owner.py" seal \
-        --generation "$OWNER_GENERATION" --image "$IMAGE" -- "$@" || exit $?
+        --generation "$OWNER_GENERATION" --image "$IMAGE" --status "$status" -- "$@" || exit $?
 fi
 exit "$status"

@@ -29,6 +29,237 @@ FILE_MOUNT_KEYS = {
 }
 
 
+def host_target_specs(repo: Path) -> dict[str, tuple[Path, str]]:
+    return {
+        "node_modules": (repo / "node_modules", "dir"),
+        "jni_mountpoint": (repo / "src-tauri/gen/android/app/src/main/jniLibs", "dir"),
+        "dist": (repo / "dist", "dir"),
+        "tauri_schemas": (repo / "src-tauri/gen/schemas", "dir"),
+        "android_project_build": (repo / "src-tauri/gen/android/build", "dir"),
+        "android_buildsrc_build": (repo / "src-tauri/gen/android/buildSrc/build", "dir"),
+        "android_buildsrc_gradle": (repo / "src-tauri/gen/android/buildSrc/.gradle", "dir"),
+        "android_build": (repo / "src-tauri/gen/android/app/build", "dir"),
+        "android_gradle": (repo / "src-tauri/gen/android/.gradle", "dir"),
+        "android_generated_java": (repo / "src-tauri/gen/android/app/src/main/java/jp/hatsuboshi/funkotplayer/generated", "dir"),
+        "android_generated_assets": (repo / "src-tauri/gen/android/app/src/main/assets", "dir"),
+        "android_proguard_tauri": (repo / "src-tauri/gen/android/app/proguard-tauri.pro", "file"),
+        "android_tauri_build_gradle": (repo / "src-tauri/gen/android/app/tauri.build.gradle.kts", "file"),
+        "android_tauri_properties": (repo / "src-tauri/gen/android/app/tauri.properties", "file"),
+        "android_tauri_settings": (repo / "src-tauri/gen/android/tauri.settings.gradle", "file"),
+    }
+
+
+def mount_session() -> list[str | int]:
+    return [Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            os.stat("/proc/self/ns/mnt").st_ino]
+
+
+def fd_mount_id(descriptor: int) -> int:
+    for line in Path(f"/proc/self/fdinfo/{descriptor}").read_text().splitlines():
+        if line.startswith("mnt_id:"):
+            return int(line.split(":", 1)[1])
+    die("Linux mount identity is unavailable")
+
+
+def open_parent(path: Path) -> int:
+    if not path.is_absolute():
+        die("managed mountpoint path must be absolute")
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parent.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def stat_identity(info: os.stat_result) -> list[int]:
+    return [info.st_dev, info.st_ino, info.st_mode, info.st_nlink]
+
+
+def path_identity(path: Path, kind: str, parent_fd: int | None = None) -> dict:
+    owned_parent = parent_fd is None
+    if owned_parent:
+        parent_fd = open_parent(path)
+    assert parent_fd is not None
+    flags = os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if kind == "dir" else 0)
+    descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+    info = os.fstat(descriptor)
+    expected = stat.S_ISREG(info.st_mode) if kind == "file" else stat.S_ISDIR(info.st_mode)
+    parent = os.fstat(parent_fd)
+    try:
+        if not expected or (kind == "file" and info.st_nlink != 1):
+            die("managed mountpoint type or hardlink count changed: " + str(path))
+        if info.st_dev != parent.st_dev or fd_mount_id(descriptor) != fd_mount_id(parent_fd):
+            die("managed mountpoint crosses a mount boundary: " + str(path))
+        return {"identity": stat_identity(info), "parent": [parent.st_dev, parent.st_ino],
+                "mount_id": fd_mount_id(parent_fd), "mount_session": mount_session(),
+                "kind": kind, "path": str(path)}
+    finally:
+        os.close(descriptor)
+        if owned_parent: os.close(parent_fd)
+
+
+def validate_mountpoint(entry: dict, empty: bool = False) -> None:
+    path = Path(entry["path"])
+    parent_fd = open_parent(path)
+    try:
+        actual = path_identity(path, entry["kind"], parent_fd)
+        for key in ("identity", "parent", "kind", "path"):
+            if actual[key] != entry[key]: die("managed mountpoint identity changed: " + str(path))
+        if actual["mount_session"] == entry.get("mount_session") and actual["mount_id"] != entry.get("mount_id"):
+            die("managed mountpoint mount identity changed: " + str(path))
+        if empty:
+            if entry["kind"] == "file" and os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False).st_size:
+                die("managed file mountpoint contains bytes: " + str(path))
+            if entry["kind"] == "dir":
+                descriptor = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                try:
+                    if os.listdir(descriptor): die("managed directory mountpoint contains bytes: " + str(path))
+                finally: os.close(descriptor)
+    finally:
+        os.close(parent_fd)
+
+
+def validate_parent(entry: dict) -> None:
+    path = Path(entry["path"])
+    parent_fd = open_parent(path)
+    try:
+        parent = os.fstat(parent_fd)
+        if [parent.st_dev, parent.st_ino] != entry["parent"]:
+            die("managed mountpoint parent changed: " + str(path))
+        if mount_session() == entry.get("mount_session") and fd_mount_id(parent_fd) != entry.get("mount_id"):
+            die("managed mountpoint parent mount changed: " + str(path))
+    finally:
+        os.close(parent_fd)
+
+
+def prepare_mountpoints(intent_path: Path, record: dict, repo: Path) -> None:
+    targets = host_target_specs(repo)
+    journal = record.setdefault("host_mountpoints", {})
+    for key, (path, kind) in targets.items():
+        saved = journal.get(key)
+        if saved is not None:
+            intended = record.setdefault("host_mountpoint_delete_intents", {}).get(key)
+            if intended:
+                # Finish the prior incarnation, including a durable quarantine,
+                # before replacing its journal entry with a new inode.
+                cleanup_mountpoints(intent_path, record, {key})
+            if not path.exists() and not path.is_symlink():
+                if not intended:
+                    die("managed mountpoint disappeared without deletion intent: " + str(path))
+                parent_fd = open_parent(path)
+                parent = os.fstat(parent_fd)
+                if [parent.st_dev, parent.st_ino] != saved["parent"]:
+                    os.close(parent_fd); die("managed mountpoint parent changed: " + str(path))
+                if mount_session() == saved.get("mount_session") and fd_mount_id(parent_fd) != saved.get("mount_id"):
+                    os.close(parent_fd); die("managed mountpoint parent mount changed: " + str(path))
+                try:
+                    if kind == "file":
+                        descriptor = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+                        os.close(descriptor)
+                    else:
+                        os.mkdir(path.name, dir_fd=parent_fd)
+                    journal[key] = path_identity(path, kind, parent_fd)
+                finally: os.close(parent_fd)
+                _checkpoint("after-mountpoint-create", str(path))
+            else:
+                validate_mountpoint(saved, empty=True)
+            record["host_mountpoint_delete_intents"].pop(key, None)
+            atomic_json(intent_path, record)
+            continue
+        if path.exists() or path.is_symlink():
+            die("unproved managed mountpoint already exists: " + str(path))
+        parent_fd = open_parent(path)
+        try:
+            if kind == "file":
+                descriptor = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+                os.close(descriptor)
+            else:
+                os.mkdir(path.name, dir_fd=parent_fd)
+            journal[key] = path_identity(path, kind, parent_fd)
+        finally: os.close(parent_fd)
+        _checkpoint("after-mountpoint-create", str(path))
+        atomic_json(intent_path, record)
+
+
+def cleanup_mountpoints(intent_path: Path, record: dict, keys: set[str] | None = None) -> None:
+    # Validate the full fixed set before any removal, so one replacement holds
+    # every remaining mountpoint.  Safety assumes the task owner lease and the
+    # cooperating build container are the only writers to these paths; this is
+    # not a claim of safety against an arbitrary writer racing after validation.
+    for key, entry in record.get("host_mountpoints", {}).items():
+        if keys is not None and key not in keys: continue
+        path = Path(entry["path"]); tombstone = entry.get("tombstone")
+        intended = record.setdefault("host_mountpoint_delete_intents", {}).get(key)
+        quarantine = path.parent / tombstone if tombstone else None
+        if quarantine is not None and (quarantine.exists() or quarantine.is_symlink()):
+            validate_mountpoint({**entry, "path": str(quarantine)}, empty=True)
+            if path.exists() or path.is_symlink():
+                die("managed mountpoint was replaced after quarantine: " + str(path))
+            continue
+        if not path.exists() and not path.is_symlink():
+            if not intended:
+                die("managed mountpoint disappeared before deletion intent: " + str(path))
+            validate_parent(entry)
+        else:
+            validate_mountpoint(entry, empty=True)
+    for key, entry in record.get("host_mountpoints", {}).items():
+        if keys is not None and key not in keys: continue
+        path = Path(entry["path"])
+        tombstone = entry.get("tombstone")
+        intended = record.setdefault("host_mountpoint_delete_intents", {}).get(key)
+        quarantine = path.parent / tombstone if tombstone else None
+        if quarantine is not None and (quarantine.exists() or quarantine.is_symlink()):
+            pass
+        elif not path.exists() and not path.is_symlink():
+            if not intended:
+                die("managed mountpoint disappeared before deletion intent: " + str(path))
+            continue
+        else:
+            if not intended:
+                tombstone = "." + path.name + ".owner-" + sha256(compact(entry["identity"]))[:16]
+                if (path.parent / tombstone).exists() or (path.parent / tombstone).is_symlink():
+                    die("managed mountpoint tombstone already exists: " + str(path.parent / tombstone))
+                entry["tombstone"] = tombstone
+                record["host_mountpoint_delete_intents"][key] = True
+                atomic_json(intent_path, record)
+            parent_fd = open_parent(path)
+            try:
+                parent = os.fstat(parent_fd)
+                if [parent.st_dev, parent.st_ino] != entry["parent"]:
+                    die("managed mountpoint parent changed: " + str(path))
+                os.rename(path.name, tombstone, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            finally: os.close(parent_fd)
+            _checkpoint("after-mountpoint-quarantine", str(path))
+        quarantine = path.parent / tombstone
+        validate_mountpoint({**entry, "path": str(quarantine)}, empty=True)
+        if path.exists() or path.is_symlink():
+            die("managed mountpoint was replaced after quarantine: " + str(path))
+        parent_fd = open_parent(path)
+        try:
+            parent = os.fstat(parent_fd)
+            if [parent.st_dev, parent.st_ino] != entry["parent"]:
+                die("managed mountpoint parent changed: " + str(path))
+            current = os.stat(tombstone, dir_fd=parent_fd, follow_symlinks=False)
+            if stat_identity(current) != entry["identity"]:
+                die("managed mountpoint identity changed after quarantine: " + str(path))
+            if entry["kind"] == "file": os.unlink(tombstone, dir_fd=parent_fd)
+            else: os.rmdir(tombstone, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+        _checkpoint("after-mountpoint-remove", str(path))
+
+
+def _checkpoint(event: str, path: str) -> None:
+    pass
+
+
 class OwnerError(RuntimeError):
     pass
 
@@ -196,24 +427,8 @@ def owner_lock(directory: Path):
 
 
 def output_mounts(repo: Path, root: Path) -> dict[str, str]:
-    worktree = {"dist": repo / "dist",
-                "tauri_schemas": repo / "src-tauri/gen/schemas",
-                "android_project_build": repo / "src-tauri/gen/android/build",
-                "android_buildsrc_build": repo / "src-tauri/gen/android/buildSrc/build",
-                "android_buildsrc_gradle": repo / "src-tauri/gen/android/buildSrc/.gradle",
-                "android_build": repo / "src-tauri/gen/android/app/build",
-                "android_gradle": repo / "src-tauri/gen/android/.gradle",
-                "android_generated_java": repo / "src-tauri/gen/android/app/src/main/java/jp/hatsuboshi/funkotplayer/generated",
-                "android_generated_assets": repo / "src-tauri/gen/android/app/src/main/assets",
-                "android_proguard_tauri": repo / "src-tauri/gen/android/app/proguard-tauri.pro",
-                "android_tauri_build_gradle": repo / "src-tauri/gen/android/app/tauri.build.gradle.kts",
-                "android_tauri_properties": repo / "src-tauri/gen/android/app/tauri.properties",
-                "android_tauri_settings": repo / "src-tauri/gen/android/tauri.settings.gradle"}
-    checked = [*worktree.values(), repo / "src-tauri/gen/android/app/src/main/jniLibs"]
-    for path in checked:
-        if path.exists() or path.is_symlink():
-            die("managed output path already exists: " + str(path))
-    return {key: str(root / key) for key in worktree}
+    return {key: str(root / key) for key in host_target_specs(repo)
+            if key not in {"node_modules", "jni_mountpoint"}}
 
 
 def active_intent(context: dict) -> tuple[Path, dict] | None:
@@ -234,12 +449,18 @@ def lifecycle_register(context: dict, record: dict) -> None:
     root = Path(record["output"])
     if root.exists() or root.is_symlink():
         die("managed generation root appeared before lifecycle registration")
+    for path, _kind in host_target_specs(Path(record["repo"])).values():
+        if path.exists() or path.is_symlink():
+            die("managed output appeared before lifecycle registration: " + str(path))
     completion = [context["owner_receipt_argv"][0], str(Path(__file__).resolve()), "reclaim",
                   "--receipt", record["receipt"], "--generation", record["generation"],
                   "--result-ref", "{result_ref}"]
     command = [*context["owner_receipt_argv"], "--owner", OWNER,
                "--generation", record["generation"], "--receipt", record["receipt"],
-               "--output", record["output"], "--completion-json", compact(completion)]
+               "--output", record["output"]]
+    for path, _kind in host_target_specs(Path(record["repo"])).values():
+        command.extend(["--output", str(path)])
+    command.extend(["--completion-json", compact(completion)])
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode:
         die("lifecycle owner receipt registration failed: " + result.stderr.strip())
@@ -273,7 +494,6 @@ def prepare(context: dict) -> dict:
         atomic_json(intent_path, record)
     receipt = Path(record["receipt"])
     root = Path(record["output"])
-    output_mounts(repo, root)
     requested_target = os.environ.get("FUNKOT_CARGO_TARGET", "funkot-player-cargo-target")
     if record.get("cargo_target") and requested_target != record["cargo_target"]:
         die("managed Cargo target choice changed")
@@ -362,6 +582,10 @@ def prepare(context: dict) -> dict:
     else:
         exact_volume_identity({"volume": record["jni_volume"]}, jni, daemon, endpoint)
     atomic_json(intent_path, record)
+    for volume_key in ("node_volume", "jni_volume"):
+        managed = record[volume_key]
+        if volume_has_containers(managed["name"]):
+            die("managed volume is still referenced by a container: " + managed["name"])
     if root.is_symlink():
         die("managed generation root became a link")
     if not root.exists():
@@ -380,6 +604,7 @@ def prepare(context: dict) -> dict:
         root_info = root.stat()
         if record["identity"].get("root") != [root_info.st_dev, root_info.st_ino]:
             die("managed generation root identity changed")
+    prepare_mountpoints(intent_path, record, repo)
     if record.get("state") == "sealed":
         for key in ("host_manifest", "host_capture", "volume_proof", "node_volume_proof", "jni_volume_proof", "sha256", "image"):
             record.pop(key, None)
@@ -451,13 +676,20 @@ def reclamation_api():
     return reclamation
 
 
-def seal(context: dict, generation: str, image: str, argv: list[str]) -> None:
+def seal(context: dict, generation: str, image: str, argv: list[str], status: int = 0) -> None:
     intent_path, _receipt, _root = record_paths(context, generation)
     record = read_json(intent_path)
-    if record.get("state") == "sealed":
+    if record.get("state") == "sealed" and status == 0:
         return
     if record.get("state") != "active":
         die("cannot seal a generation that is not active")
+    for volume_key in ("node_volume", "jni_volume"):
+        managed = record[volume_key]
+        if volume_has_containers(managed["name"]):
+            die("managed volume is still referenced by a container: " + managed["name"])
+    cleanup_mountpoints(intent_path, record)
+    if status != 0:
+        return
     root = Path(record["output"])
     root_identity = record.get("identity", {}).get("root")
     if not isinstance(root_identity, list) or len(root_identity) != 2:
@@ -499,6 +731,8 @@ def persist_completion(receipt: Path, record: dict, result_ref: str, state: str)
         "identity": {"root": record["identity"]["root"], "volume": record["volume"], "node_volume": record["node_volume"], "jni_volume": record["jni_volume"]},
         "sha256": record["sha256"], "completion_result_ref": result_ref,
         "host_manifest": record["host_manifest"],
+        "host_mountpoints": record.get("host_mountpoints", {}),
+        "host_mountpoint_delete_intents": record.get("host_mountpoint_delete_intents", {}),
         "host_capture": record["host_capture"], "volume_proof": record["volume_proof"], "node_volume_proof": record["node_volume_proof"], "jni_volume_proof": record["jni_volume_proof"],
         "accepted_proof": result_ref, "released_proof": result_ref,
     })
@@ -533,6 +767,11 @@ def reclaim(receipt: Path, generation: str, result_ref: str) -> None:
     if record.get("state") == "reclaimed":
         print(compact({"reclaimed": True, "generation": generation, "receipt": str(receipt)}))
         return
+    for volume_key in ("node_volume", "jni_volume"):
+        managed = intent[volume_key]
+        if volume_has_containers(managed["name"]):
+            die("managed volume is still referenced by a container: " + managed["name"])
+    cleanup_mountpoints(intent_path, intent)
     record = persist_completion(receipt, intent, result_ref, "reclaim-pending")
     if not record.get("host_delete_intended"):
         if not root.exists():
@@ -626,6 +865,7 @@ def main() -> int:
     seal_parser = commands.add_parser("seal")
     seal_parser.add_argument("--generation", required=True)
     seal_parser.add_argument("--image", required=True)
+    seal_parser.add_argument("--status", required=True, type=int)
     seal_parser.add_argument("argv", nargs=argparse.REMAINDER)
     reclaim_parser = commands.add_parser("reclaim")
     reclaim_parser.add_argument("--receipt", required=True)
@@ -640,13 +880,13 @@ def main() -> int:
         elif args.command == "seal":
             context = context_from_env()
             with owner_lock(Path(context["owner_receipt_dir"])):
-                seal(context, args.generation, args.image, args.argv[1:] if args.argv[:1] == ["--"] else args.argv)
+                seal(context, args.generation, args.image, args.argv[1:] if args.argv[:1] == ["--"] else args.argv, args.status)
         else:
             receipt = Path(args.receipt)
             with owner_lock(receipt.parent):
                 reclaim(receipt, args.generation, args.result_ref)
         return 0
-    except OwnerError as exc:
+    except (OwnerError, OSError) as exc:
         print("funkot-player managed owner: " + str(exc), file=sys.stderr)
         return 2
 

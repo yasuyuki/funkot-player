@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import shutil
+import subprocess
 import types
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,9 @@ def check(value, message):
 
 
 def main():
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "src-tauri/gen"], cwd=ROOT, text=True).splitlines()
+    tracked_hashes = {name: owner.file_sha256(ROOT / name, (ROOT / name).stat()) for name in tracked}
     with tempfile.TemporaryDirectory() as temporary:
         temp = Path(temporary)
         receipts = temp / "receipts"
@@ -70,6 +74,16 @@ def main():
         owner.docker = fake.call
         owner.docker_optional = lambda *argv: (None if argv[:2] == ("volume", "inspect") and argv[2] not in fake.volumes else fake.call(*argv))
         owner.source_revision = lambda repo: "a" * 40
+        registered_argv = []
+        original_run = owner.subprocess.run
+        owner.subprocess.run = lambda argv, **kwargs: (registered_argv.append(argv) or types.SimpleNamespace(returncode=0, stderr=""))
+        registration_record = {"output": str(temp / "generation"), "repo": str(ROOT),
+                               "receipt": str(temp / "receipt.json"), "generation": "registration"}
+        registration_context = {"owner_receipt_argv": ["register"]}
+        owner.lifecycle_register(registration_context, registration_record)
+        owner.subprocess.run = original_run
+        check(registered_argv[0].count("--output") == 1 + len(owner.host_target_specs(ROOT)),
+              "lifecycle registration omitted managed host output paths")
         registered = []
         def register(context, record):
             check(not Path(record["output"]).exists(), "output existed before registration")
@@ -199,9 +213,206 @@ def main():
           "managed JNI output is not mounted from its owned volume")
     for key in ("OWNER_ANDROID_PROJECT_BUILD", "OWNER_ANDROID_BUILDSRC_BUILD", "OWNER_ANDROID_BUILDSRC_GRADLE"):
         check(('"$' + key + '"') in text, key + " is not mounted from the owned generation root")
-    check('"$PWD/node_modules"' in text, "managed node_modules mountpoint is not removed after Docker exits")
+    check('--status "$status"' in text, "Docker exit status is not passed to owner cleanup")
+    check("create_owner_file_mountpoint" not in text and 'rmdir "$PWD/node_modules"' not in text,
+          "shell still creates or removes owner mountpoints")
     check('"mounts"]["android_jni"]' not in text, "managed JNI output still uses the host generation root")
+    check({name: owner.file_sha256(ROOT / name, (ROOT / name).stat()) for name in tracked} == tracked_hashes,
+          "focused owner test changed tracked Android sources")
+    mountpoint_recovery_tests()
     print("lifecycle product owner: OK")
+
+
+def mountpoint_recovery_tests():
+    original_specs = owner.host_target_specs
+    original_checkpoint = owner._checkpoint
+    try:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            parent.mkdir()
+            targets = {"file": (parent / "placeholder", "file"),
+                       "dir": (parent / "mount", "dir")}
+            owner.host_target_specs = lambda repo: targets
+            intent = root / "intent.json"
+            owner.atomic_json(intent, {})
+
+            # A real child exits after prepare has durably recorded every identity.
+            child = os.fork()
+            if child == 0:
+                owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+                os._exit(73)
+            _pid, status = os.waitpid(child, 0)
+            check(os.WEXITSTATUS(status) == 73, "prepare child did not reach interruption point")
+            prepared = owner.read_json(intent)
+            owner.prepare_mountpoints(intent, prepared, root)
+
+            # Kill after unlink but before any later state write; durable intent permits retry.
+            child = os.fork()
+            if child == 0:
+                owner._checkpoint = lambda event, path: os._exit(74) if event == "after-mountpoint-remove" else None
+                owner.cleanup_mountpoints(intent, owner.read_json(intent))
+                os._exit(75)
+            _pid, status = os.waitpid(child, 0)
+            check(os.WEXITSTATUS(status) == 74, "cleanup child did not stop after exact unlink")
+            owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            check(not any(path.exists() or path.is_symlink() for path, _kind in targets.values()),
+                  "cleanup retry left a mountpoint")
+
+            # A normal prepare after a kill at quarantine must finish deleting
+            # the old inode before journaling a new incarnation.
+            owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+            child = os.fork()
+            if child == 0:
+                owner._checkpoint = lambda event, path: os._exit(78) if event == "after-mountpoint-quarantine" else None
+                owner.cleanup_mountpoints(intent, owner.read_json(intent), {"file"})
+                os._exit(79)
+            _pid, status = os.waitpid(child, 0)
+            check(os.WEXITSTATUS(status) == 78, "cleanup child did not stop after quarantine")
+            quarantined = owner.read_json(intent)["host_mountpoints"]["file"]
+            tombstone = Path(quarantined["path"]).parent / quarantined["tombstone"]
+            check(tombstone.exists(), "quarantined inode was not retained for retry")
+            old_fd = os.open(tombstone, os.O_RDONLY)
+            resumed = owner.read_json(intent)
+            owner.prepare_mountpoints(intent, resumed, root)
+            current = owner.read_json(intent)["host_mountpoints"]["file"]
+            check(current["identity"] != owner.stat_identity(os.fstat(old_fd)),
+                  "prepare did not journal a new incarnation")
+            os.close(old_fd)
+            check(not tombstone.exists(), "prepare orphaned the old quarantined inode")
+            owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            check(not any(parent.glob(".*.owner-*")), "cleanup left an owner tombstone")
+
+            # Deletion intent permits a new, separately journaled incarnation for the next run.
+            resumed = owner.read_json(intent)
+            owner.prepare_mountpoints(intent, resumed, root)
+            check(all(path.exists() for path, _kind in targets.values()), "next invocation did not recreate mountpoints")
+            owner.cleanup_mountpoints(intent, owner.read_json(intent))
+
+            # A create-to-journal crash is held as unknown rather than adopted.
+            owner.atomic_json(intent, {})
+            child = os.fork()
+            if child == 0:
+                owner._checkpoint = lambda event, path: os._exit(76) if event == "after-mountpoint-create" else None
+                owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+                os._exit(77)
+            _pid, status = os.waitpid(child, 0)
+            check(os.WEXITSTATUS(status) == 76, "creation interruption was not reached")
+            try:
+                owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+            except owner.OwnerError as exc:
+                check("unproved" in str(exc), "unjournaled mountpoint was not held")
+            else:
+                raise AssertionError("unjournaled mountpoint was adopted")
+            for path, _kind in targets.values():
+                if path.is_dir() and not path.is_symlink(): path.rmdir()
+                elif path.exists() or path.is_symlink(): path.unlink()
+
+            # Unknown preexisting paths and links are never claimed.
+            targets["file"][0].write_text("unknown")
+            for expected in ("unproved",):
+                try: owner.prepare_mountpoints(intent, {}, root)
+                except owner.OwnerError as exc: check(expected in str(exc), "unknown path refusal changed")
+                else: raise AssertionError("unknown preexisting path was adopted")
+            targets["file"][0].unlink()
+            targets["file"][0].symlink_to(parent / "elsewhere")
+            try: owner.prepare_mountpoints(intent, {}, root)
+            except owner.OwnerError as exc: check("unproved" in str(exc), "link refusal changed")
+            else: raise AssertionError("preexisting link was adopted")
+            targets["file"][0].unlink()
+
+            # Replacement, unexpected bytes, and external hardlinks all stop cleanup.
+            owner.atomic_json(intent, {})
+            record = owner.read_json(intent); owner.prepare_mountpoints(intent, record, root)
+            targets["file"][0].unlink(); targets["file"][0].touch()
+            try: owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            except owner.OwnerError as exc: check("identity changed" in str(exc), "replacement refusal changed")
+            else: raise AssertionError("replacement mountpoint was removed")
+            check(targets["file"][0].exists() and targets["dir"][0].exists(),
+                  "replacement refusal removed another mountpoint")
+            targets["file"][0].unlink()
+            targets["dir"][0].rmdir()
+            # Restore the proved inode only by starting an isolated test record.
+            owner.atomic_json(intent, {}); owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+            targets["dir"][0].joinpath("bytes").write_text("x")
+            try: owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            except owner.OwnerError as exc: check("contains bytes" in str(exc), "nonempty refusal changed")
+            else: raise AssertionError("nonempty mountpoint was removed")
+            targets["dir"][0].joinpath("bytes").unlink()
+            os.link(targets["file"][0], parent / "outside-link")
+            try: owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            except owner.OwnerError as exc: check("hardlink count changed" in str(exc), "hardlink refusal changed")
+            else: raise AssertionError("externally hardlinked mountpoint was removed")
+            (parent / "outside-link").unlink()
+            owner.cleanup_mountpoints(intent, owner.read_json(intent))
+
+            # A replacement installed after quarantine is retained with the proved tombstone.
+            owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+            def replace_after_quarantine(event, value):
+                if event == "after-mountpoint-quarantine" and value.endswith("placeholder"):
+                    Path(value).write_text("replacement")
+            owner._checkpoint = replace_after_quarantine
+            try: owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            except owner.OwnerError as exc: check("replaced after quarantine" in str(exc), "post-check replacement refusal changed")
+            else: raise AssertionError("post-check replacement was removed")
+            check(targets["file"][0].read_text() == "replacement", "replacement bytes were removed")
+            owner._checkpoint = original_checkpoint
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); real = root / "real"; real.mkdir()
+            linked = root / "linked"; linked.symlink_to(real, target_is_directory=True)
+            owner.host_target_specs = lambda repo: {"file": (linked / "placeholder", "file")}
+            try: owner.prepare_mountpoints(root / "intent.json", {}, root)
+            except OSError: pass
+            else: raise AssertionError("symlinked ancestor was followed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); parent = root / "parent"; parent.mkdir()
+            target = parent / "placeholder"
+            owner.host_target_specs = lambda repo: {"file": (target, "file")}
+            intent = root / "intent.json"; owner.atomic_json(intent, {})
+            owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+            saved = owner.read_json(intent)
+            # Raw mount IDs matter within one mount session, but are deliberately
+            # ignored after a simulated reboot/namespace change.
+            changed_session = json.loads(json.dumps(saved))
+            changed_session["host_mountpoints"]["file"]["mount_session"] = ["other", 1]
+            changed_session["host_mountpoints"]["file"]["mount_id"] += 1000
+            owner.validate_mountpoint(changed_session["host_mountpoints"]["file"], empty=True)
+            original_mount_id = owner.fd_mount_id
+            owner.fd_mount_id = lambda descriptor: original_mount_id(descriptor) + 1
+            try: owner.validate_mountpoint(saved["host_mountpoints"]["file"], empty=True)
+            except owner.OwnerError as exc: check("mount identity changed" in str(exc), "same-session mount replacement refusal changed")
+            else: raise AssertionError("same-session mount replacement was accepted")
+            owner.fd_mount_id = original_mount_id
+            owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            parent.rename(root / "old-parent"); parent.mkdir()
+            try: owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+            except owner.OwnerError as exc: check("parent changed" in str(exc), "changed parent recreation refusal changed")
+            else: raise AssertionError("missing mountpoint was recreated below a replacement parent")
+            try: owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            except owner.OwnerError as exc: check("parent changed" in str(exc), "missing-path cleanup parent refusal changed")
+            else: raise AssertionError("missing path below a replacement parent was accepted as removed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); parent = root / "parent"; parent.mkdir()
+            target = parent / "placeholder"
+            owner.host_target_specs = lambda repo: {"file": (target, "file")}
+            intent = root / "intent.json"; owner.atomic_json(intent, {})
+            owner.prepare_mountpoints(intent, owner.read_json(intent), root)
+            saved = owner.read_json(intent); entry = saved["host_mountpoints"]["file"]
+            entry["tombstone"] = ".placeholder.owner-static"
+            saved.setdefault("host_mountpoint_delete_intents", {})["file"] = True
+            owner.atomic_json(intent, saved)
+            dangling = parent / entry["tombstone"]
+            dangling.symlink_to(parent / "absent")
+            try: owner.cleanup_mountpoints(intent, owner.read_json(intent))
+            except OSError: pass
+            else: raise AssertionError("unexpected dangling tombstone was overwritten")
+            check(target.exists() and dangling.is_symlink(), "unknown tombstone or original was removed")
+    finally:
+        owner.host_target_specs = original_specs
+        owner._checkpoint = original_checkpoint
 
 
 if __name__ == "__main__":
