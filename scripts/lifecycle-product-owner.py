@@ -23,6 +23,10 @@ import uuid
 
 OWNER = "funkot-player-build"
 SCHEMA = 1
+FILE_MOUNT_KEYS = {
+    "android_proguard_tauri", "android_tauri_build_gradle",
+    "android_tauri_properties", "android_tauri_settings",
+}
 
 
 class OwnerError(RuntimeError):
@@ -193,11 +197,18 @@ def owner_lock(directory: Path):
 
 def output_mounts(repo: Path, root: Path) -> dict[str, str]:
     worktree = {"dist": repo / "dist",
+                "tauri_schemas": repo / "src-tauri/gen/schemas",
                 "android_project_build": repo / "src-tauri/gen/android/build",
                 "android_buildsrc_build": repo / "src-tauri/gen/android/buildSrc/build",
                 "android_buildsrc_gradle": repo / "src-tauri/gen/android/buildSrc/.gradle",
                 "android_build": repo / "src-tauri/gen/android/app/build",
-                "android_gradle": repo / "src-tauri/gen/android/.gradle"}
+                "android_gradle": repo / "src-tauri/gen/android/.gradle",
+                "android_generated_java": repo / "src-tauri/gen/android/app/src/main/java/jp/hatsuboshi/funkotplayer/generated",
+                "android_generated_assets": repo / "src-tauri/gen/android/app/src/main/assets",
+                "android_proguard_tauri": repo / "src-tauri/gen/android/app/proguard-tauri.pro",
+                "android_tauri_build_gradle": repo / "src-tauri/gen/android/app/tauri.build.gradle.kts",
+                "android_tauri_properties": repo / "src-tauri/gen/android/app/tauri.properties",
+                "android_tauri_settings": repo / "src-tauri/gen/android/tauri.settings.gradle"}
     checked = [*worktree.values(), repo / "src-tauri/gen/android/app/src/main/jniLibs"]
     for path in checked:
         if path.exists() or path.is_symlink():
@@ -355,8 +366,13 @@ def prepare(context: dict) -> dict:
         die("managed generation root became a link")
     if not root.exists():
         root.mkdir(parents=True)
-        for path in record["mounts"].values():
-            Path(path).mkdir(parents=True)
+        for key, path_text in record["mounts"].items():
+            path = Path(path_text)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if key in FILE_MOUNT_KEYS:
+                path.touch(exist_ok=False)
+            else:
+                path.mkdir()
         root_info = root.stat()
         record["identity"]["root"] = [root_info.st_dev, root_info.st_ino]
         atomic_json(intent_path, record)

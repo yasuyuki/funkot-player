@@ -138,12 +138,29 @@ if [ -n "${WORKSPACE_LIFECYCLE_CONTEXT:-}" ]; then
     FUNKOT_CARGO_TARGET=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["cargo_target"])') || exit $?
     OWNER_NODE_VOLUME=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["node_volume"]["name"])') || exit $?
     OWNER_DIST=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["dist"])') || exit $?
+    OWNER_TAURI_SCHEMAS=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["tauri_schemas"])') || exit $?
     OWNER_ANDROID_PROJECT_BUILD=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_project_build"])') || exit $?
     OWNER_ANDROID_BUILDSRC_BUILD=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_buildsrc_build"])') || exit $?
     OWNER_ANDROID_BUILDSRC_GRADLE=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_buildsrc_gradle"])') || exit $?
     OWNER_ANDROID_BUILD=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_build"])') || exit $?
     OWNER_ANDROID_GRADLE=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_gradle"])') || exit $?
+    OWNER_ANDROID_GENERATED_JAVA=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_generated_java"])') || exit $?
+    OWNER_ANDROID_GENERATED_ASSETS=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_generated_assets"])') || exit $?
+    OWNER_ANDROID_PROGUARD_TAURI=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_proguard_tauri"])') || exit $?
+    OWNER_ANDROID_TAURI_BUILD_GRADLE=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_tauri_build_gradle"])') || exit $?
+    OWNER_ANDROID_TAURI_PROPERTIES=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_tauri_properties"])') || exit $?
+    OWNER_ANDROID_TAURI_SETTINGS=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["mounts"]["android_tauri_settings"])') || exit $?
     OWNER_ANDROID_JNI_VOLUME=$(OWNER_RECORD="$OWNER_RECORD" "$OWNER_INTERPRETER" -c 'import json, os; print(json.loads(os.environ["OWNER_RECORD"])["jni_volume"]["name"])') || exit $?
+    create_owner_file_mountpoint() {
+        (set -C; : > "$1") || {
+            echo "managed output file mountpoint already exists: $1" >&2
+            exit 2
+        }
+    }
+    create_owner_file_mountpoint "$PWD/src-tauri/gen/android/app/proguard-tauri.pro"
+    create_owner_file_mountpoint "$PWD/src-tauri/gen/android/app/tauri.build.gradle.kts"
+    create_owner_file_mountpoint "$PWD/src-tauri/gen/android/app/tauri.properties"
+    create_owner_file_mountpoint "$PWD/src-tauri/gen/android/tauri.settings.gradle"
     MANAGED_OWNER=1
 fi
 
@@ -254,11 +271,18 @@ docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
     -v "$FUNKOT_CARGO_TARGET":"$STORE_MOUNT" \
     -v "$OWNER_NODE_VOLUME":"$PLAYER_MOUNT/node_modules" \
     -v "$OWNER_DIST":"$PLAYER_MOUNT/dist" \
+    -v "$OWNER_TAURI_SCHEMAS":"$PLAYER_MOUNT/src-tauri/gen/schemas" \
     -v "$OWNER_ANDROID_PROJECT_BUILD":"$PLAYER_MOUNT/src-tauri/gen/android/build" \
     -v "$OWNER_ANDROID_BUILDSRC_BUILD":"$PLAYER_MOUNT/src-tauri/gen/android/buildSrc/build" \
     -v "$OWNER_ANDROID_BUILDSRC_GRADLE":"$PLAYER_MOUNT/src-tauri/gen/android/buildSrc/.gradle" \
     -v "$OWNER_ANDROID_BUILD":"$PLAYER_MOUNT/src-tauri/gen/android/app/build" \
     -v "$OWNER_ANDROID_GRADLE":"$PLAYER_MOUNT/src-tauri/gen/android/.gradle" \
+    -v "$OWNER_ANDROID_GENERATED_JAVA":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/java/jp/hatsuboshi/funkotplayer/generated" \
+    -v "$OWNER_ANDROID_GENERATED_ASSETS":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/assets" \
+    -v "$OWNER_ANDROID_PROGUARD_TAURI":"$PLAYER_MOUNT/src-tauri/gen/android/app/proguard-tauri.pro" \
+    -v "$OWNER_ANDROID_TAURI_BUILD_GRADLE":"$PLAYER_MOUNT/src-tauri/gen/android/app/tauri.build.gradle.kts" \
+    -v "$OWNER_ANDROID_TAURI_PROPERTIES":"$PLAYER_MOUNT/src-tauri/gen/android/app/tauri.properties" \
+    -v "$OWNER_ANDROID_TAURI_SETTINGS":"$PLAYER_MOUNT/src-tauri/gen/android/tauri.settings.gradle" \
     -v "$OWNER_ANDROID_JNI_VOLUME":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/jniLibs" \
     -e CARGO_TARGET_DIR="$STORE_MOUNT" \
     -e CARGO_TERM_COLOR=never \
@@ -271,12 +295,26 @@ docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
 status=$?
 set -e
 if [ "$MANAGED_OWNER" = 1 ]; then
+    for path in "$PWD/src-tauri/gen/android/app/proguard-tauri.pro" \
+                "$PWD/src-tauri/gen/android/app/tauri.build.gradle.kts" \
+                "$PWD/src-tauri/gen/android/app/tauri.properties" \
+                "$PWD/src-tauri/gen/android/tauri.settings.gradle"; do
+        [ -f "$path" ] && [ ! -s "$path" ] && [ ! -L "$path" ] || {
+            echo "managed output file mountpoint contains unexpected host bytes: $path" >&2
+            exit 2
+        }
+        rm -- "$path"
+    done
     rmdir "$PWD/src-tauri/gen/android/app/src/main/jniLibs" \
+          "$PWD/src-tauri/gen/android/app/src/main/java/jp/hatsuboshi/funkotplayer/generated" \
+          "$PWD/src-tauri/gen/android/app/src/main/assets" \
           "$PWD/src-tauri/gen/android/app/build" \
           "$PWD/src-tauri/gen/android/buildSrc/.gradle" \
           "$PWD/src-tauri/gen/android/buildSrc/build" \
           "$PWD/src-tauri/gen/android/build" \
-          "$PWD/src-tauri/gen/android/.gradle" "$PWD/dist" 2>/dev/null || {
+          "$PWD/src-tauri/gen/schemas" \
+          "$PWD/src-tauri/gen/android/.gradle" "$PWD/dist" \
+          "$PWD/node_modules" 2>/dev/null || {
         echo "managed output mountpoints contain unexpected host bytes" >&2
         exit 2
     }

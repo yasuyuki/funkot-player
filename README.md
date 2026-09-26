@@ -371,7 +371,8 @@ When launched by workspace-lifecycle 0.4 or later, `dev.sh` registers generated
 build output before starting Docker. The task owns separate node_modules and
 generated-JNI Docker volumes plus an external generation root for dist, Gradle
 project output (including the project and buildSrc build/cache directories),
-and Android app/build (including test APKs). JNI uses a volume because Tauri
+generated Tauri Android source/config/schema paths, and Android app/build
+(including test APKs). JNI uses a volume because Tauri
 generates links to the task Cargo target and NDK; the immutable volume proof
 records those links without following them. The tracked Android project and
 buildSrc sources stay in the checkout. The external intent records the exact

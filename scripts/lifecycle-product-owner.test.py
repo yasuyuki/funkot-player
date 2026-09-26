@@ -102,6 +102,12 @@ def main():
         volume = record["volume"]["name"]
         node_volume = record["node_volume"]["name"]
         jni_volume = record["jni_volume"]["name"]
+        for key, path_text in record["mounts"].items():
+            path = Path(path_text)
+            if key in owner.FILE_MOUNT_KEYS:
+                check(path.is_file() and not path.is_symlink(), key + " external mount source is not a regular file")
+            else:
+                check(path.is_dir() and not path.is_symlink(), key + " external mount source is not a directory")
         check(registered == ["g" * 32], "one output was not registered")
         check(fake.events.index(("register", "g" * 32)) < next(i for i, e in enumerate(fake.events) if e[:2] == ("volume", "create")), "volume created before register")
         check(volume == "owner-test-cargo", "explicit Cargo target was not preserved")
@@ -193,6 +199,7 @@ def main():
           "managed JNI output is not mounted from its owned volume")
     for key in ("OWNER_ANDROID_PROJECT_BUILD", "OWNER_ANDROID_BUILDSRC_BUILD", "OWNER_ANDROID_BUILDSRC_GRADLE"):
         check(('"$' + key + '"') in text, key + " is not mounted from the owned generation root")
+    check('"$PWD/node_modules"' in text, "managed node_modules mountpoint is not removed after Docker exits")
     check('"mounts"]["android_jni"]' not in text, "managed JNI output still uses the host generation root")
     print("lifecycle product owner: OK")
 
