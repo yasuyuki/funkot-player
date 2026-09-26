@@ -367,6 +367,26 @@ binary lives at `/cargo-target/release/funkot-player` inside the container, not
 under `src-tauri/target`. Windows native builds still use
 `src-tauri\target\release`.
 
+When launched by workspace-lifecycle 0.4 or later, `dev.sh` registers generated
+build output before starting Docker. The task owns a separate node_modules
+volume and an external generation root for dist, Gradle project output,
+Android app/build (including test APKs), and generated JNI libraries. The
+tracked Android project stays in the checkout. The external intent records the
+exact output paths, source revisions, command, file hashes, and Docker identity.
+All managed users must use the same owner lease; arbitrary external writers are
+not covered by this cleanup contract.
+
+The default Cargo volume remains a shared cache. An explicitly selected,
+previously absent `FUNKOT_CARGO_TARGET` is instead owned by that task generation;
+reuse the same selection for its later commands. Preexisting custom volumes are
+refused. Lifecycle acceptance plus final-user release persists a pending request
+and invokes the registered owner immediately. It removes only the sealed,
+unchanged generation and exact unused volumes; a failure stays pending for the
+next ordinary lifecycle entry. Unaccepted outputs, explicit holds, shared caches,
+source, and published copies remain outside reclamation. Build a managed test
+APK with the existing debug command above; the receipt identifies its external
+output location. Do not move a live release or manual data into an owned root.
+
 - **Audio goes out through ALSA's pulse plugin**, not a sound card. cpal's Linux
   host is ALSA, the container has no device, and `/etc/asound.conf` in the image
   points `default` at PulseAudio. Two `snd_pcm_avail_delay` I/O errors at stream
