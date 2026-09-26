@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::queue::{QueueItem, QueueOrigin};
+use crate::playlist_progress::{self as progress, Claim as ProgressClaim, Observation, Occurrence, Progress};
 
 const FILE_NAME: &str = "playlists.json";
 const LOCK_NAME: &str = "playlists.lock";
@@ -209,16 +210,41 @@ impl Catalog {
         if self.current.as_ref().is_some_and(|current| current.playlist_id.as_deref() == Some(id)) { self.current = None; }
         self.source_changed(); Ok(new_run_id)
     }
-    pub fn mark_started(&mut self, id: &str, run_id: u64, entry_id: &str) -> Result<(), PlaylistError> {
-        self.check_run(id, run_id)?; if !self.definition(id)?.entries.iter().any(|e| e.entry_id == entry_id) { return Err(PlaylistError::NotFound); }
-        if self.run_mut(id)?.consumed.insert(entry_id.into()) { self.changed(); } Ok(())
+    /// All live progress writes pass through the same occurrence transition.
+    /// Resolve membership/run from the catalog rather than trusting the event.
+    pub(crate) fn observe_progress(&mut self, claim: Option<ProgressClaim<&str>>,
+        mut observation: Observation<&str>, reason: Option<&str>) -> bool {
+        let identity = match observation {
+            Observation::Unavailable { occurrence, .. } => occurrence,
+            _ => match claim { Some(c) => c.occurrence, None => return false },
+        };
+        // The pure input flag is derived here from a real, retained reason.
+        match &mut observation {
+            Observation::Failed { reason_present, .. } | Observation::Unavailable { reason_present, .. } =>
+                *reason_present = reason.is_some_and(|r| !r.trim().is_empty()),
+            _ => {},
+        }
+        let target = self.definition(identity.playlist).ok().and_then(|d|
+            d.entries.iter().find(|e| e.entry_id == identity.entry)).and_then(|entry|
+            self.run(identity.playlist).ok().map(|run| Occurrence {
+                playlist: identity.playlist, run: run.run_id, entry: entry.entry_id.as_str() }));
+        let before = self.run(identity.playlist).map_or(Progress::default(), |run| Progress {
+            consumed: run.consumed.contains(identity.entry), failed: run.failures.contains_key(identity.entry) });
+        let update = progress::observe(target, before, claim, observation);
+        if update.accepted.is_none() { return false; }
+        if update.progress != before {
+            let run = self.run_mut(identity.playlist).expect("accepted progress has a catalog run");
+            if update.progress.consumed { run.consumed.insert(identity.entry.into()); }
+            if update.progress.failed && !before.failed {
+                run.failures.insert(identity.entry.into(), reason.expect("failure requires reason").into());
+            }
+            self.changed();
+        }
+        true
     }
-    pub fn mark_failed(&mut self, id: &str, run_id: u64, entry_id: &str, reason: impl Into<String>) -> Result<(), PlaylistError> {
-        self.check_run(id, run_id)?; if !self.definition(id)?.entries.iter().any(|e| e.entry_id == entry_id) { return Err(PlaylistError::NotFound); }
-        let run = self.run_mut(id)?; let before = run.failures.contains_key(entry_id);
-        if !before { run.failures.insert(entry_id.into(), reason.into()); }
-        let consumed = run.consumed.insert(entry_id.into());
-        if !before || consumed { self.changed(); } Ok(())
+    pub(crate) fn unavailable(&mut self, id: &str, run: u64, entry: &str, reason: &str) -> bool {
+        self.observe_progress(None, Observation::Unavailable {
+            occurrence: Occurrence { playlist: id, run, entry }, reason_present: false }, Some(reason))
     }
     /// On app restart, the playing occurrence has already been consumed.  Put
     /// it back only if its exact membership and run are still valid.
@@ -228,6 +254,15 @@ impl Catalog {
         let id = current.playlist_id.as_deref()?;
         if self.run(id).ok()?.run_id != current.run_id || !self.definition(id).ok()?.entries.iter().any(|e| Some(e.entry_id.as_str()) == current.entry_id.as_deref()) { self.current = None; self.changed(); return None; }
         self.run_mut(id).ok()?.consumed.remove(current.entry_id.as_deref()?); self.current = None; self.changed(); Some(current)
+    }
+    #[cfg(test)]
+    fn mark_started(&mut self, id: &str, run: u64, entry: &str) -> Result<(), PlaylistError> {
+        let claim = ProgressClaim { occurrence: Occurrence { playlist: id, run, entry }, index: 7, live: true, cancelled: false };
+        self.observe_progress(Some(claim), Observation::Started(7), None).then_some(()).ok_or(PlaylistError::Stale)
+    }
+    #[cfg(test)]
+    fn mark_failed(&mut self, id: &str, run: u64, entry: &str, reason: &str) -> Result<(), PlaylistError> {
+        self.unavailable(id, run, entry, reason).then_some(()).ok_or(PlaylistError::Stale)
     }
     pub fn validate(&self) -> Result<(), PlaylistError> {
         if self.schema_version != SCHEMA_VERSION { return Err(PlaylistError::InvalidInput { message: "unsupported schema".into() }); }

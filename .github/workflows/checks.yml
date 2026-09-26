@@ -60,6 +60,30 @@ jobs:
       - name: Test core adoption checks
         run: ./scripts/check-funkot-core-commit.test.sh
 
+  playlist-progress:
+    name: Playlist occurrence proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Prepare fixed verifier (cached independently of the app)
+        uses: docker/build-push-action@v7
+        with:
+          context: verification
+          load: true
+          tags: funkot-player-kani:0.68.0
+          cache-from: type=gha,scope=playlist-kani-0.68.0
+          cache-to: type=gha,mode=max,scope=playlist-kani-0.68.0
+      - name: Verify production occurrence progress
+        run: ./scripts/check-playlist-progress.sh "$RUNNER_TEMP/playlist-proof"
+      - name: Preserve proof results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playlist-proof
+          path: ${{ runner.temp }}/playlist-proof
+          if-no-files-found: error
+
   build-and-test:
     name: Frontend and native library
     runs-on: ubuntu-latest

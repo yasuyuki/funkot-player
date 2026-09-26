@@ -54,6 +54,17 @@ pub struct CommandResult { pub created_id: Option<String>, pub undo_id: Option<S
 
 #[derive(Clone)]
 struct Claim { source: Option<String>, run: u64, entry: Option<String>, track: TrackRef, item: QueueItem, live: bool, cancelled: bool, restoring: bool }
+impl Claim {
+    fn progress(&self, index: usize) -> Option<crate::playlist_progress::Claim<&str>> {
+        Some(crate::playlist_progress::Claim {
+            occurrence: crate::playlist_progress::Occurrence {
+                playlist: self.source.as_deref()?, run: self.run, entry: self.entry.as_deref()? },
+            index, live: self.live, cancelled: self.cancelled,
+        })
+    }
+}
+use crate::playlist_progress::Observation;
+
 pub struct Service {
     data: PathBuf, cache: PathBuf, queue: SharedQueue, disk: PlaylistStore, catalog: Catalog,
     normal_source: Option<HostSource>, claims: BTreeMap<usize, Claim>, next_index: usize,
@@ -171,8 +182,8 @@ impl Service {
         self.current_index = Some(index);
         self.claims.get_mut(&index).unwrap().live = true;
         self.claims.get_mut(&index).unwrap().restoring = false;
-        let valid = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-            self.catalog.mark_started(id, claim.run, entry).is_ok()
+        let valid = if claim.source.is_some() {
+            self.catalog.observe_progress(claim.progress(index), Observation::Current(index), None)
         } else { self.catalog.revision += 1; true };
         self.catalog.current = valid.then(|| CurrentOccurrence { playlist_id: claim.source.clone(), run_id: claim.run,
             entry_id: claim.entry, track_ref: claim.track, origin: if claim.source.is_some() { PlaybackOrigin::Playlist } else { PlaybackOrigin::Normal },
@@ -186,19 +197,18 @@ impl Service {
         // the exact event occurrence, but never move current playback backward.
         if let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled) {
             if self.current_index != Some(index) { claim.live = false; }
-            if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-                let _ = self.catalog.mark_started(id, claim.run, entry);
-            }
+            self.catalog.observe_progress(claim.progress(index), Observation::Started(index), None);
         }
         self.reconcile_with(playback); self.save_progress();
     }
     fn failed(&mut self, index: usize, message: &str) {
         let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled && c.live) else { return; };
+        // An empty failure is not a reason to discard an unplayed occurrence.
+        if message.trim().is_empty() { return; }
+        self.catalog.observe_progress(claim.progress(index),
+            Observation::Failed { index, reason_present: false }, Some(message));
         claim.live = false;
         if claim.restoring { self.catalog.current = None; claim.restoring = false; }
-        if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-            let _ = self.catalog.mark_failed(id, claim.run, entry, message);
-        }
         self.save_progress();
     }
     pub fn reconcile(&mut self) { self.reconcile_with(crate::PLAYBACK.get()); }
@@ -264,7 +274,7 @@ impl TrackSource for ManagedSource {
             let path = if current.playlist_id.is_some() { owner.lookup(&current.track_ref).ok() } else { Some(current.track_ref.preferred_path.clone()) };
             if path.is_some() { owner.catalog.current = Some(current.clone()); }
             else if let (Some(id), Some(entry)) = (&current.playlist_id, &current.entry_id) {
-                let _ = owner.catalog.mark_failed(id, current.run_id, entry, "missing");
+                let _ = owner.catalog.unavailable(id, current.run_id, entry, "missing");
                 owner.catalog.current = None;
             }
             path.map(|path| Claim { source: current.playlist_id, run: current.run_id, entry: current.entry_id,
@@ -281,7 +291,7 @@ impl TrackSource for ManagedSource {
                     let path = owner.lookup(&entry.track);
                     let failure = match &path { Err(reason) => Some(*reason), Ok(path) if !crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed)
                         && crate::gated_non_funkot(path, &owner.cache, &owner.data) => Some("non_funkot"), _ => None };
-                    if let Some(reason) = failure { let _ = owner.catalog.mark_failed(&id, run, &entry.entry_id, reason); owner.save_progress(); continue; }
+                    if let Some(reason) = failure { let _ = owner.catalog.unavailable(&id, run, &entry.entry_id, reason); owner.save_progress(); continue; }
                     next = Some(Claim { source: Some(id.clone()), run, entry: Some(entry.entry_id), track: entry.track,
                         item: QueueItem::manual(path.unwrap()), live: true, cancelled: false, restoring: false }); break;
                 }

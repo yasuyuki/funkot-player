@@ -95,6 +95,19 @@ Notes:
   scripts listed in `.github/workflows/checks.yml` as well. Engine changes also require its
   own workspace tests and any real-audio acceptance required by its development instructions.
 
+## Playlist occurrence proof
+
+[The bounded Kani check](../verification/README.md) shares the production progress
+module and runs independently of native/UI builds. On Linux x86_64 with Docker
+and cgroup v2:
+
+```sh
+./scripts/check-playlist-progress.sh --setup # fixed verifier image, cached
+./scripts/check-playlist-progress.sh        # writes evidence under /tmp
+```
+
+The same check runs in the independent **Playlist occurrence proof** Checks job.
+
 ## Common failures
 
 | Symptom | What to do |

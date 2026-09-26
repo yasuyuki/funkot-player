@@ -174,6 +174,183 @@ fn delayed_started_event_consumes_its_occurrence_without_rolling_current_backwar
     assert_eq!(owner.catalog.remaining(&id).unwrap().len(), 0);
 }
 
+#[test]
+fn preparing_and_finished_empty_engine_do_not_consume_playlist_occurrences() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav");
+    let b = fixture.file("b.wav");
+    let id = fixture.install("repeated", vec![
+        Fixture::track(&a), Fixture::track(&b), Fixture::track(&a),
+        Fixture::track(&b), Fixture::track(&a),
+    ]);
+    let other = fixture.install("other", vec![Fixture::track(&a), Fixture::track(&b)]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let prepared: Vec<_> = (0..5).map(|_| source.next().expect("claim to prepare")).collect();
+    assert!(source.next().is_none(), "all remaining rows are claimed, not started");
+    {
+        let owner = fixture.service.lock().unwrap();
+        assert_eq!(owner.catalog.remaining(&id).unwrap().len(), 5, "preparation has no playback evidence");
+        assert!(owner.catalog.run(&id).unwrap().failures.is_empty());
+        assert_eq!(owner.catalog.remaining(&other).unwrap().len(), 2);
+    }
+
+    // A finite engine with no current deck represents a pending-empty/Finished
+    // lifecycle notification. It is not a TrackStarted event for these claims.
+    let empty = playback(&[], 64);
+    assert!(empty.render.lock().unwrap().engine.is_finished());
+    fixture.service.lock().unwrap().reconcile_with(Some(&empty));
+    let owner = fixture.service.lock().unwrap();
+    assert_eq!(owner.catalog.remaining(&id).unwrap().len(), prepared.len());
+    assert!(owner.catalog.run(&id).unwrap().failures.is_empty());
+    assert_eq!(owner.catalog.remaining(&other).unwrap().len(), 2);
+}
+
+#[test]
+fn real_engine_events_for_all_prepared_occurrences_are_consumed_by_index() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav");
+    let b = fixture.file("b.wav");
+    let id = fixture.install("repeated", vec![
+        Fixture::track(&a), Fixture::track(&b), Fixture::track(&a),
+        Fixture::track(&b), Fixture::track(&a),
+    ]);
+    let other = fixture.install("other", vec![Fixture::track(&a), Fixture::track(&b)]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let prepared: Vec<_> = (0..5).map(|_| source.next().unwrap()).collect();
+    let entries = fixture.service.lock().unwrap().catalog.definition(&id).unwrap().entries.clone();
+
+    // This synthetic generator checks the Engine-to-service trust boundary,
+    // not the device report's cause. Its 120s@180 BPM source becomes 90 bars
+    // at target 198 BPM: outro at bar 26, 64-bar intro/outro. The transition
+    // plan enters each incoming deck after its own outro, producing 0→4.
+    let player = geometry_playback(&prepared);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+    {
+        let owner = fixture.service.lock().unwrap();
+        let run = owner.catalog.run(&id).unwrap();
+        assert!(run.consumed.contains(&entries[0].entry_id));
+        assert!(!run.consumed.contains(&entries[2].entry_id), "same path is still a distinct unplayed occurrence");
+        assert_eq!(owner.current_index, Some(prepared[0].0));
+    }
+
+    let started = emitted_track_starts(&player);
+    assert_eq!(started, prepared.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+        "each delivered service index must come from EngineEvent::TrackStarted");
+    let mut delayed = started.clone(); delayed.rotate_left(1);
+    {
+        let mut owner = fixture.service.lock().unwrap();
+        for index in delayed {
+            let before = owner.catalog.run(&id).unwrap().consumed.len();
+            owner.observe_started(index, Some(&player));
+            let after = owner.catalog.run(&id).unwrap().consumed.len();
+            assert_eq!(after, before + usize::from(index != started[0]),
+                "only this emitted occurrence may advance progress");
+        }
+        owner.observe_started(started[2], Some(&player));
+        assert_eq!(owner.catalog.run(&id).unwrap().consumed.len(), 5, "duplicate emitted event is idempotent");
+        let run = owner.catalog.run(&id).unwrap();
+        assert!(entries.iter().all(|entry| run.consumed.contains(&entry.entry_id)));
+        assert!(run.failures.is_empty());
+        assert_eq!(owner.disk.snapshot().unwrap().run(&id).unwrap().consumed, run.consumed);
+        assert!(owner.disk.snapshot().unwrap().run(&id).unwrap().failures.is_empty());
+        assert!(owner.catalog.current.is_none());
+        assert!(owner.ended, "ended is derived from observed progress plus Engine finish");
+        assert_eq!(owner.catalog.remaining(&other).unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn real_engine_snapshot_keeps_old_audible_current_and_rejects_cancelled_future_event() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav");
+    let b = fixture.file("b.wav");
+    let id = fixture.install("set", vec![Fixture::track(&a), Fixture::track(&b)]);
+    let other = fixture.install("other", vec![Fixture::track(&a), Fixture::track(&b)]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let first = source.next().unwrap();
+    let second = source.next().unwrap();
+    let player = playback(&[first.clone(), second.clone()], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+
+    let request = fixture.request("select-other", Action::Select { id: Some(other.clone()) });
+    command_with(&fixture.service, request, Some(&player)).unwrap();
+    let mut owner = fixture.service.lock().unwrap();
+    assert!(!owner.claims[&first.0].cancelled, "the real Engine snapshot keeps its audible claim");
+    assert!(owner.claims[&second.0].cancelled);
+    let remaining_before_cancelled_event = owner.catalog.remaining(&id).unwrap().len();
+    owner.observe_started(second.0, Some(&player));
+    assert_eq!(owner.catalog.remaining(&id).unwrap().len(), remaining_before_cancelled_event);
+    assert_eq!(owner.current_index, Some(first.0), "a cancelled future event cannot become current");
+    owner.observe_started(first.0, Some(&player));
+    assert_eq!(owner.current_index, Some(first.0));
+    assert_eq!(owner.catalog.remaining(&other).unwrap().len(), 2);
+}
+
+#[test]
+fn restarted_run_rejects_delayed_old_start_and_old_engine_snapshot() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav");
+    let b = fixture.file("b.wav");
+    let id = fixture.install("set", vec![Fixture::track(&a), Fixture::track(&b)]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let first = source.next().unwrap();
+    let second = source.next().unwrap();
+    let player = playback(&[first.clone(), second.clone()], 4096);
+
+    let mut owner = fixture.service.lock().unwrap();
+    owner.catalog.restart(&id).unwrap();
+    // The delayed TrackStarted names old index 1; reconciliation then sees the
+    // real Engine's old index 0 snapshot. Neither belongs to the restarted run.
+    owner.observe_started(second.0, Some(&player));
+    let restarted = owner.catalog.run(&id).unwrap();
+    assert!(restarted.consumed.is_empty());
+    assert!(restarted.failures.is_empty());
+    assert!(owner.catalog.current.is_none(), "an old-run snapshot cannot restore current playback");
+    assert_eq!(owner.catalog.remaining(&id).unwrap().len(), 2);
+}
+
+#[test]
+fn failures_require_a_reason_and_a_matching_live_run_claim() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav");
+    let b = fixture.file("b.wav");
+    let c = fixture.file("c.wav");
+    let id = fixture.install("set", vec![Fixture::track(&a), Fixture::track(&b), Fixture::track(&c)]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let first = source.next().unwrap();
+    let second = source.next().unwrap();
+    let third = source.next().unwrap();
+    let entries = fixture.service.lock().unwrap().catalog.definition(&id).unwrap().entries.clone();
+
+    let mut owner = fixture.service.lock().unwrap();
+    owner.failed(first.0, " \t ");
+    assert_eq!(owner.catalog.remaining(&id).unwrap().len(), 3);
+    assert!(owner.claims[&first.0].live, "empty failure retains the claim for a later real start");
+
+    owner.failed(first.0, "decoder rejected stream");
+    let run = owner.catalog.run(&id).unwrap();
+    assert!(run.consumed.contains(&entries[0].entry_id));
+    assert_eq!(run.failures[&entries[0].entry_id], "decoder rejected stream");
+    assert!(!run.consumed.contains(&entries[1].entry_id));
+
+    owner.claims.get_mut(&second.0).unwrap().cancelled = true;
+    owner.failed(second.0, "late cancelled failure");
+    assert!(!owner.catalog.run(&id).unwrap().consumed.contains(&entries[1].entry_id));
+    assert!(!owner.catalog.run(&id).unwrap().failures.contains_key(&entries[1].entry_id));
+
+    owner.catalog.restart(&id).unwrap();
+    owner.failed(third.0, "late old-run failure");
+    let restarted = owner.catalog.run(&id).unwrap();
+    assert!(restarted.consumed.is_empty());
+    assert!(restarted.failures.is_empty());
+}
+
 fn playback(tracks: &[(usize, PathBuf)], frames: usize) -> crate::Playback {
     use funkot_core::engine::{Engine, PreparedTrack};
     use std::sync::atomic::AtomicBool;
@@ -189,6 +366,54 @@ fn playback(tracks: &[(usize, PathBuf)], frames: usize) -> crate::Playback {
     crate::Playback { paused: Arc::new(AtomicBool::new(false)), nav_tx, sample_rate: 48_000,
         render: Arc::new(Mutex::new(crate::RenderState { engine, audition: None,
             stall: crate::StallWatch::new(48_000), was_in_transition: false })) }
+}
+
+fn geometry_playback(tracks: &[(usize, PathBuf)]) -> crate::Playback {
+    use funkot_core::engine::{Engine, PreparedTrack};
+    use std::sync::atomic::AtomicBool;
+    const SAMPLE_RATE: u32 = 198;
+    const BAR_FRAMES: usize = 240;
+    const FRAMES: usize = 90 * BAR_FRAMES;
+    const OUTRO: usize = 26 * BAR_FRAMES;
+    let prepared = tracks.iter().map(|(index, path)| PreparedTrack {
+        path: path.clone(), playlist_index: *index,
+        samples: Arc::new((0..FRAMES * 2).map(|frame| (frame % 11) as f32 / 11.0 - 0.5).collect()),
+        frames: FRAMES as u64, first_downbeat_out: 0,
+        outro_start_out: OUTRO as u64, outro_end_anchored_out: OUTRO as u64,
+        intro_bars: 64, outro_bars: 64, gain_linear: 1.0, preview: false, head_only: false,
+    }).collect();
+    let mut options = funkot_core::EngineOptions::default();
+    options.output_sample_rate = SAMPLE_RATE;
+    options.highpass_hz = 30.0;
+    options.loop_playlist = false;
+    let mut engine = Engine::from_prepared(options, prepared).unwrap();
+    engine.set_realtime(false);
+    let nav_tx = engine.nav_sender();
+    crate::Playback { paused: Arc::new(AtomicBool::new(false)), nav_tx, sample_rate: SAMPLE_RATE,
+        render: Arc::new(Mutex::new(crate::RenderState { engine, audition: None,
+            stall: crate::StallWatch::new(SAMPLE_RATE), was_in_transition: false })) }
+}
+
+fn emitted_track_starts(player: &crate::Playback) -> Vec<usize> {
+    use funkot_core::engine::EngineEvent;
+    let mut render = player.render.lock().unwrap();
+    let mut starts = render.engine.poll_events().into_iter().filter_map(|event| match event {
+        EngineEvent::TrackStarted { index, .. } => Some(index), _ => None,
+    }).collect::<Vec<_>>();
+    // Use the Engine contract tests' existing five-second channel deadline.
+    // from_prepared still has an asynchronous tail/exhaustion sender; CPU-speed
+    // silence pulls do not measure track duration while waiting for that sender.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !render.engine.is_finished() && std::time::Instant::now() < deadline {
+        let _ = render.engine.render(&mut [0.0; 480]);
+        starts.extend(render.engine.poll_events().into_iter().filter_map(|event| match event {
+            EngineEvent::TrackStarted { index, .. } => Some(index), _ => None,
+        }));
+        if render.engine.is_finished() { break; }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(render.engine.is_finished(), "finite prepared Engine must deliver exhaustion before the channel deadline");
+    starts
 }
 
 #[test]
