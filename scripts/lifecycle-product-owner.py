@@ -193,6 +193,9 @@ def owner_lock(directory: Path):
 
 def output_mounts(repo: Path, root: Path) -> dict[str, str]:
     worktree = {"dist": repo / "dist",
+                "android_project_build": repo / "src-tauri/gen/android/build",
+                "android_buildsrc_build": repo / "src-tauri/gen/android/buildSrc/build",
+                "android_buildsrc_gradle": repo / "src-tauri/gen/android/buildSrc/.gradle",
                 "android_build": repo / "src-tauri/gen/android/app/build",
                 "android_gradle": repo / "src-tauri/gen/android/.gradle"}
     checked = [*worktree.values(), repo / "src-tauri/gen/android/app/src/main/jniLibs"]

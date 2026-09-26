@@ -191,6 +191,8 @@ def main():
     check("WORKSPACE_LIFECYCLE_CONTEXT" in text and "lifecycle-product-owner.py" in text, "managed dev integration missing")
     check('"$OWNER_ANDROID_JNI_VOLUME":"$PLAYER_MOUNT/src-tauri/gen/android/app/src/main/jniLibs"' in text,
           "managed JNI output is not mounted from its owned volume")
+    for key in ("OWNER_ANDROID_PROJECT_BUILD", "OWNER_ANDROID_BUILDSRC_BUILD", "OWNER_ANDROID_BUILDSRC_GRADLE"):
+        check(('"$' + key + '"') in text, key + " is not mounted from the owned generation root")
     check('"mounts"]["android_jni"]' not in text, "managed JNI output still uses the host generation root")
     print("lifecycle product owner: OK")
 
