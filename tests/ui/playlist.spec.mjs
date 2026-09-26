@@ -172,3 +172,53 @@ test("full-list edits use the browsed revision and reload after stale refusal", 
   await expect.poll(() => page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.browsedPlaylist?.revision)).toBe(5);
   await expect(page.getByText("This list changed. Refreshed it for review.")).toBeVisible();
 });
+
+
+test("a prepared playlist enables both next controls without a normal reservation", async ({ page }, testInfo) => {
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.player = { ...store.player, phase: "playing", now_playing: "/fixture/music/track-3.mp3", position_secs: 12, duration_secs: 274 };
+    window.__uiFixture.setReply("player_state", store.player);
+    window.__uiFixture.setReply("skip_next", null);
+  });
+  const next = page.locator(".transport").getByRole("button", { name: /Next track/ });
+  // This is the native playlist shape: reserved=null/false, but a playlist
+  // occurrence is prepared. The normal queue flag must not disable Next.
+  await expect(next).toBeEnabled();
+  await next.click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter(c => c.command === "skip_next").length)).toBe(1);
+  await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-playlist-next-ready.jpg`), quality: 70, fullPage: true, animations: "disabled" });
+
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.queue = { ...store.queue, playlist: { ...store.queue.playlist, rows: store.queue.playlist.rows.map(row => ({ ...row, status: "preparing" })) } };
+    window.__uiFixture.setReply("queue_state", store.queue);
+  });
+  await expect(next).toBeDisabled();
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.queue = { ...store.queue, playlist: { ...store.queue.playlist, rows: store.queue.playlist.rows.map((row, i) => ({ ...row, status: i === 0 ? "prepared" : "pending" })) } };
+    window.__uiFixture.setReply("queue_state", store.queue);
+  });
+  await page.locator(".mode-switch").getByRole("tab").nth(1).click();
+  const miniNext = page.locator(".minibar").getByRole("button", { name: "Next track", exact: true });
+  await expect(miniNext).toBeVisible();
+  await expect(miniNext).toBeEnabled();
+  await miniNext.click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter(c => c.command === "skip_next").length)).toBe(2);
+  await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-playlist-next-minibar.jpg`), quality: 70, fullPage: true, animations: "disabled" });
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.labelingMode = true;
+    await store.doLabelAndSkip(null);
+  });
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter(c => c.command === "skip_next").length)).toBe(3);
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.queue = { ...store.queue, playlist: { ...store.queue.playlist, rows: [], ended: true } };
+    window.__uiFixture.setReply("queue_state", store.queue);
+  });
+  await expect(miniNext).toBeDisabled();
+  await page.locator(".mode-switch").getByRole("tab").first().click();
+  await expect(next).toBeDisabled();
+});

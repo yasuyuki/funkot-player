@@ -44,7 +44,7 @@
   );
 
   let nextEnabled = $derived(
-    canSkipNext(phase, auditioning, store.queue?.reserved_prepared ?? false),
+    canSkipNext(phase, auditioning, store.queue),
   );
   let nextDisabled = $derived(!nextEnabled || nextBusy);
 

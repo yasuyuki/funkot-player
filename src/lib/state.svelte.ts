@@ -628,7 +628,7 @@ class PlayerStore {
     try {
       await skipNextCmd();
       // Host drops TransitionToNext while next is unset; refresh queue so
-      // reserved_prepared (and thus canSkipNext) drops without waiting for poll.
+      // preparation state (and thus canSkipNext) drops without waiting for poll.
       // Not awaited: `NEXT_PREPARED` is published asynchronously from the
       // cpal callback, so waiting on this refresh here does not actually
       // make the drop land any sooner -- it only delays this call's return.
@@ -655,8 +655,7 @@ class PlayerStore {
     if (this.#labelSkipBusy) return;
     const phase = this.player?.phase ?? "idle";
     const auditioning = this.player?.auditioning ?? false;
-    const prepared = this.queue?.reserved_prepared ?? false;
-    if (!canSkipNext(phase, auditioning, prepared)) {
+    if (!canSkipNext(phase, auditioning, this.queue)) {
       if (verdict !== null) void this.doSetLabel(path, verdict);
       return;
     }
