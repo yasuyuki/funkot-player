@@ -1,0 +1,170 @@
+[
+  {
+    "screen": "all-tracks",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 126.390625,
+      "height": 1452.578125,
+      "width": 1200
+    },
+    "rowsInViewport": 11,
+    "firstRow": {
+      "top": 268.21875,
+      "height": 54.59375,
+      "width": 1200
+    },
+    "controls": [
+      {
+        "text": "Funkot",
+        "top": 217.328125,
+        "height": 44,
+        "width": 72.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Non-Funkot",
+        "top": 217.328125,
+        "height": 44,
+        "width": 107.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "\u2014",
+        "top": 273.515625,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "32",
+        "top": 273.515625,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "32",
+        "top": 273.515625,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 273.515625,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "\u2014",
+        "top": 328.109375,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "32",
+        "top": 328.109375,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      }
+    ],
+    "controlCount": 98,
+    "overflow": false
+  },
+  {
+    "screen": "all-tracks",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 126.390625,
+      "height": 2850.453125,
+      "width": 380
+    },
+    "rowsInViewport": 5,
+    "firstRow": {
+      "top": 245.34375,
+      "height": 99.375,
+      "width": 378
+    },
+    "controls": [
+      {
+        "text": "Funkot",
+        "top": 251.734375,
+        "height": 44,
+        "width": 72.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Non-Funkot",
+        "top": 251.734375,
+        "height": 44,
+        "width": 107.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Edit track",
+        "top": 295.921875,
+        "height": 44,
+        "width": 93.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 295.921875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Edit track",
+        "top": 481.671875,
+        "height": 44,
+        "width": 93.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 481.671875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Edit track",
+        "top": 581.046875,
+        "height": 44,
+        "width": 93.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 581.046875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      }
+    ],
+    "controlCount": 50,
+    "overflow": false
+  }
+]

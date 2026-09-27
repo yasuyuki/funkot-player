@@ -10,7 +10,7 @@
 
   /// At most one inline chip editor: `"path\\tintro|outro"` (legacy `openChipKey`).
   let openChipKey = $state<string | null>(null);
-  let cardOpener: HTMLButtonElement | null = null;
+  let editorOpener: HTMLButtonElement | null = null;
   let busy = $state(false);
 
   let rows = $derived(store.libraryList);
@@ -81,7 +81,8 @@
     return "";
   }
 
-  function toggleChip(path: string, kind: "intro" | "outro") {
+  function toggleChip(path: string, kind: "intro" | "outro", opener: HTMLButtonElement) {
+    editorOpener = opener;
     const key = `${path}\t${kind}`;
     if (openChipKey === key) {
       openChipKey = null;
@@ -98,14 +99,14 @@
     return kind === "intro" || kind === "outro" ? kind : null;
   }
 
-  function closeCard() {
+  function closeEditor() {
     openChipKey = null;
-    cardOpener?.focus();
+    editorOpener?.focus();
   }
 
   function toggleCard(path: string, opener: HTMLButtonElement) {
-    cardOpener = opener;
-    if (openKind(path)) closeCard();
+    editorOpener = opener;
+    if (openKind(path)) closeEditor();
     else openChipKey = `${path}\tintro`;
   }
 
@@ -223,9 +224,9 @@
 </script>
 
 <svelte:window onkeydown={(event) => {
-  if (event.key === "Escape" && openChipKey && cardOpener?.getClientRects().length) {
+  if (event.key === "Escape" && openChipKey && editorOpener?.getClientRects().length) {
     event.preventDefault();
-    closeCard();
+    closeEditor();
   }
 }} />
 
@@ -274,8 +275,10 @@
                 <span class="played">✓</span>
               {/if}
               <strong>{row.title}</strong>
-              {#if row.artist}<span class="artist">{row.artist}</span>{/if}
-              <span class="path">{store.relName(row.path)}</span>
+              <span class="metadata">
+                {#if row.artist}<span class="artist">{row.artist}</span><span aria-hidden="true">·</span>{/if}
+                <span class="path">{store.relName(row.path)}</span>
+              </span>
             </td>
             <td class="label-cell">
               <button
@@ -293,7 +296,7 @@
                   type="button"
                   class="quiet bars"
                   class:low={row.intro_low_confidence && !row.intro_manual}
-                  onclick={() => toggleChip(row.path, "intro")}
+                  onclick={(event) => toggleChip(row.path, "intro", event.currentTarget)}
                 >{row.intro_bars}{cellMark(row.intro_manual, row.intro_low_confidence)}</button>
               {/if}
             </td>
@@ -305,7 +308,7 @@
                   type="button"
                   class="quiet bars"
                   class:low={row.outro_low_confidence && !row.outro_manual}
-                  onclick={() => toggleChip(row.path, "outro")}
+                  onclick={(event) => toggleChip(row.path, "outro", event.currentTarget)}
                 >{row.outro_structure_bars}{cellMark(row.outro_manual, row.outro_low_confidence)}</button>
               {/if}
             </td>
@@ -355,8 +358,10 @@
           <article class:non-funkot={isNonFunkot(row)} class:current={row.path === labelingPath} class="card">
             <div class="track-copy" title={row.path}>
               <strong>{row.title}</strong>
-              {#if row.artist}<span class="artist">{row.artist}</span>{/if}
-              <span class="path">{store.relName(row.path)}</span>
+              <span class="metadata">
+                {#if row.artist}<span class="artist">{row.artist}</span><span aria-hidden="true">·</span>{/if}
+                <span class="path">{store.relName(row.path)}</span>
+              </span>
             </div>
             <div class="card-status">
               <span class="card-values"><span>{labelText(row)}</span>
@@ -373,7 +378,7 @@
                   <button type="button" class="quiet" disabled={busy} onclick={() => onToggleLabel(live)}>{labelText(live)}</button>
                   {#if live.intro_bars !== null}<ChipEditor kind="intro" current={live.intro_bars} manual={live.intro_manual} onPick={(v) => onChipPick(row.path, "intro", v)} />{/if}
                   {#if live.outro_structure_bars !== null}<ChipEditor kind="outro" current={live.outro_structure_bars} manual={live.outro_manual} onPick={(v) => onChipPick(row.path, "outro", v)} />{/if}
-                  <div class="edit-footer"><button type="button" class="quiet" onclick={closeCard}>{t.close}</button></div>
+                  <div class="edit-footer"><button type="button" class="quiet" onclick={closeEditor}>{t.close}</button></div>
                 </div>
               {/if}
             {/if}
@@ -449,7 +454,8 @@
   }
 
   .name strong, .track-copy strong { display: block; color: var(--color-text); font-size: var(--font-size-md); font-weight: 600; }
-  .artist, .path { display: block; color: var(--color-text-dim); font-size: var(--font-size-sm); overflow-wrap: anywhere; }
+  .metadata { display: flex; flex-wrap: wrap; gap: 0 var(--space-xs); color: var(--color-text-dim); font-size: var(--font-size-sm); }
+  .artist, .path { min-width: 0; overflow-wrap: anywhere; }
 
   .played {
     color: var(--color-text-dim);
@@ -487,10 +493,10 @@
     .group { border: 1px solid var(--color-border); }
     summary { cursor: pointer; padding: var(--space-sm) var(--space-md); font-weight: 600; }
     .folder-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); }
-    .card-status { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); }
-    .card-values { display: flex; flex-wrap: wrap; gap: var(--space-xs); font-size: var(--font-size-sm); color: var(--color-text-dim); }
+    .card-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); padding: 0 var(--space-sm) var(--space-xs); }
+    .card-values { flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: var(--space-xs); font-size: var(--font-size-sm); color: var(--color-text-dim); }
     .card { border-top: 1px solid var(--color-border); }
-    .track-copy { padding: var(--space-md); overflow-wrap: anywhere; }
+    .track-copy { padding: var(--space-sm) var(--space-sm) 0; overflow-wrap: anywhere; }
     .card.current { background: var(--color-queue-reserved-bg); }
     .card-editor { padding: 0 var(--space-md) var(--space-md); }
   }

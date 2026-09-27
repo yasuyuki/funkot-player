@@ -92,7 +92,7 @@ const ipc: TauriIpc = {
     });
     if (command === "set_bars") {
       const request = args as { path: string; introBars: number | null; outroStructureBars: number | null; markManual?: boolean };
-      const source = rows.find((row) => row.path === request.path);
+      const source = (replies.refresh_library as TrackRow[]).find((row) => row.path === request.path);
       if (!source) throw new Error("fixture set_bars target missing");
       const updated = {
         ...source,

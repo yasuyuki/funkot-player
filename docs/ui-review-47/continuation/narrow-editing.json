@@ -1,0 +1,42 @@
+[
+  {
+    "track": 7,
+    "before": {
+      "scrollY": 0,
+      "opener": {
+        "x": 245.03125,
+        "y": 978.546875,
+        "width": 93.1875,
+        "height": 44
+      }
+    },
+    "editingScrollY": 543,
+    "returnedScrollY": 543,
+    "returnedOpener": {
+      "x": 245.03125,
+      "y": 435.546875,
+      "width": 93.1875,
+      "height": 44
+    }
+  },
+  {
+    "track": 8,
+    "before": {
+      "scrollY": 543,
+      "opener": {
+        "x": 245.03125,
+        "y": 621.296875,
+        "width": 93.1875,
+        "height": 44
+      }
+    },
+    "editingScrollY": 543,
+    "returnedScrollY": 882,
+    "returnedOpener": {
+      "x": 245.03125,
+      "y": 282.296875,
+      "width": 93.1875,
+      "height": 44
+    }
+  }
+]
