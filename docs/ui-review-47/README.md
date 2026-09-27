@@ -45,3 +45,13 @@ These are selected final viewport captures from the existing `tests/ui/` tests:
 `SHA256SUMS` identifies these retained artifacts. Normal tests continue to write
 temporary captures under `artifacts/ui-review`; this directory is a single task
 evidence set, not a screenshot baseline to regenerate on each change.
+
+## Continuation: AllTracks comparison and repeated editing
+
+[Continuation captures and measurements](continuation/) use the same 24-track
+fixture and viewport conditions as `after/`. Compare those two directories;
+`before/` remains the earlier UI. The edited-source revision is the commit
+containing `continuation/`. Editing JSON records the duplicate-name track 7,
+then long-name track 8, two immediate value changes each, and Escape/focus return.
+The enlarged capture uses Japanese and 200% root text. These are synthetic
+browser observations; the Issue owns the judgment and remaining device acceptance.

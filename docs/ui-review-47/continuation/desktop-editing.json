@@ -1,0 +1,42 @@
+[
+  {
+    "track": 7,
+    "before": {
+      "scrollY": 0,
+      "opener": {
+        "x": 1010.46875,
+        "y": 601.078125,
+        "width": 44,
+        "height": 44
+      }
+    },
+    "editingScrollY": 0,
+    "returnedScrollY": 0,
+    "returnedOpener": {
+      "x": 1004.875,
+      "y": 601.078125,
+      "width": 49.1875,
+      "height": 44
+    }
+  },
+  {
+    "track": 8,
+    "before": {
+      "scrollY": 0,
+      "opener": {
+        "x": 1004.875,
+        "y": 655.671875,
+        "width": 44,
+        "height": 44
+      }
+    },
+    "editingScrollY": 0,
+    "returnedScrollY": 0,
+    "returnedOpener": {
+      "x": 1004.875,
+      "y": 655.671875,
+      "width": 49.1875,
+      "height": 44
+    }
+  }
+]
