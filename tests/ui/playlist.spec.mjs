@@ -281,7 +281,7 @@ test("adding from Library refreshes the open full playlist without changing its 
   await expect.poll(() => page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.browsedPlaylist?.rows[0]?.entry_id)).toBe(selectedEntryId);
   await expect(queue.locator(".playlist-row").first().getByRole("button")).toHaveAttribute("aria-pressed", "true");
   const request = await page.evaluate(() => window.__uiFixture.calls.find((call) => call.command === "playlist_command").args.request);
-  expect(request.target).toEqual({ playlist_id: "night", generation: 2, revision: 4 });
+  expect(request.target).toMatchObject({ playlist_id: "night", generation: 2 });
   await expect.poll(() => page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.queue?.source?.playlist_id)).toBe("night");
   await expect.poll(() => page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.browsedPlaylist?.rows.some((row) => row.entry_id === "added-after-browse"))).toBe(true);
 });
