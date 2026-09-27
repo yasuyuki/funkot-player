@@ -221,6 +221,8 @@ test("Library and tag review states", async ({ page }, testInfo) => {
   await library.getByRole("checkbox", { name: "Select Pulse", exact: true }).check();
   await library.getByRole("checkbox", { name: "Select Dawn", exact: true }).check();
   await library.getByRole("button", { name: "Edit visible selected (2)", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Edit tags: 2 selected", exact: true })).toBeVisible();
+  await capture("tag-editor-selected-multiple");
   await expect(dialog.getByText("2 displayed selected tracks", { exact: true })).toBeVisible();
   await expect(dialog.getByLabel("Production year", { exact: true })).toHaveValue("unchanged");
   await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeInViewport();

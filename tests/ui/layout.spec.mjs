@@ -84,6 +84,8 @@ test("ja/en/id browsing and tag controls stay reachable with a short viewport", 
   await library.getByRole("button", { name: "Edit visible selected (1)" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Edit tags: Pulse", exact: true })).toBeVisible();
+  await capture(page, testInfo, "tag-editor-selected-single");
   expect(await controlIssues(page, "dialog")).toEqual([]);
   await page.setViewportSize({ width: testInfo.project.use.viewport.width, height: 400 });
   const value = dialog.getByLabel("Tag", { exact: true });
