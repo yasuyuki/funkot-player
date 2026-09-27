@@ -77,8 +77,11 @@ progress. The adapter and source cancellation/epoch behavior are covered by
 normal Rust tests, not by a proof of the collection implementation.
 
 Both the non-audition `TrackStarted` route and the authoritative
-`Engine::current_index` snapshot route use this transition. Loader/gate failures
-also use it. Finished/exhausted, pending-empty, in-flight-empty and lifecycle
+`Engine::current_index` snapshot route use this transition. The host publishes
+current/finished together after main-engine rendering and control changes;
+observers read that coherent snapshot without taking the render mutex. Native
+regressions cover this publication boundary; Kani does not prove its concurrency.
+Loader/gate failures also use the progress transition. Finished/exhausted, pending-empty, in-flight-empty and lifecycle
 notifications do not create start evidence; the driver's passive input models
 that absence of a progress update. A service call can apply a delayed event and
 then a newer snapshot: these are two separately justified observations.
@@ -89,6 +92,13 @@ Engine start/current observation. An incorrect producer can still lead to a
 consumption that passes this proof. Threads, mutex ordering, Android lifecycle,
 audio focus/output, DSP/clicks, and crash-safe file writes are outside this proof.
 A proof PASS does not resolve the device failures or close #44.
+
+For device click diagnosis, `playback diagnostics` logs render-lock misses and
+their silent frame count, realtime preview-wait frames, and active preview-to-full
+upgrade positions. The existing audio thread logs changes; the callback only
+updates counters and publishes changed records. Upgrade `main_callback_frame`
+is observed at the callback boundary, not an exact event timestamp. These
+measurements do not prove audible output quality and are outside the Kani model.
 
 For sensitivity checking, copy this driver and production module into an isolated
 temporary tree and change `Observation::Passive => None` to

@@ -22,6 +22,13 @@ import android.util.Log
 import android.widget.Toast
 import java.util.Locale
 
+/** MediaSession advertises toggle and dedicated play/pause transport callbacks with these bits. */
+internal val MEDIA_SESSION_ACTIONS: Long =
+    PlaybackState.ACTION_PLAY_PAUSE or
+        PlaybackState.ACTION_PLAY or
+        PlaybackState.ACTION_PAUSE or
+        PlaybackState.ACTION_SKIP_TO_NEXT
+
 /**
  * Foreground service whose only job is to keep this process foreground-
  * privileged while music plays in the background, plus own the MediaSession
@@ -62,6 +69,8 @@ class PlaybackService : Service() {
         private const val CHANNEL_ID = "playback"
         private const val NOTIFICATION_ID = 1
         private const val ACTION_TOGGLE = "jp.hatsuboshi.funkotplayer.action.TOGGLE"
+        private const val ACTION_PLAY = "jp.hatsuboshi.funkotplayer.action.PLAY"
+        private const val ACTION_PAUSE = "jp.hatsuboshi.funkotplayer.action.PAUSE"
         private const val ACTION_NEXT = "jp.hatsuboshi.funkotplayer.action.NEXT"
         private const val ACTION_FLAG = "jp.hatsuboshi.funkotplayer.action.FLAG"
         private const val ACTION_SYNC = "jp.hatsuboshi.funkotplayer.action.SYNC"
@@ -71,6 +80,8 @@ class PlaybackService : Service() {
         private const val CONTROL_NEXT = 1
         private const val CONTROL_QUERY = 2
         private const val CONTROL_FLAG = 3
+        private const val CONTROL_PLAY = 4
+        private const val CONTROL_PAUSE = 5
 
         /** Must match Rust `Phase::Disconnected as u8`. */
         private const val PHASE_DISCONNECTED = 6
@@ -151,10 +162,8 @@ class PlaybackService : Service() {
             appContext = app
             val created = MediaSession(app, "funkot-player").apply {
                 setCallback(object : MediaSession.Callback() {
-                    // The media UI shows play or pause depending on the state
-                    // we publish, so both callbacks mean the same: toggle.
-                    override fun onPlay() = toggleFromSession()
-                    override fun onPause() = toggleFromSession()
+                    override fun onPlay() = setPausedFromSession(false)
+                    override fun onPause() = setPausedFromSession(true)
                     override fun onSkipToNext() {
                         val svc = instance
                         if (svc == null) {
@@ -185,12 +194,15 @@ class PlaybackService : Service() {
             return created
         }
 
-        private fun toggleFromSession() {
+        /** Apply a dedicated MediaSession play or pause request idempotently. */
+        private fun setPausedFromSession(paused: Boolean) {
             val svc = instance
+            val action = if (paused) ACTION_PAUSE else ACTION_PLAY
+            val control = if (paused) CONTROL_PAUSE else CONTROL_PLAY
             if (svc == null) {
-                startService(appContext ?: return, ACTION_TOGGLE)
+                startService(appContext ?: return, action)
             } else {
-                svc.applyControlState(onNativeControl(CONTROL_TOGGLE))
+                svc.applyControlState(onNativeControl(control))
             }
         }
 
@@ -294,6 +306,8 @@ class PlaybackService : Service() {
 
         val packed = when (intent?.action) {
             ACTION_TOGGLE -> onNativeControl(CONTROL_TOGGLE)
+            ACTION_PLAY -> onNativeControl(CONTROL_PLAY)
+            ACTION_PAUSE -> onNativeControl(CONTROL_PAUSE)
             ACTION_NEXT -> onNativeControl(CONTROL_NEXT)
             ACTION_FLAG -> onNativeControl(CONTROL_FLAG).also {
                 showFlagFeedback(lastFlagOk())
@@ -464,7 +478,7 @@ class PlaybackService : Service() {
         session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
-                    PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT,
+                    MEDIA_SESSION_ACTIONS,
                 )
                 .addCustomAction(
                     PlaybackState.CustomAction.Builder(

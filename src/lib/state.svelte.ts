@@ -451,11 +451,25 @@ class PlayerStore {
   }
 
   /// Banner count: gate + every playing, handed-off, or queued path excluded.
+  /// For an active playlist, its unstarted/preparing/prepared occurrences are
+  /// also already at this action's destination. Other playlist definitions do
+  /// not affect this source-specific action.
   get actionableNewArrivalCount(): number {
     return this.actionableNewArrivals.length;
   }
 
+  get activeArrivalPlaylistName(): string | null {
+    return this.queue?.source?.playlist_id === null ? null : this.destinationName;
+  }
+
   get actionableNewArrivals(): NewArrival[] {
+    const id = this.queue?.source?.playlist_id;
+    const activeRows = id !== undefined && id !== null && this.activePlaylist?.id === id
+      ? this.activePlaylist.rows
+      : [];
+    const activePlaylistPaths = activeRows
+      .filter((row) => ["pending", "preparing", "prepared"].includes(row.status))
+      .map((row) => row.path);
     return actionableArrivals(
       this.arrivals,
       this.library,
@@ -464,6 +478,7 @@ class PlayerStore {
       this.queue?.reserved?.path ?? null,
       this.queue?.pending.map((item) => item.path) ?? [],
       this.queue?.in_flight.map((item) => item.path) ?? [],
+      activePlaylistPaths,
     );
   }
 
@@ -628,7 +643,7 @@ class PlayerStore {
     try {
       await skipNextCmd();
       // Host drops TransitionToNext while next is unset; refresh queue so
-      // reserved_prepared (and thus canSkipNext) drops without waiting for poll.
+      // preparation state (and thus canSkipNext) drops without waiting for poll.
       // Not awaited: `NEXT_PREPARED` is published asynchronously from the
       // cpal callback, so waiting on this refresh here does not actually
       // make the drop land any sooner -- it only delays this call's return.
@@ -655,8 +670,7 @@ class PlayerStore {
     if (this.#labelSkipBusy) return;
     const phase = this.player?.phase ?? "idle";
     const auditioning = this.player?.auditioning ?? false;
-    const prepared = this.queue?.reserved_prepared ?? false;
-    if (!canSkipNext(phase, auditioning, prepared)) {
+    if (!canSkipNext(phase, auditioning, this.queue)) {
       if (verdict !== null) void this.doSetLabel(path, verdict);
       return;
     }
@@ -1129,7 +1143,10 @@ class PlayerStore {
     }
   }
 
-  /// Prepend new arrivals to the queue (server re-evaluates gate / exclusions).
+  /// Add new arrivals to the current source (server re-evaluates gate /
+  /// exclusions). `doEnqueueMany` snapshots these paths and the source target
+  /// synchronously, so a later source change cannot send this banner's
+  /// displayed candidates elsewhere.
   ///
   /// Queuing an unanalysed arrival can stall playback: the loader may run a
   /// synchronous analysis. The banner button stays enabled; kick-less paths

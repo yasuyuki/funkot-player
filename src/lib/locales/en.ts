@@ -59,8 +59,10 @@ export const en = {
   deleted: "Deleted",
 
   // --- New arrivals ---
-  queueNewArrivals: (count: number) =>
-    `Put ${count} new ${count === 1 ? "track" : "tracks"} at the front of the queue`,
+  queueNewArrivals: (count: number, playlistName: string | null) =>
+    playlistName
+      ? `Append ${count} new ${count === 1 ? "track" : "tracks"} to ${playlistName}`
+      : `Put ${count} new ${count === 1 ? "track" : "tracks"} at the front of the queue`,
 
   // --- Log panel ---
   logTitle: "Log",

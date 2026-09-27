@@ -31,7 +31,7 @@
 {#if count > 0}
   <div class="banner">
     <button type="button" class="action" disabled={!store.canAddToSource} onclick={onQueue}>
-      {t.queueNewArrivals(count)}
+      {t.queueNewArrivals(count, store.activeArrivalPlaylistName)}
     </button>
   </div>
 {/if}

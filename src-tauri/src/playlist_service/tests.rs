@@ -363,7 +363,8 @@ fn playback(tracks: &[(usize, PathBuf)], frames: usize) -> crate::Playback {
     engine.set_realtime(true);
     engine.render(&mut [0.0; 128]);
     let nav_tx = engine.nav_sender();
-    crate::Playback { paused: Arc::new(AtomicBool::new(false)), nav_tx, sample_rate: 48_000,
+    let observation = Arc::new(crate::engine_observation::EngineObservation::new(engine.current_index(), engine.is_finished()));
+    crate::Playback { paused: Arc::new(AtomicBool::new(false)), nav_tx, observation, sample_rate: 48_000,
         render: Arc::new(Mutex::new(crate::RenderState { engine, audition: None,
             stall: crate::StallWatch::new(48_000), was_in_transition: false })) }
 }
@@ -389,9 +390,15 @@ fn geometry_playback(tracks: &[(usize, PathBuf)]) -> crate::Playback {
     let mut engine = Engine::from_prepared(options, prepared).unwrap();
     engine.set_realtime(false);
     let nav_tx = engine.nav_sender();
-    crate::Playback { paused: Arc::new(AtomicBool::new(false)), nav_tx, sample_rate: SAMPLE_RATE,
+    let observation = Arc::new(crate::engine_observation::EngineObservation::new(engine.current_index(), engine.is_finished()));
+    crate::Playback { paused: Arc::new(AtomicBool::new(false)), nav_tx, observation, sample_rate: SAMPLE_RATE,
         render: Arc::new(Mutex::new(crate::RenderState { engine, audition: None,
             stall: crate::StallWatch::new(SAMPLE_RATE), was_in_transition: false })) }
+}
+
+fn publish_observation(player: &crate::Playback) {
+    let render = player.render.lock().unwrap();
+    player.observation.publish(render.engine.current_index(), render.engine.is_finished());
 }
 
 fn emitted_track_starts(player: &crate::Playback) -> Vec<usize> {
@@ -413,6 +420,7 @@ fn emitted_track_starts(player: &crate::Playback) -> Vec<usize> {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(render.engine.is_finished(), "finite prepared Engine must deliver exhaustion before the channel deadline");
+    player.observation.publish(render.engine.current_index(), render.engine.is_finished());
     starts
 }
 
@@ -453,6 +461,12 @@ fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
     let id = fixture.install("empty playlist", vec![]);
     let request = fixture.request("switch", Action::Select { id: Some(id) });
     command_with(&fixture.service, request, Some(&player)).unwrap();
+    let snapshot = player.observation.read().unwrap();
+    {
+        let render = player.render.lock().unwrap();
+        assert_eq!(snapshot.current, render.engine.current_index());
+        assert_eq!(snapshot.finished, render.engine.is_finished());
+    }
     {
         let owner = fixture.service.lock().unwrap();
         assert!(owner.claims[&second.0].cancelled);
@@ -486,6 +500,7 @@ fn removing_unprepared_row_during_transition_does_not_require_a_source_fence() {
         render.engine.render(&mut [0.0; 128]);
         assert!(render.engine.transition_frames_into().is_some());
     }
+    publish_observation(&player);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
     let last = fixture.service.lock().unwrap().catalog.definition(&id).unwrap().entries[2].entry_id.clone();
     let request = fixture.request("remove", Action::Remove { id: id.clone(), entry_id: last });
@@ -510,6 +525,7 @@ fn paused_transition_rejects_source_switch_with_actionable_reason() {
         render.engine.render(&mut [0.0; 128]);
         assert!(render.engine.transition_frames_into().is_some());
     }
+    publish_observation(&player);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
     player.paused.store(true, Ordering::Relaxed);
     let before = fixture.service.lock().unwrap().catalog.clone();
@@ -517,6 +533,65 @@ fn paused_transition_rejects_source_switch_with_actionable_reason() {
     assert_eq!(command_with(&fixture.service, request, Some(&player)).err().unwrap().code, "transition_paused");
     assert_eq!(fixture.service.lock().unwrap().catalog, before);
     assert!(player.render.lock().unwrap().engine.transition_frames_into().is_some());
+}
+
+#[test]
+fn append_after_terminal_service_restart_clears_ended_without_starting_playback() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav"); let b = fixture.file("b.wav");
+    let normal = vec![QueueItem::manual(fixture.file("normal.wav"))];
+    queue::replace_pending(&fixture.queue, normal.clone());
+    let id = fixture.install("set", vec![Fixture::track(&a)]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let (index, _) = source.next().unwrap(); assert!(source.next().is_none());
+    {
+        let mut owner = fixture.service.lock().unwrap();
+        owner.started(index);
+        owner.reconcile_snapshot(crate::engine_observation::EngineSnapshot { current: None, finished: true });
+        assert!(owner.details(&id, false).unwrap().ended);
+    }
+    let Fixture { data, cache, queue, service } = fixture;
+    drop(source); drop(service);
+    let service = Arc::new(Mutex::new(Service::new(data.path(), cache.path(), queue.clone())));
+    let fixture = Fixture { data, cache, queue, service };
+    let before = {
+        let owner = fixture.service.lock().unwrap();
+        assert!(owner.details(&id, false).unwrap().ended);
+        assert!(!owner.exhausted);
+        owner.catalog.clone()
+    };
+    fixture.command("empty", Action::Append { tracks: vec![], mode: "many".into() }).unwrap();
+    assert!(fixture.service.lock().unwrap().details(&id, false).unwrap().ended);
+    let action = Action::Append { tracks: vec![a, b].into_iter().map(|path| TrackTarget {
+        path: path.to_string_lossy().into(), expected_hash: None,
+    }).collect(), mode: "many".into() };
+    let file = fixture.data.path().join("playlists.json"); let saved = fs::read(&file).unwrap();
+    fs::write(&file, b"external update").unwrap();
+    assert_eq!(fixture.command("failed-append", action.clone()).err().unwrap().code, "stale");
+    assert!(fixture.service.lock().unwrap().details(&id, false).unwrap().ended);
+    assert_eq!(fs::read(&file).unwrap(), b"external update");
+    fs::write(&file, saved).unwrap();
+    assert_eq!(fixture.command("append", action).unwrap().added, 2);
+    let after = {
+        let owner = fixture.service.lock().unwrap();
+        let details = owner.details(&id, false).unwrap();
+        assert!(!details.ended);
+        assert_eq!(details.total, 3); assert_eq!(details.rows.len(), 2);
+        assert!(details.rows.iter().all(|row| row.status == "pending"));
+        assert_eq!(owner.catalog.runs, before.runs);
+        assert_eq!(&owner.catalog.definition(&id).unwrap().entries[..1], &before.definition(&id).unwrap().entries);
+        assert_eq!(owner.catalog.normal, before.normal);
+        assert_eq!(queue::pending_snapshot(&fixture.queue), normal);
+        assert!(owner.catalog.current.is_none() && owner.restored.is_none() && owner.current_index.is_none());
+        assert!(owner.claims.is_empty() && owner.normal_source.is_none());
+        owner.catalog.clone()
+    };
+    let Fixture { data, cache, queue, service } = fixture; drop(service);
+    let reopened = Service::new(data.path(), cache.path(), queue);
+    assert_eq!(reopened.catalog, after);
+    assert!(!reopened.details(&id, false).unwrap().ended);
+    assert!(reopened.restored.is_none() && reopened.current_index.is_none());
 }
 
 #[test]
@@ -529,14 +604,24 @@ fn ended_restart_is_saved_without_resuming_engine_or_destroying_definition() {
     let player = playback(&[first], 256);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
     { let mut render = player.render.lock().unwrap(); while render.engine.render(&mut [0.0; 128]) != 0 {} }
+    publish_observation(&player);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
     let request = fixture.request("restart", Action::Restart { id: id.clone() });
     command_with(&fixture.service, request, Some(&player)).unwrap();
     let mut render = player.render.lock().unwrap();
     assert!(render.engine.is_finished());
+    assert!(player.observation.read().unwrap().finished);
+    let current = player.observation.read().unwrap().current;
     assert_eq!(render.engine.render(&mut [0.0; 128]), 0);
-    assert!(render.engine.resume());
-    assert!(!render.engine.is_finished());
+    drop(render);
+    // Use the production resume path: publication must happen before another
+    // callback renders, including when a repeated Play has no work to resume.
+    player.resume_finished_engine();
+    let resumed = crate::engine_observation::EngineSnapshot { current, finished: false };
+    assert_eq!(player.observation.read(), Some(resumed));
+    player.resume_finished_engine();
+    assert_eq!(player.observation.read(), Some(resumed));
+    assert!(!player.render.lock().unwrap().engine.is_finished());
     let owner = fixture.service.lock().unwrap();
     assert_eq!(owner.catalog.definition(&id).unwrap().entries.len(), 1);
     assert_eq!(owner.catalog.remaining(&id).unwrap().len(), 1);
@@ -595,6 +680,48 @@ fn undoing_current_membership_restores_its_restart_identity_without_requeueing()
 }
 
 #[test]
+fn reconcile_does_not_contend_with_held_render_mutex() {
+    use std::sync::mpsc;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    let fixture = Fixture::new();
+    let path = fixture.file("held-render.wav");
+    let id = fixture.install("set", vec![Fixture::track(&path)]);
+    fixture.command("select", Action::Select { id: Some(id) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let first = source.next().unwrap();
+    let player = Arc::new(playback(&[first], 256));
+    let held = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let holder = Arc::clone(&player);
+    let held_for_thread = Arc::clone(&held);
+    let release_for_thread = Arc::clone(&release);
+    let holder_thread = std::thread::spawn(move || {
+        let _render = holder.render.lock().unwrap();
+        held_for_thread.wait();
+        release_for_thread.wait();
+    });
+    held.wait();
+    let (done_tx, done_rx) = mpsc::channel();
+    let service = fixture.service.clone();
+    let observer = Arc::clone(&player);
+    let observer_thread = std::thread::spawn(move || {
+        service.lock().unwrap().reconcile_with(Some(&observer));
+        done_tx.send(()).unwrap();
+    });
+    // The timeout only prevents a failed regression from stranding the holder;
+    // it is not a latency requirement for a busy test host.
+    let completed_while_held = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    release.wait();
+    holder_thread.join().unwrap();
+    observer_thread.join().unwrap();
+    assert!(completed_while_held, "observer must not wait for render");
+    let mut render = player.render.lock().unwrap();
+    assert!(render.engine.render(&mut [0.0; 128]) > 0, "observer did not consume the callback render opportunity");
+}
+
+#[test]
 fn waking_finite_tail_keeps_a_current_restore_that_has_not_started_yet() {
     let fixture = Fixture::new(); let path = fixture.file("restore.wav");
     let id = fixture.install("set", vec![]);
@@ -610,8 +737,9 @@ fn waking_finite_tail_keeps_a_current_restore_that_has_not_started_yet() {
     let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
     let (old, _) = source.next().unwrap(); assert!(source.next().is_none());
     let engine = funkot_core::engine::Engine::from_prepared(funkot_core::EngineOptions::default(), vec![]).unwrap();
+    let observation = Arc::new(crate::engine_observation::EngineObservation::new(engine.current_index(), engine.is_finished()));
     let player = crate::Playback { paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        nav_tx: engine.nav_sender(), sample_rate: 48_000,
+        nav_tx: engine.nav_sender(), observation, sample_rate: 48_000,
         render: Arc::new(Mutex::new(crate::RenderState { engine, audition: None,
             stall: crate::StallWatch::new(48_000), was_in_transition: false })) };
     let request = fixture.request("append", Action::Append { tracks: vec![TrackTarget {

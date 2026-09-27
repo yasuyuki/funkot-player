@@ -1,3 +1,5 @@
+import type { QueueSnapshot } from "./tauri";
+
 /// Shared primary-button / MiniBar visibility mapping for transport UI.
 ///
 /// `PlayerState.paused` only flips via `flip_paused`; automatic track
@@ -24,8 +26,9 @@
 ///   !nextPrepared                           → false
 ///   else                                    → true
 ///
-/// `nextPrepared` is `QueueSnapshot.reserved_prepared` (NEXT_PREPARED;
-/// audition/paused treat as prepared). Host silently drops TransitionToNext
+/// Playlist preparation lives on its occurrence rows; normal queues use
+/// `reserved_prepared` (NEXT_PREPARED; audition/paused treat as prepared).
+/// Host silently drops TransitionToNext
 /// while next is None — mainly right after a transition until the loader
 /// finishes — and phase often stays `playing`, so UI must key off this flag
 /// rather than starting/stalled.
@@ -62,9 +65,10 @@ export function sessionActive(phase: string, auditioning: boolean): boolean {
 export function canSkipNext(
   phase: string,
   auditioning: boolean,
-  nextPrepared: boolean,
+  queue: Pick<QueueSnapshot, "playlist" | "reserved_prepared"> | null | undefined,
 ): boolean {
   if (!sessionActive(phase, auditioning)) return false;
-  if (!nextPrepared) return false;
-  return true;
+  return queue?.playlist
+    ? queue.playlist.rows.some(row => row.status === "prepared")
+    : queue?.reserved_prepared ?? false;
 }

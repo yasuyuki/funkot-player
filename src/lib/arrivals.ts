@@ -30,7 +30,9 @@ export function gatedArrivals(
 ///
 /// `inFlight` is the stable record of everything handed to the engine, while
 /// `reserved` closes the short gap between the loader updating the queue slot
-/// and persisting that hand-off. The union matches the backend bulk action.
+/// and persisting that hand-off. When the active source is a playlist,
+/// `activePlaylistPaths` also excludes its unstarted and prepared occurrences;
+/// another playlist never supplies this list.
 export function actionableArrivals(
   arrivals: NewArrival[],
   library: ReadonlyMap<string, TrackRow>,
@@ -39,12 +41,14 @@ export function actionableArrivals(
   reserved: string | null,
   pending: readonly string[],
   inFlight: readonly string[],
+  activePlaylistPaths: readonly string[],
 ): NewArrival[] {
   const exclude = new Set<string>();
   if (nowPlaying) exclude.add(nowPlaying);
   if (reserved) exclude.add(reserved);
   for (const p of pending) exclude.add(p);
   for (const p of inFlight) exclude.add(p);
+  for (const p of activePlaylistPaths) exclude.add(p);
   return gatedArrivals(arrivals, library, allowNonFunkot).filter(
     (a) => !exclude.has(a.path),
   );

@@ -53,7 +53,9 @@ export const ja: Messages = {
   deleted: "削除しました",
 
   // --- New arrivals ---
-  queueNewArrivals: (count) => `新着 ${count} 曲をキューの先頭に入れる`,
+  queueNewArrivals: (count, playlistName) => playlistName
+    ? `新着 ${count} 曲をプレイリスト「${playlistName}」の末尾に追加`
+    : `新着 ${count} 曲をキューの先頭に入れる`,
 
   // --- Log panel ---
   logTitle: "ログ",
