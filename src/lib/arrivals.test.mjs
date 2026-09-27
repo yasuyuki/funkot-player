@@ -28,6 +28,7 @@ test("engine hand-off keeps an arrival excluded while reserved advances", () => 
     null,
     ["/music/new-a.wav"],
     [],
+    [],
   );
   assert.deepEqual(afterManualEnqueue.map((a) => a.path), ["/music/new-b.wav"]);
 
@@ -41,6 +42,7 @@ test("engine hand-off keeps an arrival excluded while reserved advances", () => 
     "/music/base-a.wav",
     [],
     ["/music/new-a.wav", "/music/base-a.wav"],
+    [],
   );
   assert.deepEqual(afterPlaybackStarts.map((a) => a.path), ["/music/new-b.wav"]);
 });
@@ -54,6 +56,7 @@ test("reserved closes the gap before the hand-off list is updated", () => {
     "/music/new-b.wav",
     [],
     ["/music/new-a.wav"],
+    [],
   );
   assert.deepEqual(duringHandOff, []);
 });
@@ -71,6 +74,36 @@ test("an arrival stays excluded after reserved advances past it", () => {
       "/music/new-b.wav",
       "/music/base-b.wav",
     ],
+    [],
   );
   assert.deepEqual(afterRunwayAdvances, []);
+});
+
+
+test("active playlist occurrences are excluded without borrowing another playlist", () => {
+  const normal = actionableArrivals(
+    arrivals,
+    library,
+    true,
+    null,
+    null,
+    [],
+    [],
+    [],
+  );
+  assert.deepEqual(normal.map((a) => a.path), ["/music/new-a.wav", "/music/new-b.wav"]);
+
+  // Only the active source supplies this list. A matching entry in another
+  // playlist must not make this source's banner disappear.
+  const activePlaylist = actionableArrivals(
+    arrivals,
+    library,
+    true,
+    null,
+    null,
+    [],
+    [],
+    ["/music/new-a.wav", "/music/new-b.wav"],
+  );
+  assert.deepEqual(activePlaylist, []);
 });

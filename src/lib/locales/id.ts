@@ -51,7 +51,9 @@ export const id: Messages = {
   deleted: "Dihapus",
 
   // --- New arrivals ---
-  queueNewArrivals: (count) => `Taruh ${count} lagu baru di awal antrean`,
+  queueNewArrivals: (count, playlistName) => playlistName
+    ? `Tambahkan ${count} lagu baru ke akhir ${playlistName}`
+    : `Taruh ${count} lagu baru di awal antrean`,
 
   // --- Log panel ---
   logTitle: "Log",

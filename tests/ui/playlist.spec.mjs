@@ -129,6 +129,80 @@ test("rename dialog keeps the list it opened for when browse changes", async ({ 
   expect(action).toEqual({ kind: "rename", id: "empty", name: "Renamed other set" });
 });
 
+test("new-arrivals banner appends only missing tracks to its active playlist", async ({ page }, testInfo) => {
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const arrivals = [1, 2, 3, 4].map((i) => ({ path: `/fixture/music/track-${i}.mp3`, first_seen: `2026-09-01T00:00:0${i}Z` }));
+    const active = {
+      ...store.queue,
+      playlist: {
+        ...store.queue.playlist,
+        rows: [
+          { entry_id: "prepared-arrival", path: arrivals[0].path, title: "Pulse", artist: "DJ Example", status: "prepared", reason: null },
+          { entry_id: "preparing-arrival", path: arrivals[1].path, title: "Midnight", artist: "DJ Example", status: "preparing", reason: null },
+        ],
+      },
+    };
+    store.arrivals = arrivals;
+    store.queue = active;
+    window.__uiFixture.setReply("list_new_arrivals", arrivals);
+    window.__uiFixture.setReply("playlist_command", { created_id: null, undo_id: null, added: 2, rejected: 0, skipped: 0 });
+    window.__uiFixture.setReply("queue_state", active);
+  });
+  const banner = page.getByRole("button", { name: /Append 2 new tracks to Night set/ });
+  await expect(banner).toBeVisible();
+  await page.evaluate(() => window.__uiFixture.delayNext("playlist_command"));
+  await banner.click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").length)).toBe(1);
+  const request = await page.evaluate(() => window.__uiFixture.calls.find((call) => call.command === "playlist_command").args.request);
+  expect(request.target).toEqual({ playlist_id: "night", generation: 2, revision: 4 });
+  expect(request.action).toEqual({
+    kind: "append",
+    tracks: [
+      { path: "/fixture/music/track-3.mp3", expected_hash: "3".repeat(64) },
+      { path: "/fixture/music/track-4.mp3", expected_hash: "4".repeat(64) },
+    ],
+    mode: "arrivals",
+  });
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    window.__uiFixture.setReply("queue_state", {
+      ...store.queue,
+      playlist: {
+        ...store.queue.playlist,
+        rows: [...store.queue.playlist.rows,
+          { entry_id: "added-c", path: "/fixture/music/track-3.mp3", title: "Dawn", artist: "A", status: "pending", reason: null },
+          { entry_id: "added-d", path: "/fixture/music/track-4.mp3", title: "Afterglow", artist: "Studio Example", status: "pending", reason: null },
+        ],
+      },
+    });
+    window.__uiFixture.resolve("playlist_command", { created_id: null, undo_id: null, added: 2, rejected: 0, skipped: 0 });
+  });
+  await expect(banner).toHaveCount(0);
+});
+
+test("new-arrivals banner keeps the catalog playlist destination while details load", async ({ page }, testInfo) => {
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const arrivals = [3, 4].map((i) => ({ path: `/fixture/music/track-${i}.mp3`, first_seen: `2026-09-01T00:00:0${i}Z` }));
+    const loadingDetails = { ...store.queue, playlist: null };
+    store.arrivals = arrivals;
+    store.queue = loadingDetails;
+    window.__uiFixture.setReply("list_new_arrivals", arrivals);
+    window.__uiFixture.setReply("queue_state", loadingDetails);
+    window.__uiFixture.setReply("playlist_command", { created_id: null, undo_id: null, added: 2, rejected: 0, skipped: 0 });
+  });
+  const banner = page.getByRole("button", { name: /Append 2 new tracks to Night set/ });
+  await expect(banner).toBeVisible();
+  await banner.click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").length)).toBe(1);
+  const request = await page.evaluate(() => window.__uiFixture.calls.find((call) => call.command === "playlist_command").args.request);
+  expect(request.target).toEqual({ playlist_id: "night", generation: 2, revision: 4 });
+  expect(request.action).toMatchObject({ kind: "append", mode: "arrivals" });
+});
+
 test("source label and add target stay normal while a stale catalog reply is delayed", async ({ page }, testInfo) => {
   if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
   const baseline = await page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_catalog").length);
