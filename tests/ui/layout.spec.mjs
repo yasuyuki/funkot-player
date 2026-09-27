@@ -62,6 +62,31 @@ test("shared controls, dense browsing, history and playback retain readable targ
   expect(await controlIssues(page, ".minibar")).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await capture(page, testInfo, "text-enlarged");
+  await page.evaluate(() => document.documentElement.style.removeProperty("font-size"));
+
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Up next", exact: true }).click();
+  const queue = page.locator("section.queue");
+  await expect(queue).toBeVisible();
+  const footer = queue.locator(".edit-footer");
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { bottom: 0 } });
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--playback-dock-height", "0px");
+    document.documentElement.style.setProperty("--toast-height", "0px");
+  });
+  await queue.getByRole("button", { name: "Select Pulse", exact: true }).first().click();
+  await expect(footer).toBeVisible();
+  await expect.poll(() => footer.evaluate(element => getComputedStyle(element).bottom)).toBe("0px");
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { bottom: 34 } });
+  await expect.poll(() => footer.evaluate(element => getComputedStyle(element).bottom)).toBe("34px");
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--playback-dock-height", "90px");
+    document.documentElement.style.setProperty("--toast-height", "50px");
+  });
+  await expect.poll(() => footer.evaluate(element => getComputedStyle(element).bottom)).toBe("140px");
+  expect(await controlIssues(page, "section.queue .edit-footer")).toEqual([]);
+  await capture(page, testInfo, "queue-footer-safe-area");
+  await cdp.detach();
 });
 
 test("ja/en/id browsing and tag controls stay reachable with a short viewport", async ({ page }, testInfo) => {
