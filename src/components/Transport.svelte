@@ -147,19 +147,12 @@
   .primary,
   .secondary,
   .flag {
-    /* Override global `button { width: 100% }` so flex: 2/1 can share the row. */
     width: auto;
-    padding: var(--space-md) var(--space-lg);
-    font-size: var(--font-size-md);
-    min-height: var(--transport-btn-min-height);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    min-width: var(--control-target);
   }
 
   .primary {
     flex: 2;
-    min-width: 0;
     background: var(--color-transport-primary-bg);
     color: var(--color-transport-primary-text);
   }
@@ -169,7 +162,6 @@
   }
   .secondary {
     flex: 1;
-    min-width: 0;
     background: var(--color-transport-secondary-bg);
     color: var(--color-transport-secondary-text);
   }
@@ -177,7 +169,6 @@
      -- a filled amber would collide with the paused/resume colour above. */
   .flag {
     flex: 1;
-    min-width: 0;
     background: transparent;
     color: var(--color-flag-amber);
     border: 1px solid var(--color-flag-amber);

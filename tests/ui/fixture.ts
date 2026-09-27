@@ -11,6 +11,23 @@ const rows: TrackRow[] = titles.map((title, i) => ({
   intro_manual: false, outro_manual: false, intro_low_confidence: false,
   outro_low_confidence: false, played_at_ms: null, added_order: 6 - i,
 }));
+const flaggedRows = [
+  {
+    track_hash: rows[0].content_hash, role: "outgoing", title: rows[0].title, artist: rows[0].artist,
+    count: 3, low_confidence: true, missing: false, path: rows[0].path,
+    intro_bars: 32, outro_structure_bars: 32, outro_bars: 32, intro_manual: false, outro_manual: false, analyzed: true,
+    partners: [
+      { track_hash: "partner-long", title: titles[1], artist: artists[1], count: 2, missing: false, path: rows[1].path },
+      { track_hash: "partner-missing", title: "", artist: "", count: 1, missing: true, path: null },
+      { track_hash: "partner-dawn", title: rows[2].title, artist: rows[2].artist, count: 1, missing: false, path: rows[2].path },
+    ],
+  },
+  {
+    track_hash: "flagged-missing", role: "incoming", title: "", artist: "", count: 1,
+    low_confidence: false, missing: true, path: null, intro_bars: null, outro_structure_bars: null,
+    outro_bars: null, intro_manual: false, outro_manual: false, analyzed: false, partners: [],
+  },
+];
 const snapshot: TrackTagsSnapshot = {
   revision: "fixture-1", ready: true, store_status: "ready",
   tracks: Object.fromEntries(rows.map((row, i) => {
@@ -42,7 +59,8 @@ const replies: Record<string, unknown> = {
   playlist_catalog: { revision: 4, active_id: "night", generation: 2, store_status: "ready", lists: [{ id: "night", name: "Night set with an intentionally very long name", revision: 4, total: 5, remaining: 2 }, { id: "empty", name: "Empty list", revision: 1, total: 0, remaining: 0 }] },
   playlist_command: { created_id: null, undo_id: "undo-1", added: 1, rejected: 0, skipped: 0 },
   playlist_entries: { id: "night", name: "Night set with an intentionally very long name", revision: 4, run_id: 2, total: 5, ended: false, skipped: 1, rows: [{ entry_id: "played", path: rows[1].path, title: rows[1].title, artist: rows[1].artist, status: "played", reason: null }, { entry_id: "current", path: rows[2].path, title: rows[2].title, artist: rows[2].artist, status: "current", reason: null }, { entry_id: "missing", path: rows[3].path, title: rows[3].title, artist: rows[3].artist, status: "missing", reason: "missing" }, { entry_id: "a", path: rows[0].path, title: rows[0].title, artist: rows[0].artist, status: "pending", reason: null }, { entry_id: "a-again", path: rows[0].path, title: rows[0].title, artist: rows[0].artist, status: "prepared", reason: null }] },
-  refresh_library: rows, list_track_tags: snapshot, list_new_arrivals: [],
+  refresh_library: rows, list_track_tags: snapshot, list_new_arrivals: [], list_flagged_tracks: flaggedRows,
+  set_bars: null, dismiss_flags: 1, undo_last_dismiss: null, audition_transition: null, audition_again: null,
   list_play_history: { log: [], tracks: [], log_total: 0 },
 };
 const calls: Array<{ command: string; args: unknown }> = [];
@@ -72,6 +90,26 @@ const ipc: TauriIpc = {
       queue.push({ resolve: (value) => resolve(value as T), reject });
       pending.set(command, queue);
     });
+    if (command === "set_bars") {
+      const request = args as { path: string; introBars: number | null; outroStructureBars: number | null; markManual?: boolean };
+      const source = rows.find((row) => row.path === request.path);
+      if (!source) throw new Error("fixture set_bars target missing");
+      const updated = {
+        ...source,
+        intro_bars: request.introBars ?? source.intro_bars,
+        outro_structure_bars: request.outroStructureBars ?? source.outro_structure_bars,
+        intro_manual: request.introBars === null ? source.intro_manual : request.markManual ?? true,
+        outro_manual: request.outroStructureBars === null ? source.outro_manual : request.markManual ?? true,
+      };
+      Object.assign(source, updated);
+      for (const flagged of flaggedRows) {
+        if (flagged.track_hash === updated.content_hash) Object.assign(flagged, {
+          intro_bars: updated.intro_bars, outro_structure_bars: updated.outro_structure_bars,
+          intro_manual: updated.intro_manual, outro_manual: updated.outro_manual,
+        });
+      }
+      return structuredClone(updated) as T;
+    }
     if (command === "playlist_entries" && (args as { id?: string } | undefined)?.id === "empty") return structuredClone(replies.playlist_entries_empty ?? { id: "empty", name: "Empty list", revision: 1, run_id: 1, total: 0, ended: false, skipped: 0, rows: [] }) as T;
     return structuredClone(replies[command]) as T;
   },

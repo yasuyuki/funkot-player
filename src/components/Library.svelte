@@ -295,7 +295,7 @@
         {#if musicDirConfigurable}
           <button
             type="button"
-            class="set-music"
+            class="set-music primary"
             disabled={setMusicBusy}
             onclick={onSetMusicDir}
           >{t.pickMusicFolder}</button>
@@ -367,7 +367,7 @@
             <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
             <button
               type="button"
-              class="add"
+              class="add primary icon-button"
               disabled={addDisabled(row)}
               onclick={() => onAdd(row.path)}
               aria-label={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)}
@@ -426,12 +426,7 @@
   .search {
     flex: 1 1 14rem;
     min-width: 0;
-    font-size: var(--font-size-md);
-    padding: var(--space-sm) var(--space-md);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    background: var(--color-menu-bg);
-    color: var(--color-text);
   }
   .identity-unavailable { font-size: var(--font-size-sm); color: var(--color-text-dim); overflow-wrap: anywhere; }
 
@@ -439,10 +434,6 @@
   .sort {
     width: auto;
     flex: 0 0 auto;
-    font-size: var(--font-size-sm);
-    padding: var(--space-sm) var(--space-md);
-    background: var(--color-transport-secondary-bg);
-    color: var(--color-transport-secondary-text);
   }
 
   .filter.on {
@@ -486,18 +477,6 @@
   .set-music,
   .open-music {
     width: auto;
-    font-size: var(--font-size-sm);
-    padding: var(--space-sm) var(--space-md);
-  }
-
-  .set-music {
-    background: var(--color-transport-primary-bg);
-    color: var(--color-transport-primary-text);
-  }
-
-  .open-music {
-    background: var(--color-transport-secondary-bg);
-    color: var(--color-transport-secondary-text);
   }
 
   .open-music:disabled {
@@ -582,15 +561,15 @@
 
   .add {
     width: auto;
-    min-width: 2.6rem;
-    padding: var(--space-sm) var(--space-md);
-    font-size: var(--font-size-lg);
-    background: var(--color-transport-secondary-bg);
-    color: var(--color-transport-secondary-text);
+    flex: 0 0 auto;
   }
 
   .add:disabled {
     background: var(--color-transport-disabled-bg);
     color: var(--color-transport-disabled-text);
   }
+
+  /* An expanded filter must scroll with the page when its controls would
+     otherwise leave no usable height for tracks or a software keyboard. */
+  .toolbar:has(:global(.tag-filter)) { position: static; }
 </style>

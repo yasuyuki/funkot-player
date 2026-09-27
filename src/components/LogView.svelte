@@ -113,10 +113,6 @@
   }
   .close {
     width: auto;
-    font-size: var(--font-size-sm);
-    padding: var(--space-xs) var(--space-md);
-    background: var(--color-border);
-    color: var(--color-text);
   }
   .dirs {
     font-size: var(--font-size-sm);

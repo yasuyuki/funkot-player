@@ -337,6 +337,20 @@ export const id: Messages = {
   sendFeedback: "Kirim masukan",
   languageItem: (name) => `Bahasa: ${name}`,
 
+  editImmediate: "Perubahan langsung diterapkan",
+  playlistEditing: "Daftar yang diedit",
+  playlistPlaybackSource: "Sumber pemutaran",
+  playlistRemainingScope: "Lagu tersisa",
+  playlistAllScope: "Semua lagu",
+
+  flaggedApplyHint: "Bar langsung diterapkan. Konfirmasi menyelesaikan tanda; Batal memulihkan nilai awal. Kembali mempertahankan perubahan.",
+  flaggedBack: "Kembali · pertahankan perubahan",
+  flaggedCancel: "Batal · pulihkan nilai awal",
+  flaggedConfirm: "Konfirmasi · selesaikan tanda",
+  transitionPartner: "Pasangan transisi",
+  editTrack: "Edit lagu",
+  folderActions: "Tindakan folder",
+
   // --- Edit: flagged list ---
   roleOutgoing: "Sisi keluar",
   roleIncoming: "Sisi masuk",

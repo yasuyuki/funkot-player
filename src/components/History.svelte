@@ -377,10 +377,6 @@
   .view,
   .filter {
     width: auto;
-    font-size: var(--font-size-sm);
-    padding: var(--space-sm) var(--space-md);
-    background: var(--color-tab-bg);
-    color: var(--color-tab-text);
   }
 
   .view {
@@ -394,8 +390,6 @@
 
   .filter {
     flex: 0 0 auto;
-    background: var(--color-transport-secondary-bg);
-    color: var(--color-transport-secondary-text);
   }
 
   .filter.on {

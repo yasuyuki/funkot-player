@@ -10,6 +10,7 @@
 
   /// At most one inline chip editor: `"path\\tintro|outro"` (legacy `openChipKey`).
   let openChipKey = $state<string | null>(null);
+  let cardOpener: HTMLButtonElement | null = null;
   let busy = $state(false);
 
   let rows = $derived(store.libraryList);
@@ -97,6 +98,17 @@
     return kind === "intro" || kind === "outro" ? kind : null;
   }
 
+  function closeCard() {
+    openChipKey = null;
+    cardOpener?.focus();
+  }
+
+  function toggleCard(path: string, opener: HTMLButtonElement) {
+    cardOpener = opener;
+    if (openKind(path)) closeCard();
+    else openChipKey = `${path}\tintro`;
+  }
+
   function chipRow(path: string): TrackRow | null {
     return store.libraryList.find((r) => r.path === path) ?? null;
   }
@@ -120,8 +132,7 @@
       kind === "outro" ? value : null,
     );
     if (!updated) return;
-    // Re-open the same editor on the refreshed row (legacy).
-    openChipKey = `${path}\t${kind}`;
+    // The path-keyed editor survives refresh; do not steal a newer selection.
     toast.show(t.changed, async () => {
       const restored = await store.doSetBars(
         path,
@@ -211,8 +222,16 @@
   }
 </script>
 
+<svelte:window onkeydown={(event) => {
+  if (event.key === "Escape" && openChipKey && cardOpener?.getClientRects().length) {
+    event.preventDefault();
+    closeCard();
+  }
+}} />
+
 <div class="wrap">
   <p class="destination">{t.playlistDestination(store.destinationLabel || t.playlistNormal)}</p>
+  <p class="destination">{t.editImmediate}</p>
   <table class="table">
     <thead>
       <tr>
@@ -231,14 +250,14 @@
           <td class="folder-acts" colspan="5">
             <button
               type="button"
-              class="folder-btn"
+              class="quiet folder-btn"
               disabled={busy || (group.key !== "" && !group.absDir)}
               onclick={() =>
                 onFolderLabel(group.absDir, true, group.tracks, group.key === "")}
             >{t.funkot}</button>
             <button
               type="button"
-              class="folder-btn"
+              class="quiet folder-btn"
               disabled={busy || (group.key !== "" && !group.absDir)}
               onclick={() =>
                 onFolderLabel(group.absDir, false, group.tracks, group.key === "")}
@@ -250,16 +269,18 @@
             class:non-funkot={isNonFunkot(row)}
             class:current={row.path === labelingPath}
           >
-            <td class="name">
+            <td class="name" title={row.path}>
               {#if row.played_at_ms != null}
                 <span class="played">✓</span>
               {/if}
-              {store.relName(row.path)}
+              <strong>{row.title}</strong>
+              {#if row.artist}<span class="artist">{row.artist}</span>{/if}
+              <span class="path">{store.relName(row.path)}</span>
             </td>
             <td class="label-cell">
               <button
                 type="button"
-                class="label-btn"
+                class="quiet label-btn"
                 disabled={busy}
                 onclick={() => onToggleLabel(row)}
               >{labelText(row)}</button>
@@ -270,7 +291,7 @@
               {:else}
                 <button
                   type="button"
-                  class="bars"
+                  class="quiet bars"
                   class:low={row.intro_low_confidence && !row.intro_manual}
                   onclick={() => toggleChip(row.path, "intro")}
                 >{row.intro_bars}{cellMark(row.intro_manual, row.intro_low_confidence)}</button>
@@ -282,7 +303,7 @@
               {:else}
                 <button
                   type="button"
-                  class="bars"
+                  class="quiet bars"
                   class:low={row.outro_low_confidence && !row.outro_manual}
                   onclick={() => toggleChip(row.path, "outro")}
                 >{row.outro_structure_bars}{cellMark(row.outro_manual, row.outro_low_confidence)}</button>
@@ -292,7 +313,7 @@
             <td class="act">
               <button
                 type="button"
-                class="add"
+                class="icon-button add"
                 disabled={addDisabled(row)}
                 onclick={() => onAdd(row.path)}
                 aria-label={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)}
@@ -320,6 +341,47 @@
       {/each}
     </tbody>
   </table>
+  <div class="cards">
+    {#each groups as group (group.key)}
+      <section class="group">
+        <details aria-label={t.folderActions}>
+          <summary>{group.title} · {t.folderActions}</summary>
+          <div class="folder-actions">
+            <button type="button" class="quiet" disabled={busy || (group.key !== "" && !group.absDir)} onclick={() => onFolderLabel(group.absDir, true, group.tracks, group.key === "")}>{t.funkot}</button>
+            <button type="button" class="quiet" disabled={busy || (group.key !== "" && !group.absDir)} onclick={() => onFolderLabel(group.absDir, false, group.tracks, group.key === "")}>{t.notFunkot}</button>
+          </div>
+        </details>
+        {#each group.tracks as row (row.path)}
+          <article class:non-funkot={isNonFunkot(row)} class:current={row.path === labelingPath} class="card">
+            <div class="track-copy" title={row.path}>
+              <strong>{row.title}</strong>
+              {#if row.artist}<span class="artist">{row.artist}</span>{/if}
+              <span class="path">{store.relName(row.path)}</span>
+            </div>
+            <div class="card-status">
+              <span class="card-values"><span>{labelText(row)}</span>
+              <span class:low={row.intro_low_confidence && !row.intro_manual}>{t.intro} {row.intro_bars ?? "-"}{cellMark(row.intro_manual, row.intro_low_confidence)}</span>
+              <span class:low={row.outro_low_confidence && !row.outro_manual}>{t.outro} {row.outro_structure_bars ?? "-"}{cellMark(row.outro_manual, row.outro_low_confidence)}</span>
+              <span>mix {row.outro_bars ?? "-"}</span></span>
+              <button type="button" class="quiet" aria-pressed={openKind(row.path) !== null} onclick={(event) => toggleCard(row.path, event.currentTarget)}>{t.editTrack}</button>
+              <button type="button" class="icon-button" disabled={addDisabled(row)} onclick={() => onAdd(row.path)} aria-label={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)} title={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)}>+</button>
+            </div>
+            {#if openKind(row.path)}
+              {@const live = chipRow(row.path)}
+              {#if live}
+                <div class="card-editor" tabindex="-1" aria-label={t.editTrack}>
+                  <button type="button" class="quiet" disabled={busy} onclick={() => onToggleLabel(live)}>{labelText(live)}</button>
+                  {#if live.intro_bars !== null}<ChipEditor kind="intro" current={live.intro_bars} manual={live.intro_manual} onPick={(v) => onChipPick(row.path, "intro", v)} />{/if}
+                  {#if live.outro_structure_bars !== null}<ChipEditor kind="outro" current={live.outro_structure_bars} manual={live.outro_manual} onPick={(v) => onChipPick(row.path, "outro", v)} />{/if}
+                  <div class="edit-footer"><button type="button" class="quiet" onclick={closeCard}>{t.close}</button></div>
+                </div>
+              {/if}
+            {/if}
+          </article>
+        {/each}
+      </section>
+    {/each}
+  </div>
 </div>
 
 <style>
@@ -377,32 +439,17 @@
     white-space: nowrap;
   }
 
-  .folder-btn,
-  .label-btn {
-    width: auto;
-    min-width: 0;
-    font-size: var(--font-size-sm);
-    padding: var(--space-xs) var(--space-sm);
-    background: var(--color-tab-bg);
-    color: var(--color-text);
-  }
-
   .folder-btn + .folder-btn {
     margin-left: var(--space-xs);
   }
 
-  .folder-btn:disabled,
-  .label-btn:disabled {
-    background: var(--color-transport-disabled-bg);
-    color: var(--color-transport-disabled-text);
+  .name {
+    min-width: 16rem;
+    overflow-wrap: anywhere;
   }
 
-  .name {
-    max-width: 10rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .name strong, .track-copy strong { display: block; color: var(--color-text); font-size: var(--font-size-md); font-weight: 600; }
+  .artist, .path { display: block; color: var(--color-text-dim); font-size: var(--font-size-sm); overflow-wrap: anywhere; }
 
   .played {
     color: var(--color-text-dim);
@@ -423,27 +470,28 @@
     width: 1%;
   }
 
-  .bars,
-  .add {
-    width: auto;
-    min-width: 3.2rem;
-    font-size: var(--font-size-md);
-    padding: var(--space-xs) var(--space-md);
-    background: var(--color-tab-bg);
-    color: var(--color-text);
-  }
-
   .bars.low {
     color: var(--color-flagged-warn);
   }
 
-  .add:disabled,
-  .bars:disabled {
-    background: var(--color-transport-disabled-bg);
-    color: var(--color-transport-disabled-text);
-  }
-
   .chip-row td {
     padding: var(--space-xs) var(--space-sm) var(--space-md);
+  }
+
+  .cards { display: none; }
+
+  @media (max-width: 47.99rem) {
+    .table { display: none; }
+    .wrap { overflow: visible; }
+    .cards { display: grid; gap: var(--space-md); }
+    .group { border: 1px solid var(--color-border); }
+    summary { cursor: pointer; padding: var(--space-sm) var(--space-md); font-weight: 600; }
+    .folder-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); }
+    .card-status { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); }
+    .card-values { display: flex; flex-wrap: wrap; gap: var(--space-xs); font-size: var(--font-size-sm); color: var(--color-text-dim); }
+    .card { border-top: 1px solid var(--color-border); }
+    .track-copy { padding: var(--space-md); overflow-wrap: anywhere; }
+    .card.current { background: var(--color-queue-reserved-bg); }
+    .card-editor { padding: 0 var(--space-md) var(--space-md); }
   }
 </style>

@@ -20,6 +20,7 @@
   let clearPlayLogBusy = $state(false);
   let clearPlayCountsBusy = $state(false);
   let localeBusy = $state(false);
+  let menuButton: HTMLButtonElement;
 
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
   let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
@@ -212,12 +213,22 @@
       ui.menuOpen = false;
     };
     document.addEventListener("click", onDocClick);
-    return () => document.removeEventListener("click", onDocClick);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        ui.menuOpen = false;
+        menuButton?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
   });
 </script>
 
 <div class="overflow">
-  <button type="button" class="menu-btn" aria-label="menu" onclick={toggleMenu}>⋮</button>
+  <button type="button" class="menu-btn" bind:this={menuButton} aria-label="menu" aria-expanded={ui.menuOpen} onclick={toggleMenu}>⋮</button>
   {#if ui.menuOpen}
     <!-- Not a keyboard-interactive element itself -- it only exists to stop
          a tap inside the menu from bubbling to the document listener below
@@ -225,15 +236,15 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu" onclick={(event) => event.stopPropagation()}>
-      <button type="button" onclick={onRescan} disabled={scanBusy}>{t.rescan}</button>
+      <button class="menu-item" type="button" onclick={onRescan} disabled={scanBusy}>{t.rescan}</button>
       {#if musicDirConfigurable && musicDirNeeded}
-        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>{t.pickMusicFolder}</button>
+        <button class="menu-item" type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>{t.pickMusicFolder}</button>
       {/if}
       {#if musicDirConfigurable && !musicDirNeeded}
-        <button type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>{t.changeMusicFolder}</button>
-        <button type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>{t.openMusicFolder}</button>
+        <button class="menu-item" type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>{t.changeMusicFolder}</button>
+        <button class="menu-item" type="button" onclick={onOpenMusicDir} disabled={openMusicBusy}>{t.openMusicFolder}</button>
       {/if}
-      <button type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
+      <button class="menu-item" type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
         {t.allowNonFunkotItem(store.allowNonFunkot)}
       </button>
       <!-- Desktop only, same platform test as the folder items above: labeling
@@ -241,22 +252,22 @@
            is not an Android budget. The authority is `LABELING_AVAILABLE` in
            src-tauri/src/lib.rs -- this only hides the button. -->
       {#if musicDirConfigurable}
-        <button type="button" onclick={onToggleLabelingMode} disabled={labelingModeBusy}>
+        <button class="menu-item" type="button" onclick={onToggleLabelingMode} disabled={labelingModeBusy}>
           {t.labelingModeItem(store.labelingMode, labelingModePending)}
         </button>
       {/if}
-      <button type="button" onclick={onClearLabels} disabled={clearLabelsBusy}>
+      <button class="menu-item" type="button" onclick={onClearLabels} disabled={clearLabelsBusy}>
         {t.clearLabelsItem}
       </button>
-      <button type="button" onclick={onClearPlayLog} disabled={clearPlayLogBusy}>
+      <button class="menu-item" type="button" onclick={onClearPlayLog} disabled={clearPlayLogBusy}>
         {t.clearPlayLogItem}
       </button>
-      <button type="button" onclick={onClearPlayCounts} disabled={clearPlayCountsBusy}>
+      <button class="menu-item" type="button" onclick={onClearPlayCounts} disabled={clearPlayCountsBusy}>
         {t.clearPlayCountsItem}
       </button>
-      <button type="button" onclick={onShowLog}>{t.showLog}</button>
-      <button type="button" onclick={onShareFeedback} disabled={feedbackBusy}>{t.sendFeedback}</button>
-      <button type="button" onclick={onCycleLocale} disabled={localeBusy || !store.localeReady}>
+      <button class="menu-item" type="button" onclick={onShowLog}>{t.showLog}</button>
+      <button class="menu-item" type="button" onclick={onShareFeedback} disabled={feedbackBusy}>{t.sendFeedback}</button>
+      <button class="menu-item" type="button" onclick={onCycleLocale} disabled={localeBusy || !store.localeReady}>
         {t.languageItem(LOCALE_NAMES[i18n.locale])}
       </button>
     </div>
@@ -270,10 +281,6 @@
   }
   .menu-btn {
     width: auto;
-    font-size: var(--font-size-lg);
-    padding: var(--space-sm) var(--space-md);
-    background: var(--color-border);
-    color: var(--color-text);
   }
   .menu {
     position: absolute;
@@ -285,16 +292,14 @@
     border-radius: var(--radius-sm);
     padding: var(--space-xs);
     z-index: 10;
-    min-width: 8rem;
+    min-width: min(20rem, calc(100vw - 2rem));
+    max-width: calc(100vw - 2rem);
+    max-height: calc(100dvh - 5rem);
+    overflow-y: auto;
   }
   .menu button {
     width: 100%;
-    font-size: var(--font-size-md);
-    padding: var(--space-sm) var(--space-md);
-    background: transparent;
-    color: var(--color-text);
     text-align: left;
-    border-radius: var(--radius-sm);
   }
   /* tokens.css's global `button:active` is a brightness filter, which does
      nothing visible on a transparent background -- these items would give

@@ -19,7 +19,7 @@ test("Library and tag review states", async ({ page }, testInfo) => {
     await page.mouse.move(0, 0);
     await page.evaluate(() => window.scrollTo(0, 0));
     const path = testInfo.outputPath(`${testInfo.project.name}-${name}.jpg`);
-    await page.screenshot({ path, quality: 70, fullPage: true, animations: "disabled", caret: "hide" });
+    await page.screenshot({ path, quality: 70, fullPage: false, animations: "disabled", caret: "hide" });
     await testInfo.attach(name, { path, contentType: "image/jpeg" });
   }
   await capture("library");
@@ -109,7 +109,7 @@ test("Library and tag review states", async ({ page }, testInfo) => {
   await queue.getByRole("button", { name: "Close" }).click();
   await queue.locator(".source .choose").click();
   await queue.getByRole("button", { name: "Browse Empty list" }).click();
-  await expect(queue.getByText("Browse all tracks: Empty list")).toBeVisible();
+  await expect(queue.getByText("Editing playlist: Empty list")).toBeVisible();
   await capture("playlist-inactive-edit");
   await queue.getByRole("button", { name: "Close" }).click();
   await page.evaluate(async () => {

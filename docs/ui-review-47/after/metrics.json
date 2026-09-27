@@ -1,0 +1,456 @@
+[
+  {
+    "screen": "library",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 272.53125,
+      "height": 1796.890625,
+      "width": 384
+    },
+    "rowsInViewport": 6,
+    "firstRow": {
+      "top": 433.296875,
+      "height": 68.171875,
+      "width": 384
+    },
+    "controls": [
+      {
+        "text": "New only",
+        "top": 332.515625,
+        "height": 44,
+        "width": 90.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Newest▾",
+        "top": 382.90625,
+        "height": 44,
+        "width": 84.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Select",
+        "top": 382.90625,
+        "height": 44,
+        "width": 67.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Tags",
+        "top": 382.90625,
+        "height": 44,
+        "width": 54.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 444.875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 513.046875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 581.21875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 649.390625,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "queue",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 272.53125,
+      "height": 1610.75,
+      "width": 384
+    },
+    "rowsInViewport": 8,
+    "firstRow": {
+      "top": 352.90625,
+      "height": 63.765625,
+      "width": 384
+    },
+    "controls": [],
+    "overflow": false
+  },
+  {
+    "screen": "all-tracks",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 126.390625,
+      "height": 1922.453125,
+      "width": 1200
+    },
+    "rowsInViewport": 8,
+    "firstRow": {
+      "top": 268.21875,
+      "height": 74.171875,
+      "width": 1200
+    },
+    "controls": [
+      {
+        "text": "Funkot",
+        "top": 217.328125,
+        "height": 44,
+        "width": 72.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Non-Funkot",
+        "top": 217.328125,
+        "height": 44,
+        "width": 107.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "—",
+        "top": 283.296875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "32",
+        "top": 283.296875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "32",
+        "top": 283.296875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 283.296875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "—",
+        "top": 357.46875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "32",
+        "top": 357.46875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "flagged-detail",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 224.765625,
+      "height": 125.15625,
+      "width": 1200
+    },
+    "rowsInViewport": 1,
+    "firstRow": {
+      "top": 224.765625,
+      "height": 125.15625,
+      "width": 1200
+    },
+    "controls": [
+      {
+        "text": "Confirm · resolve flag",
+        "top": 593.28125,
+        "height": 44,
+        "width": 182.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Cancel · restore starting values",
+        "top": 593.28125,
+        "height": 44,
+        "width": 257.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Back · keep changes",
+        "top": 593.28125,
+        "height": 44,
+        "width": 177.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "library",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 342.5,
+      "height": 1796.890625,
+      "width": 380
+    },
+    "rowsInViewport": 6,
+    "firstRow": {
+      "top": 503.265625,
+      "height": 68.171875,
+      "width": 380
+    },
+    "controls": [
+      {
+        "text": "New only",
+        "top": 402.484375,
+        "height": 44,
+        "width": 90.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Newest▾",
+        "top": 452.875,
+        "height": 44,
+        "width": 84.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Select",
+        "top": 452.875,
+        "height": 44,
+        "width": 67.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Tags",
+        "top": 452.875,
+        "height": 44,
+        "width": 54.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 514.84375,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 583.015625,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 651.1875,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 719.359375,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "queue",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 342.5,
+      "height": 1610.75,
+      "width": 380
+    },
+    "rowsInViewport": 7,
+    "firstRow": {
+      "top": 422.875,
+      "height": 63.765625,
+      "width": 380
+    },
+    "controls": [],
+    "overflow": false
+  },
+  {
+    "screen": "all-tracks",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 126.390625,
+      "height": 3757.015625,
+      "width": 380
+    },
+    "rowsInViewport": 4,
+    "firstRow": {
+      "top": 245.34375,
+      "height": 140.546875,
+      "width": 378
+    },
+    "controls": [
+      {
+        "text": "Funkot",
+        "top": 251.734375,
+        "height": 44,
+        "width": 72.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Non-Funkot",
+        "top": 251.734375,
+        "height": 44,
+        "width": 107.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Edit track",
+        "top": 335.5,
+        "height": 44,
+        "width": 93.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 335.5,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Edit track",
+        "top": 542.03125,
+        "height": 44,
+        "width": 93.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 542.03125,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Edit track",
+        "top": 682.578125,
+        "height": 44,
+        "width": 93.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "+",
+        "top": 682.578125,
+        "height": 44,
+        "width": 44,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "flagged-detail",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 311.140625,
+      "height": 125.15625,
+      "width": 380
+    },
+    "rowsInViewport": 1,
+    "firstRow": {
+      "top": 311.140625,
+      "height": 125.15625,
+      "width": 380
+    },
+    "controls": [
+      {
+        "text": "Confirm · resolve flag",
+        "top": 727.65625,
+        "height": 44,
+        "width": 182.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Cancel · restore starting values",
+        "top": 781.25,
+        "height": 44,
+        "width": 257.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      },
+      {
+        "text": "Back · keep changes",
+        "top": 834.84375,
+        "height": 44,
+        "width": 177.1875,
+        "font": "15.2px",
+        "lineHeight": "22.8px"
+      }
+    ],
+    "overflow": false
+  }
+]

@@ -8,11 +8,12 @@
     kind: "intro" | "outro";
     current: number | null;
     manual: boolean;
+    disabled?: boolean;
     /// Called with the newly picked bar count. Parent runs `set_bars`.
     onPick: (value: number) => Promise<void>;
   }
 
-  let { kind, current, manual, onPick }: Props = $props();
+  let { kind, current, manual, onPick, disabled = false }: Props = $props();
 
   let busy = $state(false);
 
@@ -34,7 +35,7 @@
 
   async function pick(v: number) {
     // Re-tapping the current chip is a no-op (legacy).
-    if (cur === v || busy) return;
+    if (cur === v || busy || disabled) return;
     busy = true;
     try {
       await onPick(v);
@@ -51,9 +52,9 @@
     {#each values as v (v)}
       <button
         type="button"
-        class="chip"
+        class="quiet chip"
         class:current={cur === v}
-        disabled={busy}
+        disabled={busy || disabled}
         onclick={() => pick(v)}
       >{v}{cur === v && manual ? "*" : ""}</button>
     {/each}
@@ -84,22 +85,9 @@
     gap: var(--space-sm);
   }
 
-  .chip {
-    width: auto;
-    font-size: var(--font-size-md);
-    padding: var(--space-xs) var(--space-md);
-    background: var(--color-tab-bg);
-    color: var(--color-text);
-  }
-
   .chip.current {
     background: var(--color-chip-current-bg);
     color: var(--color-chip-current-text);
-  }
-
-  .chip:disabled {
-    background: var(--color-transport-disabled-bg);
-    color: var(--color-transport-disabled-text);
   }
 
   .hint {
