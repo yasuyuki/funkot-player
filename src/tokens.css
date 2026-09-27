@@ -49,7 +49,7 @@
 
   /* Fixed mini bar (scroll-away transport replacement) */
   --color-minibar-bg: #1a1a1a;
-  --minibar-height: 3.2rem;
+  --minibar-height: calc(2.75rem + 2 * var(--space-sm) + 1px);
 
   /* Mode / edit tabs */
   --color-tab-bg: #333;
@@ -102,7 +102,11 @@
   --font-size-md: 0.95rem;
   --font-size-lg: 1.2rem;
 
-  --transport-btn-min-height: 2.8rem;
+  /* Shared control geometry. 44 CSS px remains the floor at every pointer
+     type; a wide viewport may still be used with touch. Rems allow zoom. */
+  --control-target: max(44px, 2.75rem);
+  --control-line-height: 1.5;
+
 }
 
 body {
@@ -124,14 +128,24 @@ body {
   margin-inline: auto;
 }
 
-button {
-  font-size: var(--font-size-lg);
-  padding: var(--space-lg) 1.6rem;
-  width: 100%;
-  background: var(--color-transport-primary-bg);
-  color: var(--color-transport-primary-text);
-  border: 0;
+button, input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+  box-sizing: border-box;
+  font: inherit;
+  font-size: var(--font-size-md);
+  line-height: var(--control-line-height);
+  padding: var(--space-sm) var(--space-md);
+  min-height: var(--control-target);
+  min-width: var(--control-target);
+  max-width: 100%;
+  background: var(--color-menu-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
+}
+
+button {
+  width: auto;
+  overflow-wrap: anywhere;
   /* No transition: a tap must show up immediately, not after a fade. */
   touch-action: manipulation;
   -webkit-tap-highlight-color: rgba(255, 255, 255, 0.25);
@@ -144,4 +158,47 @@ button:active {
 
 button[disabled] {
   opacity: 0.45;
+}
+
+button.primary, button[aria-pressed="true"] {
+  background: var(--color-accent-bg);
+  color: var(--color-accent-text);
+}
+button.danger { color: var(--color-status-failed); }
+button.quiet, button.menu-item, button[role="menuitem"] {
+  background: transparent;
+  border-color: transparent;
+}
+button.menu-item, button[role="menuitem"] {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  text-align: start;
+}
+button.menu-item:active, button[role="menuitem"]:active {
+  background: var(--color-accent-bg);
+}
+.icon-button { flex: 0 0 auto; }
+:where(button, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--color-link);
+  outline-offset: 2px;
+}
+summary {
+  box-sizing: border-box;
+  min-height: var(--control-target);
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+}
+.edit-footer {
+  position: sticky;
+  bottom: calc(var(--playback-dock-height, 0px) + var(--toast-height, 0px));
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  padding-block: var(--space-sm);
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-border);
 }

@@ -137,6 +137,7 @@
 <dialog bind:this={dialog} aria-label={t.tagEditorTitle(title)} onkeydown={stopShortcut}
   oncancel={(event) => { event.preventDefault(); close(); }}>
   <form onsubmit={(event) => { event.preventDefault(); void save(); }}>
+    <div class="fields">
     <header>
       <h2 title={t.tagEditorTitle(title)}>{t.tagEditorTitle(title)}</h2>
       <p>{t.tagEditorScope(targets.length)}</p>
@@ -236,22 +237,24 @@
         {#each displayed as state}{#each state.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}{/each}
       {/if}
     </details>
+    </div>
     <footer>
       {#if error}<p class="feedback" role="alert">{t.tagError(error)}</p>{/if}
       {#if reloaded}<p class="feedback" role="status">{t.tagReloaded}</p>{/if}
       {#if error}<button class="secondary" type="button" disabled={busy} onclick={reload}>{reloading ? t.tagReloading : t.tagReload}</button>{/if}
       <button class="secondary" type="button" onclick={close} disabled={busy}>{t.cancelAction}</button>
-      <button type="submit" class="save" disabled={busy || readOnly}>{saving ? t.tagSaving : t.tagSave}</button>
+      <button type="submit" class="save primary" disabled={busy || readOnly}>{saving ? t.tagSaving : t.tagSave}</button>
     </footer>
   </form>
 </dialog>
 
 <style>
-  dialog { box-sizing: border-box; width: min(38rem, calc(100vw - 1.5rem)); max-height: calc(100dvh - 1.5rem); overflow-y: auto; padding: var(--space-lg); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text); }
+  dialog { box-sizing: border-box; width: min(38rem, calc(100vw - 1.5rem)); max-height: calc(100dvh - 1.5rem); overflow: hidden; padding: var(--space-lg); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text); }
   dialog::backdrop { background: #000a; }
-  form { display: grid; gap: var(--space-md); min-width: 0; }
+  form { display: flex; flex-direction: column; gap: var(--space-md); min-width: 0; max-height: calc(100dvh - 1.5rem - 2 * var(--space-lg) - 2px); }
+  .fields { display: grid; gap: var(--space-md); min-height: 0; overflow-y: auto; padding: 2px; scroll-padding-block: var(--space-md); }
   h2,h3,h4,p { margin: 0; overflow-wrap: anywhere; }
-  h2 { display: -webkit-box; overflow: hidden; font-size: var(--font-size-lg); line-clamp: 2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  h2 { font-size: var(--font-size-lg); }
   h3,h4 { font-size: var(--font-size-sm); }
   header,section,fieldset { display: grid; gap: var(--space-sm); min-width: 0; }
   fieldset { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-md); }
@@ -266,17 +269,15 @@
   .add-fields { display: grid; grid-template-columns: auto minmax(0,1fr); gap: var(--space-sm); }
   .add-fields button { grid-column: 1 / -1; }
   .chips { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
-  button { width: auto; overflow-wrap: anywhere; max-width: 100%; background: var(--color-menu-bg); color: var(--color-text); border: 1px solid var(--color-border); font-size: var(--font-size-sm); padding: var(--space-sm) var(--space-md); }
-  .chips button { display: inline-flex; flex-wrap: wrap; gap: var(--space-xs); align-items: center; padding: var(--space-sm); text-align: start; font-size: var(--font-size-sm); }
+  .chips button { display: inline-flex; flex-wrap: wrap; gap: var(--space-xs); align-items: center; text-align: start; }
   .chips small { flex-basis: 100%; }
   .removing { text-decoration: line-through; }
   .candidate { display: grid; gap: var(--space-xs); margin-top: var(--space-sm); overflow-wrap: anywhere; }
   .warning { border-inline-start: 3px solid var(--color-border); padding-inline-start: var(--space-sm); }
   .details[open] { display: grid; gap: var(--space-sm); }
   summary { cursor: pointer; }
-  footer { position: sticky; bottom: calc(var(--space-lg) * -1); display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-sm); margin-top: var(--space-sm); padding: var(--space-md) 0 var(--space-lg); background: var(--color-bg); border-top: 1px solid var(--color-border); }
+  footer { flex: 0 0 auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-sm); padding-top: var(--space-md); background: var(--color-bg); border-top: 1px solid var(--color-border); }
   .feedback { flex-basis: 100%; }
-  .save { background: var(--color-accent-bg); color: var(--color-accent-text); }
   @media (max-width: 30rem) {
     .year-controls { grid-template-columns: 1fr; }
     .year-controls .year-input { grid-column: 1; grid-row: auto; }

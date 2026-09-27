@@ -30,7 +30,7 @@
 
 {#if count > 0}
   <div class="banner">
-    <button type="button" class="action" disabled={!store.canAddToSource} onclick={onQueue}>
+    <button type="button" class="action primary" disabled={!store.canAddToSource} onclick={onQueue}>
       {t.queueNewArrivals(count, store.activeArrivalPlaylistName)}
     </button>
   </div>
@@ -51,9 +51,5 @@
 
   .action {
     width: auto;
-    font-size: var(--font-size-md);
-    padding: var(--space-sm) var(--space-lg);
-    background: var(--color-transport-secondary-bg);
-    color: var(--color-transport-secondary-text);
   }
 </style>

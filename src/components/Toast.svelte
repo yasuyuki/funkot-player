@@ -11,15 +11,25 @@
   let { raised }: Props = $props();
 
   let t = $derived(i18n.t);
+  let toastElement = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const el = toastElement;
+    const update = () => document.documentElement.style.setProperty("--toast-height", `${el?.getBoundingClientRect().height ?? 0}px`);
+    update();
+    if (!el) return;
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => { observer.disconnect(); document.documentElement.style.setProperty("--toast-height", "0px"); };
+  });
 </script>
 
 {#if toast.message !== null}
-  <div class="toast" class:raised>
+  <div class="toast" class:raised bind:this={toastElement} role="status">
     <div class="inner">
       <span class="message">{toast.message}</span>
       {#if toast.undoable}
         <span class="sep">｜</span>
-        <button type="button" class="undo" disabled={toast.busy} onclick={() => toast.undo()}>
+        <button type="button" class="undo quiet" disabled={toast.busy} onclick={() => toast.undo()}>
           {t.undo}
         </button>
       {/if}
@@ -86,21 +96,10 @@
     flex: none;
     color: var(--color-text-dimmer);
   }
-  /* Overrides tokens.css's default `button` (full width, large padding): undo
-     is an inline text action next to the message, not a standalone control.
-     No `transition` here either, for the same tap-must-be-instant reason as
-     every other button in this app. */
   .undo {
     width: auto;
-    /* Two long titles make the message wrap, and without these the flex row
-       squeezes undo down to one character per line -- seen on the device. */
     flex: none;
     white-space: nowrap;
-    font-size: inherit;
-    padding: 0;
-    background: transparent;
-    color: var(--color-link);
     text-decoration: underline;
-    border-radius: 0;
   }
 </style>

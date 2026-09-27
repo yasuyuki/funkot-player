@@ -77,7 +77,7 @@
 
 <style>
   .spacer {
-    height: calc(var(--minibar-height) + env(safe-area-inset-bottom, 0px));
+    min-height: calc(var(--minibar-height) + env(safe-area-inset-bottom, 0px));
   }
 
   .minibar {
@@ -88,7 +88,7 @@
     z-index: 20;
     display: flex;
     align-items: center;
-    height: calc(var(--minibar-height) + env(safe-area-inset-bottom, 0px));
+    min-height: calc(var(--minibar-height) + env(safe-area-inset-bottom, 0px));
     padding: var(--space-sm) 0 calc(var(--space-sm) + env(safe-area-inset-bottom, 0px));
     background: var(--color-minibar-bg);
     border-top: 1px solid var(--color-border);
@@ -123,9 +123,7 @@
 
   .ctrl {
     width: auto;
-    min-width: 2.8rem;
-    padding: var(--space-sm) var(--space-md);
-    font-size: var(--font-size-lg);
+    flex: 0 0 auto;
     background: var(--color-transport-primary-bg);
     color: var(--color-transport-primary-text);
   }

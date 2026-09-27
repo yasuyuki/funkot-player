@@ -32,6 +32,7 @@
   let baselineOutroManual = $state(false);
   let dirty = $state(false);
   let openedKey = $state<string | null>(null);
+  let selectedPartnerHash = $state<string | null>(null);
 
   $effect(() => {
     const r = row;
@@ -45,26 +46,16 @@
     baselineIntroManual = r.intro_manual;
     baselineOutroManual = r.outro_manual;
     dirty = false;
+    selectedPartnerHash = r.partners[0]?.track_hash ?? null;
   });
 
   let kind = $derived<"intro" | "outro">(
     row?.role === "outgoing" ? "outro" : "intro",
   );
   let roleLabel = $derived(translatedRoleLabel(t, row?.role ?? "incoming"));
-  let partnersText = $derived.by(() => {
-    const r = row;
-    if (!r) return "";
-    return r.partners
-      .map((p) => {
-        const rowTitle = flaggedTitle(t, r.title, r.missing);
-        const partnerTitle = flaggedTitle(t, p.title, p.missing);
-        const left = r.role === "outgoing" ? rowTitle : partnerTitle;
-        const right = r.role === "outgoing" ? partnerTitle : rowTitle;
-        const mul = p.count > 1 ? t.flagCount(p.count) : "";
-        return `${left} → ${right}${mul}`;
-      })
-      .join(" / ");
-  });
+  let selectedPartner = $derived(
+    row?.partners.find((partner) => partner.track_hash === selectedPartnerHash) ?? null,
+  );
 
   let auditioning = $derived(store.player?.auditioning ?? false);
   let auditionHasPair = $derived(
@@ -78,29 +69,39 @@
 
   async function onChipPick(value: number) {
     const r = row;
+    if (busy) return;
     if (!r?.path) {
       store.lastError = "no path for this track";
       return;
     }
+    const currentKey = key ? `${key.trackHash}:${key.role}` : null;
+    if (currentKey && openedKey !== currentKey) {
+      openedKey = currentKey;
+      baselineIntro = r.intro_bars;
+      baselineOutro = r.outro_structure_bars;
+      baselineIntroManual = r.intro_manual;
+      baselineOutroManual = r.outro_manual;
+      dirty = false;
+    }
+    busy = true;
     const prevIntro = r.intro_bars;
     const prevOutro = r.outro_structure_bars;
     const prevManual =
       kind === "intro" ? r.intro_manual : r.outro_manual;
     const introBars = kind === "intro" ? value : null;
     const outroStructureBars = kind === "outro" ? value : null;
-    const updated = await store.doSetBars(r.path, introBars, outroStructureBars);
-    if (!updated) return;
-    dirty = true;
-    const path = r.path;
-    toast.show(t.changed, async () => {
-      const restored = await store.doSetBars(
-        path,
-        kind === "intro" ? prevIntro : null,
-        kind === "outro" ? prevOutro : null,
-        prevManual,
-      );
-      return restored !== null;
-    });
+    try {
+      const updated = await store.doSetBars(r.path, introBars, outroStructureBars);
+      if (!updated) return;
+      dirty = true;
+      const path = r.path;
+      toast.show(t.changed, async () => {
+        const restored = await store.doSetBars(path, kind === "intro" ? prevIntro : null, kind === "outro" ? prevOutro : null, prevManual);
+        return restored !== null;
+      });
+    } finally {
+      busy = false;
+    }
   }
 
   async function listenPartner(partnerPath: string | null, outgoing: boolean) {
@@ -124,6 +125,10 @@
     } finally {
       busy = false;
     }
+  }
+
+  function selectPartner(trackHash: string) {
+    selectedPartnerHash = trackHash;
   }
 
   async function onConfirm() {
@@ -185,76 +190,66 @@
 </script>
 
 {#if row}
-  <button type="button" class="linkish" onclick={goList}>{t.backToList}</button>
-
   <div class="meta">
     <div>
       <strong>{flaggedTitle(t, row.title, row.missing)}</strong>
       {#if row.artist}<span class="artist"> {row.artist}</span>{/if}
     </div>
-    <div>
+    <div class="direction">
       {roleLabel} · {t.flagCount(row.count)}
       {#if row.low_confidence}<span class="warn"> ⚠</span>{/if}
     </div>
-    <div>{partnersText}</div>
   </div>
+  <p class="apply-hint">{t.flaggedApplyHint}</p>
 
   <ChipEditor
     {kind}
     current={kind === "outro" ? row.outro_structure_bars : row.intro_bars}
     manual={kind === "outro" ? row.outro_manual : row.intro_manual}
+    disabled={busy || !row.path}
     onPick={onChipPick}
   />
 
-  <div class="actions">
-    {#each row.partners as partner (partner.track_hash)}
+  <section class="partners" aria-label={t.transitionPartner}>
+    <label class="partner-picker">{t.transitionPartner}
+      <select value={selectedPartnerHash ?? ""} onchange={(event) => selectPartner(event.currentTarget.value)} disabled={busy}>
+        {#each row.partners as partner (partner.track_hash)}
+          <option value={partner.track_hash}>{flaggedTitle(t, partner.title, partner.missing)}{partner.count > 1 ? ` · ${t.flagCount(partner.count)}` : ""}</option>
+        {/each}
+      </select>
+    </label>
+    {#if selectedPartner}
       {@const outgoing = row.role === "outgoing"}
-      {@const disabled = !!(partner.missing || !partner.path || !row.path)}
-      <button
-        type="button"
-        disabled={disabled || busy}
-        onclick={() => listenPartner(partner.path, outgoing)}
-      >
-        {outgoing
-          ? t.listenTransitionTo(flaggedTitle(t, partner.title, partner.missing))
-          : t.listenTransitionFrom(flaggedTitle(t, partner.title, partner.missing))}
-      </button>
-    {/each}
-    <button
-      type="button"
-      class="again"
-      disabled={!againEnabled || busy}
-      onclick={onAgain}
-    >{t.listenAgain}</button>
-  </div>
+      {@const unavailable = !!(selectedPartner.missing || !selectedPartner.path || !row.path)}
+      <div class="selected-partner">
+        <strong>{outgoing ? flaggedTitle(t, row.title, row.missing) : flaggedTitle(t, selectedPartner.title, selectedPartner.missing)} → {outgoing ? flaggedTitle(t, selectedPartner.title, selectedPartner.missing) : flaggedTitle(t, row.title, row.missing)}</strong>
+        {#if selectedPartner.missing}<span>{flaggedTitle(t, selectedPartner.title, true)}</span>{/if}
+        <button type="button" class="primary" disabled={unavailable || busy} onclick={() => listenPartner(selectedPartner.path, outgoing)}>{outgoing ? t.listenTransitionTo(flaggedTitle(t, selectedPartner.title, selectedPartner.missing)) : t.listenTransitionFrom(flaggedTitle(t, selectedPartner.title, selectedPartner.missing))}</button>
+      </div>
+    {/if}
+    <button type="button" class="quiet again" disabled={!againEnabled || busy} onclick={onAgain}>{t.listenAgain}</button>
+  </section>
 
-  <div class="actions">
-    <button type="button" class="confirm" disabled={busy} onclick={onConfirm}>
-      {t.confirmAction}
+  <div class="actions edit-footer">
+    <button type="button" class="primary confirm" aria-label={t.confirmAction} disabled={busy} onclick={onConfirm}>
+      {t.flaggedConfirm}
     </button>
-    <button type="button" class="cancel" disabled={busy} onclick={onCancel}>
-      {t.cancelAction}
+    <button type="button" class="danger cancel" aria-label={t.cancelAction} disabled={busy} onclick={onCancel}>
+      {t.flaggedCancel}
     </button>
+    <button type="button" class="quiet" aria-label={t.backToList} disabled={busy} onclick={goList}>{t.flaggedBack}</button>
   </div>
 {/if}
 
 <style>
-  .linkish {
-    width: auto;
-    font-size: inherit;
-    padding: 0;
-    background: transparent;
-    color: var(--color-link);
-    text-decoration: underline;
-    border-radius: 0;
-    margin-top: var(--space-md);
-  }
-
   .meta {
+    overflow-wrap: anywhere;
     font-size: var(--font-size-md);
     color: var(--color-text-dim);
     margin: var(--space-sm) 0 var(--space-lg);
   }
+
+  .apply-hint { color: var(--color-text-dim); font-size: var(--font-size-sm); margin: calc(-1 * var(--space-md)) 0 var(--space-md); }
 
   .artist {
     color: var(--color-text-dim);
@@ -272,21 +267,9 @@
     margin-top: var(--space-lg);
   }
 
-  .actions button {
-    width: auto;
-    font-size: var(--font-size-md);
-    padding: var(--space-md) var(--space-lg);
-    background: var(--color-tab-bg);
-    color: var(--color-text);
-  }
-
-  .actions button:disabled {
-    background: var(--color-transport-disabled-bg);
-    color: var(--color-transport-disabled-text);
-  }
-
-  .confirm {
-    background: var(--color-transport-secondary-bg) !important;
-    color: var(--color-transport-secondary-text) !important;
-  }
+  .partners { margin-top: var(--space-lg); }
+  .partner-picker { display: grid; gap: var(--space-xs); max-width: 100%; }
+  .selected-partner { display: grid; gap: var(--space-sm); margin-top: var(--space-md); overflow-wrap: anywhere; }
+  .selected-partner span { color: var(--color-text-dim); font-size: var(--font-size-sm); }
+  .again { margin-top: var(--space-md); }
 </style>

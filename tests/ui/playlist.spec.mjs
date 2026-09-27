@@ -76,7 +76,8 @@ test("inactive full editor changes its own occurrences without switching the sou
   await pickerHost.getByRole("button", { name: "Browse Empty list" }).click();
   await expect(queue).toBeVisible();
   await expect(queue.locator("li.row")).toHaveCount(2);
-  await queue.locator("li.row").first().getByRole("button", { name: "Move down" }).click();
+  await queue.locator("li.row").first().getByRole("button", { name: "Select Pulse" }).click();
+  await queue.locator(".selection-toolbar").getByRole("button", { name: "Move down" }).click();
   await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").length)).toBe(1);
   const action = await page.evaluate(() => window.__uiFixture.calls.find((call) => call.command === "playlist_command").args.request.action);
   expect(action).toEqual({ kind: "move", id: "empty", entry_id: "first", to: 1, scope: "all" });
@@ -115,7 +116,7 @@ test("rename dialog keeps the list it opened for when browse changes", async ({ 
   const queue = page.locator("section.queue");
   await queue.locator(".source .choose").click();
   await queue.getByRole("button", { name: "Browse Empty list" }).click();
-  await expect(queue.getByText("Browse all tracks: Empty list")).toBeVisible();
+  await expect(queue.getByText("Editing playlist: Empty list")).toBeVisible();
   await queue.getByRole("button", { name: "Playlist actions" }).click();
   await queue.getByRole("button", { name: "Rename" }).click();
   await queue.getByRole("dialog", { name: "Rename" }).getByRole("textbox").fill("Renamed other set");
@@ -238,7 +239,8 @@ test("full-list edits use the browsed revision and reload after stale refusal", 
     window.__uiFixture.setReply("queue_state", store.queue);
     window.__uiFixture.failNext("playlist_command", { code: "stale", message: "stale" });
   });
-  await queue.locator(".playlist-row").first().getByRole("button", { name: "Move down" }).click();
+  await queue.locator(".playlist-row").first().getByRole("button").click();
+  await queue.locator(".selection-toolbar").getByRole("button", { name: "Move down" }).click();
   await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").length)).toBe(1);
   const target = await page.evaluate(() => window.__uiFixture.calls.find((call) => call.command === "playlist_command").args.request.target);
   expect(target).toEqual({ playlist_id: "night", generation: 2, revision: 4 });

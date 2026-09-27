@@ -352,6 +352,20 @@ export const en = {
   sendFeedback: "Send feedback",
   languageItem: (name: string) => `Language: ${name}`,
 
+  editImmediate: "Changes apply immediately",
+  playlistEditing: "Editing playlist",
+  playlistPlaybackSource: "Playback source",
+  playlistRemainingScope: "Remaining tracks",
+  playlistAllScope: "All tracks",
+
+  flaggedApplyHint: "Bars apply immediately. Confirm resolves the flag; Cancel restores the starting values. Back keeps changes.",
+  flaggedBack: "Back · keep changes",
+  flaggedCancel: "Cancel · restore starting values",
+  flaggedConfirm: "Confirm · resolve flag",
+  transitionPartner: "Transition partner",
+  editTrack: "Edit track",
+  folderActions: "Folder actions",
+
   // --- Edit: flagged list ---
   roleOutgoing: "Outgoing",
   roleIncoming: "Incoming",

@@ -336,6 +336,20 @@ export const ja: Messages = {
   sendFeedback: "意見を送る",
   languageItem: (name) => `言語: ${name}`,
 
+  editImmediate: "変更は即時反映されます",
+  playlistEditing: "編集中のリスト",
+  playlistPlaybackSource: "再生供給元",
+  playlistRemainingScope: "残りの曲",
+  playlistAllScope: "すべての曲",
+
+  flaggedApplyHint: "barsの変更は即時反映されます。確認はフラグを解消、取消は開始時の値へ復元します。戻ると変更を保持します。",
+  flaggedBack: "戻る・変更を保持",
+  flaggedCancel: "取消・開始時の値へ戻す",
+  flaggedConfirm: "確認・フラグを解消",
+  transitionPartner: "接続相手",
+  editTrack: "曲を編集",
+  folderActions: "フォルダー操作",
+
   // --- Edit: flagged list ---
   roleOutgoing: "出る側",
   roleIncoming: "入る側",

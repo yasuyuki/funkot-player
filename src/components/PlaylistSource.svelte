@@ -39,17 +39,18 @@
 
 <div class:compact class="source">
   {#if compact}<span class="destination">{t.playlistDestination("")}</span>{/if}
-  <button type="button" class="choose" bind:this={chooseButton} aria-label={compact ? t.playlistDestination(current) : current} aria-expanded={open} onclick={() => (open ? closePicker() : (open = true))} title={current}>{current}<span aria-hidden="true">▾</span></button>
+  <button type="button" class="quiet choose" bind:this={chooseButton} aria-label={compact ? t.playlistDestination(current) : current} aria-expanded={open} onclick={() => (open ? closePicker() : (open = true))} title={current}>{current}<span aria-hidden="true">▾</span></button>
   {#if open}
     <div class="picker" role="dialog" aria-label={t.playlistChoose}>
+      <button type="button" class="quiet picker-close" onclick={closePicker}>{t.close}</button>
       <input aria-label={t.playlistSearch} bind:this={searchInput} bind:value={query} placeholder={t.playlistSearch} />
-      <button type="button" class:active={source?.playlist_id === null} disabled={!store.canPlaylistMutate || busy} onclick={() => select(null)}>{t.playlistNormal}</button>
+      <button type="button" class="quiet" class:active={source?.playlist_id === null} disabled={!store.canPlaylistMutate || busy} onclick={() => select(null)}>{t.playlistNormal}</button>
       {#each lists as list (list.id)}
-        <div class="list-row"><button type="button" class:active={source?.playlist_id === list.id} disabled={!store.canPlaylistMutate || busy} onclick={() => select(list.id)} title={list.name}><span class="list-name">{list.name}</span><small>{t.playlistCount(list.remaining, list.total)}</small></button><button type="button" class="view" onclick={() => { void store.browsePlaylist(list.id); if (compact) { open = false; ui.setPlaySub("queue"); window.scrollTo(0, 0); } else closePicker(); }} aria-label={t.playlistBrowseLabel(list.name)}>{t.playlistBrowse}</button></div>
+        <div class="list-row"><button type="button" class="quiet" class:active={source?.playlist_id === list.id} disabled={!store.canPlaylistMutate || busy} onclick={() => select(list.id)} title={list.name}><span class="list-name">{list.name}</span><small>{t.playlistCount(list.remaining, list.total)}</small></button><button type="button" class="quiet view" onclick={() => { void store.browsePlaylist(list.id); if (compact) { open = false; ui.setPlaySub("queue"); window.scrollTo(0, 0); } else closePicker(); }} aria-label={t.playlistBrowseLabel(list.name)}>{t.playlistBrowse}</button></div>
       {/each}
       <form onsubmit={(event) => { event.preventDefault(); void create(); }}>
         <input aria-label={t.playlistNewName} bind:value={createName} />
-        <button type="submit" disabled={!store.canPlaylistMutate || busy || !createName.trim()}>{t.playlistCreateUse}</button>
+        <button type="submit" class="primary" disabled={!store.canPlaylistMutate || busy || !createName.trim()}>{t.playlistCreateUse}</button>
       </form>
     </div>
   {/if}
@@ -57,18 +58,18 @@
 
 <style>
   .source { position: relative; display: flex; gap: var(--space-sm); align-items: center; min-width: 0; }
-  .choose { width: auto; min-width: 0; flex: 1 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--color-transport-secondary-bg); color: var(--color-transport-secondary-text); }
+  .choose { width: auto; min-width: var(--control-target); flex: 1 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .compact { min-width: 0; max-width: 70%; }
   .compact .destination { flex: 0 0 auto; }
   .destination { color: var(--color-text-dim); font-size: var(--font-size-sm); white-space: nowrap; }
-  .picker { position: absolute; z-index: 20; top: calc(100% + var(--space-sm)); right: 0; min-width: min(22rem, 95vw); max-height: min(65vh, 32rem); overflow: auto; padding: var(--space-sm); background: var(--color-menu-bg); border: 1px solid var(--color-border); border-radius: var(--radius-md); box-shadow: 0 8px 24px #0006; }
+  .picker { box-sizing: border-box; position: absolute; z-index: 20; top: calc(100% + var(--space-sm)); right: 0; min-width: min(22rem, 95vw); max-height: min(65vh, 32rem); overflow: auto; padding: var(--space-sm); background: var(--color-menu-bg); border: 1px solid var(--color-border); border-radius: var(--radius-md); box-shadow: 0 8px 24px #0006; }
   .picker > button, .picker input, .picker form { width: 100%; margin: 0 0 var(--space-sm); }
-  .picker > button, .list-row > button:first-child { text-align: left; background: transparent; color: var(--color-text); display: flex; justify-content: space-between; gap: var(--space-md); }
+  .picker > button, .list-row > button:first-child { text-align: left; display: flex; justify-content: space-between; gap: var(--space-md); }
   .picker > button.active, .list-row > button.active { outline: 2px solid var(--color-accent-bg); }
-  .list-row { display: flex; gap: var(--space-sm); margin-bottom: var(--space-sm); }.list-row > button:first-child { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }.list-name { display: block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }.picker .list-row > .view { width: auto; white-space: nowrap; background: transparent; color: var(--color-text-dim); border: 1px solid var(--color-border); font-size: var(--font-size-sm); padding: var(--space-sm); }
+  .list-row { display: flex; gap: var(--space-sm); margin-bottom: var(--space-sm); }.list-row > button:first-child { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }.list-name { display: block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }.picker .list-row > .view { width: auto; white-space: nowrap; }
   small { color: var(--color-text-dim); white-space: nowrap; }
   .picker form { display: flex; gap: var(--space-sm); margin: 0; } .picker form button { width: auto; flex: 0 0 auto; }
   @media (max-width: 47.99rem) {
-    .picker { position: fixed; left: var(--space-lg); right: var(--space-lg); top: 7rem; min-width: 0; width: auto; max-height: calc(100vh - 9rem); }
+    .picker { position: fixed; left: var(--space-lg); right: var(--space-lg); top: var(--space-lg); min-width: 0; width: auto; max-height: calc(100dvh - 2 * var(--space-lg)); }
   }
 </style>

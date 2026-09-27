@@ -11,7 +11,7 @@ export default defineConfig({
   },
   projects: [
     { name: "desktop", use: { viewport: { width: 1280, height: 900 } } },
-    { name: "narrow", use: { viewport: { width: 412, height: 915 } } },
+    { name: "narrow", use: { viewport: { width: 412, height: 915 }, hasTouch: true } },
   ],
   webServer: {
     command: "npm run dev -- --host 127.0.0.1 --port 1422 --strictPort",

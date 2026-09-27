@@ -42,6 +42,11 @@
       (ui.mode === "edit" || !transportVisible),
   );
 
+  $effect(() => {
+    document.documentElement.style.setProperty("--playback-dock-height", miniBarVisible
+      ? "calc(var(--minibar-height) + env(safe-area-inset-bottom, 0px))" : "0px");
+  });
+
   /// Last scroll offset per play subtab. Deliberately not `$state`: nothing
   /// renders from it, and a reactive write inside the swap would be one more
   /// thing to order against `tick`.
@@ -324,6 +329,7 @@
 <style>
   .header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-md);
@@ -340,10 +346,7 @@
     text-overflow: ellipsis;
   }
 
-  /* Segmented, not a pair of standalone buttons: the two share a border and
-     only one is filled, so which mode you are in is the same read as the
-     subtabs below. `flex: none` keeps it whole and hands any squeeze to the
-     title, which is the one thing here that can be clipped. */
+  /* Keep the mode pair together; the header wraps with enlarged text. */
   .mode-switch {
     display: flex;
     flex: none;
@@ -352,10 +355,6 @@
 
   .mode-switch .mode {
     width: auto;
-    font-size: var(--font-size-sm);
-    padding: var(--space-sm) var(--space-md);
-    background: var(--color-tab-bg);
-    color: var(--color-tab-text);
   }
 
   .mode-switch .mode.active {
@@ -384,10 +383,6 @@
   .subtabs .tab {
     flex: 1;
     width: auto;
-    font-size: var(--font-size-md);
-    padding: var(--space-md) var(--space-lg);
-    background: var(--color-tab-bg);
-    color: var(--color-tab-text);
   }
 
   .subtabs .tab.active {

@@ -63,17 +63,16 @@
 {/if}
 
 <style>
-  .toggle { flex: 0 0 auto; padding: var(--space-sm) var(--space-md); background: var(--color-transport-secondary-bg); color: var(--color-transport-secondary-text); border: 0; }
+  .toggle { flex: 0 0 auto; }
   .toggle.active { outline: 2px solid var(--color-accent-text); outline-offset: -2px; }
   .tag-filter { flex-basis: 100%; display: grid; gap: var(--space-sm); min-width: 0; padding: var(--space-sm); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
   label { display: grid; gap: var(--space-xs); min-width: 0; font-size: var(--font-size-sm); }
-  select { box-sizing: border-box; min-width: 0; max-width: 100%; width: 100%; padding: var(--space-xs); background: var(--color-menu-bg); color: var(--color-text); border: 1px solid var(--color-border); }
+  select { min-width: 0; width: 100%; }
   .candidate { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: var(--space-xs); }
   .conditions { display: flex; align-items: end; flex-wrap: wrap; gap: var(--space-sm); }
   .unset { display: flex; align-items: center; padding: var(--space-xs) 0; }
   .unset input { width: auto; }
   .selected { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
-  button { width: auto; max-width: 100%; padding: var(--space-xs) var(--space-sm); background: var(--color-menu-bg); color: var(--color-text); border: 1px solid var(--color-border); font-size: var(--font-size-sm); overflow-wrap: anywhere; }
   .clear { color: var(--color-text-dim); }
   .hint { margin: var(--space-xs) 0; font-size: var(--font-size-sm); color: var(--color-text-dim); }
 </style>

@@ -26,7 +26,7 @@
 <div class="banner">
   <span class="what">{label}</span>
   <span class="sep" aria-hidden="true">｜</span>
-  <button type="button" class="resume" disabled={busy} onclick={onResume}>
+  <button type="button" class="resume primary" disabled={busy} onclick={onResume}>
     {t.resumeAction}
   </button>
 </div>
@@ -56,10 +56,6 @@
 
   .resume {
     width: auto;
-    font-size: var(--font-size-md);
-    padding: var(--space-sm) var(--space-lg);
-    background: var(--color-transport-secondary-bg);
-    color: var(--color-transport-secondary-text);
   }
 
   .resume:disabled {

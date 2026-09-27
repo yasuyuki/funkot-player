@@ -38,7 +38,7 @@
 
 {#if rows.length === 0}
   <p class="empty">{t.noFlagged}</p>
-  <button type="button" class="linkish" onclick={seeAll}>{t.seeAllTracks}</button>
+  <button type="button" class="quiet linkish" onclick={seeAll}>{t.seeAllTracks}</button>
 {:else}
   <ul class="list">
     {#each rows as row (`${row.track_hash}:${row.role}`)}
@@ -52,7 +52,7 @@
           </button>
           <button
             type="button"
-            class="ok"
+            class="quiet ok"
             disabled={busyKey === `${row.track_hash}\t${row.role}`}
             onclick={() => dismiss(row)}
           >{t.dismissFlag}</button>
@@ -86,9 +86,6 @@
   }
 
   .linkish {
-    width: auto;
-    font-size: inherit;
-    padding: 0;
     background: transparent;
     color: var(--color-link);
     text-decoration: underline;
@@ -153,17 +150,5 @@
     font-size: var(--font-size-sm);
   }
 
-  .ok {
-    width: auto;
-    flex: 0 0 auto;
-    font-size: var(--font-size-sm);
-    padding: var(--space-sm) var(--space-md);
-    background: var(--color-tab-bg);
-    color: var(--color-text);
-  }
-
-  .ok:disabled {
-    background: var(--color-transport-disabled-bg);
-    color: var(--color-transport-disabled-text);
-  }
+  .ok { flex: 0 0 auto; }
 </style>

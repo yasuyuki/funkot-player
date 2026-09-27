@@ -207,6 +207,8 @@
     z-index: 20;
     min-width: 10rem;
     max-width: 16rem;
+    max-height: calc(100dvh - 2 * var(--space-xl));
+    overflow-y: auto;
     padding: var(--space-xs);
     background: var(--color-menu-bg);
     border: 1px solid var(--color-menu-border);
@@ -230,12 +232,8 @@
     align-items: center;
     gap: var(--space-sm);
     width: 100%;
-    font-size: var(--font-size-md);
-    padding: var(--space-sm) var(--space-md);
-    background: transparent;
-    color: var(--color-text);
+
     text-align: left;
-    border-radius: var(--radius-sm);
   }
 
   .menu button:active {

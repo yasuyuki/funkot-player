@@ -92,7 +92,7 @@
     {#if nowRow && shownFunkot !== null}
       <button
         type="button"
-        class="label-toggle"
+        class="label-toggle quiet"
         disabled={labelBusy}
         onclick={onToggleLabel}
       >{shownFunkot ? t.funkot : t.notFunkot}</button>
@@ -125,14 +125,14 @@
   {#if showLogLink || showOpenMusic}
     <div class="error-actions">
       {#if showLogLink}
-        <button type="button" class="log-link" onclick={() => (ui.logOpen = true)}>
+        <button type="button" class="log-link quiet" onclick={() => (ui.logOpen = true)}>
           {t.showLog}
         </button>
       {/if}
       {#if showOpenMusic}
         <button
           type="button"
-          class="log-link"
+          class="log-link quiet"
           disabled={openMusicBusy}
           onclick={onOpenMusicDir}
         >{t.openMusicFolder}</button>
@@ -168,13 +168,10 @@
 
   .label-toggle {
     width: auto;
-    font-size: var(--font-size-sm);
-    padding: 0;
+
     margin: 0;
-    background: transparent;
-    color: var(--color-link);
+
     text-decoration: underline;
-    border-radius: 0;
   }
 
   .progress {
@@ -236,16 +233,11 @@
     margin-top: var(--space-sm);
   }
 
-  /* Overrides tokens.css's default `button` (full width, large padding):
-     this is an inline text link under the card, not a standalone control. */
   .log-link {
     width: auto;
-    font-size: var(--font-size-sm);
-    padding: 0;
+
     margin: 0;
-    background: transparent;
-    color: var(--color-link);
+
     text-decoration: underline;
-    border-radius: 0;
   }
 </style>

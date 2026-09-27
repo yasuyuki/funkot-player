@@ -59,7 +59,7 @@
   >{t.selectNone}</button>
   <button
     type="button"
-    class="add"
+    class="add primary"
     disabled={busy || addDisabled || queuedTotal === 0}
     onclick={onAdd}
   >{addLabel ?? (onEditTags ? t.tagEnqueueCount(queuedTotal) : t.addSelected)}</button>
@@ -90,24 +90,10 @@
   }
   .unavailable { flex-basis: 100%; font-size: var(--font-size-sm); color: var(--color-text-dim); }
 
-  /* `width: auto` on every button here: the global rule in tokens.css makes a
-     bare button full-width. */
   .mini,
   .add {
     width: auto;
     flex: 0 0 auto;
-    font-size: var(--font-size-sm);
-    padding: var(--space-sm) var(--space-md);
-  }
-
-  .mini {
-    background: var(--color-transport-secondary-bg);
-    color: var(--color-transport-secondary-text);
-  }
-
-  .add {
-    background: var(--color-accent-bg);
-    color: var(--color-accent-text);
   }
 
   .mini:disabled,

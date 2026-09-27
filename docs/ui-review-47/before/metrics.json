@@ -1,0 +1,666 @@
+[
+  {
+    "screen": "library",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 265.109375,
+      "height": 1775.046875,
+      "width": 384
+    },
+    "rowsInViewport": 7,
+    "firstRow": {
+      "top": 404.03125,
+      "height": 68.171875,
+      "width": 384
+    },
+    "controls": [
+      {
+        "text": "New only",
+        "top": 329.6875,
+        "height": 32.78125,
+        "width": 83.1875,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Newest▾",
+        "top": 368.859375,
+        "height": 28.78125,
+        "width": 77.1875,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Select",
+        "top": 368.859375,
+        "height": 28.78125,
+        "width": 63.1875,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Tags",
+        "top": 368.859375,
+        "height": 28.78125,
+        "width": 51.1875,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 419.71875,
+        "height": 35.78125,
+        "width": 41.59375,
+        "font": "19.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 487.890625,
+        "height": 35.78125,
+        "width": 41.59375,
+        "font": "19.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 556.0625,
+        "height": 35.78125,
+        "width": 41.59375,
+        "font": "19.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 624.234375,
+        "height": 35.78125,
+        "width": 41.59375,
+        "font": "19.2px",
+        "lineHeight": "normal"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "queue",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 265.109375,
+      "height": 1644.21875,
+      "width": 384
+    },
+    "rowsInViewport": 8,
+    "firstRow": {
+      "top": 350.078125,
+      "height": 64.96875,
+      "width": 384
+    },
+    "controls": [
+      {
+        "text": "↑",
+        "top": 366.671875,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↓",
+        "top": 366.671875,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "✕",
+        "top": 366.671875,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↑",
+        "top": 431.640625,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↓",
+        "top": 431.640625,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "✕",
+        "top": 431.640625,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↑",
+        "top": 496.609375,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↓",
+        "top": 496.609375,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "all-tracks",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 111.359375,
+      "height": 1013.640625,
+      "width": 1200
+    },
+    "rowsInViewport": 18,
+    "firstRow": {
+      "top": 208,
+      "height": 38.1875,
+      "width": 1200
+    },
+    "controls": [
+      {
+        "text": "Funkot",
+        "top": 175.515625,
+        "height": 25.59375,
+        "width": 59.78125,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Non-Funkot",
+        "top": 175.515625,
+        "height": 25.59375,
+        "width": 92.78125,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "—",
+        "top": 214.296875,
+        "height": 25.59375,
+        "width": 26.78125,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "32",
+        "top": 213.296875,
+        "height": 27.59375,
+        "width": 51.1875,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "32",
+        "top": 213.296875,
+        "height": 27.59375,
+        "width": 51.1875,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 213.296875,
+        "height": 27.59375,
+        "width": 51.1875,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "—",
+        "top": 252.484375,
+        "height": 25.59375,
+        "width": 26.78125,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "32",
+        "top": 251.484375,
+        "height": 27.59375,
+        "width": 51.1875,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "flagged-detail",
+    "width": 1280,
+    "height": 900,
+    "region": {
+      "top": 357.71875,
+      "height": 108.75,
+      "width": 1200
+    },
+    "rowsInViewport": 1,
+    "firstRow": {
+      "top": 357.71875,
+      "height": 108.75,
+      "width": 1200
+    },
+    "controls": [
+      {
+        "text": "Listen to the transition into “Afterglow”",
+        "top": 479.265625,
+        "height": 41.1875,
+        "width": 320.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “帰り道のリミックス”",
+        "top": 479.265625,
+        "height": 41.1875,
+        "width": 387.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Last train”",
+        "top": 479.265625,
+        "height": 41.1875,
+        "width": 322.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Pulse”",
+        "top": 530.046875,
+        "height": 37.1875,
+        "width": 292.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Midnight on the coast — extended festival reconstruction with a very long title”",
+        "top": 530.046875,
+        "height": 37.1875,
+        "width": 849.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Dawn”",
+        "top": 576.828125,
+        "height": 41.1875,
+        "width": 294.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Afterglow”",
+        "top": 576.828125,
+        "height": 41.1875,
+        "width": 320.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “帰り道のリミックス”",
+        "top": 576.828125,
+        "height": 41.1875,
+        "width": 387.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "library",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 311.890625,
+      "height": 1775.046875,
+      "width": 380
+    },
+    "rowsInViewport": 6,
+    "firstRow": {
+      "top": 450.8125,
+      "height": 68.171875,
+      "width": 380
+    },
+    "controls": [
+      {
+        "text": "New only",
+        "top": 376.46875,
+        "height": 32.78125,
+        "width": 83.1875,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Newest▾",
+        "top": 415.640625,
+        "height": 28.78125,
+        "width": 77.1875,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Select",
+        "top": 415.640625,
+        "height": 28.78125,
+        "width": 63.1875,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Tags",
+        "top": 415.640625,
+        "height": 28.78125,
+        "width": 51.1875,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 466.5,
+        "height": 35.78125,
+        "width": 41.59375,
+        "font": "19.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 534.671875,
+        "height": 35.78125,
+        "width": 41.59375,
+        "font": "19.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 602.84375,
+        "height": 35.78125,
+        "width": 41.59375,
+        "font": "19.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 671.015625,
+        "height": 35.78125,
+        "width": 41.59375,
+        "font": "19.2px",
+        "lineHeight": "normal"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "queue",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 311.890625,
+      "height": 2421.21875,
+      "width": 380
+    },
+    "rowsInViewport": 5,
+    "firstRow": {
+      "top": 396.859375,
+      "height": 97.34375,
+      "width": 380
+    },
+    "controls": [
+      {
+        "text": "↑",
+        "top": 456.03125,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↓",
+        "top": 456.03125,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "✕",
+        "top": 456.03125,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↑",
+        "top": 553.375,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↓",
+        "top": 553.375,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "✕",
+        "top": 553.375,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↑",
+        "top": 650.71875,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "↓",
+        "top": 650.71875,
+        "height": 30.78125,
+        "width": 38.390625,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "all-tracks",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 111.359375,
+      "height": 1034.03125,
+      "width": 380
+    },
+    "rowsInViewport": 17,
+    "firstRow": {
+      "top": 228.390625,
+      "height": 38.1875,
+      "width": 389.25
+    },
+    "controls": [
+      {
+        "text": "Funkot",
+        "top": 195.90625,
+        "height": 25.59375,
+        "width": 59.78125,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Non-Funkot",
+        "top": 195.90625,
+        "height": 25.59375,
+        "width": 92.78125,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "—",
+        "top": 234.6875,
+        "height": 25.59375,
+        "width": 26.78125,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "32",
+        "top": 233.6875,
+        "height": 27.59375,
+        "width": 51.1875,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "32",
+        "top": 233.6875,
+        "height": 27.59375,
+        "width": 51.1875,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "+",
+        "top": 233.6875,
+        "height": 27.59375,
+        "width": 51.1875,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "—",
+        "top": 272.875,
+        "height": 25.59375,
+        "width": 26.78125,
+        "font": "13.6px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "32",
+        "top": 271.875,
+        "height": 27.59375,
+        "width": 51.1875,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      }
+    ],
+    "overflow": false
+  },
+  {
+    "screen": "flagged-detail",
+    "width": 412,
+    "height": 915,
+    "region": {
+      "top": 676.875,
+      "height": 108.75,
+      "width": 380
+    },
+    "rowsInViewport": 1,
+    "firstRow": {
+      "top": 676.875,
+      "height": 108.75,
+      "width": 380
+    },
+    "controls": [
+      {
+        "text": "Listen to the transition into “Afterglow”",
+        "top": 798.421875,
+        "height": 37.1875,
+        "width": 320.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “帰り道のリミックス”",
+        "top": 845.203125,
+        "height": 63.1875,
+        "width": 380,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Last train”",
+        "top": 917.984375,
+        "height": 37.1875,
+        "width": 322.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Pulse”",
+        "top": 964.765625,
+        "height": 37.1875,
+        "width": 292.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Midnight on the coast — extended festival reconstruction with a very long title”",
+        "top": 1011.546875,
+        "height": 73.1875,
+        "width": 380,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Dawn”",
+        "top": 1094.328125,
+        "height": 37.1875,
+        "width": 294.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “Afterglow”",
+        "top": 1141.109375,
+        "height": 37.1875,
+        "width": 320.59375,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      },
+      {
+        "text": "Listen to the transition into “帰り道のリミックス”",
+        "top": 1187.890625,
+        "height": 63.1875,
+        "width": 380,
+        "font": "15.2px",
+        "lineHeight": "normal"
+      }
+    ],
+    "overflow": false
+  }
+]
