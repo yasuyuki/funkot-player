@@ -250,6 +250,42 @@ test("full-list edits use the browsed revision and reload after stale refusal", 
 });
 
 
+test("adding from Library refreshes the open full playlist without changing its source or selection", async ({ page }, testInfo) => {
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Up next" }).click();
+  const queue = page.locator("section.queue");
+  await queue.getByRole("button", { name: "Playlist actions" }).click();
+  await queue.getByRole("button", { name: "Show and edit all tracks" }).click();
+  await expect(queue.locator(".playlist-row")).toHaveCount(5);
+  const selectedEntryId = await page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.browsedPlaylist?.rows[0]?.entry_id);
+  expect(selectedEntryId).toBeTruthy();
+  await queue.locator(".playlist-row").first().getByRole("button").click();
+  await expect(queue.locator(".playlist-row").first().getByRole("button")).toHaveAttribute("aria-pressed", "true");
+  const initialReads = await page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_entries").length);
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const added = { entry_id: "added-after-browse", path: "/fixture/music/track-1.mp3", title: "Pulse", artist: "DJ Example", status: "pending", reason: null };
+    const details = { ...store.browsedPlaylist, revision: 5, total: 6, rows: [...store.browsedPlaylist.rows, added] };
+    const queueState = {
+      ...store.queue,
+      source: { ...store.queue.source, revision: 5 },
+      playlist: { ...store.queue.playlist, revision: 5, total: 6, rows: [...store.queue.playlist.rows, added] },
+    };
+    window.__uiFixture.setReply("playlist_entries", details);
+    window.__uiFixture.setReply("queue_state", queueState);
+  });
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
+  await page.locator("section.library li.row").first().getByRole("button", { name: /Add Pulse to Night set/ }).click();
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Up next" }).click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_entries").length)).toBeGreaterThan(initialReads);
+  await expect(queue.locator(".playlist-row")).toHaveCount(6);
+  await expect.poll(() => page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.browsedPlaylist?.rows[0]?.entry_id)).toBe(selectedEntryId);
+  await expect(queue.locator(".playlist-row").first().getByRole("button")).toHaveAttribute("aria-pressed", "true");
+  const request = await page.evaluate(() => window.__uiFixture.calls.find((call) => call.command === "playlist_command").args.request);
+  expect(request.target).toMatchObject({ playlist_id: "night", generation: 2 });
+  await expect.poll(() => page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.queue?.source?.playlist_id)).toBe("night");
+  await expect.poll(() => page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.browsedPlaylist?.rows.some((row) => row.entry_id === "added-after-browse"))).toBe(true);
+});
+
 test("a prepared playlist enables both next controls without a normal reservation", async ({ page }, testInfo) => {
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");

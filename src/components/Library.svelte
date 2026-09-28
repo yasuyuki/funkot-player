@@ -266,7 +266,13 @@
         onSelectAll={() => (selected = addAll(selected, visiblePaths))}
         onClear={() => (selected = clearSelection())}
         onAdd={onAddSelected}
-        onEditTags={(event) => openTagEditor(tagSelectedRows, t.tagEditSelected, event.currentTarget as HTMLElement)}
+        onEditTags={(event) => openTagEditor(
+          tagSelectedRows,
+          tagSelectedRows.length === 1
+            ? (tagSelectedRows[0]?.title || store.relName(tagSelectedRows[0]?.path ?? ""))
+            : t.selectedCount(tagSelectedRows.length),
+          event.currentTarget as HTMLElement,
+        )}
       />
     {/if}
   </div>

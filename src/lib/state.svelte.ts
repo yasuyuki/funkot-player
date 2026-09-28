@@ -915,13 +915,13 @@ class PlayerStore {
       const result = await playlistCommandCmd({ request_id: this.#requestId(), target, action });
       await this.#refreshQueueNow();
       if (action.kind === "delete" && this.browsedPlaylist?.id === action.id) this.closeBrowsedPlaylist();
-      else if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id)))
+      else if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
         await this.browsePlaylist(this.browsedPlaylist.id);
       return result;
     } catch (e) {
       this.lastError = this.#errorCode(e);
       await this.#refreshQueueNow();
-      if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id)))
+      if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
         await this.browsePlaylist(this.browsedPlaylist.id);
       return null;
     }

@@ -193,7 +193,7 @@ summary {
 }
 .edit-footer {
   position: sticky;
-  bottom: calc(var(--playback-dock-height, 0px) + var(--toast-height, 0px));
+  bottom: max(env(safe-area-inset-bottom, 0px), calc(var(--playback-dock-height, 0px) + var(--toast-height, 0px)));
   z-index: 6;
   display: flex;
   flex-wrap: wrap;
