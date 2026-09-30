@@ -41,6 +41,62 @@ dialogs keep their actions within their own scroll area. A proposed exception
 must name the user task or state that needs it and be reviewed beside the same
 role in another current screen. Keep geometry in code, not a second value table.
 
+## Choose the verification route
+
+Use the smallest existing layer that proves the changed behavior, in this order:
+
+1. Pure/unit/state tests for logic and request construction.
+2. Playwright browser tests for navigation, menus, inputs, ordering, displayed
+   state, accessibility names and screenshots. Batch the whole flow in one test
+   run rather than using Computer Use to click through known steps.
+3. Native automation only for a changed Tauri/WebView boundary that the browser
+   fixture cannot prove.
+4. Visual/UX review of the prepared captures for hierarchy, density, readability,
+   discoverability and human interaction feel. Computer Use is appropriate for
+   those judgments or a remaining OS/native interaction; record the exact reason.
+
+Reuse `tests/ui/` and its synthetic IPC seam. Prefer native elements with
+`getByRole()` or `getByLabel()`, then existing stable semantic selectors.
+Add a dedicated test id only when those cannot identify the target reliably.
+Do not make screen coordinates or styling classes a new automation contract.
+Assert the relevant request payload and resulting frontend state, not merely
+that a button could be clicked. Mock replies establish the frontend contract,
+not the native implementation.
+
+Use Playwright’s existing file/title selection for a focused check, for example:
+
+```sh
+npm run ui:capture -- tests/ui/queue-ui.spec.mjs --grep "playlist removal keeps Undo"
+```
+
+This existing flow selects an occurrence, removes it and invokes Undo, checks
+the exact occurrence/undo identifiers, and captures the final state for review
+at both configured widths. Use the affected existing files for regression and
+the full capture run when shell/layout changes require it. The report contains
+test timing and attached screenshots; setup, tool round trips and visual
+reasoning must also be counted when reporting end-to-end review time. An
+occasional timing comparison is evidence for that run, not a speed guarantee.
+
+### Native boundary
+
+The browser fixture proves neither WebView2 rendering nor real Tauri IPC,
+on-disk persistence/restart, OS dialogs, audio output or Android device behavior.
+Keep existing build/device acceptance for those boundaries. Do not replay
+ordinary DOM regression in a second native suite.
+
+For a native change, first consider the existing
+[Tauri WebDriver route](https://v2.tauri.app/develop/tests/webdriver/) on a built
+Windows app. `tauri-driver` uses Edge WebDriver, whose version must match the
+app's WebView2 Runtime. Use controlled test data and the existing profile protection
+before any native mutation. The
+[WebView2 WebDriver guide](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webdriver)
+distinguishes launching the app from attaching to a running WebView.
+WebDriver does not operate OS-native dialogs; those need a separate native
+automation or human/Computer Use check. DOM playback state does not establish
+audible output. No native runner is required for a browser-only change:
+record the changed boundary, available automation and any remaining native
+review in the task Issue before adding one.
+
 ## Capture and review
 
 From the repository root, install dependencies and Chromium once:

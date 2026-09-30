@@ -57,7 +57,7 @@ test("a repeated playlist occurrence keeps its entry id and the clicked move con
 
 test("playlist removal keeps Undo and a poll retains the selected occurrence", async ({
   page,
-}) => {
+}, testInfo) => {
   const queue = page.locator("section.queue");
   await queue
     .locator(".playlist-row")
@@ -113,6 +113,10 @@ test("playlist removal keeps Undo and a poll retains the selected occurrence", a
         )[1].args.request.action,
     ),
   ).toEqual({ kind: "undo_remove", undo_id: "undo-1" });
+  await expect(page.getByRole("button", { name: "Undo", exact: true })).toHaveCount(0);
+  const path = testInfo.outputPath(`${testInfo.project.name}-playlist-undo.jpg`);
+  await page.screenshot({ path, quality: 70, fullPage: false, animations: "disabled" });
+  await testInfo.attach("playlist-undo", { path, contentType: "image/jpeg" });
 });
 
 test("normal queue clears ambiguous duplicates and keeps an unswappable reservation protected", async ({
