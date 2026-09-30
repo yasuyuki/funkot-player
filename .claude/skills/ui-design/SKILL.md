@@ -1,11 +1,11 @@
 ---
 name: ui-design
-description: Review or refine funkot-player UI layout and interaction hierarchy with the project’s rendered-screen review procedure.
+description: Verify or refine funkot-player UI with the project's browser-test and rendered-screen review procedure.
 ---
 
 # UI design
 
-Use this skill for UI, layout, or interaction changes in `funkot-player`. Read [the project UI design and review procedure](../../../docs/ui-design.md) first; it is the single source for principles and the eight visual review criteria.
+Use this skill for UI verification and UI, layout, or interaction changes in `funkot-player`. Read [the project UI design and review procedure](../../../docs/ui-design.md) first; it is the single source for principles and the eight visual review criteria.
 
 Inspect the current related screens and entrypoints before designing a change.
 Choose the existing shared role in `src/tokens.css` before introducing a size,
@@ -20,7 +20,9 @@ Before implementation, record:
 
 Choose one recommended UI that serves the stated task. Do not invent a generic platform or unspecified design system. Group search, sort, and filter controls by purpose, distinguish displayed metadata from interactive controls, and preserve title, artist, and the main row action area. Use progressive disclosure for rare actions and reuse existing components, tokens, and entrypoints first.
 
-After implementation, run the relevant existing unit tests and `npm run check`. Then run the documented `npm run ui:capture` entrypoint and inspect the affected
+Follow the linked document's verification order. Use the existing tests to construct states and check behavior in one run; reserve Computer Use for judgments the machine assertions cannot make.
+
+After implementation, run the relevant existing unit tests and `npm run check`. Then use the documented `npm run ui:capture` entrypoint for the affected scenarios and inspect the affected
 current screens, using real viewport captures at wide and narrow widths. Check
 the existing two-column boundary when relevant. Extend the existing fixture for
 uncovered states, using synthetic long names, overflowing lists and relevant
