@@ -234,6 +234,7 @@ export function refreshLibrary(kickAnalysis = true): Promise<TrackRow[]> {
 }
 
 export interface QueueItem {
+  entry_id: string;
   path: string;
   origin: "manual" | "automatic";
 }

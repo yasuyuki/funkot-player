@@ -26,7 +26,7 @@
   let dialogName = $state("");
   let dialogBusy = $state(false);
   let selectedPlaylist = $state<{ id: string; scope: "all" | "remaining"; entryId: string } | null>(null);
-  let selectedQueue = $state<{ item: QueueItem; index: number; signature: string; source: string | null } | null>(null);
+  let selectedQueue = $state<{ entryId: string; source: string | null } | null>(null);
   let toolbar = $state<HTMLElement | null>(null);
   let busy = $state(false);
 
@@ -35,25 +35,15 @@
   let selectedQueueIndex = $derived(findSelectedQueueIndex(selectedQueue));
   let selectedQueueItem = $derived(selectedQueueIndex < 0 ? null : items[selectedQueueIndex]);
 
-  function sameItem(a: QueueItem, b: QueueItem): boolean { return JSON.stringify(a) === JSON.stringify(b); }
   function findSelectedPlaylistIndex(selection: typeof selectedPlaylist): number {
     if (!selection || selection.id !== target?.id || selection.scope !== (editor ? "all" : "remaining")) return -1;
     return shownRows.findIndex((row) => row.entry_id === selection.entryId);
   }
-  // Normal queue rows have no stable occurrence id. A later poll is accepted
-  // only if it proves the selected payload occurs exactly once.
-  function findUniqueQueueIndex(item: QueueItem): number {
-    if (!item) return -1;
-    const matches = items.map((candidate, index) => sameItem(candidate, item) ? index : -1).filter((index) => index >= 0);
-    return matches.length === 1 ? matches[0] : -1;
-  }
-  function queueSignature(): string { return JSON.stringify(items); }
   function findSelectedQueueIndex(selection: typeof selectedQueue): number {
     if (!selection || selection.source !== (store.queue?.source?.playlist_id ?? null)) return -1;
-    if (selection.signature === queueSignature() && sameItem(items[selection.index], selection.item)) return selection.index;
-    return findUniqueQueueIndex(selection.item);
+    return items.findIndex((item) => item.entry_id === selection.entryId);
   }
-  function selectQueue(item: QueueItem, index: number) { selectedPlaylist = null; selectedQueue = { item, index, signature: queueSignature(), source: store.queue?.source?.playlist_id ?? null }; }
+  function selectQueue(item: QueueItem) { selectedPlaylist = null; selectedQueue = { entryId: item.entry_id, source: store.queue?.source?.playlist_id ?? null }; }
   function selectPlaylist(row: PlaylistEntryView) { selectedQueue = null; selectedPlaylist = target ? { id: target.id, scope: editor ? "all" : "remaining", entryId: row.entry_id } : null; }
   function clearSelection() { selectedQueue = null; selectedPlaylist = null; }
   function retainFocus(control: EventTarget | null) { const element = control instanceof HTMLElement ? control : null; queueMicrotask(() => element?.focus()); }
@@ -70,9 +60,6 @@
     busy = true;
     const err = await store.doReorder(from, to, selectedQueueItem);
     if (err) { busy = false; toast.notify(queueErrorMessage(t, err)); if (err === "stale") clearSelection(); return; }
-    selectedQueue = sameItem(items[to], selectedQueueItem)
-      ? { item: selectedQueueItem, index: to, signature: queueSignature(), source: store.queue?.source?.playlist_id ?? null }
-      : null;
     busy = false;
     retainFocus(control);
   }
@@ -133,7 +120,7 @@
     {#if shownRows.length === 0}{#if target.ended && target.total > 0}<button type="button" class="quiet" disabled={!store.canPlaylistMutate} onclick={() => void restart(target.id)}>{t.playlistRestart}</button>{:else}<p class="empty">{t.playlistEmpty}</p>{/if}
     {:else}<ul class="list">{#each shownRows as row (row.entry_id)}<li class="row playlist-row" class:selected={selectedPlaylist?.entryId === row.entry_id}><button type="button" class="row-select" disabled={busy} aria-label={t.selectTrackLabel(row.title)} aria-pressed={selectedPlaylist?.entryId === row.entry_id} onclick={() => selectPlaylist(row)}><span class="text"><span class="title">{row.title}</span><span class="artist">{row.artist}</span>{#if editor || row.status === "preparing" || row.status === "prepared"}<span class="row-status">{t.playlistStatus(row.status)}</span>{/if}{#if editor && row.reason}<span class="row-reason">{t.playlistFailureReason(row.reason)}</span>{/if}</span></button></li>{/each}</ul>{/if}
   {:else if items.length === 0}<p class="empty">{t.queueEmpty}</p>
-  {:else}<ul class="list">{#each items as item, index (item.path + ":" + item.origin + ":" + index)}<li class="row" class:reserved={reserved !== null && index === 0} class:selected={selectedQueueIndex === index}><button type="button" class="row-select" disabled={busy} aria-label={t.selectTrackLabel(store.titleForPath(item.path))} aria-pressed={selectedQueueIndex === index} onclick={() => selectQueue(item, index)}><span class="text"><span class="title-line"><span class="title">{store.titleForPath(item.path)}</span>{#if item.origin === "automatic"}<span class="automatic">{t.automaticSelection}</span>{/if}</span><span class="artist">{store.artistForPath(item.path)}</span></span>{#if reserved !== null && index === 0}<span class="badge" class:preparing={!reservedPrepared}>{!reservedPrepared ? t.queuePreparing : reservedSwappable && transitionInSecs !== null ? transitionBadge(transitionInSecs) : t.queuePrepared}</span>{/if}</button></li>{/each}</ul>{/if}
+  {:else}<ul class="list">{#each items as item, index (item.entry_id)}<li class="row" class:reserved={reserved !== null && index === 0} class:selected={selectedQueueIndex === index}><button type="button" class="row-select" disabled={busy} aria-label={t.selectTrackLabel(store.titleForPath(item.path))} aria-pressed={selectedQueueIndex === index} onclick={() => selectQueue(item)}><span class="text"><span class="title-line"><span class="title">{store.titleForPath(item.path)}</span>{#if item.origin === "automatic"}<span class="automatic">{t.automaticSelection}</span>{/if}</span><span class="artist">{store.artistForPath(item.path)}</span></span>{#if reserved !== null && index === 0}<span class="badge" class:preparing={!reservedPrepared}>{!reservedPrepared ? t.queuePreparing : reservedSwappable && transitionInSecs !== null ? transitionBadge(transitionInSecs) : t.queuePrepared}</span>{/if}</button></li>{/each}</ul>{/if}
   {#if selectedPlaylistRow || selectedQueueItem}
     <div class="selection-toolbar edit-footer" bind:this={toolbar} aria-label={t.selectModeLabel}>
       <p class="selection-target">

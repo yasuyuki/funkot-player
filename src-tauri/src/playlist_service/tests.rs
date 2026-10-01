@@ -62,7 +62,8 @@ fn moved_identity_resolves_but_changed_content_is_skipped_once_without_fallback(
 
     let id = fixture.install("unavailable", vec![reference.clone(), reference]);
     let normal = fixture.file("normal.wav");
-    queue::replace_pending(&fixture.queue, vec![QueueItem::manual(normal.clone())]);
+    let normal_item = QueueItem::manual(normal.clone());
+    queue::replace_pending(&fixture.queue, vec![normal_item.clone()]);
     fixture.command("select-unavailable", Action::Select { id: Some(id.clone()) }).unwrap();
     let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
     assert!(source.next().is_none());
@@ -71,7 +72,7 @@ fn moved_identity_resolves_but_changed_content_is_skipped_once_without_fallback(
     assert_eq!(owner.catalog.definition(&id).unwrap().entries.len(), 2);
     assert_eq!(owner.catalog.run(&id).unwrap().failures.len(), 2);
     assert!(owner.catalog.remaining(&id).unwrap().is_empty());
-    assert_eq!(queue::pending_snapshot(&fixture.queue), vec![QueueItem::manual(normal)]);
+    assert_eq!(queue::pending_snapshot(&fixture.queue), vec![normal_item]);
 }
 
 #[test]
@@ -460,7 +461,8 @@ fn failed_source_save_aborts_real_engine_fence_and_keeps_prepared_next() {
 fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
     let fixture = Fixture::new();
     let paths: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| fixture.file(n)).collect();
-    queue::replace_pending(&fixture.queue, vec![QueueItem::manual(paths[0].clone()), QueueItem::automatic(paths[1].clone()), QueueItem::manual(paths[2].clone())]);
+    let items = vec![QueueItem::manual(paths[0].clone()), QueueItem::automatic(paths[1].clone()), QueueItem::manual(paths[2].clone())];
+    queue::replace_pending(&fixture.queue, items.clone());
     let normal = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
     let mut source = configure(&fixture.service, normal);
     let first = source.next().unwrap(); let second = source.next().unwrap();
@@ -478,7 +480,7 @@ fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
     {
         let owner = fixture.service.lock().unwrap();
         assert!(owner.claims[&second.0].cancelled);
-        assert_eq!(owner.normal_items(), vec![QueueItem::automatic(paths[1].clone()),QueueItem::manual(paths[2].clone())]);
+        assert_eq!(owner.normal_items(), items[1..].to_vec());
     }
     assert!(source.next().is_none(), "detached source cannot consume the new owner");
     let mut render = player.render.lock().unwrap();
@@ -490,7 +492,7 @@ fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
     command_with(&fixture.service, request, Some(&player)).unwrap();
     let owner = fixture.service.lock().unwrap();
     assert_eq!(owner.active(), None);
-    assert_eq!(owner.normal_items(), vec![QueueItem::automatic(paths[1].clone()), QueueItem::manual(paths[2].clone())]);
+    assert_eq!(owner.normal_items(), items[1..].to_vec());
 }
 
 #[test]
@@ -781,4 +783,90 @@ fn final_source_skips_cached_non_funkot_before_returning_playlist_candidate() {
     let owner = fixture.service.lock().unwrap();
     assert_eq!(owner.catalog.run(&id).unwrap().failures.len(), 1);
     assert_eq!(owner.claims.len(), 1);
+}
+
+#[test]
+fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(false, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let rejected = fixture.data.path().join("uncached-120bpm.wav");
+    let sample_rate = 44_100usize;
+    let mut pcm = Vec::with_capacity(sample_rate * 60 * 2);
+    for frame in 0..sample_rate * 60 {
+        let beat_time = (frame % (sample_rate / 2)) as f64 / sample_rate as f64;
+        let kick = if beat_time < 0.08 {
+            (2.0 * std::f64::consts::PI * 60.0 * beat_time).sin()
+                * (-40.0 * beat_time).exp() * 0.8
+        } else { 0.0 };
+        pcm.extend_from_slice(&((kick * i16::MAX as f64) as i16).to_le_bytes());
+    }
+    let data_len = pcm.len() as u32;
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate as u32).to_le_bytes());
+    wav.extend_from_slice(&((sample_rate * 2) as u32).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    fs::write(&rejected, wav).unwrap();
+    funkot_core::decode::decode_file(&rejected).expect("generated WAV must decode");
+    let accepted = fixture.data.path().join("cached-funkot.wav");
+    let mut accepted_wav = fs::read(&rejected).unwrap();
+    accepted_wav[44] ^= 1; // distinct content hash, same decodable pulse pattern
+    fs::write(&accepted, accepted_wav).unwrap();
+    let mut accepted_analysis = crate::analyzed_cache_entry(
+        fixture.cache.path(), &funkot_core::cache::content_hash(&rejected).unwrap()
+    ).unwrap_or_else(|| {
+        let buffer = funkot_core::decode::decode_file(&rejected).unwrap();
+        funkot_core::cache::fill_missing(&rejected, fixture.cache.path(), &buffer).unwrap();
+        crate::analyzed_cache_entry(fixture.cache.path(), &funkot_core::cache::content_hash(&rejected).unwrap()).unwrap()
+    });
+    accepted_analysis.is_funkot = true;
+    accepted_analysis.classify_scores = None;
+    funkot_core::cache::store(fixture.cache.path(), &funkot_core::cache::content_hash(&accepted).unwrap(), &accepted_analysis).unwrap();
+    let bad = QueueItem::manual(rejected.clone());
+    let good = QueueItem::manual(accepted.clone());
+    queue::replace_pending(&fixture.queue, vec![bad.clone(), good.clone()]);
+    let normal = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
+    let mut source = configure(&fixture.service, normal);
+    let first = source.next();
+    assert_eq!(first.map(|(_, path)| path), Some(accepted.clone()));
+    let analysis = crate::analyzed_cache_entry(fixture.cache.path(), &funkot_core::cache::content_hash(&rejected).unwrap())
+        .expect("the uncached candidate must be fully analysed");
+    assert!(!analysis.is_funkot);
+    assert_eq!(queue::pending_snapshot(&fixture.queue), vec![bad, good]);
+    assert!(source.next().is_none(), "blocked non-Funkot must not be retried");
+
+    // Exercise the real asynchronous loader, not just the source return: the
+    // first audible Engine event must name the accepted candidate.
+    queue::restore_all(&fixture.queue, vec![QueueItem::manual(rejected.clone()), QueueItem::manual(accepted.clone())]);
+    let live_service = Arc::new(Mutex::new(Service::new(fixture.data.path(), fixture.cache.path(), fixture.queue.clone())));
+    let live_normal = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
+    let live_source = configure(&live_service, live_normal);
+    let mut options = funkot_core::EngineOptions::default();
+    options.loop_playlist = false;
+    let mut engine = funkot_core::engine::Engine::new_with_source(options, Box::new(live_source)).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let first_started = loop {
+        let mut output = [0.0; 1024];
+        engine.render(&mut output);
+        if let Some(path) = engine.poll_events().into_iter().find_map(|event| match event {
+            funkot_core::engine::EngineEvent::TrackStarted { path, .. } => Some(path),
+            _ => None,
+        }) { break path; }
+        assert!(std::time::Instant::now() < deadline, "engine did not start the accepted first track");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(first_started, accepted);
 }

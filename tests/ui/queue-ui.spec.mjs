@@ -119,20 +119,21 @@ test("playlist removal keeps Undo and a poll retains the selected occurrence", a
   await testInfo.attach("playlist-undo", { path, contentType: "image/jpeg" });
 });
 
-test("normal queue clears ambiguous duplicates and keeps an unswappable reservation protected", async ({
+test("normal queue keeps same-path occurrences selected and protects an unswappable reservation", async ({
   page,
 }) => {
   const queue = page.locator("section.queue");
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");
-    const shared = { path: "/fixture/music/track-1.mp3", origin: "manual" };
+    const first = { entry_id: "first", path: "/fixture/music/track-1.mp3", origin: "manual" };
+    const second = { entry_id: "second", path: "/fixture/music/track-1.mp3", origin: "manual" };
     store.browsedPlaylist = null;
     store.queue = {
       ...store.queue,
       source: { playlist_id: null, generation: 7, revision: 2 },
       playlist: null,
       reserved: null,
-      pending: [shared, shared],
+      pending: [first, second],
     };
     window.__uiFixture.setReply("queue_state", store.queue);
   });
@@ -161,8 +162,14 @@ test("normal queue clears ambiguous duplicates and keeps an unswappable reservat
     kind: "queue_move",
     from: 0,
     to: 1,
-    expect: { path: "/fixture/music/track-1.mp3", origin: "manual" },
+    expect: { entry_id: "first", path: "/fixture/music/track-1.mp3", origin: "manual" },
   });
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.queue = { ...store.queue, pending: [store.queue.pending[1], store.queue.pending[0]] };
+    window.__uiFixture.setReply("queue_state", store.queue);
+  });
+  await expect(duplicateToolbar).toContainText("Pulse");
   const duplicateUp = duplicateToolbar.getByRole("button", { name: "Move up" });
   await duplicateUp.click();
   await expect
@@ -186,22 +193,15 @@ test("normal queue clears ambiguous duplicates and keeps an unswappable reservat
     kind: "queue_move",
     from: 1,
     to: 0,
-    expect: { path: "/fixture/music/track-1.mp3", origin: "manual" },
+    expect: { entry_id: "first", path: "/fixture/music/track-1.mp3", origin: "manual" },
   });
-  await page.evaluate(async () => {
-    const { store } = await import("/src/lib/state.svelte.ts");
-    const shared = { path: "/fixture/music/track-1.mp3", origin: "manual" };
-    store.queue = { ...store.queue, pending: [shared, shared, shared] };
-    window.__uiFixture.setReply("queue_state", store.queue);
-  });
-  await expect(duplicateToolbar).toHaveCount(0);
 
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");
     store.queue = {
       ...store.queue,
-      reserved: { path: "/fixture/music/track-1.mp3", origin: "manual" },
-      pending: [{ path: "/fixture/music/track-2.mp3", origin: "manual" }],
+      reserved: { entry_id: "reserved", path: "/fixture/music/track-1.mp3", origin: "manual" },
+      pending: [{ entry_id: "pending", path: "/fixture/music/track-2.mp3", origin: "manual" }],
       reserved_swappable: false,
     };
     window.__uiFixture.setReply("queue_state", store.queue);
