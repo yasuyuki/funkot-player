@@ -62,7 +62,7 @@
   .compact { min-width: 0; max-width: 70%; }
   .compact .destination { flex: 0 0 auto; }
   .destination { color: var(--color-text-dim); font-size: var(--font-size-sm); white-space: nowrap; }
-  .picker { box-sizing: border-box; position: absolute; z-index: 20; top: calc(100% + var(--space-sm)); right: 0; min-width: min(22rem, 95vw); max-height: min(65vh, 32rem); overflow: auto; padding: var(--space-sm); background: var(--color-menu-bg); border: 1px solid var(--color-border); border-radius: var(--radius-md); box-shadow: 0 8px 24px #0006; }
+  .picker { box-sizing: border-box; position: absolute; z-index: 20; top: calc(100% + var(--space-sm)); right: 0; min-width: min(22rem, 95vw); max-height: min(65vh, 32rem); overflow: auto; padding: var(--space-sm); background: var(--color-menu-bg); border: 1px solid var(--color-border); border-radius: var(--radius-md); box-shadow: 0 8px 24px var(--color-popup-shadow); }
   .picker > button, .picker input, .picker form { width: 100%; margin: 0 0 var(--space-sm); }
   .picker > button, .list-row > button:first-child { text-align: left; display: flex; justify-content: space-between; gap: var(--space-md); }
   .picker > button.active, .list-row > button.active { outline: 2px solid var(--color-accent-bg); }

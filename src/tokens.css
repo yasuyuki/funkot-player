@@ -1,77 +1,79 @@
-/* Design tokens: CSS custom properties shared by every component.
- * Names use the --color-* / --space-* / --radius-* / --font-* prefixes.
- * Shared accent (#369) is defined once as --color-accent-* and referenced
- * by transport secondary, active tabs, and current chips. */
+@import "@radix-ui/colors/gray.css";
+@import "@radix-ui/colors/gray-dark.css";
+@import "@radix-ui/colors/indigo.css";
+@import "@radix-ui/colors/indigo-dark.css";
+@import "@radix-ui/colors/green.css";
+@import "@radix-ui/colors/green-dark.css";
+@import "@radix-ui/colors/amber.css";
+@import "@radix-ui/colors/amber-dark.css";
+@import "@radix-ui/colors/red.css";
+@import "@radix-ui/colors/red-dark.css";
+
+/* Radix scales supply color values. Component styles use semantic roles. */
 :root {
-  /* Surface / text */
-  --color-bg: #111;
-  --color-text: #eee;
-  --color-text-dim: #999;
-  --color-text-dimmer: #777;
-  --color-border: #333;
+  color-scheme: dark;
+  --color-bg: var(--gray-1);
+  --color-panel-bg: var(--gray-3);
+  --color-input-bg: var(--gray-1);
+  --color-hover-bg: var(--gray-4);
+  --color-pressed-bg: var(--gray-5);
+  --color-selected-bg: var(--indigo-3);
+  --color-text: var(--gray-12);
+  --color-text-dim: var(--gray-11);
+  --color-text-dimmer: var(--gray-11);
+  --color-placeholder: var(--gray-11);
+  --color-disabled-text: var(--gray-10);
+  --color-border: var(--gray-6);
+  --color-input-border: var(--gray-10);
+  --color-selected-border: var(--indigo-11);
+  --color-focus: var(--gray-12);
+  --color-backdrop: rgba(0, 0, 0, 0.6);
+  --color-popup-shadow: rgba(0, 0, 0, 0.35);
+  --color-tap-highlight: rgba(158, 177, 255, 0.25);
 
-  /* Shared accent (transport secondary / active tab / current chip) */
-  --color-accent-bg: #369;
+  --color-accent-bg: var(--indigo-9);
+  --color-accent-hover-bg: var(--indigo-8);
+  --color-accent-pressed-bg: var(--indigo-7);
   --color-accent-text: #fff;
+  --color-danger-bg: var(--red-8);
+  --color-danger-hover-bg: var(--red-7);
+  --color-danger-text: #fff;
 
-  /* Phase / status colours */
-  --color-status-idle: #777;
-  --color-status-starting: #fa6;
-  --color-status-paused: #fa6;
-  --color-status-stalled: #fa6;
-  --color-status-playing: #6c9;
-  --color-status-failed: #f66;
-  --color-status-disconnected: #f66;
+  --color-status-idle: var(--gray-11);
+  --color-status-starting: var(--amber-11);
+  --color-status-paused: var(--amber-11);
+  --color-status-stalled: var(--amber-11);
+  --color-status-playing: var(--green-11);
+  --color-status-failed: var(--red-11);
+  --color-status-disconnected: var(--red-11);
 
-  /* Transport buttons */
-  --color-transport-primary-bg: #2b6;
-  --color-transport-primary-text: #000;
-  --color-transport-paused-bg: #b83;
-  --color-transport-paused-text: #000;
+  --color-transport-primary-bg: var(--green-9);
+  --color-transport-primary-text: var(--gray-1);
+  --color-transport-paused-bg: var(--amber-9);
+  --color-transport-paused-text: var(--gray-1);
   --color-transport-secondary-bg: var(--color-accent-bg);
   --color-transport-secondary-text: var(--color-accent-text);
-  --color-transport-disabled-bg: #444;
-  --color-transport-disabled-text: #777;
+  --color-transport-disabled-bg: var(--gray-4);
+  --color-transport-disabled-text: var(--color-disabled-text);
 
-  /* Record operation (flag): outline, not fill -- filled amber would collide
-   * with the paused colour above (#b83). */
-  --color-flag-amber: #e6a417;
-
-  /* Overflow menu (⋮) */
-  --color-menu-bg: #222;
-  --color-menu-border: #444;
-
-  /* Inline text links (toast 取消, NowCard's ログを表示) */
-  --color-link: #6af;
-
-  /* Queue reserved row (next-up, not editable) */
-  --color-queue-reserved-bg: #1a2a1f;
-
-  /* Fixed mini bar (scroll-away transport replacement) */
-  --color-minibar-bg: #1a1a1a;
+  --color-flag-amber: var(--amber-11);
+  --color-menu-bg: var(--color-panel-bg);
+  --color-menu-border: var(--color-input-border);
+  --color-link: var(--indigo-11);
+  --color-queue-reserved-bg: var(--green-3);
+  --color-minibar-bg: var(--gray-2);
   --minibar-height: calc(2.75rem + 2 * var(--space-sm) + 1px);
-
-  /* Mode / edit tabs */
-  --color-tab-bg: #333;
-  --color-tab-text: #aaa;
+  --color-tab-bg: var(--gray-3);
+  --color-tab-text: var(--gray-11);
   --color-tab-active-bg: var(--color-accent-bg);
   --color-tab-active-text: var(--color-accent-text);
-
-  /* Audition banner (takes NowCard's slot while auditioning) */
-  --color-audition-banner-bg: #332;
-
-  /* New-arrival row badge (gate-independent NEW chip) */
+  --color-audition-banner-bg: var(--amber-3);
   --color-new-arrival-badge-bg: var(--color-accent-bg);
   --color-new-arrival-badge-text: var(--color-accent-text);
-
-  /* Chip / flagged edit accents */
   --color-chip-current-bg: var(--color-accent-bg);
   --color-chip-current-text: var(--color-accent-text);
-  --color-flagged-warn: #fa6;
-
-  /* Log panel */
-  --color-log-bg: #000;
-
+  --color-flagged-warn: var(--amber-11);
+  --color-log-bg: var(--gray-1);
   /* Library / queue row heights — fixed so a virtual list can drop in later */
   --library-row-height: 3.4rem;
   --queue-row-height: 3.2rem;
@@ -109,6 +111,35 @@
 
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-disabled-text: var(--gray-11);
+  --color-transport-primary-text: var(--gray-12);
+  --color-transport-paused-text: var(--gray-12);
+  --color-focus: var(--indigo-12);
+  --color-accent-hover-bg: var(--indigo-10);
+  --color-accent-pressed-bg: var(--indigo-11);
+  --color-danger-bg: var(--red-11);
+  --color-danger-hover-bg: var(--red-12);
+  --color-status-starting: var(--amber-12);
+  --color-status-paused: var(--amber-12);
+  --color-status-stalled: var(--amber-12);
+  --color-status-playing: var(--green-12);
+  --color-flag-amber: var(--amber-12);
+  --color-flagged-warn: var(--amber-12);
+  --color-backdrop: rgba(0, 0, 0, 0.38);
+  --color-popup-shadow: rgba(0, 0, 0, 0.2);
+  --color-tap-highlight: rgba(62, 99, 221, 0.2);
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --color-text-dim: var(--gray-12);
+    --color-text-dimmer: var(--gray-12);
+    --color-placeholder: var(--gray-12);
+    --color-input-border: var(--gray-12);
+  }
+}
 body {
   font: 16px/1.5 system-ui, sans-serif;
   margin: 0;
@@ -139,7 +170,7 @@ button, input:not([type="checkbox"]):not([type="radio"]), select, textarea {
   max-width: 100%;
   background: var(--color-menu-bg);
   color: var(--color-text);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-input-border);
   border-radius: var(--radius-md);
 }
 
@@ -148,26 +179,36 @@ button {
   overflow-wrap: anywhere;
   /* No transition: a tap must show up immediately, not after a fade. */
   touch-action: manipulation;
-  -webkit-tap-highlight-color: rgba(255, 255, 255, 0.25);
+  -webkit-tap-highlight-color: var(--color-tap-highlight);
 }
 
-button:active {
-  filter: brightness(1.4);
+button:hover:not(:disabled) { background: var(--color-hover-bg); }
+button:active:not(:disabled) {
+  background: var(--color-pressed-bg);
   transform: scale(0.98);
 }
-
-button[disabled] {
-  opacity: 0.45;
-}
-
 button.primary, button[aria-pressed="true"] {
   background: var(--color-accent-bg);
   color: var(--color-accent-text);
 }
+button.primary:hover:not(:disabled), button[aria-pressed="true"]:hover:not(:disabled) {
+  background: var(--color-accent-hover-bg);
+}
+button.primary:active:not(:disabled), button[aria-pressed="true"]:active:not(:disabled) {
+  background: var(--color-accent-pressed-bg);
+}
 button.danger { color: var(--color-status-failed); }
+button.primary.danger { background: var(--color-danger-bg); color: var(--color-danger-text); }
+button.primary.danger:hover:not(:disabled), button.primary.danger:active:not(:disabled) { background: var(--color-danger-hover-bg); }
 button.quiet, button.menu-item, button[role="menuitem"] {
   background: transparent;
   border-color: transparent;
+}
+button.quiet:hover:not(:disabled), button.menu-item:hover:not(:disabled), button[role="menuitem"]:hover:not(:disabled) {
+  background: var(--color-hover-bg);
+}
+button.quiet:active:not(:disabled), button.menu-item:active:not(:disabled), button[role="menuitem"]:active:not(:disabled) {
+  background: var(--color-pressed-bg);
 }
 button.menu-item, button[role="menuitem"] {
   display: flex;
@@ -176,12 +217,20 @@ button.menu-item, button[role="menuitem"] {
   width: 100%;
   text-align: start;
 }
-button.menu-item:active, button[role="menuitem"]:active {
-  background: var(--color-accent-bg);
+button:disabled {
+  background: var(--color-pressed-bg);
+  color: var(--color-disabled-text);
+  border-color: var(--color-border);
 }
+input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+  background: var(--color-input-bg);
+  border-color: var(--color-input-border);
+}
+input::placeholder, textarea::placeholder { color: var(--color-placeholder); }
+dialog, [role="dialog"] { color: var(--color-text); }
 .icon-button { flex: 0 0 auto; }
 :where(button, input, select, textarea, summary):focus-visible {
-  outline: 2px solid var(--color-link);
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
 summary {
@@ -201,4 +250,12 @@ summary {
   padding-block: var(--space-sm);
   background: var(--color-bg);
   border-top: 1px solid var(--color-border);
+}
+
+@media (forced-colors: active) {
+  body, dialog, [role="dialog"] { background: Canvas; color: CanvasText; }
+  button, input, select, textarea { background: ButtonFace; color: ButtonText; border-color: ButtonText; }
+  button:disabled { color: GrayText; border-color: GrayText; }
+  :where(button, input, select, textarea, summary):focus-visible { outline: 2px solid Highlight; }
+  .row.selected, [aria-selected="true"] { outline: 2px solid Highlight; }
 }
