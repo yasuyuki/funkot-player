@@ -151,6 +151,11 @@ button {
   -webkit-tap-highlight-color: rgba(255, 255, 255, 0.25);
 }
 
+button:not(:disabled):hover {
+  filter: brightness(1.3);
+  border-color: var(--color-text-dim);
+}
+
 button:active {
   filter: brightness(1.4);
   transform: scale(0.98);
@@ -168,6 +173,12 @@ button.danger { color: var(--color-status-failed); }
 button.quiet, button.menu-item, button[role="menuitem"] {
   background: transparent;
   border-color: transparent;
+}
+button.quiet:not(:disabled):hover,
+button.menu-item:not(:disabled):hover,
+button[role="menuitem"]:not(:disabled):hover {
+  background: var(--color-menu-bg);
+  border-color: var(--color-text-dim);
 }
 button.menu-item, button[role="menuitem"] {
   display: flex;

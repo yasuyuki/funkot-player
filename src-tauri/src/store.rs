@@ -423,40 +423,25 @@ pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
     write_atomic(&dir.join(SETTINGS_FILE), &json)
 }
 
-/// Build the pending queue to restore after a restart: `in_flight` first (the
-/// engine's active track, then anything already reserved ahead of it), then
-/// whatever `queue.json` still had. `exists` drops paths the library no
-/// longer has (moved/deleted while the app was closed).
-///
-/// Identical items repeated across the two inputs keep only their first
-/// occurrence. The same path with different origins remains distinct.
-/// That is not a defensive nicety: `HostSource::next` (`src-tauri/src/
-/// queue.rs`) pops from `pending`, then calls `on_pending_consumed` (which
-/// rewrites `queue.json` without that entry) and *then* `on_reserved` (which
-/// appends it to `in_flight`), in that order. A process death between those
-/// two calls leaves the same path in both `queue.json` and `in_flight` — or,
-/// symmetrically, in neither — and it is the double-listed case this
-/// dedupes. The dropped-from-both case is not something this function can
-/// fix; its window is microsecond-scale, and losing at most one track to it
-/// is accepted.
+/// Restore the active occurrence first, then manual and automatic entries.
+/// Queue and session overlap is deduplicated by occurrence ID. Legacy entries
+/// receive new IDs when loaded; their ambiguous overlaps are retained so an
+/// intentional duplicate path is never discarded by a path-based guess.
 pub fn restored_pending(
     in_flight: &[QueueItem],
     saved_queue: &[QueueItem],
-    exists: impl Fn(&Path) -> bool,
 ) -> Vec<QueueItem> {
-    let active = in_flight
-        .first()
-        .filter(|item| exists(&item.path))
-        .cloned();
+    let active = in_flight.first().cloned();
     let mut combined: Vec<QueueItem> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for item in in_flight.iter().chain(saved_queue.iter()) {
-        if exists(&item.path) && !combined.contains(item) {
+        if seen.insert(item.entry_id.as_str()) {
             combined.push(item.clone());
         }
     }
     let mut restored = Vec::new();
     if let Some(active) = active {
-        if let Some(pos) = combined.iter().position(|item| item == &active) {
+        if let Some(pos) = combined.iter().position(|item| item.entry_id == active.entry_id) {
             combined.remove(pos);
         }
         restored.push(active);
@@ -475,53 +460,11 @@ pub fn restored_pending(
     restored
 }
 
-/// Removes `revoked` from `in_flight` after `queue::edit_displayed`'s
-/// `revoke` closure pulled it back out of the engine (`reorder`/`dequeue` in
-/// `src-tauri/src/lib.rs`) and returned it to `pending`. `in_flight` no
-/// longer reflects reality for that entry once that happens, and leaving it
-/// there would resurrect a track the listener just reordered or removed the
-/// next time `restored_pending` runs.
-///
-/// Removes the *last* matching entry, not the first. `in_flight` can
-/// legitimately hold the same path twice — e.g. the same track queued twice
-/// gives `in_flight = [X (now playing), X (reserved)]` — and a revoke always
-/// undoes whichever instance was reserved *most recently*: the engine's
-/// active track (`in_flight[0]`) is never what a revoke hands back, only
-/// something reserved after it. Removing the first match instead could evict
-/// the still-playing entry and lose the session's record of what is actually
-/// on the speakers.
-///
-/// A no-op if `revoked` is not found in `in_flight` (should not happen if
-/// `in_flight` and the engine's reserved slot stay in sync, but this
-/// function is not the place to assert that).
+/// Retire exactly the revoked occurrence from the persisted engine claims.
 pub fn retire_revoked(in_flight: &mut Vec<QueueItem>, revoked: &QueueItem) {
-    if let Some(pos) = in_flight.iter().rposition(|item| item == revoked) {
+    if let Some(pos) = in_flight.iter().position(|item| item.entry_id == revoked.entry_id) {
         in_flight.remove(pos);
     }
-}
-
-/// Advance `in_flight` from the completed transition's outgoing occurrence
-/// to its incoming occurrence. Searching after `from` is essential when both
-/// occurrences have the same path but different origins.
-///
-/// Returns the position that was drained to, or `None` when either occurrence
-/// was not found and nothing moved. Callers use the `Some` case to read the
-/// incoming item -- now at index 0 -- while they still hold the session lock.
-pub fn retire_transition(
-    in_flight: &mut Vec<QueueItem>,
-    from: &Path,
-    to: &Path,
-) -> Option<usize> {
-    let from_pos = in_flight
-        .iter()
-        .position(|item| item.path.as_path() == from)?;
-    let to_pos = in_flight
-        .iter()
-        .enumerate()
-        .skip(from_pos + 1)
-        .find_map(|(index, item)| (item.path.as_path() == to).then_some(index))?;
-    in_flight.drain(..to_pos);
-    Some(to_pos)
 }
 
 /// Where to resume folder cycling (`DrainPolicy::ContinueFolder`,
@@ -1924,10 +1867,10 @@ mod tests {
             br#"["/music/a.flac","/music/b.flac"]"#,
         )
         .unwrap();
-        assert_eq!(
-            load_queue(&dir.0).unwrap(),
-            vec![qi("/music/a.flac"), qi("/music/b.flac")]
-        );
+        let loaded = load_queue(&dir.0).unwrap();
+        assert_eq!(loaded, vec![PathBuf::from("/music/a.flac"), PathBuf::from("/music/b.flac")]);
+        assert!(loaded.iter().all(|item| item.origin == QueueOrigin::Manual && !item.entry_id.is_empty()));
+        assert_ne!(loaded[0].entry_id, loaded[1].entry_id);
     }
 
     /// Fresh temp dir per test, cleaned up on drop.
@@ -3230,7 +3173,10 @@ mod tests {
             br#"{"in_flight":["/music/active.flac"],"paused":false}"#,
         )
         .unwrap();
-        assert_eq!(load_session(&dir.0).in_flight, vec![qi("/music/active.flac")]);
+        let loaded = load_session(&dir.0).in_flight;
+        assert_eq!(loaded, vec![PathBuf::from("/music/active.flac")]);
+        assert_eq!(loaded[0].origin, QueueOrigin::Manual);
+        assert!(!loaded[0].entry_id.is_empty());
     }
 
     #[test]
@@ -3241,7 +3187,7 @@ mod tests {
             paused: false,
         };
         save_session(&dir.0, &session).unwrap();
-        let restored = restored_pending(&session.in_flight, &[], |_| true);
+        let restored = restored_pending(&session.in_flight, &[]);
         save_restored_queue_and_clear_session(&dir.0, &VecDeque::from(restored)).unwrap();
 
         // Listener clears the preloaded row before pressing Start.
@@ -3250,7 +3196,6 @@ mod tests {
         let at_start = restored_pending(
             &load_session(&dir.0).in_flight,
             &load_queue(&dir.0).unwrap(),
-            |_| true,
         );
         assert!(at_start.is_empty());
     }
@@ -3484,7 +3429,7 @@ mod tests {
     fn restored_pending_puts_in_flight_before_saved_queue() {
         let in_flight = vec![qi("/music/active.flac")];
         let saved = vec![qi("/music/next.flac")];
-        let restored = restored_pending(&in_flight, &saved, |_| true);
+        let restored = restored_pending(&in_flight, &saved);
         assert_eq!(
             restored,
             vec![
@@ -3494,17 +3439,11 @@ mod tests {
         );
     }
 
-    /// A path saved on both sides (the `on_pending_consumed` /
-    /// `on_reserved` ordering race) must only appear once, at the
-    /// `in_flight` position.
     #[test]
     fn restored_pending_dedupes_keeping_first_occurrence() {
         let in_flight = vec![qi("/music/a.flac")];
-        let saved = vec![
-            qi("/music/a.flac"),
-            qi("/music/b.flac"),
-        ];
-        let restored = restored_pending(&in_flight, &saved, |_| true);
+        let saved = vec![in_flight[0].clone(), qi("/music/b.flac")];
+        let restored = restored_pending(&in_flight, &saved);
         assert_eq!(
             restored,
             vec![
@@ -3515,21 +3454,16 @@ mod tests {
     }
 
     #[test]
-    fn restored_pending_drops_paths_that_no_longer_exist() {
-        let in_flight = vec![
-            qi("/music/gone.flac"),
-            qi("/music/still-here.flac"),
-        ];
+    fn restored_pending_keeps_missing_paths_until_user_deletes_them() {
+        let in_flight = vec![qi("/music/gone.flac"), qi("/music/still-here.flac")];
         let saved = vec![qi("/music/also-gone.flac")];
-        let restored = restored_pending(&in_flight, &saved, |p| {
-            p == Path::new("/music/still-here.flac")
-        });
-        assert_eq!(restored, vec![PathBuf::from("/music/still-here.flac")]);
+        assert_eq!(restored_pending(&in_flight, &saved),
+            vec![in_flight[0].clone(), in_flight[1].clone(), saved[0].clone()]);
     }
 
     #[test]
     fn restored_pending_both_empty_is_empty() {
-        assert!(restored_pending(&[], &[], |_| true).is_empty());
+        assert!(restored_pending(&[], &[]).is_empty());
     }
 
     #[test]
@@ -3537,13 +3471,13 @@ mod tests {
         let in_flight = vec![ai("active"), ai("reserved-auto")];
         let saved = vec![qi("manual-1"), ai("auto-2"), qi("manual-2")];
         assert_eq!(
-            restored_pending(&in_flight, &saved, |_| true),
+            restored_pending(&in_flight, &saved),
             vec![
-                ai("active"),
-                qi("manual-1"),
-                qi("manual-2"),
-                ai("reserved-auto"),
-                ai("auto-2"),
+                in_flight[0].clone(),
+                saved[0].clone(),
+                saved[2].clone(),
+                in_flight[1].clone(),
+                saved[1].clone(),
             ]
         );
     }
@@ -3552,18 +3486,60 @@ mod tests {
     fn restored_pending_without_active_partitions_all_saved_items() {
         let saved = vec![ai("auto-1"), qi("manual"), ai("auto-2")];
         assert_eq!(
-            restored_pending(&[], &saved, |_| true),
-            vec![qi("manual"), ai("auto-1"), ai("auto-2")]
+            restored_pending(&[], &saved),
+            vec![saved[1].clone(), saved[0].clone(), saved[2].clone()]
         );
     }
 
     #[test]
     fn restored_pending_preserves_same_path_with_different_origins() {
         let path = "/music/same.flac";
+        let automatic = ai(path);
+        let manual = qi(path);
         assert_eq!(
-            restored_pending(&[ai(path)], &[qi(path)], |_| true),
-            vec![ai(path), qi(path)]
+            restored_pending(std::slice::from_ref(&automatic), std::slice::from_ref(&manual)),
+            vec![automatic, manual]
         );
+    }
+
+    #[test]
+    fn restart_preserves_duplicate_occurrences_and_merges_same_id_overlap_once() {
+        let dir = TempDir::new("restart-occurrence-ids");
+        let first = qi("/music/same.flac");
+        let second = qi("/music/same.flac");
+        assert_ne!(first.entry_id, second.entry_id);
+        let session = Session { in_flight: vec![first.clone(), second.clone()], paused: false };
+        let pending = VecDeque::from([first.clone(), second.clone()]);
+        save_session(&dir.0, &session).unwrap();
+        save_queue(&dir.0, &pending).unwrap();
+        let restored = restored_pending(&load_session(&dir.0).in_flight, &load_queue(&dir.0).unwrap());
+        assert_eq!(restored, vec![first.clone(), second.clone()]);
+        save_restored_queue_and_clear_session(&dir.0, &VecDeque::from(restored)).unwrap();
+        assert!(load_session(&dir.0).in_flight.is_empty());
+        assert_eq!(load_queue(&dir.0).unwrap(), vec![first, second]);
+    }
+
+    #[test]
+    fn legacy_overlap_preserves_ambiguous_same_path_occurrences() {
+        let dir = TempDir::new("legacy-overlap");
+        fs::write(dir.0.join(QUEUE_FILE), br#"[{"path":"same","origin":"manual"},"same"]"#).unwrap();
+        fs::write(dir.0.join(SESSION_FILE), br#"{"in_flight":["same"],"paused":false}"#).unwrap();
+        let restored = restored_pending(&load_session(&dir.0).in_flight, &load_queue(&dir.0).unwrap());
+        assert_eq!(restored.len(), 3);
+        assert!(restored.iter().all(|item| item.path == Path::new("same") && item.origin == QueueOrigin::Manual));
+        assert_eq!(restored.iter().map(|item| &item.entry_id).collect::<std::collections::HashSet<_>>().len(), 3);
+    }
+
+    #[test]
+    fn restore_and_revoke_use_id_even_if_occurrence_metadata_changed() {
+        let active = qi("old-path");
+        let mut saved = active.clone();
+        saved.path = PathBuf::from("new-path");
+        saved.origin = QueueOrigin::Automatic;
+        assert_eq!(restored_pending(std::slice::from_ref(&active), std::slice::from_ref(&saved)), vec![active.clone()]);
+        let mut in_flight = vec![active];
+        retire_revoked(&mut in_flight, &saved);
+        assert!(in_flight.is_empty());
     }
 
     #[test]
@@ -3615,13 +3591,15 @@ mod tests {
     /// The duplicate case `retire_revoked` exists for: the actively-playing
     /// entry at index `0` must survive, only the later reservation goes.
     #[test]
-    fn retire_revoked_removes_the_last_match_not_the_first() {
+    fn retire_revoked_removes_exact_id_among_duplicate_paths() {
         let mut in_flight = vec![
             qi("/music/x.flac"),
             qi("/music/x.flac"),
         ];
-        retire_revoked(&mut in_flight, &qi("/music/x.flac"));
-        assert_eq!(in_flight, vec![PathBuf::from("/music/x.flac")]);
+        let active = in_flight[0].clone();
+        let revoked = in_flight[1].clone();
+        retire_revoked(&mut in_flight, &revoked);
+        assert_eq!(in_flight, vec![active]);
     }
 
     #[test]
@@ -3640,31 +3618,43 @@ mod tests {
     #[test]
     fn retire_revoked_on_empty_in_flight_is_a_noop() {
         let mut in_flight: Vec<QueueItem> = Vec::new();
-        retire_revoked(&mut in_flight, &qi("/music/a.flac"));
+        let revoked = qi("/music/a.flac");
+        retire_revoked(&mut in_flight, &revoked);
         assert!(in_flight.is_empty());
     }
 
     #[test]
     fn retire_revoked_with_one_matching_element_empties_it() {
         let mut in_flight = vec![qi("/music/a.flac")];
-        retire_revoked(&mut in_flight, &qi("/music/a.flac"));
+        let revoked = in_flight[0].clone();
+        retire_revoked(&mut in_flight, &revoked);
         assert!(in_flight.is_empty());
     }
 
 
     #[test]
-    fn retire_transition_advances_same_path_to_the_incoming_origin() {
-        let path = Path::new("/music/same.flac");
-        let mut in_flight = vec![ai("/music/same.flac"), qi("/music/same.flac")];
-        assert_eq!(retire_transition(&mut in_flight, path, path), Some(1));
-        assert_eq!(in_flight, vec![qi("/music/same.flac")]);
-        // The incoming item is at index 0, which is what the caller reads the
-        // play-log origin off while it still holds the session lock.
-        assert_eq!(in_flight[0].origin, QueueOrigin::Manual);
-        assert_eq!(
-            restored_pending(&in_flight, &[], |_| true),
-            vec![qi("/music/same.flac")]
+    fn played_duplicate_paths_do_not_return_from_session_after_restart() {
+        let dir = TempDir::new("session-played-duplicate-paths");
+        let first = qi("/music/a.flac");
+        let second = qi("/music/a.flac");
+        let later = qi("/music/b.flac");
+        let queue = crate::queue::new_shared_queue();
+        crate::queue::replace_pending(&queue, vec![first.clone(), second.clone(), later.clone()]);
+        let mut session = Session {
+            in_flight: vec![first.clone(), second.clone(), later.clone()],
+            paused: false,
+        };
+        for played in [&first, &second] {
+            assert!(crate::queue::mark_started(&queue, played));
+            retire_revoked(&mut session.in_flight, played);
+            save_queue(&dir.0, &VecDeque::from(crate::queue::pending_snapshot(&queue))).unwrap();
+            save_session(&dir.0, &session).unwrap();
+        }
+        let restored = restored_pending(
+            &load_session(&dir.0).in_flight,
+            &load_queue(&dir.0).unwrap(),
         );
+        assert_eq!(restored, vec![later]);
     }
 
     #[test]

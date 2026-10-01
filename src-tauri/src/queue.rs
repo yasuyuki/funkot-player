@@ -1,53 +1,12 @@
-//! Host-owned playback queue: the shared queue state the plan calls for, plus
-//! the `TrackSource` that lets `Engine::new_with_source` read from it.
-//!
-//! # Threading
-//!
-//! `HostSource::next` is called only from the engine's dedicated
-//! `funkot-loader` thread (`funkot_core::engine::loader_main`), never from the
-//! audio (cpal) callback: the callback only ever calls `Engine::render`, which
-//! drains an internal channel the loader thread feeds. That makes locking the
-//! queue's `Mutex` here safe under the "never block the audio callback" rule —
-//! see `funkot-core/src/engine.rs::loader_main` (spawned in
-//! `Engine::new_with_source`) for the call site.
-//!
-//! # What this does *not* decide
-//!
-//! Per `TrackSource`'s contract (`funkot-core/src/engine.rs`), `next`
-//! returning `None` ends the playlist for good: the loader thread exits and
-//! sets the engine's `loader_exhausted` latch, which nothing can clear
-//! afterwards (see `funkot-core/src/engine.rs:1409` and `:1944`). Since this
-//! app is used for continuous BGM playback, that's not acceptable, so
-//! `HostSource` never returns `None` while there is anything left to play at
-//! all — see [`DrainPolicy`] for what it falls back to once the host-managed
-//! queue drains. `next` only returns `None` when both the queue and the
-//! fallback source are exhausted.
-//!
-//! # Lock ordering
-//!
-//! The fixed order across this codebase is **`INDEX_LOCK` → `SAVE_LOCK` →
-//! `SESSION` → queue → render**, never the reverse. `INDEX_LOCK` and
-//! `SAVE_LOCK` / `SESSION` live in `src-tauri/src/lib.rs`. `SESSION` is the
-//! restart-persistence counterpart to this module's queue. `queue_state`
-//! snapshots `SESSION` → queue, and the new-arrivals bulk insert holds
-//! `SAVE_LOCK` → `SESSION` → queue so its exclusion test and insert are one
-//! operation.
-//! The other nestings here are real, not hypothetical:
-//! [`edit_displayed`] takes the engine's `RenderState` lock (`render` in
-//! `src-tauri/src/lib.rs`) via its `revoke` closure while already holding this
-//! module's queue lock, and both `persist_queue` and the
-//! [`HostSource::on_pending_consumed`] observer read the queue while already holding
-//! `SAVE_LOCK` (`src-tauri/src/lib.rs`).
-//!
-//! Nothing takes them the other way round, which is what keeps this
-//! acyclic: the loader thread (`next`, above) only ever takes the queue lock,
-//! and the cpal audio callback only ever takes the render lock (with
-//! `try_lock`, so it cannot block on this module at all). Keep it that way —
-//! taking the queue lock and then reaching for `SAVE_LOCK` / `INDEX_LOCK`, or
-//! taking `render` and then reaching for the queue lock, is what would close
-//! the cycle.
+//! Pending entries remain members until user deletion or accepted playback.
+//! Reservations and rejection markers do not remove membership.
+//! Lock order is INDEX_LOCK, SAVE_LOCK, SESSION, queue, render. Loader
+//! observers run after releasing the queue lock; the audio callback never
+//! acquires this mutex.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::hash::{BuildHasher, Hasher};
+use crate::queue_progress::{transition, Event};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -64,17 +23,30 @@ pub enum QueueOrigin {
 /// A queued path together with the policy that controls its priority.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueItem {
+    #[serde(default = "new_entry_id")]
+    pub entry_id: String,
     pub path: PathBuf,
     pub origin: QueueOrigin,
 }
 
+fn new_entry_id() -> String {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PROCESS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let process = PROCESS.get_or_init(|| std::collections::hash_map::RandomState::new().build_hasher().finish());
+    format!("{process:016x}-{:016x}", SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 impl QueueItem {
+    pub fn with_origin(path: PathBuf, origin: QueueOrigin) -> Self {
+        Self { entry_id: new_entry_id(), path, origin }
+    }
+
     pub fn manual(path: PathBuf) -> Self {
-        Self { path, origin: QueueOrigin::Manual }
+        Self { entry_id: new_entry_id(), path, origin: QueueOrigin::Manual }
     }
 
     pub fn automatic(path: PathBuf) -> Self {
-        Self { path, origin: QueueOrigin::Automatic }
+        Self { entry_id: new_entry_id(), path, origin: QueueOrigin::Automatic }
     }
 }
 
@@ -96,28 +68,23 @@ impl PartialEq<QueueItem> for PathBuf {
     }
 }
 
-/// Shared, lock-protected queue state: the host-managed pending queue plus
-/// the most recently reserved (handed to the engine for preparation) track.
-///
-/// Both fields live behind the same `Mutex` so a reader can take a
-/// consistent snapshot of "what's playing next" and "what's queued after
-/// that" with a single lock acquisition.
 pub struct QueueState {
     pending: VecDeque<QueueItem>,
     reserved: Option<QueueItem>,
-    /// When `false`, [`Self::reserved`] is the first hand-off of this
-    /// `HostSource` — the track being prepared as *current*, not as next-up.
-    /// The displayed list (`[reserved?] ++ pending`) then omits it, so the
-    /// next-up list does not keep showing the track that is about to play.
-    reserved_is_next: bool,
+    reservations: HashSet<String>,
+    blocked: HashSet<String>,
 }
 
 impl QueueState {
-    /// The reserved row the UI and [`edit_displayed`] treat as next-up.
-    /// `None` when nothing is reserved, or when the reserved track is the
-    /// current one still being prepared (the first `HostSource::next`).
-    fn displayed_reserved(&self) -> Option<&QueueItem> {
-        self.reserved.as_ref().filter(|_| self.reserved_is_next)
+    fn usable(&self) -> Option<&QueueItem> {
+        self.pending.iter().find(|item| !self.reservations.contains(&item.entry_id) && !self.blocked.contains(&item.entry_id))
+    }
+    fn cancel(&mut self, id: &str) -> bool {
+        let removed = self.reservations.remove(id);
+        if self.reserved.as_ref().is_some_and(|item| item.entry_id == id) {
+            self.reserved = None;
+        }
+        removed
     }
 }
 
@@ -130,7 +97,8 @@ pub fn new_shared_queue() -> SharedQueue {
     Arc::new(Mutex::new(QueueState {
         pending: VecDeque::new(),
         reserved: None,
-        reserved_is_next: false,
+        reservations: HashSet::new(),
+        blocked: HashSet::new(),
     }))
 }
 
@@ -143,20 +111,22 @@ pub fn enqueue(queue: &SharedQueue, path: PathBuf) -> usize {
         .iter()
         .position(|item| item.origin == QueueOrigin::Automatic)
         .unwrap_or(q.pending.len());
-    q.pending.insert(at, QueueItem::manual(path));
+    let item = QueueItem::manual(path);
+    if transition(item.entry_id.as_str(), false, Event::UserAdd(item.entry_id.as_str())).present {
+        q.pending.insert(at, item);
+    }
     q.pending.len()
 }
 
-/// Replace the whole pending queue with `paths`, leaving `reserved` alone.
-///
-/// This is how the persisted queue is restored, and it must replace rather
-/// than append: `queue.json` is a mirror of the pending queue that every
-/// mutating command rewrites, so anything already queued in this process is
-/// *also* in the file. Appending would therefore duplicate every entry the
-/// user queued before pressing start.
 pub fn replace_pending<T: Into<QueueItem>>(queue: &SharedQueue, items: Vec<T>) {
     let mut q = queue.lock().unwrap();
     q.pending = items.into_iter().map(Into::into).collect();
+    let retained: HashSet<_> = q.pending.iter().map(|item| item.entry_id.clone()).collect();
+    q.reservations.retain(|id| retained.contains(id));
+    q.blocked.retain(|id| retained.contains(id));
+    if q.reserved.as_ref().is_some_and(|item| !retained.contains(&item.entry_id)) {
+        q.reserved = None;
+    }
 }
 
 pub(crate) fn pending_snapshot(queue: &SharedQueue) -> Vec<QueueItem> {
@@ -168,33 +138,39 @@ pub(crate) fn reserved_item(queue: &SharedQueue) -> Option<QueueItem> {
 }
 
 pub(crate) fn discard_reserved(queue: &SharedQueue, item: &QueueItem) -> bool {
+    queue.lock().unwrap().cancel(&item.entry_id)
+}
+
+pub(crate) fn mark_started(queue: &SharedQueue, item: &QueueItem) -> bool {
     let mut q = queue.lock().unwrap();
-    if q.reserved.as_ref() != Some(item) {
-        return false;
-    }
-    q.reserved = None;
-    q.reserved_is_next = false;
+    let Some(index) = q.pending.iter().position(|entry| entry.entry_id == item.entry_id) else { return false; };
+    let update = transition(item.entry_id.as_str(), true, Event::PlaybackStarted { entry: item.entry_id.as_str(), accepted: true });
+    if update.present { return false; }
+    q.pending.remove(index);
+    q.cancel(&item.entry_id);
+    q.blocked.remove(&item.entry_id);
     true
 }
 
-/// Used only after the engine's future fence has returned all old claims.
+pub(crate) fn block_reserved(queue: &SharedQueue, item: &QueueItem) -> bool {
+    let mut q = queue.lock().unwrap();
+    if !q.pending.iter().any(|entry| entry.entry_id == item.entry_id) { return false; }
+    let update = transition(item.entry_id.as_str(), true, Event::Reject(item.entry_id.as_str()));
+    if !update.present { return false; }
+    q.cancel(&item.entry_id);
+    q.blocked.insert(item.entry_id.clone());
+    true
+}
+
+/// Restore persisted membership after old engine claims have been fenced.
 pub(crate) fn restore_all(queue: &SharedQueue, items: Vec<QueueItem>) {
     let mut q = queue.lock().unwrap();
     q.pending = items.into();
     q.reserved = None;
-    q.reserved_is_next = false;
+    q.reservations.clear();
+    q.blocked.clear();
 }
 
-/// Judge and insert under one queue lock: keep `candidates` order, prepend
-/// survivors to `pending`, leave `reserved` alone.
-///
-/// Paths already in `reserved`, `pending`, `now_playing`, or `in_flight` are
-/// skipped. `in_flight` covers the engine's full prepared runway, while
-/// `reserved` closes the short gap before a new hand-off is persisted there.
-/// Returns how many paths were actually added. Idempotent: a second call with
-/// the same candidates returns 0.
-///
-/// Resulting order: `[reserved?] ++ new ++ old pending`.
 pub fn prepend_pending_filtered(
     queue: &SharedQueue,
     candidates: &[PathBuf],
@@ -231,21 +207,16 @@ pub fn prepend_pending_filtered(
         .position(|item| item.origin == QueueOrigin::Automatic)
         .unwrap_or(q.pending.len());
     for path in to_add {
-        q.pending.insert(at, QueueItem::manual(path));
+        let item = QueueItem::manual(path);
+    if transition(item.entry_id.as_str(), false, Event::UserAdd(item.entry_id.as_str())).present {
+        q.pending.insert(at, item);
+    }
         at += 1;
     }
     n
 }
 
-/// An edit to the list the UI actually displays: displayed `reserved` (the
-/// next-up row, if any) followed by `pending`, as one 0-based sequence.
-/// Index `0` is that reserved row when it is present; otherwise the list is
-/// just `pending` and indices line up with it directly. The first hand-off
-/// of a `HostSource` (current track being prepared) is not displayed — see
-/// [`QueueState::reserved_is_next`]. This mirrors what `queue_state`'s
-/// `QueueSnapshot` (`src-tauri/src/lib.rs`) hands the frontend, so a UI
-/// index can be passed straight through to [`edit_displayed`] with no
-/// translation of its own.
+/// An edit to pending membership, including reserved occurrences.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueEdit {
     /// Move the item at `from` to `to` (both displayed-list indices).
@@ -295,51 +266,6 @@ impl std::fmt::Display for EditError {
     }
 }
 
-/// Apply `edit` to the displayed list (`[displayed reserved?] ++ pending`),
-/// swapping the reserved slot back into `pending` first if the edit reaches
-/// into it. The first hand-off of a `HostSource` is not in this list.
-///
-/// # Why this takes `queue.lock()` once and never lets go
-///
-/// `revoke` (the caller passes `Engine::revoke_next`, wrapped) frees a loader
-/// permit the moment it succeeds, and the loader thread is parked waiting on
-/// exactly that permit inside [`HostSource::next`] — which takes this same
-/// `SharedQueue`'s lock. If this function released the lock between calling
-/// `revoke` and pushing the revoked path back onto `pending`, the loader
-/// could win the race, `pop_front` the queue's current head (the very item
-/// this edit is about to move or remove), and reserve it again before the
-/// edit below ever runs. That is not a rare interleaving to guard against —
-/// on a single-core-scheduled or just unlucky run it is the *likely* outcome
-/// for any edit that touches `reserved`, since revoking is exactly what
-/// unblocks the loader. So every step — the `expect` check, the reserved
-/// hand-back, and the index-shifted `pending` mutation — happens under one
-/// `MutexGuard` that is held for the whole call.
-///
-/// # Why `expect` is checked before `revoke` runs
-///
-/// A stale tap (the UI's last-known list is older than the one on screen
-/// right now) must not discard a track the engine has already buffered for
-/// nothing: `revoke_next` (`funkot-core/src/engine.rs`) permanently gives up
-/// the prepared track's engine-side state, and there is no way to hand it
-/// back other than re-queuing the path and letting the loader redo the work
-/// from scratch. Checking staleness first means a stale tap costs nothing.
-///
-/// # What counts as "touches reserved"
-///
-/// `reserved.is_some()` **and it is next-up** (`reserved_is_next`) and the
-/// edit's `from`, `to`, or `index` is `0` — including `Move { to: 0, .. }`:
-/// moving some other item to the front displaces `reserved` from that slot
-/// just as surely as moving `reserved` itself would, so it needs the exact
-/// same hand-back. The first hand-off of a run is not displayed, so edits
-/// never revoke it this way.
-///
-/// # Errors
-///
-/// Returns [`EditError::OutOfRange`] if any index in `edit` is outside the
-/// displayed list, [`EditError::Stale`] if the path at the edit's subject
-/// index does not match `expect`, or [`EditError::TooLate`] if the edit
-/// touches `reserved` and `revoke` returns `None`. In every error case the
-/// queue (`reserved` and `pending` both) is left completely unchanged.
 pub fn edit_displayed(
     queue: &SharedQueue,
     edit: QueueEdit,
@@ -347,122 +273,37 @@ pub fn edit_displayed(
     revoke: impl FnOnce() -> Option<PathBuf>,
 ) -> Result<(), EditError> {
     let mut q = queue.lock().unwrap();
-
-    let has_reserved = q.displayed_reserved().is_some();
-    let len = q.pending.len() + usize::from(has_reserved);
-
-    // The edit's "subject" is the index whose path must match `expect`:
-    // `Move::from` (where the item is coming *from*) or `Remove::index`.
-    // `Move::to` has no path of its own to check — it is just a destination
-    // — but still has to be in bounds.
-    let subject = match edit {
-        QueueEdit::Move { from, to } => {
-            if from >= len || to >= len {
-                return Err(EditError::OutOfRange);
-            }
-            from
-        }
-        QueueEdit::Remove { index } => {
-            if index >= len {
-                return Err(EditError::OutOfRange);
-            }
-            index
-        }
+    let (subject, end) = match edit {
+        QueueEdit::Move { from, to } => (from, to),
+        QueueEdit::Remove { index } => (index, index),
     };
-
-    let subject_item: Option<&QueueItem> = if has_reserved {
-        if subject == 0 {
-            q.reserved.as_ref()
-        } else {
-            q.pending.get(subject - 1)
-        }
-    } else {
-        q.pending.get(subject)
-    };
-    if subject_item != Some(expect) {
-        return Err(EditError::Stale);
-    }
-
-    // A `Move` to its own position changes nothing. Bail out before the
-    // `touches_reserved` check below so a no-op `from == to` (e.g. a UI tap
-    // that already landed, or `to == 0` on a track already at the front)
-    // cannot trigger a `revoke`: that would discard the engine's prepared
-    // track for a rearrangement that was never going to happen.
+    if subject >= q.pending.len() || end >= q.pending.len() { return Err(EditError::OutOfRange); }
+    if q.pending.get(subject) != Some(expect) { return Err(EditError::Stale); }
     if let QueueEdit::Move { from, to } = edit {
-        if from == to {
-            return Ok(());
-        }
-        let item_at = |index: usize| -> Option<&QueueItem> {
-            if has_reserved {
-                if index == 0 { q.reserved.as_ref() } else { q.pending.get(index - 1) }
-            } else {
-                q.pending.get(index)
-            }
-        };
-        let origin = item_at(from).expect("from checked above").origin;
-        let (start, end) = if from < to { (from, to) } else { (to, from) };
-        if (start..=end).any(|index| {
-            item_at(index).map(|item| item.origin) != Some(origin)
-        }) {
+        if from == to { return Ok(()); }
+        if (from.min(to)..=from.max(to)).any(|i| q.pending[i].origin != expect.origin) {
             return Err(EditError::OriginBoundary);
         }
     }
-
-    let touches_reserved = has_reserved
-        && match edit {
-            QueueEdit::Move { from, to } => from == 0 || to == 0,
-            QueueEdit::Remove { index } => index == 0,
-        };
-
-    if touches_reserved {
-        match revoke() {
-            Some(path) => {
-                // The engine's next-track slot and this module's `reserved`
-                // are supposed to mirror each other, so this should always
-                // match; if it doesn't, trust what the engine actually had
-                // and just note the mismatch rather than losing the track.
-                if q.reserved.as_ref().map(|item| item.path.as_path()) != Some(path.as_path()) {
-                    log::warn!(
-                        "edit_displayed: revoke returned {}, but reserved was {:?}",
-                        path.display(),
-                        q.reserved,
-                    );
-                }
-                let origin = q
-                    .reserved
-                    .as_ref()
-                    .map(|item| item.origin)
-                    .unwrap_or(QueueOrigin::Automatic);
-                q.reserved = None;
-                q.reserved_is_next = false;
-                q.pending.push_front(QueueItem { path, origin });
-            }
-            None => return Err(EditError::TooLate),
-        }
+    let affected: Vec<_> = (subject.min(end)..=subject.max(end))
+        .filter_map(|i| q.reservations.contains(&q.pending[i].entry_id).then(|| q.pending[i].clone())).collect();
+    if !affected.is_empty() {
+        // This compatibility entry point can revoke only one prepared slot.
+        if affected.len() != 1 || revoke().as_ref() != Some(&affected[0].path) { return Err(EditError::TooLate); }
+        q.cancel(&affected[0].entry_id);
     }
-
-    // Once `reserved` has been folded into `pending` above (or was never
-    // there), the displayed list and `pending` are the exact same sequence,
-    // so the edit's indices apply to `pending` unshifted. The one case left
-    // needing a shift is an edit that never touched `reserved`: `pending`
-    // still excludes it, so a displayed index one past `reserved` is
-    // `pending`'s index `0`.
-    let pending_index = |i: usize| if has_reserved && !touches_reserved { i - 1 } else { i };
     match edit {
         QueueEdit::Move { from, to } => {
-            let from = pending_index(from);
-            let to = pending_index(to);
-            if from != to {
-                let item = q.pending.remove(from).expect("from checked above");
-                q.pending.insert(to, item);
-            }
+            let item = q.pending.remove(from).unwrap();
+            q.pending.insert(to, item);
         }
         QueueEdit::Remove { index } => {
-            let index = pending_index(index);
-            q.pending.remove(index);
+            if !transition(expect.entry_id.as_str(), true, Event::UserDelete(expect.entry_id.as_str())).present {
+                q.pending.remove(index);
+                q.blocked.remove(&expect.entry_id);
+            }
         }
     }
-
     Ok(())
 }
 
@@ -471,65 +312,28 @@ pub fn snapshot(queue: &SharedQueue) -> Vec<QueueItem> {
     queue.lock().unwrap().pending.iter().cloned().collect()
 }
 
-/// `(displayed reserved, pending)` read under a single lock acquisition, so
-/// callers get a consistent view instead of two snapshots that could
-/// straddle a `next()` call. Displayed reserved is the next-up row; the
-/// first hand-off of a `HostSource` (current track being prepared) is
-/// omitted — see [`QueueState::reserved_is_next`].
+/// Pending owns every row; reservation metadata must not duplicate it.
 pub fn state_snapshot(queue: &SharedQueue) -> (Option<QueueItem>, Vec<QueueItem>) {
-    let q = queue.lock().unwrap();
-    (
-        q.displayed_reserved().cloned(),
-        q.pending.iter().cloned().collect(),
-    )
+    (None, pending_snapshot(queue))
 }
 
-/// Last path handed to the engine, including a first-track current that
-/// [`state_snapshot`] does not expose as the displayed reserved row.
 #[cfg(test)]
 pub(crate) fn reserved_track(queue: &SharedQueue) -> Option<PathBuf> {
-    queue.lock().unwrap().reserved.as_ref().map(|item| item.path.clone())
+    reserved_item(queue).map(|item| item.path)
 }
 
 pub fn manual_priority_needed(queue: &SharedQueue) -> bool {
     let q = queue.lock().unwrap();
-    q.displayed_reserved()
-        .is_some_and(|item| item.origin == QueueOrigin::Automatic)
-        && q.pending
-            .iter()
-            .any(|item| item.origin == QueueOrigin::Manual)
+    q.reserved.as_ref().is_some_and(|item| item.origin == QueueOrigin::Automatic)
+        && q.pending.iter().any(|item| item.origin == QueueOrigin::Manual && !q.reservations.contains(&item.entry_id) && !q.blocked.contains(&item.entry_id))
 }
 
-/// If an automatic next track is reserved while manual work is waiting,
-/// revoke it and put it behind the manual partition. The closure decides
-/// whether the engine-side track is safe to revoke right now.
-pub fn prioritize_manual(
-    queue: &SharedQueue,
-    revoke: impl FnOnce() -> Option<PathBuf>,
-) -> Option<QueueItem> {
+pub fn prioritize_manual(queue: &SharedQueue, revoke: impl FnOnce() -> Option<PathBuf>) -> Option<QueueItem> {
     let mut q = queue.lock().unwrap();
-    let reserved = q.displayed_reserved()?;
-    if reserved.origin != QueueOrigin::Automatic
-        || !q.pending.iter().any(|item| item.origin == QueueOrigin::Manual)
-    {
-        return None;
-    }
-    let path = revoke()?;
-    let item = q.reserved.take().unwrap_or_else(|| QueueItem::automatic(path.clone()));
-    if item.path != path {
-        log::warn!(
-            "prioritize_manual: revoke returned {}, but reserved was {}",
-            path.display(),
-            item.path.display()
-        );
-    }
-    q.reserved_is_next = false;
-    let at = q
-        .pending
-        .iter()
-        .position(|pending| pending.origin == QueueOrigin::Automatic)
-        .unwrap_or(q.pending.len());
-    q.pending.insert(at, QueueItem::automatic(path));
+    let item = q.reserved.clone()?;
+    if item.origin != QueueOrigin::Automatic || !q.pending.iter().any(|entry| entry.origin == QueueOrigin::Manual && !q.reservations.contains(&entry.entry_id) && !q.blocked.contains(&entry.entry_id)) { return None; }
+    if revoke()? != item.path { return None; }
+    q.cancel(&item.entry_id);
     Some(item)
 }
 
@@ -540,8 +344,6 @@ pub enum DrainPolicy {
     ContinueFolder { tracks: Vec<PathBuf>, pos: usize },
 }
 
-/// Called with the pending queue's remaining contents each time [`HostSource`]
-/// takes an entry out of it. See [`HostSource::on_pending_consumed`].
 pub type PendingObserver = Box<dyn FnMut(&[QueueItem]) + Send>;
 
 /// Called with the track [`HostSource::next`] is about to hand back, every
@@ -549,10 +351,6 @@ pub type PendingObserver = Box<dyn FnMut(&[QueueItem]) + Send>;
 /// queue or the folder-drain fallback. See [`HostSource::on_reserved`].
 pub type ReservedObserver = Box<dyn FnMut(&QueueItem) + Send>;
 
-/// Called with the folder-drain cursor (`DrainPolicy::ContinueFolder.pos`,
-/// next 0-based index to pick) each time [`HostSource::pick_folder_track`]
-/// returns a path. Not called for pending-queue pops. See
-/// [`HostSource::on_folder_pos`].
 pub type FolderPosObserver = Box<dyn FnMut(usize) + Send>;
 
 /// Called for each folder-drain candidate; return `true` to skip that path
@@ -598,62 +396,17 @@ impl HostSource {
         self
     }
 
-    /// Run `observer` whenever `next` removes an entry from the pending queue,
-    /// passing what is left of it.
-    ///
-    /// Playback is the one way the pending queue shrinks without a command
-    /// being involved, so without this the host's on-disk copy would keep
-    /// listing tracks that have already been played and hand them back at the
-    /// next start.
-    ///
-    /// The observer runs on the engine's loader thread with the queue's lock
-    /// released, so it may block (the loader already decodes whole tracks)
-    /// and may take the queue lock itself. The slice it is handed is only a
-    /// snapshot from pop time, which a concurrent command may already have
-    /// moved past — the host's observer therefore treats it as a signal that
-    /// a pop happened and re-reads `pending` itself rather than persisting
-    /// the captured value (see `audio_thread` in `src-tauri/src/lib.rs`).
-    ///
-    /// An observer that does take the queue lock must not already hold a lock
-    /// that anything else takes *after* the queue lock, or the two orders can
-    /// deadlock. The host's `SAVE_LOCK` is fine: the fixed order there is
-    /// `INDEX_LOCK` → `SAVE_LOCK` → queue → render, and nothing takes the
-    /// queue lock and then reaches for `SAVE_LOCK` / `INDEX_LOCK`.
-    ///
-    /// Not called when the queue was empty and [`DrainPolicy`] supplied the
-    /// track: nothing was consumed, so there is nothing new to report.
+    /// Notify the host after automatic fill changes pending membership.
     pub fn on_pending_consumed(mut self, observer: PendingObserver) -> Self {
         self.on_pending_consumed = Some(observer);
         self
     }
 
-    /// Run `observer` with the path `next` is about to hand back, every call,
-    /// whether it came from the pending queue or the folder-drain fallback.
-    ///
-    /// Unlike [`Self::on_pending_consumed`], this fires unconditionally: it
-    /// is the one hook that sees *every* track the loader is about to
-    /// prepare, which is what makes it useful for logging "here is what the
-    /// loader is about to do and whether its analysis cache is warm" ahead of
-    /// a stall, rather than only for tracks that happened to come through the
-    /// host queue.
-    ///
-    /// Same threading rule as `on_pending_consumed`: runs on the loader
-    /// thread with the queue's lock released, so it may block but must not
-    /// lock the queue itself.
     pub fn on_reserved(mut self, observer: ReservedObserver) -> Self {
         self.on_reserved = Some(observer);
         self
     }
 
-    /// Run `observer` with the folder-drain cursor after
-    /// [`Self::pick_folder_track`] returns a path. `pos` is the next
-    /// 0-based index the policy will consider (already advanced past the
-    /// path just picked, including wrap).
-    ///
-    /// Not called when `next` took a track from the pending queue — the
-    /// folder cursor did not move. Same threading rule as
-    /// `on_pending_consumed` / `on_reserved`: loader thread, queue lock
-    /// released.
     pub fn on_folder_pos(mut self, observer: FolderPosObserver) -> Self {
         self.on_folder_pos = Some(observer);
         self
@@ -676,41 +429,39 @@ impl HostSource {
         &mut self,
         folder_skip: &mut Option<FolderSkip>,
     ) -> Option<(usize, PathBuf)> {
-        let (item, remaining) = {
+        let (item, remaining) = loop {
             let mut q = self.queue.lock().unwrap();
-            match q.pending.pop_front() {
-                Some(item) => {
-                    q.reserved = Some(item.clone());
-                    q.reserved_is_next = self.calls > 0;
-                    let remaining = Some(q.pending.iter().cloned().collect::<Vec<_>>());
-                    (item, remaining)
-                }
-                None => {
-                    // Release before folder-skip I/O (cache / overrides): those
-                    // can take milliseconds and must not stall enqueue/reorder.
-                    drop(q);
-                    let path = match Self::pick_folder_track(&mut self.policy, folder_skip) {
-                        Some(path) => {
-                            if let Some(observer) = self.on_folder_pos.as_mut() {
-                                let DrainPolicy::ContinueFolder { pos, .. } = &self.policy;
-                                observer(*pos);
-                            }
-                            path
-                        }
-                        None => {
-                            let mut q = self.queue.lock().unwrap();
-                            q.reserved = None;
-                            q.reserved_is_next = false;
-                            return None;
-                        }
-                    };
-                    let mut q = self.queue.lock().unwrap();
-                    let item = QueueItem::automatic(path);
-                    q.reserved = Some(item.clone());
-                    q.reserved_is_next = self.calls > 0;
-                    (item, None)
-                }
+            if let Some(item) = q.usable().cloned() {
+                q.reservations.insert(item.entry_id.clone());
+                q.reserved = Some(item.clone());
+                break (item, None);
             }
+            let blocked_paths: HashSet<_> = q.pending.iter().filter(|item| q.blocked.contains(&item.entry_id)).map(|item| item.path.clone()).collect();
+            drop(q);
+            let mut candidate = None;
+            let DrainPolicy::ContinueFolder { tracks, .. } = &self.policy;
+            for _ in 0..tracks.len() {
+                let Some(path) = Self::pick_folder_track(&mut self.policy, folder_skip) else { break; };
+                if !blocked_paths.contains(&path) { candidate = Some(path); break; }
+            }
+            let path = candidate?;
+            if let Some(observer) = self.on_folder_pos.as_mut() {
+                let DrainPolicy::ContinueFolder { pos, .. } = &self.policy;
+                observer(*pos);
+            }
+            let mut q = self.queue.lock().unwrap();
+            if q.usable().is_some() { continue; }
+            // Rejection may have arrived while the folder predicate ran.
+            if q.pending.iter().any(|item| item.path == path && q.blocked.contains(&item.entry_id)) { continue; }
+            let item = QueueItem::automatic(path);
+            if !transition(item.entry_id.as_str(), false, Event::AutomaticFill {
+                entry: item.entry_id.as_str(), source_request: true, unreserved_usable: false,
+            }).present { return None; }
+            q.pending.push_back(item.clone());
+            q.reservations.insert(item.entry_id.clone());
+            q.reserved = Some(item.clone());
+            let remaining = Some(q.pending.iter().cloned().collect::<Vec<_>>());
+            break (item, remaining);
         };
         if let (Some(remaining), Some(observer)) =
             (remaining, self.on_pending_consumed.as_mut())
@@ -765,314 +516,11 @@ impl HostSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn p(name: &str) -> PathBuf {
-        PathBuf::from(name)
-    }
-
-    fn i(name: &str) -> QueueItem {
-        QueueItem::manual(p(name))
-    }
-
-    fn a(name: &str) -> QueueItem {
-        QueueItem::automatic(p(name))
-    }
-
-    /// Displayed reserved on its own. Production code always wants it
-    /// together with `pending`, so `state_snapshot` is the only accessor;
-    /// this just keeps the assertions below readable.
-    fn reserved(queue: &SharedQueue) -> Option<PathBuf> {
-        state_snapshot(queue).0.map(|item| item.path)
-    }
-
-    fn path_state(queue: &SharedQueue) -> (Option<PathBuf>, Vec<PathBuf>) {
-        let (reserved, pending) = state_snapshot(queue);
-        (
-            reserved.map(|item| item.path),
-            pending.into_iter().map(|item| item.path).collect(),
-        )
-    }
-
-    fn handed_out(queue: &SharedQueue) -> Option<PathBuf> {
-        reserved_track(queue)
-    }
-
-    fn empty_policy() -> DrainPolicy {
-        DrainPolicy::ContinueFolder {
-            tracks: Vec::new(),
-            pos: 0,
-        }
-    }
-
+    fn p(name: &str) -> PathBuf { PathBuf::from(name) }
+    fn empty_policy() -> DrainPolicy { folder_policy(&[]) }
     fn folder_policy(names: &[&str]) -> DrainPolicy {
-        DrainPolicy::ContinueFolder {
-            tracks: names.iter().map(|n| p(n)).collect(),
-            pos: 0,
-        }
+        DrainPolicy::ContinueFolder { tracks: names.iter().map(|name| p(name)).collect(), pos: 0 }
     }
-
-    #[test]
-    fn enqueue_appends_in_order() {
-        let q = new_shared_queue();
-        assert_eq!(enqueue(&q, p("a")), 1);
-        assert_eq!(enqueue(&q, p("b")), 2);
-        assert_eq!(enqueue(&q, p("c")), 3);
-        assert_eq!(snapshot(&q), vec![p("a"), p("b"), p("c")]);
-    }
-
-    #[test]
-    fn enqueue_keeps_manual_fifo_before_automatic_items() {
-        let q = new_shared_queue();
-        replace_pending(&q, vec![i("m1"), a("a1"), a("a2")]);
-        enqueue(&q, p("m2"));
-        assert_eq!(snapshot(&q), vec![i("m1"), i("m2"), a("a1"), a("a2")]);
-    }
-
-    #[test]
-    fn prioritize_manual_revokes_automatic_next_and_preserves_auto_order() {
-        let q = Arc::new(Mutex::new(QueueState {
-            pending: vec![i("m1"), i("m2"), a("a2")].into(),
-            reserved: Some(a("a1")),
-            reserved_is_next: true,
-        }));
-        let revoked = prioritize_manual(&q, || Some(p("a1")));
-        assert_eq!(revoked, Some(a("a1")));
-        assert_eq!(state_snapshot(&q), (None, vec![i("m1"), i("m2"), a("a1"), a("a2")]));
-    }
-
-    #[test]
-    fn prioritize_manual_can_retry_after_automatic_finishes_preparing() {
-        let q = Arc::new(Mutex::new(QueueState {
-            pending: vec![i("m1")].into(),
-            reserved: Some(a("a1")),
-            reserved_is_next: true,
-        }));
-        assert_eq!(prioritize_manual(&q, || None), None);
-        assert!(manual_priority_needed(&q));
-        assert_eq!(prioritize_manual(&q, || Some(p("a1"))), Some(a("a1")));
-        assert_eq!(snapshot(&q), vec![i("m1"), a("a1")]);
-    }
-
-    #[test]
-    fn edit_displayed_rejects_moves_across_origin_boundary() {
-        let q = new_shared_queue();
-        replace_pending(&q, vec![i("m"), a("a")]);
-        assert_eq!(
-            edit_displayed(
-                &q,
-                QueueEdit::Move { from: 0, to: 1 },
-                &i("m"),
-                panic_revoke,
-            ),
-            Err(EditError::OriginBoundary)
-        );
-        assert_eq!(snapshot(&q), vec![i("m"), a("a")]);
-    }
-
-    #[test]
-    fn edit_displayed_rejects_automatic_move_across_manual_partition() {
-        let q = Arc::new(Mutex::new(QueueState {
-            pending: vec![i("m"), a("a2")].into(),
-            reserved: Some(a("a1")),
-            reserved_is_next: true,
-        }));
-        assert_eq!(
-            edit_displayed(
-                &q,
-                QueueEdit::Move { from: 0, to: 2 },
-                &a("a1"),
-                panic_revoke,
-            ),
-            Err(EditError::OriginBoundary)
-        );
-        assert_eq!(state_snapshot(&q), (Some(a("a1")), vec![i("m"), a("a2")]));
-    }
-
-    #[test]
-    fn replace_pending_overwrites_instead_of_appending() {
-        let q = new_shared_queue();
-        for name in ["a", "b"] {
-            enqueue(&q, p(name));
-        }
-        // What start() does with queue.json, whose contents mirror what is
-        // already queued here. Appending would give a, b, a, b.
-        replace_pending(&q, vec![p("a"), p("b")]);
-        assert_eq!(snapshot(&q), vec![p("a"), p("b")]);
-    }
-
-    #[test]
-    fn replace_pending_leaves_the_reserved_track_alone() {
-        let q = new_shared_queue();
-        enqueue(&q, p("a"));
-        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
-        assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(handed_out(&q), Some(p("a")));
-        assert_eq!(reserved(&q), None);
-
-        replace_pending(&q, vec![p("b")]);
-        assert_eq!(handed_out(&q), Some(p("a")));
-        assert_eq!(reserved(&q), None);
-        assert_eq!(snapshot(&q), vec![p("b")]);
-    }
-
-    #[test]
-    fn prepend_pending_filtered_appends_candidates_after_existing_manual_items() {
-        let q = queue_with(None, &["old"]);
-        let added = prepend_pending_filtered(&q, &[p("a"), p("b"), p("c")], None, &[]);
-        assert_eq!(added, 3);
-        assert_eq!(snapshot(&q), vec![p("old"), p("a"), p("b"), p("c")]);
-    }
-
-    #[test]
-    fn prepend_pending_filtered_leaves_reserved_and_inserts_after_it() {
-        let q = queue_with(Some("r"), &["old"]);
-        let added = prepend_pending_filtered(&q, &[p("a"), p("b")], None, &[]);
-        assert_eq!(added, 2);
-        assert_eq!(path_state(&q), (Some(p("r")), vec![p("old"), p("a"), p("b")]));
-    }
-
-    #[test]
-    fn prepend_pending_filtered_skips_reserved_pending_and_now_playing() {
-        let q = queue_with(Some("r"), &["pend"]);
-        let added = prepend_pending_filtered(
-            &q,
-            &[p("r"), p("pend"), p("now"), p("new")],
-            Some(Path::new("now")),
-            &[],
-        );
-        assert_eq!(added, 1);
-        assert_eq!(path_state(&q), (Some(p("r")), vec![p("pend"), p("new")]));
-    }
-
-    #[test]
-    fn prepend_pending_filtered_is_idempotent() {
-        let q = queue_with(None, &[]);
-        let candidates = [p("a"), p("b")];
-        assert_eq!(prepend_pending_filtered(&q, &candidates, None, &[]), 2);
-        assert_eq!(prepend_pending_filtered(&q, &candidates, None, &[]), 0);
-        assert_eq!(snapshot(&q), vec![p("a"), p("b")]);
-    }
-
-    #[test]
-    fn prepend_pending_filtered_skips_every_in_flight_occurrence() {
-        let q = queue_with(Some("reserved"), &["pending"]);
-        let candidates = [
-            p("old-current"),
-            p("prefetched"),
-            p("reserved"),
-            p("pending"),
-            p("new"),
-        ];
-        let in_flight = [i("old-current"), i("prefetched")];
-
-        assert_eq!(
-            prepend_pending_filtered(&q, &candidates, None, &in_flight),
-            1
-        );
-        assert_eq!(snapshot(&q), vec![p("pending"), p("new")]);
-        assert_eq!(
-            prepend_pending_filtered(&q, &candidates, None, &in_flight),
-            0
-        );
-    }
-
-    /// A `revoke` that panics if it runs. Used by tests below whose whole
-    /// point is that a particular edit must *not* reach into `reserved` --
-    /// with this, a wrongly-touched slot fails loudly instead of the test
-    /// just happening to still pass.
-    fn panic_revoke() -> Option<PathBuf> {
-        panic!("revoke should not run: this edit does not touch reserved")
-    }
-
-    #[test]
-    fn edit_displayed_moves_an_item_forward_and_backward_without_reserved() {
-        let q = new_shared_queue();
-        for name in ["a", "b", "c", "d"] {
-            enqueue(&q, p(name));
-        }
-        // Move "a" (index 0) to the end.
-        edit_displayed(&q, QueueEdit::Move { from: 0, to: 3 }, &i("a"), panic_revoke).unwrap();
-        assert_eq!(snapshot(&q), vec![p("b"), p("c"), p("d"), p("a")]);
-        // Move it back to the front.
-        edit_displayed(&q, QueueEdit::Move { from: 3, to: 0 }, &i("a"), panic_revoke).unwrap();
-        assert_eq!(snapshot(&q), vec![p("a"), p("b"), p("c"), p("d")]);
-    }
-
-    #[test]
-    fn edit_displayed_move_out_of_range_without_reserved_leaves_queue_untouched() {
-        let q = new_shared_queue();
-        for name in ["a", "b"] {
-            enqueue(&q, p(name));
-        }
-        assert_eq!(
-            edit_displayed(&q, QueueEdit::Move { from: 0, to: 2 }, &i("a"), panic_revoke),
-            Err(EditError::OutOfRange)
-        );
-        assert_eq!(
-            edit_displayed(&q, QueueEdit::Move { from: 2, to: 0 }, &i("a"), panic_revoke),
-            Err(EditError::OutOfRange)
-        );
-        assert_eq!(snapshot(&q), vec![p("a"), p("b")]);
-    }
-
-    #[test]
-    fn edit_displayed_dequeue_out_of_range_without_reserved_leaves_queue_untouched() {
-        let q = new_shared_queue();
-        enqueue(&q, p("a"));
-        assert_eq!(
-            edit_displayed(&q, QueueEdit::Remove { index: 1 }, &i("a"), panic_revoke),
-            Err(EditError::OutOfRange)
-        );
-        assert_eq!(
-            edit_displayed(&q, QueueEdit::Remove { index: 99 }, &i("a"), panic_revoke),
-            Err(EditError::OutOfRange)
-        );
-        assert_eq!(snapshot(&q), vec![p("a")]);
-    }
-
-    #[test]
-    fn edit_displayed_on_an_empty_queue_is_out_of_range() {
-        let q = new_shared_queue();
-        // `expect` is irrelevant here -- both edits fail the bounds check
-        // (len 0) before any path is ever compared against it.
-        assert_eq!(
-            edit_displayed(&q, QueueEdit::Move { from: 0, to: 0 }, &i("x"), panic_revoke),
-            Err(EditError::OutOfRange)
-        );
-        assert_eq!(
-            edit_displayed(&q, QueueEdit::Remove { index: 0 }, &i("x"), panic_revoke),
-            Err(EditError::OutOfRange)
-        );
-    }
-
-    #[test]
-    fn edit_displayed_does_not_require_a_running_source() {
-        // Sanity check that `edit_displayed` works with no reserved track and
-        // no `HostSource` involved at all, matching how the Tauri commands
-        // use it (a `SharedQueue` handed around independently of the
-        // engine) before anything has been reserved yet.
-        let q = new_shared_queue();
-        enqueue(&q, p("a"));
-        enqueue(&q, p("b"));
-        enqueue(&q, p("c"));
-        edit_displayed(&q, QueueEdit::Move { from: 2, to: 0 }, &i("c"), panic_revoke).unwrap();
-        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &i("a"), panic_revoke).unwrap();
-        assert_eq!(snapshot(&q), vec![p("c"), p("b")]);
-    }
-
-    #[test]
-    fn host_source_pops_front_in_fifo_order() {
-        let q = new_shared_queue();
-        for name in ["a", "b", "c"] {
-            enqueue(&q, p(name));
-        }
-        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
-        assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(source.next(), Some((1, p("b"))));
-        assert_eq!(source.next(), Some((2, p("c"))));
-        assert_eq!(snapshot(&q), Vec::<PathBuf>::new());
-    }
-
     #[test]
     fn host_source_returns_none_when_pending_and_folder_are_both_empty() {
         let q = new_shared_queue();
@@ -1087,18 +535,6 @@ mod tests {
         assert_eq!(source.next(), None);
         enqueue(&q, p("late"));
         assert_eq!(source.next(), Some((0, p("late"))));
-    }
-
-    #[test]
-    fn host_source_falls_back_to_folder_when_queue_drains() {
-        let q = new_shared_queue();
-        let mut source = HostSource::new(Arc::clone(&q), folder_policy(&["f1", "f2", "f3"]));
-        assert_eq!(source.next(), Some((0, p("f1"))));
-        assert_eq!(reserved(&q), None);
-        assert_eq!(source.next(), Some((1, p("f2"))));
-        assert_eq!(reserved(&q), Some(p("f2")));
-        assert_eq!(source.next(), Some((2, p("f3"))));
-        assert_eq!(reserved(&q), Some(p("f3")));
     }
 
     #[test]
@@ -1132,15 +568,6 @@ mod tests {
     }
 
     #[test]
-    fn host_source_folder_exhausts_when_all_entries_skipped() {
-        let q = new_shared_queue();
-        let mut source = HostSource::new(Arc::clone(&q), folder_policy(&["a", "b"]))
-            .skip_folder_entry(Box::new(|_| true));
-        assert_eq!(source.next(), None);
-        assert_eq!(reserved(&q), None);
-    }
-
-    #[test]
     fn host_source_folder_skip_does_not_filter_pending() {
         let q = new_shared_queue();
         enqueue(&q, p("pending-non-funkot"));
@@ -1164,371 +591,178 @@ mod tests {
     }
 
     #[test]
-    fn reserved_reflects_the_most_recently_handed_out_track() {
+    fn reservations_keep_membership_until_each_accepted_start() {
         let q = new_shared_queue();
-        assert_eq!(handed_out(&q), None);
-        enqueue(&q, p("a"));
-        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
-        assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(handed_out(&q), Some(p("a")));
-        // First hand-off is current, not next-up — the displayed list omits it.
-        assert_eq!(reserved(&q), None);
-        enqueue(&q, p("b"));
-        assert_eq!(source.next(), Some((1, p("b"))));
-        assert_eq!(handed_out(&q), Some(p("b")));
-        assert_eq!(reserved(&q), Some(p("b")));
-    }
-
-    #[test]
-    fn first_hand_off_is_not_in_the_displayed_list() {
-        let q = new_shared_queue();
-        for name in ["a", "b", "c"] {
-            enqueue(&q, p(name));
-        }
-        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
-        assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(path_state(&q), (None, vec![p("b"), p("c")]));
-        // Index 0 is pending's "b", not the current-preparing "a".
-        edit_displayed(&q, QueueEdit::Move { from: 0, to: 1 }, &i("b"), panic_revoke).unwrap();
-        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &i("b"), panic_revoke).unwrap();
-        assert_eq!(handed_out(&q), Some(p("a")));
-        assert_eq!(path_state(&q), (None, vec![p("c")]));
-    }
-
-    #[test]
-    fn edits_that_do_not_touch_reserved_do_not_revoke_it() {
-        let q = new_shared_queue();
-        enqueue(&q, p("a"));
-        enqueue(&q, p("b"));
-        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
-        assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(source.next(), Some((1, p("b"))));
-        assert_eq!(reserved(&q), Some(p("b")));
-
-        enqueue(&q, p("c"));
-        enqueue(&q, p("d"));
-        // Displayed list is [b(reserved), c, d]; neither edit's `from`/`to`/
-        // `index` is 0, so per `edit_displayed`'s "touches reserved" rule
-        // neither should revoke `reserved` -- this is the design's central
-        // invariant. `panic_revoke` makes that assertion load-bearing: if
-        // either edit wrongly reached into the reserved slot, the test
-        // panics instead of quietly passing.
-        edit_displayed(&q, QueueEdit::Move { from: 1, to: 2 }, &i("c"), panic_revoke).unwrap();
-        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &i("d"), panic_revoke).unwrap();
-
-        assert_eq!(reserved(&q), Some(p("b")));
-        assert_eq!(path_state(&q), (Some(p("b")), vec![p("c")]));
-    }
-
-    /// Collects what the observer is handed, standing in for `queue.json`.
-    fn recording_observer() -> (Arc<Mutex<Vec<Vec<PathBuf>>>>, PendingObserver) {
-        let seen: Arc<Mutex<Vec<Vec<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&seen);
-        (
-            seen,
-            Box::new(move |pending: &[QueueItem]| {
-                sink.lock()
-                    .unwrap()
-                    .push(pending.iter().map(|item| item.path.clone()).collect());
-            }),
-        )
-    }
-
-    #[test]
-    fn playing_a_queued_track_reports_what_is_left() {
-        let q = new_shared_queue();
-        for name in ["a", "b", "c"] {
-            enqueue(&q, p(name));
-        }
-        let (seen, observer) = recording_observer();
-        let mut source =
-            HostSource::new(Arc::clone(&q), empty_policy()).on_pending_consumed(observer);
-
-        source.next();
-        source.next();
-
-        // Not [b, c] then [c]: the track handed to the engine is reserved, and
-        // reserved is deliberately not part of what gets persisted -- it is
-        // already gone as far as the queue is concerned.
-        assert_eq!(
-            *seen.lock().unwrap(),
-            vec![vec![p("b"), p("c")], vec![p("c")]]
-        );
-    }
-
-    #[test]
-    fn falling_back_to_the_folder_reports_nothing() {
-        let q = new_shared_queue();
-        let (seen, observer) = recording_observer();
-        let mut source =
-            HostSource::new(Arc::clone(&q), folder_policy(&["f1", "f2"])).on_pending_consumed(observer);
-
-        source.next();
-        source.next();
-
-        // The pending queue was empty throughout, so it never changed and
-        // there is nothing to write out.
-        assert!(seen.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn draining_the_queue_reports_it_empty_before_the_folder_takes_over() {
-        let q = new_shared_queue();
-        enqueue(&q, p("a"));
-        let (seen, observer) = recording_observer();
-        let mut source =
-            HostSource::new(Arc::clone(&q), folder_policy(&["f1"])).on_pending_consumed(observer);
-
-        source.next(); // takes "a", queue now empty
-        source.next(); // falls back to the folder
-
-        // The empty report is the one that matters: without it, restarting the
-        // app would find "a" still listed and play it a second time.
-        assert_eq!(*seen.lock().unwrap(), vec![Vec::<PathBuf>::new()]);
-    }
-
-    /// Collects what the `on_reserved` observer is handed.
-    fn recording_reserved_observer() -> (Arc<Mutex<Vec<PathBuf>>>, ReservedObserver) {
-        let seen: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&seen);
-        (
-            seen,
-            Box::new(move |item: &QueueItem| {
-                sink.lock().unwrap().push(item.path.clone())
-            }),
-        )
-    }
-
-    #[test]
-    fn on_reserved_fires_for_tracks_from_the_pending_queue() {
-        let q = new_shared_queue();
-        for name in ["a", "b"] {
-            enqueue(&q, p(name));
-        }
-        let (seen, observer) = recording_reserved_observer();
-        let mut source = HostSource::new(Arc::clone(&q), empty_policy()).on_reserved(observer);
-
-        source.next();
-        source.next();
-
-        assert_eq!(*seen.lock().unwrap(), vec![p("a"), p("b")]);
-    }
-
-    #[test]
-    fn on_reserved_fires_for_tracks_from_the_folder_fallback() {
-        let q = new_shared_queue();
-        let (seen, observer) = recording_reserved_observer();
-        let mut source =
-            HostSource::new(q, folder_policy(&["f1", "f2"])).on_reserved(observer);
-
-        source.next();
-        source.next();
-
-        assert_eq!(*seen.lock().unwrap(), vec![p("f1"), p("f2")]);
-    }
-
-    #[test]
-    fn on_reserved_fires_regardless_of_which_source_a_track_came_from() {
-        let q = new_shared_queue();
-        enqueue(&q, p("priority"));
-        let (seen, observer) = recording_reserved_observer();
-        let mut source =
-            HostSource::new(Arc::clone(&q), folder_policy(&["f1"])).on_reserved(observer);
-
-        source.next(); // from the pending queue
-        source.next(); // pending drained, falls back to the folder
-
-        assert_eq!(*seen.lock().unwrap(), vec![p("priority"), p("f1")]);
-    }
-
-    fn recording_folder_pos_observer() -> (Arc<Mutex<Vec<usize>>>, FolderPosObserver) {
-        let seen: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&seen);
-        (seen, Box::new(move |pos: usize| sink.lock().unwrap().push(pos)))
-    }
-
-    #[test]
-    fn on_folder_pos_fires_for_folder_drain_including_wrap_not_for_pending() {
-        let q = new_shared_queue();
-        enqueue(&q, p("pending"));
-        let (seen, observer) = recording_folder_pos_observer();
-        let mut source =
-            HostSource::new(Arc::clone(&q), folder_policy(&["f1", "f2", "f3"]))
-                .on_folder_pos(observer);
-
-        source.next(); // pending — folder cursor must not move
-        assert!(seen.lock().unwrap().is_empty());
-
-        source.next(); // f1 → pos 1
-        source.next(); // f2 → pos 2
-        source.next(); // f3 → pos 0 (wrap)
-        assert_eq!(*seen.lock().unwrap(), vec![1, 2, 0]);
-    }
-
-    #[test]
-    fn host_source_returns_none_and_clears_reserved_when_fully_exhausted() {
-        let q = new_shared_queue();
-        enqueue(&q, p("a"));
-        let mut source = HostSource::new(Arc::clone(&q), empty_policy());
-        assert_eq!(source.next(), Some((0, p("a"))));
-        assert_eq!(handed_out(&q), Some(p("a")));
-        assert_eq!(reserved(&q), None);
+        enqueue(&q, p("same")); enqueue(&q, p("same"));
+        let before = snapshot(&q);
+        assert_ne!(before[0].entry_id, before[1].entry_id);
+        let mut source = HostSource::new(q.clone(), empty_policy());
+        assert_eq!(source.next(), Some((0, p("same"))));
+        assert_eq!(source.next(), Some((1, p("same"))));
         assert_eq!(source.next(), None);
-        assert_eq!(handed_out(&q), None);
-        assert_eq!(reserved(&q), None);
-    }
-
-    /// Builds a queue with `reserved` and `pending` already set, bypassing
-    /// `HostSource` entirely — `edit_displayed`'s tests only care about the
-    /// displayed-list arithmetic, not how a track came to be reserved.
-    fn queue_with(reserved: Option<&str>, pending: &[&str]) -> SharedQueue {
-        Arc::new(Mutex::new(QueueState {
-            pending: pending.iter().map(|n| i(n)).collect(),
-            reserved: reserved.map(i),
-            reserved_is_next: reserved.is_some(),
-        }))
-    }
-
-    /// A `revoke` closure that records whether it ran and always returns
-    /// `answer`.
-    fn revoke_stub(answer: Option<PathBuf>) -> (std::rc::Rc<std::cell::Cell<bool>>, impl FnOnce() -> Option<PathBuf>) {
-        let called = std::rc::Rc::new(std::cell::Cell::new(false));
-        let flag = std::rc::Rc::clone(&called);
-        (called, move || {
-            flag.set(true);
-            answer
-        })
+        assert_eq!(snapshot(&q), before);
+        assert_eq!(state_snapshot(&q), (None, before.clone()));
+        assert!(mark_started(&q, &before[1]));
+        assert!(!mark_started(&q, &before[1]));
+        assert_eq!(snapshot(&q), vec![before[0].clone()]);
+        assert!(mark_started(&q, &before[0]));
+        assert!(snapshot(&q).is_empty());
     }
 
     #[test]
-    fn edit_displayed_remove_reserved_slot_revokes_and_clears_reserved() {
-        let q = queue_with(Some("r"), &["a", "b"]);
-        let (called, revoke) = revoke_stub(Some(p("r")));
-
-        edit_displayed(&q, QueueEdit::Remove { index: 0 }, &i("r"), revoke).unwrap();
-
-        assert!(called.get());
-        assert_eq!(path_state(&q), (None, vec![p("a"), p("b")]));
+    fn rejected_entries_stay_and_folder_does_not_retry_their_paths() {
+        let q = new_shared_queue();
+        enqueue(&q, p("bad"));
+        let bad = snapshot(&q)[0].clone();
+        let mut source = HostSource::new(q.clone(), folder_policy(&["bad", "good"]));
+        assert_eq!(source.next(), Some((0, p("bad"))));
+        assert!(block_reserved(&q, &bad));
+        assert_eq!(source.next(), Some((1, p("good"))));
+        let good = reserved_item(&q).unwrap();
+        assert!(block_reserved(&q, &good));
+        assert_eq!(source.next(), None);
+        assert_eq!(snapshot(&q), vec![bad, good]);
     }
 
     #[test]
-    fn edit_displayed_remove_reserved_with_empty_pending_leaves_an_empty_queue() {
-        let q = queue_with(Some("r"), &[]);
-        let (called, revoke) = revoke_stub(Some(p("r")));
-
-        edit_displayed(&q, QueueEdit::Remove { index: 0 }, &i("r"), revoke).unwrap();
-
-        assert!(called.get());
-        assert_eq!(path_state(&q), (None, Vec::<PathBuf>::new()));
+    fn automatic_fill_waits_for_all_usable_pending_reservations() {
+        let q = new_shared_queue();
+        enqueue(&q, p("first")); enqueue(&q, p("second"));
+        let mut source = HostSource::new(q.clone(), folder_policy(&["auto"]));
+        source.next(); assert_eq!(snapshot(&q).len(), 2);
+        source.next(); assert_eq!(snapshot(&q).len(), 2);
+        source.next(); assert_eq!(snapshot(&q).len(), 3);
+        assert_eq!(snapshot(&q)[2].origin, QueueOrigin::Automatic);
+        enqueue(&q, p("manual"));
+        assert_eq!(source.next(), Some((3, p("manual"))));
+        assert_eq!(snapshot(&q).len(), 4);
     }
 
     #[test]
-    fn edit_displayed_move_reserved_to_itself_is_a_noop_and_does_not_revoke() {
-        let q = queue_with(Some("r"), &["a", "b"]);
-        let (called, revoke) = revoke_stub(Some(p("r")));
-
-        edit_displayed(&q, QueueEdit::Move { from: 0, to: 0 }, &i("r"), revoke).unwrap();
-
-        assert!(!called.get());
-        assert_eq!(path_state(&q), (Some(p("r")), vec![p("a"), p("b")]));
+    fn cancellation_releases_occurrence_without_adding_it_again() {
+        let q = new_shared_queue(); enqueue(&q, p("a"));
+        let item = snapshot(&q)[0].clone();
+        let mut source = HostSource::new(q.clone(), empty_policy());
+        source.next(); assert!(discard_reserved(&q, &item));
+        assert_eq!(source.next(), Some((1, p("a"))));
+        assert_eq!(snapshot(&q), vec![item]);
     }
 
     #[test]
-    fn edit_displayed_move_reserved_to_middle_revokes_then_reinserts_at_destination() {
-        let q = queue_with(Some("r"), &["a", "b", "c"]);
-        let (called, revoke) = revoke_stub(Some(p("r")));
-
-        // Displayed list is [r, a, b, c]; moving index 0 to index 2 means the
-        // revoked track is folded back to the front, then moved to slot 2.
-        edit_displayed(&q, QueueEdit::Move { from: 0, to: 2 }, &i("r"), revoke).unwrap();
-
-        assert!(called.get());
-        assert_eq!(
-            path_state(&q),
-            (None, vec![p("a"), p("b"), p("r"), p("c")])
-        );
+    fn restore_preserves_identity_and_resets_reservations_and_rejections() {
+        let q = new_shared_queue(); enqueue(&q, p("a"));
+        let before = snapshot(&q);
+        let mut source = HostSource::new(q.clone(), empty_policy());
+        source.next(); block_reserved(&q, &before[0]);
+        restore_all(&q, before.clone());
+        assert_eq!(snapshot(&q), before);
+        assert_eq!(source.next(), Some((1, p("a"))));
     }
 
     #[test]
-    fn edit_displayed_move_into_reserved_slot_revokes_and_promotes_the_source_track() {
-        let q = queue_with(Some("r"), &["a", "b", "c"]);
-        let (called, revoke) = revoke_stub(Some(p("r")));
+    fn persisted_reservations_survive_restart_until_playback_or_user_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = new_shared_queue();
+        enqueue(&queue, p("same")); enqueue(&queue, p("same"));
+        let expected = snapshot(&queue);
+        let mut source = HostSource::new(queue.clone(), folder_policy(&["auto"]));
+        assert_eq!(source.next(), Some((0, p("same"))));
+        assert_eq!(source.next(), Some((1, p("same"))));
+        assert_eq!(source.next(), Some((2, p("auto"))));
+        let with_auto = snapshot(&queue);
+        assert_eq!(with_auto.len(), 3);
+        assert_eq!(&with_auto[..2], expected.as_slice());
+        crate::store::save_queue(dir.path(), &with_auto.iter().cloned().collect::<VecDeque<_>>()).unwrap();
+        let saved = crate::store::load_queue(dir.path()).unwrap();
+        let restored = crate::store::restored_pending(&with_auto, &saved);
+        assert_eq!(restored, with_auto, "reservation must not duplicate or retire membership");
 
-        // Displayed list is [r, a, b, c]; index 3 is "c". Moving it to 0
-        // displaces reserved, which must be revoked and folded back in.
-        edit_displayed(&q, QueueEdit::Move { from: 3, to: 0 }, &i("c"), revoke).unwrap();
-
-        assert!(called.get());
-        assert_eq!(
-            path_state(&q),
-            (None, vec![p("c"), p("r"), p("a"), p("b")])
-        );
+        let restarted = new_shared_queue();
+        restore_all(&restarted, restored);
+        let mut source = HostSource::new(restarted.clone(), empty_policy());
+        assert_eq!(source.next(), Some((0, p("same"))));
+        assert_eq!(snapshot(&restarted), with_auto);
+        assert!(mark_started(&restarted, &expected[0]));
+        assert_eq!(snapshot(&restarted), with_auto[1..].to_vec());
+        edit_displayed(&restarted, QueueEdit::Remove { index: 0 }, &expected[1], || Some(p("same"))).unwrap();
+        assert_eq!(snapshot(&restarted), vec![with_auto[2].clone()]);
     }
 
     #[test]
-    fn edit_displayed_move_within_pending_does_not_revoke_reserved() {
-        let q = queue_with(Some("r"), &["a", "b", "c"]);
-        let (called, revoke) = revoke_stub(Some(p("r")));
-
-        // Displayed indices 1, 2 are "a", "b" — neither is the reserved slot.
-        edit_displayed(&q, QueueEdit::Move { from: 1, to: 2 }, &i("a"), revoke).unwrap();
-
-        assert!(!called.get());
-        assert_eq!(
-            path_state(&q),
-            (Some(p("r")), vec![p("b"), p("a"), p("c")])
-        );
+    fn serde_persists_ids_and_assigns_distinct_legacy_occurrences() {
+        let legacy = r#"{"path":"same","origin":"manual"}"#;
+        let first: QueueItem = serde_json::from_str(legacy).unwrap();
+        let second: QueueItem = serde_json::from_str(legacy).unwrap();
+        assert_ne!(first.entry_id, second.entry_id);
+        let encoded = serde_json::to_string(&first).unwrap();
+        assert_eq!(serde_json::from_str::<QueueItem>(&encoded).unwrap(), first);
     }
 
     #[test]
-    fn edit_displayed_too_late_when_revoke_returns_none_and_leaves_queue_untouched() {
-        let q = queue_with(Some("r"), &["a", "b"]);
-        let (called, revoke) = revoke_stub(None);
-
-        let err = edit_displayed(&q, QueueEdit::Remove { index: 0 }, &i("r"), revoke).unwrap_err();
-
-        assert_eq!(err, EditError::TooLate);
-        assert!(called.get());
-        assert_eq!(path_state(&q), (Some(p("r")), vec![p("a"), p("b")]));
+    fn edits_check_identity_bounds_priority_and_preserve_membership_on_move() {
+        let q = new_shared_queue(); enqueue(&q, p("a")); enqueue(&q, p("a"));
+        let before = snapshot(&q);
+        assert_eq!(edit_displayed(&q, QueueEdit::Remove { index: 0 }, &before[1], || panic!()), Err(EditError::Stale));
+        assert_eq!(edit_displayed(&q, QueueEdit::Remove { index: 2 }, &before[0], || panic!()), Err(EditError::OutOfRange));
+        edit_displayed(&q, QueueEdit::Move { from: 0, to: 1 }, &before[0], || panic!()).unwrap();
+        assert_eq!(snapshot(&q), vec![before[1].clone(), before[0].clone()]);
+        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &before[0], || panic!()).unwrap();
+        assert_eq!(snapshot(&q), vec![before[1].clone()]);
+        let auto = QueueItem::automatic(p("auto"));
+        replace_pending(&q, vec![before[1].clone(), auto]);
+        assert_eq!(edit_displayed(&q, QueueEdit::Move { from: 0, to: 1 }, &before[1], || panic!()), Err(EditError::OriginBoundary));
     }
 
     #[test]
-    fn edit_displayed_stale_expect_does_not_revoke_and_leaves_queue_untouched() {
-        let q = queue_with(Some("r"), &["a", "b"]);
-        let (called, revoke) = revoke_stub(Some(p("r")));
-
-        let err =
-            edit_displayed(&q, QueueEdit::Remove { index: 0 }, &i("stale"), revoke).unwrap_err();
-
-        assert_eq!(err, EditError::Stale);
-        assert!(!called.get());
-        assert_eq!(path_state(&q), (Some(p("r")), vec![p("a"), p("b")]));
+    fn reserved_edit_requires_successful_revoke_without_duplicating_rows() {
+        let q = new_shared_queue(); enqueue(&q, p("a")); enqueue(&q, p("b"));
+        let before = snapshot(&q);
+        let mut source = HostSource::new(q.clone(), empty_policy()); source.next();
+        assert_eq!(edit_displayed(&q, QueueEdit::Remove { index: 0 }, &before[0], || None), Err(EditError::TooLate));
+        assert_eq!(snapshot(&q), before);
+        edit_displayed(&q, QueueEdit::Move { from: 0, to: 1 }, &before[0], || Some(p("a"))).unwrap();
+        assert_eq!(snapshot(&q), vec![before[1].clone(), before[0].clone()]);
     }
 
     #[test]
-    fn edit_displayed_out_of_range_leaves_queue_untouched() {
-        let q = queue_with(Some("r"), &["a", "b"]);
-        // len is 3 (r, a, b): index 3 and to=3 are both one past the end.
-        let (_, revoke) = revoke_stub(Some(p("r")));
-        let err = edit_displayed(&q, QueueEdit::Remove { index: 3 }, &i("r"), revoke).unwrap_err();
-        assert_eq!(err, EditError::OutOfRange);
-
-        let (_, revoke) = revoke_stub(Some(p("r")));
-        let err =
-            edit_displayed(&q, QueueEdit::Move { from: 0, to: 3 }, &i("r"), revoke).unwrap_err();
-        assert_eq!(err, EditError::OutOfRange);
-
-        assert_eq!(path_state(&q), (Some(p("r")), vec![p("a"), p("b")]));
+    fn filtered_insert_excludes_existing_and_active_paths_and_keeps_manual_priority() {
+        let q = new_shared_queue();
+        let auto = QueueItem::automatic(p("auto"));
+        replace_pending(&q, vec![auto.clone()]);
+        let flight = QueueItem::manual(p("flight"));
+        assert_eq!(prepend_pending_filtered(&q, &[p("auto"), p("now"), p("flight"), p("new"), p("new")], Some(Path::new("now")), &[flight]), 1);
+        let items = snapshot(&q);
+        assert_eq!(items.iter().map(|item| item.path.clone()).collect::<Vec<_>>(), vec![p("new"), p("auto")]);
+        assert_eq!(items[1], auto);
+        assert_eq!(prepend_pending_filtered(&q, &[p("new")], None, &[]), 0);
     }
 
     #[test]
-    fn edit_displayed_without_reserved_indexes_pending_directly() {
-        let q = queue_with(None, &["a", "b", "c"]);
-        let (called, revoke) = revoke_stub(Some(p("unused")));
-
-        edit_displayed(&q, QueueEdit::Remove { index: 1 }, &i("b"), revoke).unwrap();
-
-        assert!(!called.get());
-        assert_eq!(path_state(&q), (None, vec![p("a"), p("c")]));
+    fn manual_priority_releases_auto_reservation_without_duplicate_or_new_identity() {
+        let q = new_shared_queue();
+        let mut source = HostSource::new(q.clone(), folder_policy(&["auto"]));
+        source.next();
+        let auto = reserved_item(&q).unwrap();
+        enqueue(&q, p("manual"));
+        assert!(manual_priority_needed(&q));
+        assert_eq!(prioritize_manual(&q, || Some(p("auto"))), Some(auto.clone()));
+        assert_eq!(snapshot(&q)[1], auto);
+        assert_eq!(source.next(), Some((1, p("manual"))));
+        assert_eq!(snapshot(&q).len(), 2);
     }
+
+    #[test]
+    fn observers_report_reservations_and_only_actual_automatic_additions() {
+        let q = new_shared_queue(); enqueue(&q, p("manual"));
+        let added = Arc::new(Mutex::new(Vec::new()));
+        let reserved = Arc::new(Mutex::new(Vec::new()));
+        let added_sink = added.clone(); let reserved_sink = reserved.clone();
+        let mut source = HostSource::new(q.clone(), folder_policy(&["auto"]))
+            .on_pending_consumed(Box::new(move |items| added_sink.lock().unwrap().push(items.len())))
+            .on_reserved(Box::new(move |item| reserved_sink.lock().unwrap().push(item.path.clone())));
+        source.next(); source.next();
+        assert_eq!(*added.lock().unwrap(), vec![2]);
+        assert_eq!(*reserved.lock().unwrap(), vec![p("manual"), p("auto")]);
+    }
+
 }

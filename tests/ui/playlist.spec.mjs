@@ -354,6 +354,73 @@ test("a prepared playlist enables both next controls without a normal reservatio
   await expect(next).toBeDisabled();
 });
 
+test("enabled button roles show hover feedback without changing disabled controls", async ({ page }, testInfo) => {
+  async function styles(button) {
+    return button.evaluate((element) => {
+      const computed = getComputedStyle(element);
+      return {
+        background: computed.backgroundColor,
+        border: computed.borderColor,
+        color: computed.color,
+        filter: computed.filter,
+      };
+    });
+  }
+
+  async function expectHoverFeedback(button) {
+    await expect(button).toBeEnabled();
+    const before = await styles(button);
+    await button.hover();
+    expect(await styles(button)).not.toEqual(before);
+  }
+
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
+  await expectHoverFeedback(page.locator(".library .sort"));
+  await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-button-hover.jpg`), quality: 70, fullPage: true, animations: "disabled" });
+
+  const menuButton = page.getByRole("button", { name: "menu" });
+  await menuButton.click();
+  await expectHoverFeedback(page.getByRole("button", { name: "Rescan" }));
+  await menuButton.click();
+
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const player = {
+      ...store.player,
+      phase: "playing",
+      now_playing: "/fixture/music/track-1.mp3",
+      playback_started_frames: 48000,
+      last_transition: {
+        from: "/fixture/music/track-1.mp3",
+        to: "/fixture/music/track-2.mp3",
+        automatic: true,
+        seconds_ago: 1,
+      },
+    };
+    store.player = player;
+    window.__uiFixture.setReply("player_state", player);
+  });
+  await expectHoverFeedback(page.locator(".transport .primary"));
+  await expectHoverFeedback(page.locator(".transport .flag"));
+
+  await page.locator(".mode-switch").getByRole("tab").nth(1).click();
+  const compactPrimary = page.locator(".minibar .ctrl").first();
+  await expectHoverFeedback(compactPrimary);
+
+  const disabledNext = page.locator(".minibar .ctrl.next");
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const player = { ...store.player, playback_started_frames: null };
+    store.player = player;
+    window.__uiFixture.setReply("player_state", player);
+  });
+  await expect(disabledNext).toBeDisabled();
+  const disabledBefore = await styles(disabledNext);
+  await disabledNext.hover({ force: true });
+  expect(await disabledNext.evaluate((element) => element.matches(":hover"))).toBe(true);
+  expect(await styles(disabledNext)).toEqual(disabledBefore);
+});
+
 
 test("next stays disabled across stale prepared snapshots and history edits until playback advances", async ({ page }, testInfo) => {
   await page.evaluate(async () => {
