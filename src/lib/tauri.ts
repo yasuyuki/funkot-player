@@ -91,6 +91,8 @@ export interface PlayerState {
   /// Monotonic counter bumped after a successful history persist. UI re-pulls
   /// new arrivals when this changes (not on now-playing alone).
   history_revision: number;
+  /// Start frame of the audible track, including same-path restarts.
+  playback_started_frames: number | null;
 }
 
 /// Matches `TrackRow`. `path` is the identity the UI keys on (basenames can

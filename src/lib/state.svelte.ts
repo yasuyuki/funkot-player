@@ -238,6 +238,9 @@ class PlayerStore {
   /// Drops overlapping F/J/Space while a skip invoke is in flight, so the
   /// progress index cannot walk the library faster than playback.
   #labelSkipBusy = false;
+  /// The audible track's start frame when `skip_next` was requested.
+  /// This identifies same-path restarts without reacting to history edits.
+  skipNextPending = $state<{ startedFrames: number | null } | null>(null);
   /// The listing rows `doSetFolderLabel` patched, so `doUndoLastFolderLabel`
   /// can put the display back without re-listing. The authoritative undo is
   /// the host's own snapshot; this is only the screen's half of it. `null`
@@ -339,6 +342,7 @@ class PlayerStore {
     try {
       const state = await playerState();
       this.player = state;
+      this.#reconcileSkipNextPending();
       this.#polledAt = Date.now();
       const rev = state.history_revision;
       if (this.#processedHistoryRevision !== rev) {
@@ -352,6 +356,7 @@ class PlayerStore {
       const q = await queueStateCmd();
       if (gen === this.#queueGen) {
         this.queue = q;
+        this.#reconcileSkipNextPending();
         if (q.catalog_revision !== undefined && q.catalog_revision !== this.#catalogRevision) void this.#refreshCatalog();
       }
     } catch (e) {
@@ -639,7 +644,28 @@ class PlayerStore {
     }
   }
 
+  #reconcileSkipNextPending(): void {
+    const pending = this.skipNextPending;
+    if (pending === null) return;
+    const player = this.player;
+    if (player && player.playback_started_frames !== pending.startedFrames) {
+      this.skipNextPending = null;
+      return;
+    }
+    if (this.queue && !canSkipNext(player?.phase ?? "idle", player?.auditioning ?? false, this.queue)) {
+      this.skipNextPending = null;
+    }
+  }
+
   async doSkipNext(): Promise<boolean> {
+    const player = this.player;
+    if (
+      this.skipNextPending !== null ||
+      !player ||
+      player.playback_started_frames === null ||
+      !canSkipNext(player.phase, player.auditioning, this.queue)
+    ) return false;
+    this.skipNextPending = { startedFrames: player.playback_started_frames };
     try {
       await skipNextCmd();
       // Host drops TransitionToNext while next is unset; refresh queue so
@@ -650,6 +676,7 @@ class PlayerStore {
       void this.#refreshQueueNow();
       return true;
     } catch (e) {
+      this.skipNextPending = null;
       this.lastError = String(e);
       return false;
     }
@@ -670,7 +697,7 @@ class PlayerStore {
     if (this.#labelSkipBusy) return;
     const phase = this.player?.phase ?? "idle";
     const auditioning = this.player?.auditioning ?? false;
-    if (!canSkipNext(phase, auditioning, this.queue)) {
+    if (this.skipNextPending !== null || this.player?.playback_started_frames == null || !canSkipNext(phase, auditioning, this.queue)) {
       if (verdict !== null) void this.doSetLabel(path, verdict);
       return;
     }
@@ -882,6 +909,7 @@ class PlayerStore {
       const q = await queueStateCmd();
       if (gen === this.#queueGen) {
         this.queue = q;
+        this.#reconcileSkipNextPending();
         if (q.catalog_revision !== undefined && q.catalog_revision !== this.#catalogRevision) await this.#refreshCatalog();
       }
     } catch (e) {

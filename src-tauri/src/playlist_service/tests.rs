@@ -17,7 +17,15 @@ impl Fixture {
     fn file(&self, name: &str) -> PathBuf {
         let path = self.data.path().join(name);
         fs::write(&path, format!("synthetic {name}")).unwrap();
+        self.store_analysis(&path, true);
         path
+    }
+    fn store_analysis(&self, path: &Path, is_funkot: bool) {
+        let buffer = funkot_core::decode::AudioBuffer { sample_rate: 48_000, frames: 48_000 * 30, samples: Vec::new() };
+        let mut analysis = funkot_core::cache::provisional(&buffer, path.file_name().unwrap().to_str().unwrap());
+        analysis.is_funkot = is_funkot;
+        let hash = funkot_core::cache::content_hash(path).unwrap();
+        funkot_core::cache::store(self.cache.path(), &hash, &analysis).unwrap();
     }
     fn track(path: &Path) -> TrackRef {
         TrackRef { content_hash: funkot_core::cache::content_hash(path).unwrap(), preferred_path: path.into(),
@@ -750,4 +758,27 @@ fn waking_finite_tail_keeps_a_current_restore_that_has_not_started_yet() {
     assert!(owner.restored.as_ref().is_some_and(|c| c.track_ref.preferred_path == path)
         || owner.claims.values().any(|c| c.restoring && !c.cancelled && c.item.path == path));
     assert!(owner.normal_items().is_empty());
+}
+
+#[test]
+fn final_source_skips_cached_non_funkot_before_returning_playlist_candidate() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(false, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let rejected = fixture.file("non-funkot.wav");
+    fixture.store_analysis(&rejected, false);
+    let accepted = fixture.file("funkot.wav");
+    assert_eq!(crate::admit_playback_path(&rejected, fixture.cache.path(), fixture.data.path(), false), crate::PlaybackAdmission::Rejected);
+    assert_eq!(crate::admit_playback_path(&accepted, fixture.cache.path(), fixture.data.path(), false), crate::PlaybackAdmission::Accepted);
+    let id = fixture.install("gate", vec![Fixture::track(&rejected), Fixture::track(&accepted)]);
+    fixture.command("select-gate", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let (_, path) = source.next().expect("the Funkot candidate should reach core");
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(path, accepted);
+    let owner = fixture.service.lock().unwrap();
+    assert_eq!(owner.catalog.run(&id).unwrap().failures.len(), 1);
+    assert_eq!(owner.claims.len(), 1);
 }

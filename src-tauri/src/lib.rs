@@ -2945,8 +2945,6 @@ fn audio_thread(
     // command only runs while the webview is polling, and the whole point of
     // this app is to keep playing with the screen off.
     let queue_dir = data_dir.clone();
-    let cache_dir_for_skip = cache_dir_for_log.clone();
-    let data_dir_for_skip = data_dir.clone();
     // Cloned before `queue` moves into `HostSource::new` below: the
     // `on_pending_consumed` closure needs its own handle so it can re-read
     // the queue under `SAVE_LOCK` (see the closure body).
@@ -2959,12 +2957,6 @@ fn audio_thread(
             pos: folder_pos,
         },
     )
-        .skip_folder_entry(Box::new(move |path| {
-            if ALLOW_NON_FUNKOT.load(Ordering::Relaxed) {
-                return false;
-            }
-            gated_non_funkot(path, &cache_dir_for_skip, &data_dir_for_skip)
-        }))
         .on_pending_consumed(Box::new(move |_pending| {
             // Ignore the slice this observer is handed — it is a snapshot
             // `HostSource::next` took *after releasing the queue lock*
@@ -4204,6 +4196,8 @@ struct PlayerState {
     /// Monotonic counter bumped after a successful history persist. The UI
     /// re-pulls new arrivals when this changes (not on now-playing alone).
     history_revision: u64,
+    /// Start frame of the audible track; changes when playback actually advances.
+    playback_started_frames: Option<u64>,
 }
 
 fn audition_display_title(path: &Path) -> String {
@@ -4421,6 +4415,7 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
         position_secs,
         duration_secs,
         history_revision: HISTORY_REVISION.load(Ordering::Relaxed),
+        playback_started_frames: now_started_frames,
     }
 }
 
@@ -5316,28 +5311,56 @@ fn analyzed_cache_entry(
     funkot_core::cache::load(cache_dir, hash).filter(|a| !a.needs_reanalysis)
 }
 
-/// `true` when the track is analysed and effectively non-Funkot — the gate
-/// condition shared by enqueue reject and folder-drain skip. Unanalysed
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaybackAdmission {
+    Accepted,
+    Rejected,
+}
+
+pub(crate) fn admit_playback_path(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    allow_non_funkot: bool,
+) -> PlaybackAdmission {
+    if allow_non_funkot {
+        return PlaybackAdmission::Accepted;
+    }
+    let Ok(hash) = funkot_core::cache::content_hash(path) else {
+        return PlaybackAdmission::Rejected;
+    };
+    if analyzed_cache_entry(cache_dir, &hash).is_none() {
+        let Ok(buffer) = funkot_core::decode::decode_file(path) else {
+            return PlaybackAdmission::Rejected;
+        };
+        if funkot_core::cache::fill_missing(path, cache_dir, &buffer).is_err() {
+            return PlaybackAdmission::Rejected;
+        }
+        reapply_overrides(path, cache_dir, data_dir);
+    }
+    let Some(analysis) = analyzed_cache_entry(cache_dir, &hash) else {
+        return PlaybackAdmission::Rejected;
+    };
+    let override_funkot = store::load_overrides(data_dir)
+        .get(&hash)
+        .and_then(|override_| override_.funkot);
+    if store::effective_is_funkot(analysis.is_funkot, override_funkot) {
+        PlaybackAdmission::Accepted
+    } else {
+        PlaybackAdmission::Rejected
+    }
+}
+/// `true` when the track is analysed and effectively non-Funkot. Unanalysed
 /// tracks are never gated. Does not consult `allow_non_funkot` (caller does).
 fn gated_non_funkot(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> bool {
-    // Read-only use of the index: never save here. Persist is `refresh_library`
-    // only — otherwise folder-drain / enqueue races with refresh and can
-    // overwrite a pruned index with a stale map. `store_cache` is read-only
-    // for exactly that reason, so it is the right side of that rule.
-    let Ok(hash) = store_cache::content_hash(data_dir, path) else {
-        return false;
-    };
-    let Some(a) = analyzed_cache_entry(cache_dir, &hash) else {
-        return false;
-    };
-    let override_funkot = store::load_overrides(data_dir)
-        .get(&hash)
-        .and_then(|o| o.funkot);
-    !store::effective_is_funkot(a.is_funkot, override_funkot)
+    let Ok(hash) = store_cache::content_hash(data_dir, path) else { return false; };
+    let Some(analysis) = analyzed_cache_entry(cache_dir, &hash) else { return false; };
+    let override_funkot = store::load_overrides(data_dir).get(&hash).and_then(|entry| entry.funkot);
+    !store::effective_is_funkot(analysis.is_funkot, override_funkot)
 }
 
 /// Pending restore can include folder-drain `in_flight`; apply the same gate
@@ -7236,7 +7259,7 @@ mod arrivals_settings_rmw_tests {
     /// `ALLOW_NON_FUNKOT` is one atomic for the whole test binary, so a test
     /// that asserts on it cannot run beside one that writes it. Every test in
     /// this module that touches the atomic takes this first.
-    static ALLOW_NON_FUNKOT_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static ALLOW_NON_FUNKOT_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_allow_non_funkot() -> MutexGuard<'static, ()> {
         ALLOW_NON_FUNKOT_LOCK
