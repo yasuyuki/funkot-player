@@ -297,7 +297,7 @@ function controlClip(inFile,outFile,start,count,at,type,amplitude) {
   fs.writeFileSync(outFile,out);
   console.log(JSON.stringify({inputSha256:sha(inFile),outputSha256:sha(outFile),sourceStartFrame:start,frames:count,controlFrame:at,type,amplitude,peak}));
 }
-function calibrate(aFile,bFile,outFile,offlineManifestFile) {
+function calibrate(aFile,bFile,outFile,offlineManifestFile,validationFile) {
   const a=wav(aFile),b=wav(bFile),values=Object.fromEntries(keys.map(k=>[k,[]]));
   const localRows=[];
   const result=eachWindow(a,b,null,(frame,m,range)=>{
@@ -317,7 +317,16 @@ function calibrate(aFile,bFile,outFile,offlineManifestFile) {
     }
     return {windows:rows.length,scale,maxRawScore:Math.max(...rows.map(m=>featureScore(m,scale)))};
   });
-  const localCritical=Math.max(...local.map(s=>s.maxRawScore))*1.25;
+  let validation=null;
+  if(validationFile){
+    const scores=[];
+    const checked=eachWindow(wav(validationFile),b,null,(frame,m,range)=>{
+      const second=Math.floor((frame-range.first)/RATE);
+      if(local[second])scores.push(featureScore(m,local[second].scale));
+    });
+    validation={sha256:sha(validationFile),windows:scores.length,maxRawScore:scores.reduce((max,score)=>Math.max(max,score),0),alignment:checked.alignment};
+  }
+  const localCritical=Math.max(...local.map(s=>s.maxRawScore),validation?.maxRawScore??0)*1.25;
   const aC=continuity(a,result.active.first,result.active.last,null),bA=active(b),bC=continuity(b,bA.first,bA.last,null);
   const aTiming=callbackBaseline(aFile,result.active),bTiming=callbackBaseline(bFile,bA);
   thresholds.adjacentDelta=1.25*Math.max(aC.maxDelta,bC.maxDelta);
@@ -338,7 +347,7 @@ function calibrate(aFile,bFile,outFile,offlineManifestFile) {
     const offline=offlineInput(offlineManifestFile);
     const values=Object.fromEntries(keys.map(k=>[k,[]]));
     const coverage=[];
-    for(const file of [aFile,bFile]){
+    for(const file of [aFile,bFile,...(validationFile?[validationFile]:[])]){
       const scan=eachOfflineWindow(wav(file),offline,(_frame,m)=>{for(const k of keys)values[k].push(m[k]);});
       coverage.push({captureSha256:sha(file),...scan});
     }
@@ -346,7 +355,7 @@ function calibrate(aFile,bFile,outFile,offlineManifestFile) {
     for(const k of keys){const v=values[k].sort((a,b)=>a-b);stats[k]={median:v[Math.floor(v.length/2)],p999:v[Math.floor(v.length*.999)],max:v.at(-1)};}
     offlineCalibration={manifestSha256:offline.manifestSha256,referenceSha256:offline.manifest.sha256,coverage,stats,thresholds:Object.fromEntries(keys.map(k=>[k,stats[k].max*1.25]))};
   }
-  const output={schema:2,rate:RATE,windowFrames:WINDOW,baseline:{aSha256:sha(aFile),bSha256:sha(bFile),alignedCorrelation:result.alignment.correlation,alignmentOffsetFrames:result.alignment.offset,activeFrames:{a:result.active.last-result.active.first,b:bA.last-bA.first},windows:values.rms.length,stats,continuity:{a:aC,b:bC},timing:{a:aTiming,b:bTiming}},thresholds,local:{criticalRawScore:localCritical,seconds:local},offline:offlineCalibration,controls};
+  const output={schema:2,rate:RATE,windowFrames:WINDOW,baseline:{aSha256:sha(aFile),bSha256:sha(bFile),alignedCorrelation:result.alignment.correlation,alignmentOffsetFrames:result.alignment.offset,activeFrames:{a:result.active.last-result.active.first,b:bA.last-bA.first},windows:values.rms.length,stats,continuity:{a:aC,b:bC},timing:{a:aTiming,b:bTiming}},thresholds,local:{criticalRawScore:localCritical,seconds:local,validation},offline:offlineCalibration,controls};
   fs.writeFileSync(outFile,JSON.stringify(output,null,2)+'\n');
   console.log(JSON.stringify({calibration:outFile,thresholds,controlHits:controls.filter(x=>x.detected).length,controls:controls.length,activeSeconds:(result.active.last-result.active.first)/RATE}));
 }
@@ -359,6 +368,7 @@ function scan(file,refFile,calibrationFile,packetFile,callbackFile,outFile,offli
   const offlineWindows=new Map();
   const offlineCoverage=offline?eachOfflineWindow(target,offline,(frame,m,alignment)=>offlineWindows.set(frame,{m,alignment})):null;
   let first=null,maxScore=0,maxOfflineScore=0,candidates=0;
+  const candidateDetails=[];
   const aligned=eachWindow(target,ref,null,(frame,m,range)=>{
     const second=Math.floor((frame-range.first)/RATE),local=cal.local.seconds[second];
     const globalScore=featureScore(m,cal.thresholds),localScore=local?featureScore(m,local.scale)/cal.local.criticalRawScore:0;
@@ -368,6 +378,7 @@ function scan(file,refFile,calibrationFile,packetFile,callbackFile,outFile,offli
     maxScore=Math.max(score,maxScore);maxOfflineScore=Math.max(offlineScore,maxOfflineScore);
     if(score>1){
       candidates++;
+      candidateDetails.push({frame,score,cleanScore,globalScore,localScore,offlineScore,metrics:m});
       if(!first)first={classification:'pcm_transient',frame,score,cleanScore,globalScore,localScore,offlineScore,metrics:m,offlineMetrics:o?.m,offlineAlignment:o?.alignment,channelConsistency:m.impulseChannels[0]>cal.thresholds.impulse&&m.impulseChannels[1]>cal.thresholds.impulse?'both':'one_or_below'};
     }
   });
@@ -395,13 +406,13 @@ function scan(file,refFile,calibrationFile,packetFile,callbackFile,outFile,offli
     const p=packets[Math.max(0,lo-1)];
     if(p&&first.frame<p.file_frame+p.frames)first.qpc100ns=p.qpc_100ns+Math.round((first.frame-p.file_frame)*1e7/RATE);
   }
-  const output={classification:first?.classification||'clean',first,pcmCandidates:candidates,maxScore,maxOfflineScore,offline:offline?{manifestSha256:offline.manifestSha256,referenceSha256:offline.manifest.sha256,coverage:offlineCoverage,matchedWindows:offlineWindows.size}:null,continuity:c,timing:cb,alignment:aligned.alignment,active:aligned.active,captureFrames:target.frames,analysisSeconds:Number(process.hrtime.bigint()-t0)/1e9,inputSha256:sha(file)};
+  const output={classification:first?.classification||'clean',first,pcmCandidates:candidates,candidateDetails,maxScore,maxOfflineScore,offline:offline?{manifestSha256:offline.manifestSha256,referenceSha256:offline.manifest.sha256,coverage:offlineCoverage,matchedWindows:offlineWindows.size}:null,continuity:c,timing:cb,alignment:aligned.alignment,active:aligned.active,captureFrames:target.frames,analysisSeconds:Number(process.hrtime.bigint()-t0)/1e9,inputSha256:sha(file)};
   fs.writeFileSync(outFile,JSON.stringify(output,null,2)+'\n');
   console.log(JSON.stringify({classification:output.classification,frame:first?.frame,pcmCandidates:candidates,maxScore,analysisSeconds:output.analysisSeconds}));
 }
 const [mode,...args]=process.argv.slice(2);
-if(mode==='calibrate'&&args.length===4)calibrate(...args);
+if(mode==='calibrate'&&(args.length===4||args.length===5))calibrate(...args);
 else if(mode==='scan'&&args.length===7)scan(...args);
 else if(mode==='inject'&&args.length===5)injectFile(args[0],args[1],Number(args[2]),args[3],Number(args[4]));
 else if(mode==='clip'&&args.length===7)controlClip(args[0],args[1],Number(args[2]),Number(args[3]),Number(args[4]),args[5],Number(args[6]));
-else {console.error('Usage: node detect.cjs calibrate clean-a.wav clean-b.wav calibration.json offline-manifest.json | scan capture.wav clean.wav calibration.json packets.csv callbacks.csv result.json offline-manifest.json | inject input.wav output.wav frame type amplitude | clip input.wav output.wav startFrame frameCount controlFrame type amplitude');process.exitCode=2;}
+else {console.error('Usage: node detect.cjs calibrate clean-a.wav clean-b.wav calibration.json offline-manifest.json [validation-clean.wav] | scan capture.wav clean.wav calibration.json packets.csv callbacks.csv result.json offline-manifest.json | inject input.wav output.wav frame type amplitude | clip input.wav output.wav startFrame frameCount controlFrame type amplitude');process.exitCode=2;}
