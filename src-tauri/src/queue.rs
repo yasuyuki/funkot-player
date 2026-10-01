@@ -167,6 +167,16 @@ pub(crate) fn reserved_item(queue: &SharedQueue) -> Option<QueueItem> {
     queue.lock().unwrap().reserved.clone()
 }
 
+pub(crate) fn discard_reserved(queue: &SharedQueue, item: &QueueItem) -> bool {
+    let mut q = queue.lock().unwrap();
+    if q.reserved.as_ref() != Some(item) {
+        return false;
+    }
+    q.reserved = None;
+    q.reserved_is_next = false;
+    true
+}
+
 /// Used only after the engine's future fence has returned all old claims.
 pub(crate) fn restore_all(queue: &SharedQueue, items: Vec<QueueItem>) {
     let mut q = queue.lock().unwrap();

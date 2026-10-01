@@ -31,7 +31,7 @@
   --color-transport-secondary-bg: var(--color-accent-bg);
   --color-transport-secondary-text: var(--color-accent-text);
   --color-transport-disabled-bg: #444;
-  --color-transport-disabled-text: #777;
+  --color-transport-disabled-text: #bbb;
 
   /* Record operation (flag): outline, not fill -- filled amber would collide
    * with the paused colour above (#b83). */

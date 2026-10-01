@@ -270,49 +270,172 @@ impl Service {
 pub struct ManagedSource { service: Shared, epoch: u64 }
 impl TrackSource for ManagedSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
-        let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
-        if owner.epoch != self.epoch { return None; }
-        let restored = owner.restored.take().filter(|current| {
-            current.origin == PlaybackOrigin::Normal || current.playlist_id.as_deref().is_some_and(|id| owner.catalog.run(id).is_ok_and(|r| r.run_id == current.run_id)
-                && owner.catalog.definition(id).is_ok_and(|d| d.entries.iter().any(|e| Some(&e.entry_id) == current.entry_id.as_ref())))
-        });
-        let claim = if let Some(current) = restored {
-            let path = if current.playlist_id.is_some() { owner.lookup(&current.track_ref).ok() } else { Some(current.track_ref.preferred_path.clone()) };
-            if path.is_some() { owner.catalog.current = Some(current.clone()); }
-            else if let (Some(id), Some(entry)) = (&current.playlist_id, &current.entry_id) {
-                let _ = owner.catalog.unavailable(id, current.run_id, entry, "missing");
-                owner.catalog.current = None;
-            }
-            path.map(|path| Claim { source: current.playlist_id, run: current.run_id, entry: current.entry_id,
-                track: current.track_ref, item: QueueItem { path, origin: current.queue_origin.unwrap_or(QueueOrigin::Manual) }, live: true, cancelled: false, restoring: true })
-        } else { None };
-        let claim = match claim {
-            Some(c) => Some(c),
-            None if owner.catalog.active_id.is_some() => {
-                let id = owner.catalog.active_id.clone().unwrap(); let run = owner.catalog.run(&id).ok()?.run_id;
-                let claimed: BTreeSet<_> = owner.claims.values().filter(|c| c.live && !c.cancelled && c.source.as_deref() == Some(&id) && c.run == run).filter_map(|c|c.entry.clone()).collect();
-                let mut next = None;
-                for entry in owner.catalog.remaining(&id).ok()? {
-                    if claimed.contains(&entry.entry_id) { continue; }
-                    let path = owner.lookup(&entry.track);
-                    let failure = match &path { Err(reason) => Some(*reason), Ok(path) if !crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed)
-                        && crate::gated_non_funkot(path, &owner.cache, &owner.data) => Some("non_funkot"), _ => None };
-                    if let Some(reason) = failure { let _ = owner.catalog.unavailable(&id, run, &entry.entry_id, reason); owner.save_progress(); continue; }
-                    next = Some(Claim { source: Some(id.clone()), run, entry: Some(entry.entry_id), track: entry.track,
-                        item: QueueItem::manual(path.unwrap()), live: true, cancelled: false, restoring: false }); break;
+        loop {
+            let (claim, cache, data) = {
+                let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
+                if owner.epoch != self.epoch {
+                    return None;
                 }
-                next
+                let restored = owner.restored.take().filter(|current| {
+                    current.origin == PlaybackOrigin::Normal || current.playlist_id.as_deref().is_some_and(|id| {
+                        owner.catalog.run(id).is_ok_and(|run| run.run_id == current.run_id)
+                            && owner.catalog.definition(id).is_ok_and(|definition| {
+                                definition.entries.iter().any(|entry| Some(&entry.entry_id) == current.entry_id.as_ref())
+                            })
+                    })
+                });
+                let claim = if let Some(current) = restored {
+                    let path = if current.playlist_id.is_some() {
+                        owner.lookup(&current.track_ref).ok()
+                    } else {
+                        Some(current.track_ref.preferred_path.clone())
+                    };
+                    if path.is_some() {
+                        owner.catalog.current = Some(current.clone());
+                    } else if let (Some(id), Some(entry)) = (&current.playlist_id, &current.entry_id) {
+                        let _ = owner.catalog.unavailable(id, current.run_id, entry, "missing");
+                        owner.catalog.current = None;
+                    }
+                    path.map(|path| Claim {
+                        source: current.playlist_id,
+                        run: current.run_id,
+                        entry: current.entry_id,
+                        track: current.track_ref,
+                        item: QueueItem {
+                            path,
+                            origin: current.queue_origin.unwrap_or(QueueOrigin::Manual),
+                        },
+                        live: true,
+                        cancelled: false,
+                        restoring: true,
+                    })
+                } else {
+                    None
+                };
+                let claim = match claim {
+                    Some(claim) => Some(claim),
+                    None if owner.catalog.active_id.is_some() => {
+                        let id = owner.catalog.active_id.clone().unwrap();
+                        let run = owner.catalog.run(&id).ok()?.run_id;
+                        let claimed: BTreeSet<_> = owner
+                            .claims
+                            .values()
+                            .filter(|claim| {
+                                claim.live
+                                    && !claim.cancelled
+                                    && claim.source.as_deref() == Some(&id)
+                                    && claim.run == run
+                            })
+                            .filter_map(|claim| claim.entry.clone())
+                            .collect();
+                        let mut next = None;
+                        for entry in owner.catalog.remaining(&id).ok()? {
+                            if claimed.contains(&entry.entry_id) {
+                                continue;
+                            }
+                            let path = match owner.lookup(&entry.track) {
+                                Ok(path) => path,
+                                Err(reason) => {
+                                    let _ = owner.catalog.unavailable(&id, run, &entry.entry_id, reason);
+                                    owner.save_progress();
+                                    continue;
+                                }
+                            };
+                            next = Some(Claim {
+                                source: Some(id.clone()),
+                                run,
+                                entry: Some(entry.entry_id),
+                                track: entry.track,
+                                item: QueueItem::manual(path),
+                                live: true,
+                                cancelled: false,
+                                restoring: false,
+                            });
+                            break;
+                        }
+                        next
+                    }
+                    None => {
+                        let Some((_, path)) = owner.normal_source.as_mut()?.next() else {
+                            owner.exhausted = true;
+                            return None;
+                        };
+                        let item = queue::reserved_item(&owner.queue)
+                            .unwrap_or_else(|| QueueItem::manual(path.clone()));
+                        Some(Claim {
+                            source: None,
+                            run: 0,
+                            entry: None,
+                            track: TrackRef {
+                                content_hash: String::new(),
+                                preferred_path: path,
+                                title: String::new(),
+                                artist: String::new(),
+                            },
+                            item,
+                            live: true,
+                            cancelled: false,
+                            restoring: false,
+                        })
+                    }
+                };
+                let Some(claim) = claim else {
+                    owner.exhausted = true;
+                    return None;
+                };
+                (claim, owner.cache.clone(), owner.data.clone())
+            };
+            if crate::admit_playback_path(
+                    &claim.item.path,
+                    &cache,
+                    &data,
+                    crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+                ) == crate::PlaybackAdmission::Rejected
+            {
+                let rejected_normal = {
+                    let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
+                    if owner.epoch != self.epoch { return None; }
+                    let rejected_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
+                        if owner.catalog.active_id.as_deref() != Some(id) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
+                        let _ = owner.catalog.unavailable(id, claim.run, entry, "non_funkot");
+                        owner.catalog.current = None;
+                        false
+                    } else {
+                        owner.catalog.current = None;
+                        queue::discard_reserved(&owner.queue, &claim.item)
+                    };
+                    owner.save_progress();
+                    rejected_normal
+                };
+                if rejected_normal {
+                    let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    crate::store::retire_revoked(&mut session.in_flight, &claim.item);
+                    drop(session);
+                    crate::persist_session();
+                }
+                continue;
             }
-            None => {
-                let Some((_, path)) = owner.normal_source.as_mut()?.next() else { owner.exhausted = true; return None; };
-                let item = queue::reserved_item(&owner.queue).unwrap_or_else(|| QueueItem::manual(path.clone()));
-                Some(Claim { source: None, run: 0, entry: None, track: TrackRef { content_hash: String::new(),
-                    preferred_path: path, title: String::new(), artist: String::new() }, item, live: true, cancelled: false, restoring: false })
+            let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
+            if owner.epoch != self.epoch {
+                return None;
             }
-        };
-        let Some(claim) = claim else { owner.exhausted = true; return None; };
-        let index = owner.next_index; owner.next_index += 1; let path = claim.item.path.clone();
-        owner.claims.insert(index, claim); owner.save_progress(); Some((index, path))
+            if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
+                if owner.catalog.active_id.as_deref() != Some(id)
+                    || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
+                    || !owner.catalog.definition(id).is_ok_and(|definition| {
+                        definition.entries.iter().any(|candidate| candidate.entry_id == *entry)
+                    })
+                {
+                    return None;
+                }
+            }
+            let index = owner.next_index;
+            owner.next_index += 1;
+            let path = claim.item.path.clone();
+            owner.claims.insert(index, claim);
+            owner.save_progress();
+            return Some((index, path));
+        }
     }
 }
 pub fn configure(service: &Shared, normal: HostSource) -> ManagedSource {

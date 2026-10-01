@@ -6,14 +6,10 @@
 
   let t = $derived(i18n.t);
 
-  // Every command round-trips through the host, and `start`/`toggle_pause`
-  // touch the filesystem or the audio thread; without a busy guard a second
-  // tap before the first reply lands double-fires (the desktop/legacy
-  // equivalent was `withBusy`). One flag per button, not one for the row: a
-  // tap on the next-track button must not wait on an in-flight start/pause or
-  // vice-versa, and flagging is a different command again.
+  // Every command round-trips through the host. Start/pause and flagging use
+  // local guards because they are independent actions. Next uses the store's
+  // shared transition guard so every control sees the same pending state.
   let primaryBusy = $state(false);
-  let nextBusy = $state(false);
   let flagBusy = $state(false);
 
   let phase = $derived(store.player?.phase ?? "idle");
@@ -46,7 +42,7 @@
   let nextEnabled = $derived(
     canSkipNext(phase, auditioning, store.queue),
   );
-  let nextDisabled = $derived(!nextEnabled || nextBusy);
+  let nextDisabled = $derived(!nextEnabled || store.player?.playback_started_frames == null || store.skipNextPending !== null);
 
   // Moved here from TransitionStrip so the three high-frequency taps sit on
   // one row. Mirrors legacy/index.html's `flagEnabled = !!state.last_transition
@@ -98,13 +94,8 @@
   }
 
   async function onNextClick() {
-    if (nextBusy) return;
-    nextBusy = true;
-    try {
-      await store.doSkipNext();
-    } finally {
-      nextBusy = false;
-    }
+    if (nextDisabled) return;
+    await store.doSkipNext();
   }
 </script>
 
@@ -165,6 +156,11 @@
     background: var(--color-transport-secondary-bg);
     color: var(--color-transport-secondary-text);
   }
+  .secondary:not(:disabled):hover {
+    background: var(--color-transport-secondary-text);
+    color: var(--color-transport-secondary-bg);
+    border-color: var(--color-transport-secondary-text);
+  }
   /* Amber outline, not fill: see tokens.css's `--color-flag-amber` comment
      -- a filled amber would collide with the paused/resume colour above. */
   .flag {
@@ -180,5 +176,9 @@
   .secondary:disabled {
     background: var(--color-transport-disabled-bg);
     color: var(--color-transport-disabled-text);
+  }
+  .secondary:disabled {
+    cursor: not-allowed;
+    opacity: 1;
   }
 </style>
