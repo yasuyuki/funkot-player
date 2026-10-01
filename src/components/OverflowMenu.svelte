@@ -7,8 +7,11 @@
   import { i18n } from "../lib/i18n.svelte";
   import { LOCALE_NAMES, nextLocale } from "../lib/locale";
   import { musicDirErrorMessage } from "../lib/messages";
+  import { getThemeController, parseThemePreference } from "../lib/theme.svelte";
 
   let t = $derived(i18n.t);
+  const theme = getThemeController();
+  let themePreference = $state(theme.preference);
 
   let scanBusy = $state(false);
   let openMusicBusy = $state(false);
@@ -35,6 +38,14 @@
       store.activeLabelingMode !== null &&
       store.activeLabelingMode !== store.labelingMode,
   );
+
+  function onThemePreferenceChange(event: Event) {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLSelectElement)) return;
+    const preference = parseThemePreference(target.value);
+    theme.setPreference(preference);
+    themePreference = preference;
+  }
 
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
@@ -236,6 +247,14 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu" onclick={(event) => event.stopPropagation()}>
+      <label class="theme-control">
+        <span>{t.themePreferenceLabel}</span>
+        <select value={themePreference} onchange={onThemePreferenceChange}>
+          <option value="dark">{t.themeDark}</option>
+          <option value="light">{t.themeLight}</option>
+          <option value="system">{t.themeSystem}</option>
+        </select>
+      </label>
       <button class="menu-item" type="button" onclick={onRescan} disabled={scanBusy}>{t.rescan}</button>
       {#if musicDirConfigurable && musicDirNeeded}
         <button class="menu-item" type="button" onclick={onSetMusicDir} disabled={musicDirBusy}>{t.pickMusicFolder}</button>
@@ -297,15 +316,20 @@
     max-height: calc(100dvh - 5rem);
     overflow-y: auto;
   }
+  .theme-control {
+    display: grid;
+    gap: var(--space-xs);
+    padding: var(--space-sm) var(--space-md);
+  }
+  .theme-control select {
+    width: 100%;
+  }
   .menu button {
     width: 100%;
     text-align: left;
   }
-  /* tokens.css's global `button:active` is a brightness filter, which does
-     nothing visible on a transparent background -- these items would give
-     no feedback at all on desktop (Android still tap-highlights them).
-     Same fill legacy/index.html used for `.menu button:active`. */
   .menu button:active {
     background: var(--color-transport-secondary-bg);
+    color: var(--color-transport-secondary-text);
   }
 </style>

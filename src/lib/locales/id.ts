@@ -336,6 +336,10 @@ export const id: Messages = {
   clearPlayCountsFailed: "Tidak dapat menghapus jumlah pemutaran per lagu",
   sendFeedback: "Kirim masukan",
   languageItem: (name) => `Bahasa: ${name}`,
+  themePreferenceLabel: "Tema",
+  themeDark: "Gelap",
+  themeLight: "Terang",
+  themeSystem: "Sistem",
 
   editImmediate: "Perubahan langsung diterapkan",
   playlistEditing: "Daftar yang diedit",
