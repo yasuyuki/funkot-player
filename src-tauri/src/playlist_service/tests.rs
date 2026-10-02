@@ -786,6 +786,68 @@ fn final_source_skips_cached_non_funkot_before_returning_playlist_candidate() {
 }
 
 #[test]
+fn folder_preparation_allows_queue_edits_and_does_not_play_a_deleted_reservation() {
+    let fixture = Fixture::new();
+    let first = fixture.file("first.wav");
+    let second = fixture.file("second.wav");
+    let (reserved_tx, reserved_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let first_for_hook = first.clone();
+    let normal = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder {
+        tracks: vec![first.clone(), second.clone()], pos: 0,
+    }).on_reserved(Box::new(move |item| {
+        if item.path == first_for_hook {
+            reserved_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }
+    }));
+    let mut source = configure(&fixture.service, normal);
+    let worker = std::thread::spawn(move || source.next());
+    reserved_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let service_was_available = fixture.service.try_lock().is_ok();
+    let reserved = queue::reserved_item(&fixture.queue).unwrap();
+    queue::edit_displayed(
+        &fixture.queue,
+        queue::QueueEdit::Remove { index: 0 },
+        &reserved,
+        || Some(first.clone()),
+    ).unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(worker.join().unwrap().map(|(_, path)| path), Some(second.clone()));
+    assert!(service_was_available, "slow folder preparation must not hold the service mutex");
+    let pending = queue::pending_snapshot(&fixture.queue);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].path, second);
+}
+
+#[test]
+fn deleting_a_reserved_automatic_item_retires_its_restart_claim() {
+    let fixture = Fixture::new();
+    let item = QueueItem::automatic(fixture.file("reserved.wav"));
+    queue::replace_pending(&fixture.queue, vec![item.clone()]);
+    let mut source = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder {
+        tracks: vec![], pos: 0,
+    });
+    assert_eq!(source.next().map(|(_, path)| path), Some(item.path.clone()));
+    {
+        let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        session.in_flight.push(item.clone());
+        store::save_session(fixture.data.path(), &session).unwrap();
+    }
+
+    fixture.command("delete-reserved", Action::QueueRemove { index: 0, expect: item.clone() }).unwrap();
+    assert!(queue::pending_snapshot(&fixture.queue).is_empty());
+    assert!(queue::reserved_item(&fixture.queue).is_none());
+    assert!(!store::load_session(fixture.data.path()).in_flight.iter()
+        .any(|entry| entry.entry_id == item.entry_id));
+    let Fixture { data, cache, queue, service } = fixture;
+    drop(service);
+    let reopened = Service::new(data.path(), cache.path(), queue);
+    assert!(reopened.restore_normal().unwrap().items.is_empty());
+}
+
+#[test]
 fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
@@ -867,6 +929,35 @@ fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
         assert!(std::time::Instant::now() < deadline, "engine did not start the accepted first track");
         std::thread::sleep(std::time::Duration::from_millis(2));
     };
-    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(first_started, accepted);
+
+    // A folder candidate must be analysed before automatic queue membership
+    // is created. Rejected paths may not be removed afterward under the
+    // occurrence lifecycle contract.
+    let auto_rejected = fixture.data.path().join("uncached-auto-non-funkot.wav");
+    let mut auto_wav = fs::read(&rejected).unwrap();
+    auto_wav[46] ^= 1;
+    fs::write(&auto_rejected, auto_wav).unwrap();
+    let auto_hash = funkot_core::cache::content_hash(&auto_rejected).unwrap();
+    assert!(crate::analyzed_cache_entry(fixture.cache.path(), &auto_hash).is_none());
+    let auto_queue = queue::new_shared_queue();
+    let auto_service = Arc::new(Mutex::new(Service::new(
+        fixture.data.path(), fixture.cache.path(), auto_queue.clone()
+    )));
+    let gate_cache = fixture.cache.path().to_owned();
+    let gate_data = fixture.data.path().to_owned();
+    let auto_normal = HostSource::new(auto_queue.clone(), queue::DrainPolicy::ContinueFolder {
+        tracks: vec![auto_rejected.clone(), accepted.clone()], pos: 0,
+    }).skip_folder_entry(Box::new(move |path| {
+        crate::admit_playback_path(path, &gate_cache, &gate_data, false)
+            == crate::PlaybackAdmission::Rejected
+    }));
+    let mut auto_source = configure(&auto_service, auto_normal);
+    assert_eq!(auto_source.next().map(|(_, path)| path), Some(accepted.clone()));
+    let pending = queue::pending_snapshot(&auto_queue);
+    assert_eq!(pending.len(), 1, "rejected automatic candidates never enter pending");
+    assert_eq!(pending[0].path, accepted);
+    assert_eq!(pending[0].origin, QueueOrigin::Automatic);
+    assert!(!crate::analyzed_cache_entry(fixture.cache.path(), &auto_hash).unwrap().is_funkot);
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
 }

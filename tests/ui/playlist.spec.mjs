@@ -401,7 +401,13 @@ test("enabled button roles show hover feedback without changing disabled control
     window.__uiFixture.setReply("player_state", player);
   });
   await expectHoverFeedback(page.locator(".transport .primary"));
-  await expectHoverFeedback(page.locator(".transport .flag"));
+  const flag = page.locator(".transport .flag");
+  const flagIdle = await styles(flag);
+  await expectHoverFeedback(flag);
+  const flagHover = await styles(flag);
+  expect(flagHover.background).not.toBe(flagIdle.background);
+  expect(flagHover.color).not.toBe(flagIdle.color);
+  await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-flag-hover.jpg`), quality: 70, fullPage: true, animations: "disabled" });
 
   await page.locator(".mode-switch").getByRole("tab").nth(1).click();
   const compactPrimary = page.locator(".minibar .ctrl").first();

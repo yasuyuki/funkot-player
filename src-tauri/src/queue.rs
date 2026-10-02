@@ -456,6 +456,7 @@ impl HostSource {
             let item = QueueItem::automatic(path);
             if !transition(item.entry_id.as_str(), false, Event::AutomaticFill {
                 entry: item.entry_id.as_str(), source_request: true, unreserved_usable: false,
+                admitted: true, // pick_folder_track already applied the folder predicate
             }).present { return None; }
             q.pending.push_back(item.clone());
             q.reservations.insert(item.entry_id.clone());

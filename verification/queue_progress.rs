@@ -13,6 +13,7 @@ mod proofs {
                 entry: kani::any(),
                 source_request: kani::any(),
                 unreserved_usable: kani::any(),
+                admitted: kani::any(),
             },
             2 => Event::UserDelete(kani::any()),
             3 => Event::PlaybackStarted {
@@ -38,7 +39,8 @@ mod proofs {
                 entry,
                 source_request,
                 unreserved_usable,
-            } => entry == target && source_request && !unreserved_usable,
+                admitted,
+            } => entry == target && source_request && !unreserved_usable && admitted,
             _ => false,
         };
         let removal = match e {
@@ -132,6 +134,7 @@ mod proofs {
                 entry: id,
                 source_request: request,
                 unreserved_usable: true,
+                admitted: kani::any(),
             },
         );
         assert_eq!(
@@ -148,6 +151,7 @@ mod proofs {
                 entry: id,
                 source_request: false,
                 unreserved_usable: kani::any(),
+                admitted: kani::any(),
             },
         );
         assert_eq!(
@@ -157,10 +161,22 @@ mod proofs {
                 accepted: None
             }
         );
+        let rejected = transition(
+            id,
+            before,
+            Event::AutomaticFill {
+                entry: id,
+                source_request: true,
+                unreserved_usable: false,
+                admitted: false,
+            },
+        );
+        assert_eq!(rejected, Update { present: before, accepted: None });
         kani::cover!(
             request && !before && !available.present,
             "usable entry blocks fill"
         );
+        kani::cover!(!before && !rejected.present, "rejected candidate cannot fill");
         kani::cover!(!before && !unsolicited.present, "absence alone cannot fill");
     }
 }

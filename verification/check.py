@@ -15,7 +15,7 @@ PROOFS = {
     "queue_progress": {
         "proofs::membership_update": 9,
         "proofs::distinct_occurrences": 2,
-        "proofs::automatic_fill_requires_exhausted_selection": 2,
+        "proofs::automatic_fill_requires_exhausted_selection": 3,
     },
 }
 started = time.monotonic()

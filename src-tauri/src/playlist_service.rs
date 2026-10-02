@@ -68,7 +68,7 @@ use crate::queue_progress::{transition as queue_transition, Event as QueueEvent}
 
 pub struct Service {
     data: PathBuf, cache: PathBuf, queue: SharedQueue, disk: PlaylistStore, catalog: Catalog,
-    normal_source: Option<HostSource>, claims: BTreeMap<usize, Claim>, next_index: usize,
+    normal_source: Option<Arc<Mutex<HostSource>>>, claims: BTreeMap<usize, Claim>, next_index: usize,
     current_index: Option<usize>, epoch: u64, exhausted: bool, ended: bool,
     restored: Option<CurrentOccurrence>, undo: BTreeMap<String, (String, RemovedEntry)>,
     receipts: BTreeMap<String, (String, CommandResult)>, progress_error: bool,
@@ -292,6 +292,18 @@ pub struct ManagedSource { service: Shared, epoch: u64 }
 impl TrackSource for ManagedSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
         loop {
+            // Folder admission can decode an unanalysed track. Keep the
+            // service mutex available to UI commands while that work runs.
+            let normal_source = {
+                let owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
+                if owner.epoch != self.epoch { return None; }
+                if owner.restored.is_none() && owner.catalog.active_id.is_none() {
+                    owner.normal_source.clone()
+                } else { None }
+            };
+            let normal_selected = normal_source.map(|source| {
+                source.lock().unwrap_or_else(|e| e.into_inner()).next()
+            });
             let (claim, cache, data) = {
                 let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                 if owner.epoch != self.epoch {
@@ -377,12 +389,19 @@ impl TrackSource for ManagedSource {
                         next
                     }
                     None => {
-                        let Some((_, path)) = owner.normal_source.as_mut()?.next() else {
+                        let Some(selection) = normal_selected else {
+                            if owner.normal_source.is_some() { continue; }
                             owner.exhausted = true;
                             return None;
                         };
-                        let item = queue::reserved_item(&owner.queue)
-                            .unwrap_or_else(|| QueueItem::manual(path.clone()));
+                        let Some((_, path)) = selection else {
+                            owner.exhausted = true;
+                            return None;
+                        };
+                        // A queue edit may have revoked the reservation while
+                        // folder analysis ran without the service mutex.
+                        let Some(item) = queue::reserved_item(&owner.queue)
+                            .filter(|item| item.path == path) else { continue; };
                         Some(Claim {
                             source: None,
                             run: 0,
@@ -458,7 +477,8 @@ impl TrackSource for ManagedSource {
     }
 }
 pub fn configure(service: &Shared, normal: HostSource) -> ManagedSource {
-    let mut owner = service.lock().unwrap_or_else(|e| e.into_inner()); owner.normal_source = Some(normal);
+    let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
+    owner.normal_source = Some(Arc::new(Mutex::new(normal)));
     ManagedSource { service: service.clone(), epoch: owner.epoch }
 }
 pub fn started(index: usize) -> Option<QueueOrigin> {
@@ -498,6 +518,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     let append_action = matches!(&request.action, Action::Append { .. });
     let normal_append = owner.active().is_none() && append_action;
     let mut result = CommandResult::default(); let mut removed = None; let mut undo_used = None;
+    let mut removed_normal = None;
     let mut force_source = false;
     match request.action {
         Action::Create { name } => { result.created_id = Some(next.create(name, vec![])?); }
@@ -553,6 +574,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
             if !queue_transition(expect.entry_id.as_str(), true, QueueEvent::UserDelete(expect.entry_id.as_str())).present {
                 normal.remove(index);
             }
+            removed_normal = Some(expect);
             next.revision += 1;
         }
     }
@@ -624,11 +646,29 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     } else { None };
     owner.capture_normal(&mut next, Some(normal.clone()));
     if force_source && !append_action && owner.current_index.is_none() { next.current = None; }
-    let saved = if normal_only && !matches!(owner.disk.load_state(), LoadState::Ready | LoadState::Missing) {
-        let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-        store::save_queue(&owner.data, &normal.iter().cloned().collect()).map_err(|e| PlaylistError::PersistFailed { message: e.to_string() })
-    } else { owner.disk.persist(&next) };
+    // Keep deletion, the session claim, and the displayed queue in one save
+    // order. Session goes first: if the queue save fails, the older durable
+    // queue still restores the occurrence; the inverse order can resurrect a
+    // successfully deleted occurrence after a crash.
+    let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let saved = (|| {
+        if let Some(item) = &removed_normal {
+            let mut session = crate::SESSION.lock().unwrap_or_else(|e|e.into_inner());
+            if session.in_flight.iter().any(|entry| entry.entry_id == item.entry_id) {
+                let mut updated = session.clone();
+                store::retire_revoked(&mut updated.in_flight, item);
+                store::save_session(&owner.data, &updated)
+                    .map_err(|e| PlaylistError::PersistFailed { message: e.to_string() })?;
+                *session = updated;
+            }
+        }
+        if normal_only && !matches!(owner.disk.load_state(), LoadState::Ready | LoadState::Missing) {
+            store::save_queue(&owner.data, &normal.iter().cloned().collect())
+                .map_err(|e| PlaylistError::PersistFailed { message: e.to_string() })
+        } else { owner.disk.persist(&next) }
+    })();
     if let Err(failure) = saved {
+        drop(_saving);
         if let Some(token) = fence {
             let playback = playback.unwrap();
             let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
@@ -652,6 +692,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         for (i, claim) in owner.claims.iter_mut() { if Some(*i) != current_index && claim.live { claim.cancelled = true; claim.live = false; } }
         queue::restore_all(&owner.queue, normal);
         owner.epoch = next_epoch; owner.exhausted = false;
+        drop(_saving);
         let playback = playback.unwrap();
         let retired = { let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
             let retired = render.engine.commit_future_update(fence.unwrap(), prepared.unwrap());
@@ -660,6 +701,9 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         drop(retired);
     } else if normal != old_normal {
         queue::replace_pending(&owner.queue, normal);
+        drop(_saving);
+    } else {
+        drop(_saving);
     }
     // Appending to an ended list makes new pending work, but core remains
     // naturally stopped until the existing Play control explicitly resumes.
