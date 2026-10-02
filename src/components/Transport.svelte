@@ -169,6 +169,12 @@
     color: var(--color-flag-amber);
     border: 1px solid var(--color-flag-amber);
   }
+  .flag:not(:disabled):hover {
+    background: color-mix(in srgb, var(--color-flag-amber) 35%, var(--color-bg));
+    color: #fff;
+    box-shadow: inset 0 0 0 1px var(--color-flag-amber);
+    filter: none;
+  }
   /* Not `.flag`: the outline keeps its colour and the global
      `button[disabled]` opacity is what reads as unavailable, the same way it
      did while this button lived in TransitionStrip. */

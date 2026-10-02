@@ -3018,6 +3018,10 @@ fn audio_thread(
     // the queue under `SAVE_LOCK` (see the closure body).
     let queue_for_save = Arc::clone(&queue);
     let queue_for_priority = Arc::clone(&queue);
+    let queue_for_reserved = Arc::clone(&queue);
+    let reserved_dir = data_dir.clone();
+    let folder_gate_cache = cache_dir_for_log.clone();
+    let folder_gate_data = data_dir.clone();
     let source = HostSource::new(
         queue,
         DrainPolicy::ContinueFolder {
@@ -3025,6 +3029,17 @@ fn audio_thread(
             pos: folder_pos,
         },
     )
+        .skip_folder_entry(Box::new(move |path| {
+            // Decide before automatic membership is created. A rejected
+            // pending occurrence must remain until playback or user deletion,
+            // so adding an unanalysed non-Funkot path would leave a ghost row.
+            admit_playback_path(
+                path,
+                &folder_gate_cache,
+                &folder_gate_data,
+                ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+            ) == PlaybackAdmission::Rejected
+        }))
         .on_pending_consumed(Box::new(move |_pending| {
             // Ignore the slice this observer is handed — it is a snapshot
             // `HostSource::next` took *after releasing the queue lock*
@@ -3079,13 +3094,19 @@ fn audio_thread(
             // longer available here) — `start_impl` sets it before spawning
             // this thread, so it is always populated by the time the loader
             // makes its first call.
+            let _saving = SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut session = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            // A user may have removed this reservation while source.next()
+            // waited for the save lock. QueueRemove saves the session and
+            // replaces the queue under the same lock.
+            if queue::reserved_item(&queue_for_reserved)
+                .is_some_and(|reserved| reserved.entry_id == item.entry_id)
             {
-                let mut session = SESSION
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 session.in_flight.push(item.clone());
+                if let Err(e) = store::save_session(&reserved_dir, &session) {
+                    log::warn!("save_session({}): {e}", reserved_dir.display());
+                }
             }
-            persist_session();
         }))
         .on_folder_pos(Box::new(|pos| {
             FOLDER_POS.store(pos, Ordering::Relaxed);

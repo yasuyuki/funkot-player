@@ -7,6 +7,7 @@ pub enum Event<I> {
         entry: I,
         source_request: bool,
         unreserved_usable: bool,
+        admitted: bool,
     },
     UserDelete(I),
     PlaybackStarted {
@@ -36,7 +37,7 @@ pub struct Update {
 /// Authorize one event against one occurrence, including idempotent repeats.
 /// Callers mutate membership only when `present` changes. A playback start's
 /// `accepted` flag must come from a validated claim for an observed engine index.
-/// Automatic fill requires a source request with no unreserved usable entry.
+/// Automatic fill requires an admitted source candidate and no unreserved usable entry.
 pub fn transition<I: Copy + Eq>(target: I, present: bool, event: Event<I>) -> Update {
     let accepted = match event {
         Event::UserAdd(entry) if entry == target => Some(Cause::UserAdd),
@@ -44,6 +45,7 @@ pub fn transition<I: Copy + Eq>(target: I, present: bool, event: Event<I>) -> Up
             entry,
             source_request: true,
             unreserved_usable: false,
+            admitted: true,
         } if entry == target => Some(Cause::AutomaticFill),
         Event::UserDelete(entry) if entry == target => Some(Cause::UserDelete),
         Event::PlaybackStarted {
