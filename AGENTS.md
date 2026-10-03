@@ -6,6 +6,9 @@ from that manifest; do not hard-code an absolute path or substitute another
 checkout. Start tool entry points from the common parent and read this file
 before changing the member.
 
+Before changing API, CLI, configuration, or persistent-data contracts, follow
+[the compatibility and data migration policy](docs/development-setup.md#compatibility-and-data-migration).
+
 This interactive working-set boundary is separate from isolated
 `wsl-agent-lifecycle` clone management. Do not access `.secrets/`, copy
 authentication, or handle signing material. Android builds, signing, Docker

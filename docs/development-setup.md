@@ -5,6 +5,44 @@ These steps were verified on Ubuntu 24.04 under WSL2 with systemd.
 
 For Android builds, ADB, desktop GUI, and shipping, see [README.md § For developers](../README.md#for-developers) after the smoke checks below pass.
 
+## Compatibility and data migration
+
+All products under the maintainer's control follow this policy, including
+funkot-player. A new version does not have to preserve compatibility with the
+currently released or used version. Breaking changes to APIs, CLI commands,
+configuration, behavior, and storage formats are allowed. Do not retain aliases,
+compatibility layers, old branches, or duplicate implementations solely to keep
+old versions compatible. Breaking compatibility or removing working features
+without a purpose is not a goal.
+
+When persistent data becomes incompatible, support forward conversion from only
+the immediately preceding data-format generation into the current format.
+A generation boundary is an incompatible persistent-data format change.
+Application releases, patches, and commits that keep the same format belong to
+the same generation. Use the product's existing format identifiers.
+With current format N, provide N-1 to N conversion and advance that window at
+the next incompatible generation. Do not accumulate converters for older
+generations. Direct or chained upgrades from N-2 or earlier, reverse conversion,
+old-version reads or writes, and application downgrade compatibility are not
+supported. Changes that leave persistent data compatible do not require a converter.
+
+This policy does not authorize data loss. Preserve user-owned information that
+must carry forward and keep the original recoverable until conversion is verified.
+Report unsupported old generations, unknown new formats, corruption, and conversion
+failures. Never replace them with apparently valid empty data. Preserving an
+unsupported format does not guarantee that the current product can interpret or
+convert it. Regenerable derived data may be rebuilt under the existing protection
+and use conditions in [the local-data guide](local-data.md). Do not treat manual
+or otherwise non-regenerable data as disposable derived data.
+
+Each product owns its implementation, conversion, and verification. The current
+supported combination of player, core, dependencies, IPC, and storage must still
+work correctly. Keep source-identity checks, core adoption rules, safety,
+permissions, and data-protection requirements. Where a breaking change affects
+users, explain the changed contract and supported conversion in the existing
+change documentation. Do not introduce a migration framework, compatibility
+register, approval layer, or per-task compliance report merely to assert this policy.
+
 ## Prerequisites
 
 - **Docker Engine** on the host (CLI + daemon). Host Rust and Node are not required; `./dev.sh` runs everything in the `funkot-player-dev` image.

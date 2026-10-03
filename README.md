@@ -190,6 +190,7 @@ control playback or automatically display anything in the companion app.
 ## For developers
 
 Setup: [docs/development-setup.md](docs/development-setup.md)
+Follow the [compatibility and data migration policy](docs/development-setup.md#compatibility-and-data-migration) when revising product contracts.
 
 Analysis and mixing come from
 [funkot-autodj](https://github.com/yasuyuki/funkot-autodj)'s `funkot-core`.
