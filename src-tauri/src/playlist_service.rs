@@ -520,7 +520,10 @@ pub fn reconfigure_admission(
 ) -> Result<(), CommandError> {
     let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
     let previous = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
-    if previous == allow_non_funkot {
+    // OFF is a cleanup operation as well as a setting change. The atomic can
+    // already be false while an older source still has admitted normal
+    // reservations, so only an unchanged ON setting may skip the future fence.
+    if previous == allow_non_funkot && allow_non_funkot {
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         return persist_settings().map_err(|message| CommandError { code: "persist_failed".into(), message });
     }

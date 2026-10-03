@@ -1105,6 +1105,97 @@ fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
 
 
 #[test]
+fn off_revokes_prepared_automatic_non_funkot_when_switching_from_on() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let current_path = fixture.file("current-auto.wav");
+    let prepared_path = fixture.file("prepared-auto.wav");
+    let waiting_path = fixture.file("waiting-auto.wav");
+    let items = vec![
+        QueueItem::automatic(current_path),
+        QueueItem::automatic(prepared_path.clone()),
+        QueueItem::automatic(waiting_path.clone()),
+    ];
+    queue::replace_pending(&fixture.queue, items.clone());
+    let normal = HostSource::new(
+        fixture.queue.clone(),
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    );
+    let mut source = configure(&fixture.service, normal);
+    let current = source.next().unwrap();
+    let prepared = source.next().unwrap();
+    assert_eq!(prepared.1, prepared_path);
+    // ON admits the automatic future before its analysis completes. The
+    // background result arrives while it is visibly waiting, before OFF.
+    fixture.store_analysis(&prepared_path, false);
+    fixture.store_analysis(&waiting_path, false);
+    let player = playback(&[current.clone(), prepared], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+
+    reconfigure_admission(&fixture.service, false, Some(&player), || Ok(())).unwrap();
+
+    assert!(queue::pending_snapshot(&fixture.queue).is_empty());
+    assert!(store::load_queue(fixture.data.path()).unwrap().is_empty());
+    assert!(!store::load_session(fixture.data.path()).in_flight.iter().any(|item| {
+        item.entry_id == items[1].entry_id || item.entry_id == items[2].entry_id
+    }));
+    assert!(source.next().is_none(), "retired ON source cannot replay the prepared automatic item");
+    let render = player.render.lock().unwrap();
+    assert_eq!(render.engine.current_index(), Some(current.0));
+    assert_eq!(render.engine.next_track_path(), None);
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn off_reapplies_cleanup_when_admission_atomic_is_already_false() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let current = fixture.file("current.wav");
+    let prepared_non_funkot = fixture.file("prepared-non-funkot.wav");
+    fixture.store_analysis(&prepared_non_funkot, false);
+    let waiting_non_funkot = fixture.file("waiting-non-funkot.wav");
+    fixture.store_analysis(&waiting_non_funkot, false);
+    let items = vec![
+        QueueItem::manual(current),
+        QueueItem::manual(prepared_non_funkot.clone()),
+        QueueItem::manual(waiting_non_funkot.clone()),
+    ];
+    queue::replace_pending(&fixture.queue, items.clone());
+    let normal = HostSource::new(
+        fixture.queue.clone(),
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    );
+    let mut source = configure(&fixture.service, normal);
+    let current = source.next().unwrap();
+    let prepared = source.next().unwrap();
+    assert_eq!(prepared.1, prepared_non_funkot);
+    let player = playback(&[current.clone(), prepared], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+
+    // This models a settings read that has already published OFF while an old
+    // source still owns a prepared non-Funkot future.
+    crate::ALLOW_NON_FUNKOT.store(false, std::sync::atomic::Ordering::Relaxed);
+    reconfigure_admission(&fixture.service, false, Some(&player), || Ok(())).unwrap();
+
+    assert!(queue::pending_snapshot(&fixture.queue).is_empty());
+    assert!(store::load_queue(fixture.data.path()).unwrap().is_empty());
+    assert!(!store::load_session(fixture.data.path()).in_flight.iter().any(|item| {
+        item.entry_id == items[1].entry_id || item.entry_id == items[2].entry_id
+    }));
+    assert!(source.next().is_none(), "retired source cannot replay its prepared non-Funkot item");
+    let render = player.render.lock().unwrap();
+    assert_eq!(render.engine.current_index(), Some(current.0));
+    assert_eq!(render.engine.next_track_path(), None);
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
 fn disabling_admission_persists_filtered_normal_resume_for_startup() {
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
