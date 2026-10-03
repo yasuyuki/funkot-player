@@ -12,6 +12,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-native-owner:
+    name: Windows native artifact ownership
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - uses: actions/checkout@v7
+        with:
+          repository: yasuyuki/workspace-lifecycle
+          ref: 0765d3bb33ddab16e93daa6f942e5bd781c3c5cd
+          path: workspace-lifecycle
+      - name: Install the tested public reclamation API
+        run: python -m pip install ./workspace-lifecycle
+      - name: Test native generation, deployment and completion
+        working-directory: funkot-player
+        run: ./scripts/win-build.test.ps1 -OwnerPython (Get-Command python).Source
+
   core-pin:
     name: Read adopted core commit
     runs-on: ubuntu-latest
