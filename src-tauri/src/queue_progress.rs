@@ -10,6 +10,7 @@ pub enum Event<I> {
         admitted: bool,
     },
     UserDelete(I),
+    AdmissionDisabled(I),
     PlaybackStarted {
         entry: I,
         accepted: bool,
@@ -25,6 +26,7 @@ pub enum Cause {
     UserAdd,
     AutomaticFill,
     UserDelete,
+    AdmissionDisabled,
     PlaybackStarted,
 }
 
@@ -48,6 +50,7 @@ pub fn transition<I: Copy + Eq>(target: I, present: bool, event: Event<I>) -> Up
             admitted: true,
         } if entry == target => Some(Cause::AutomaticFill),
         Event::UserDelete(entry) if entry == target => Some(Cause::UserDelete),
+        Event::AdmissionDisabled(entry) if entry == target => Some(Cause::AdmissionDisabled),
         Event::PlaybackStarted {
             entry,
             accepted: true,
@@ -56,7 +59,7 @@ pub fn transition<I: Copy + Eq>(target: I, present: bool, event: Event<I>) -> Up
     };
     let present = match accepted {
         Some(Cause::UserAdd | Cause::AutomaticFill) => true,
-        Some(Cause::UserDelete | Cause::PlaybackStarted) => false,
+        Some(Cause::UserDelete | Cause::AdmissionDisabled | Cause::PlaybackStarted) => false,
         None => present,
     };
     Update { present, accepted }

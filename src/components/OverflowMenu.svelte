@@ -107,8 +107,9 @@
     allowNonFunkotBusy = true;
     ui.menuOpen = false;
     try {
-      await store.doSetAllowNonFunkot(!store.allowNonFunkot);
-      toast.notify(t.allowNonFunkotToast(store.allowNonFunkot));
+      const saved = await store.doSetAllowNonFunkot(!store.allowNonFunkot);
+      if (saved) toast.notify(t.allowNonFunkotToast(store.allowNonFunkot));
+      else toast.notify(store.lastError ?? t.playlistError("busy"));
     } finally {
       allowNonFunkotBusy = false;
     }

@@ -20,12 +20,38 @@ impl Fixture {
         self.store_analysis(&path, true);
         path
     }
+    fn wav(&self, name: &str) -> PathBuf {
+        let path = self.data.path().join(name);
+        let sample_rate = 44_100u32;
+        let pcm = vec![0u8; sample_rate as usize * 2];
+        let data_len = pcm.len() as u32;
+        let mut wav = Vec::with_capacity(44 + pcm.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        fs::write(&path, wav).unwrap();
+        funkot_core::decode::decode_file(&path).expect("generated WAV must decode");
+        path
+    }
     fn store_analysis(&self, path: &Path, is_funkot: bool) {
         let buffer = funkot_core::decode::AudioBuffer { sample_rate: 48_000, frames: 48_000 * 30, samples: Vec::new() };
         let mut analysis = funkot_core::cache::provisional(&buffer, path.file_name().unwrap().to_str().unwrap());
         analysis.is_funkot = is_funkot;
         let hash = funkot_core::cache::content_hash(path).unwrap();
         funkot_core::cache::store(self.cache.path(), &hash, &analysis).unwrap();
+        let mut index = store::load_hash_index(self.data.path()).index;
+        store::resolve_library_file(path, &mut index).unwrap();
+        store::save_hash_index(self.data.path(), &index).unwrap();
     }
     fn track(path: &Path) -> TrackRef {
         TrackRef { content_hash: funkot_core::cache::content_hash(path).unwrap(), preferred_path: path.into(),
@@ -916,8 +942,10 @@ fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
     let analysis = crate::analyzed_cache_entry(fixture.cache.path(), &funkot_core::cache::content_hash(&rejected).unwrap())
         .expect("the uncached candidate must be fully analysed");
     assert!(!analysis.is_funkot);
-    assert_eq!(queue::pending_snapshot(&fixture.queue), vec![bad, good]);
-    assert!(source.next().is_none(), "blocked non-Funkot must not be retried");
+    assert_eq!(queue::pending_snapshot(&fixture.queue), vec![good.clone()]);
+    assert_eq!(store::load_queue(fixture.data.path()).unwrap(), vec![good.clone()],
+        "the exact classified occurrence is removed from the durable queue");
+    assert!(source.next().is_none(), "removed non-Funkot must not be retried");
 
     // Exercise the real asynchronous loader, not just the source return: the
     // first audible Engine event must name the accepted candidate.
@@ -942,8 +970,7 @@ fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
     assert_eq!(first_started, accepted);
 
     // A folder candidate must be analysed before automatic queue membership
-    // is created. Rejected paths may not be removed afterward under the
-    // occurrence lifecycle contract.
+    // is created, so rejected paths never acquire an occurrence to remove.
     let auto_rejected = fixture.data.path().join("uncached-auto-non-funkot.wav");
     let mut auto_wav = fs::read(&rejected).unwrap();
     auto_wav[46] ^= 1;
@@ -1019,6 +1046,10 @@ fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
         let session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(session.in_flight.is_empty());
     }
+    let saved_queue = store::load_queue(fixture.data.path()).unwrap();
+    assert_eq!(saved_queue, items[2..].to_vec(), "the OFF removal survives queue restore");
+    assert_eq!(store::restored_pending(&store::load_session(fixture.data.path()).in_flight, &saved_queue), items[2..].to_vec(),
+        "restart restores only the retained Funkot occurrence");
 
     assert!(source.next().is_none(), "the retired source cannot reserve another occurrence");
     assert!(!crate::NEXT_PREPARED.load(std::sync::atomic::Ordering::Relaxed));
@@ -1027,9 +1058,11 @@ fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
         let owner = fixture.service.lock().unwrap();
         assert!(owner.claims[&rejected_future.0].cancelled);
         assert_eq!(owner.current_index, Some(first.0));
-        assert_eq!(owner.normal_items(), items[1..].to_vec());
+        assert_eq!(owner.normal_items(), items[2..].to_vec());
         assert_eq!(owner.normal_items().iter().map(|item| &item.entry_id).collect::<Vec<_>>(),
-            items[1..].iter().map(|item| &item.entry_id).collect::<Vec<_>>());
+            items[2..].iter().map(|item| &item.entry_id).collect::<Vec<_>>());
+        assert_eq!(owner.catalog.normal.as_ref().unwrap().items, items[2..].to_vec(),
+            "the live OFF transaction persists the filtered startup resume");
     }
     {
         let render = player.render.lock().unwrap();
@@ -1070,6 +1103,283 @@ fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
     assert!(started_accepted, "the replacement source must start the retained Funkot occurrence");
 }
 
+
+#[test]
+fn disabling_admission_persists_filtered_normal_resume_for_startup() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let rejected = fixture.file("non-funkot.wav");
+    fixture.store_analysis(&rejected, false);
+    let accepted = fixture.file("funkot.wav");
+    let rejected_item = QueueItem::manual(rejected);
+    let accepted_item = QueueItem::manual(accepted);
+    queue::replace_pending(&fixture.queue, vec![rejected_item.clone(), accepted_item.clone()]);
+
+    reconfigure_admission(&fixture.service, false, None, || Ok(())).unwrap();
+    let Fixture { data, cache, queue, service } = fixture;
+    drop(service);
+    let reopened = Service::new(data.path(), cache.path(), queue);
+    let restored = reopened.restore_normal().unwrap().items;
+    assert_eq!(restored, vec![accepted_item], "startup keeps the original accepted occurrence");
+    assert!(!restored.iter().any(|item| item.entry_id == rejected_item.entry_id),
+        "startup must not restore the OFF-deleted occurrence");
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+
+#[test]
+fn idle_off_hydrates_persisted_normal_before_filtering() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let rejected = fixture.file("persisted-non-funkot.wav");
+    fixture.store_analysis(&rejected, false);
+    let accepted = fixture.file("persisted-funkot.wav");
+    let rejected_item = QueueItem::manual(rejected);
+    let accepted_item = QueueItem::manual(accepted);
+    {
+        let mut owner = fixture.service.lock().unwrap();
+        owner.catalog.normal = Some(NormalResume {
+            items: vec![rejected_item.clone(), accepted_item.clone()],
+            folder_pos: Some(4),
+        });
+        owner.disk.persist(&owner.catalog).unwrap();
+    }
+
+    // This models the settings command before queue-tab preload: no global
+    // service and no in-memory pending items, but catalog.normal is canonical.
+    let Fixture { data, cache, queue, service } = fixture;
+    drop(service);
+    assert!(queue::pending_snapshot(&queue).is_empty());
+    let idle = Arc::new(Mutex::new(Service::new(data.path(), cache.path(), queue.clone())));
+    reconfigure_admission(&idle, false, None, || Ok(())).unwrap();
+    assert_eq!(queue::pending_snapshot(&queue), vec![accepted_item.clone()]);
+    drop(idle);
+    let reopened = Service::new(data.path(), cache.path(), queue);
+    assert_eq!(reopened.restore_normal().unwrap().items, vec![accepted_item]);
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn idle_off_merges_live_enqueue_with_persisted_normal() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let rejected = fixture.file("persisted-mixed-non-funkot.wav");
+    fixture.store_analysis(&rejected, false);
+    let accepted = fixture.file("persisted-mixed-funkot.wav");
+    let fresh = fixture.file("live-enqueue-funkot.wav");
+    let rejected_item = QueueItem::manual(rejected);
+    let accepted_item = QueueItem::manual(accepted);
+    let fresh_item = QueueItem::manual(fresh);
+    {
+        let mut owner = fixture.service.lock().unwrap();
+        owner.catalog.normal = Some(NormalResume {
+            items: vec![rejected_item.clone(), accepted_item.clone()],
+            folder_pos: Some(4),
+        });
+        owner.disk.persist(&owner.catalog).unwrap();
+    }
+
+    // A manual enqueue that began before service initialization has already
+    // reached the live queue when OFF reconstructs the persisted normal set.
+    let Fixture { data, cache, queue, service } = fixture;
+    drop(service);
+    queue::replace_pending(&queue, vec![fresh_item.clone()]);
+    let idle = Arc::new(Mutex::new(Service::new(data.path(), cache.path(), queue.clone())));
+    reconfigure_admission(&idle, false, None, || Ok(())).unwrap();
+    assert_eq!(queue::pending_snapshot(&queue), vec![accepted_item.clone(), fresh_item.clone()]);
+    drop(idle);
+    let reopened = Service::new(data.path(), cache.path(), queue);
+    assert_eq!(reopened.restore_normal().unwrap().items, vec![accepted_item, fresh_item]);
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn disabling_admission_hashes_a_cached_manual_index_miss() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let rejected = fixture.file("manual-index-miss.wav");
+    fixture.store_analysis(&rejected, false);
+    // `enqueue` may hash a manually selected file without adding it to the
+    // refresh-owned hash index. The completed cache still governs OFF.
+    store::save_hash_index(fixture.data.path(), &store::HashIndex::new()).unwrap();
+    let rejected_item = QueueItem::manual(rejected);
+    queue::replace_pending(&fixture.queue, vec![rejected_item]);
+
+    reconfigure_admission(&fixture.service, false, None, || Ok(())).unwrap();
+    assert!(queue::pending_snapshot(&fixture.queue).is_empty(),
+        "OFF removes an effective non-Funkot manual index miss");
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+
+#[test]
+fn disabling_admission_keeps_missing_and_same_fingerprint_replacement() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let missing = fixture.file("missing-non-funkot.wav");
+    fixture.store_analysis(&missing, false);
+    let replaced = fixture.file("replaced-non-funkot.wav");
+    fixture.store_analysis(&replaced, false);
+    let missing_item = QueueItem::manual(missing.clone());
+    let replaced_item = QueueItem::manual(replaced.clone());
+    fs::remove_file(&missing).unwrap();
+    let original = fs::read(&replaced).unwrap();
+    let original_hash = funkot_core::cache::content_hash(&replaced).unwrap();
+    let original_mtime = fs::metadata(&replaced).unwrap().modified().unwrap();
+    fs::write(&replaced, vec![b'x'; original.len()]).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&replaced)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    assert_eq!(fs::metadata(&replaced).unwrap().len(), original.len() as u64);
+    assert_eq!(
+        fs::metadata(&replaced).unwrap().modified().unwrap(),
+        original_mtime
+    );
+    let replacement_hash = funkot_core::cache::content_hash(&replaced).unwrap();
+    assert_ne!(replacement_hash, original_hash);
+    // Keep the old hash-index entry intact but record the replacement as
+    // Funkot. A fingerprint-only OFF filter would delete it using the old
+    // non-Funkot verdict; the full hash below must retain it.
+    let buffer = funkot_core::decode::AudioBuffer {
+        sample_rate: 48_000,
+        frames: 48_000 * 30,
+        samples: Vec::new(),
+    };
+    let mut replacement_analysis = funkot_core::cache::provisional(&buffer, "replacement");
+    replacement_analysis.is_funkot = true;
+    funkot_core::cache::store(fixture.cache.path(), &replacement_hash, &replacement_analysis).unwrap();
+    queue::replace_pending(&fixture.queue, vec![missing_item.clone(), replaced_item.clone()]);
+
+    reconfigure_admission(&fixture.service, false, None, || Ok(())).unwrap();
+    assert_eq!(queue::pending_snapshot(&fixture.queue), vec![missing_item, replaced_item],
+        "OFF retains missing paths and same-fingerprint replacements until final admission verifies them");
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+
+#[test]
+fn disabling_admission_fences_engine_before_a_blocked_normal_source_releases() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let current = fixture.file("current.wav");
+    let rejected = fixture.file("non-funkot.wav");
+    fixture.store_analysis(&rejected, false);
+    let items = vec![QueueItem::manual(current.clone()), QueueItem::manual(rejected.clone())];
+    queue::replace_pending(&fixture.queue, items);
+    let normal = HostSource::new(
+        fixture.queue.clone(),
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    );
+    let mut source = configure(&fixture.service, normal);
+    let first = source.next().unwrap();
+    let rejected_future = source.next().unwrap();
+    let player = Arc::new(playback(&[first.clone(), rejected_future.clone()], 4096));
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+
+    // Keep the HostSource mutex unavailable. The setter must still acquire the
+    // core fence before it can wait here, otherwise an old loader can reserve
+    // and persist after the setting has begun to change.
+    let normal_source = fixture.service.lock().unwrap().normal_source.clone().unwrap();
+    let source_guard = normal_source.lock().unwrap();
+    let service = fixture.service.clone();
+    let worker_player = Arc::clone(&player);
+    let worker = std::thread::spawn(move || {
+        reconfigure_admission(&service, false, Some(&worker_player), || Ok(()))
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let mut render = player.render.lock().unwrap();
+        match render.engine.begin_future_update() {
+            Err(FutureUpdateBusy::UpdateInProgress) => break,
+            Ok(token) => render.engine.abort_future_update(token),
+            Err(reason) => panic!("unexpected fence state while normal source is blocked: {reason:?}"),
+        }
+        drop(render);
+        assert!(std::time::Instant::now() < deadline,
+            "OFF must fence the engine before waiting for HostSource");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    drop(source_guard);
+    worker.join().unwrap().unwrap();
+
+    {
+        let mut render = player.render.lock().unwrap();
+        render.engine.request_nav(funkot_core::engine::NavAction::TransitionToNext);
+        render.engine.render(&mut [0.0; 128]);
+        for event in render.engine.poll_events() {
+            if let funkot_core::engine::EngineEvent::TrackStarted { path, .. } = event {
+                assert_ne!(path, rejected, "a fenced non-Funkot future must never start");
+            }
+        }
+        assert_eq!(render.engine.current_index(), Some(first.0));
+        assert_eq!(render.engine.next_track_path(), None);
+    }
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn final_admission_blocks_decodable_track_when_cache_write_is_unavailable() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(false, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let decodable = fixture.wav("cache-write-fails.wav");
+    let item = QueueItem::manual(decodable.clone());
+    queue::replace_pending(&fixture.queue, vec![item.clone()]);
+    // `decode_file` succeeds, but the cache root is a regular file so
+    // `fill_missing` cannot publish an analysis verdict.
+    fs::remove_dir_all(fixture.cache.path()).unwrap();
+    fs::write(fixture.cache.path(), b"not a cache directory").unwrap();
+    assert_eq!(
+        crate::admit_playback_path(&decodable, fixture.cache.path(), fixture.data.path(), false),
+        crate::PlaybackAdmission::Unavailable,
+    );
+    let normal = HostSource::new(
+        fixture.queue.clone(),
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    );
+    let source = configure(&fixture.service, normal);
+    let mut engine = funkot_core::engine::Engine::new_with_source(
+        funkot_core::EngineOptions::default(), Box::new(source),
+    ).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut started = false;
+    while !engine.is_finished() && std::time::Instant::now() < deadline {
+        engine.render(&mut [0.0; 128]);
+        started |= engine.poll_events().into_iter().any(|event| matches!(
+            event, funkot_core::engine::EngineEvent::TrackStarted { .. }
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(engine.is_finished(), "unavailable admission must exhaust this source attempt");
+    assert!(!started, "cache-unavailable track must never produce TrackStarted");
+    assert_eq!(queue::pending_snapshot(&fixture.queue), vec![item],
+        "an unavailable verdict retains the exact queue occurrence for retry");
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
 
 #[test]
 fn admission_settings_save_failure_keeps_existing_future() {

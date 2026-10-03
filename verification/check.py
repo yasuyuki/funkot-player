@@ -13,7 +13,7 @@ PROOFS = {
         "proofs::initial_and_seven_occurrences": 2,
     },
     "queue_progress": {
-        "proofs::membership_update": 9,
+        "proofs::membership_update": 10,
         "proofs::distinct_occurrences": 2,
         "proofs::automatic_fill_requires_exhausted_selection": 3,
     },

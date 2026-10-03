@@ -3838,9 +3838,11 @@ fn start_impl(
         Vec::new()
     });
     let restored = store::restored_pending(&session.in_flight, &saved);
+    let _prestart = playlist_service::lock_prestart_queue();
     let source_owner = playlist_service::get(&data, &cache, &state.queue);
     let normal_resume = source_owner.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
     queue::replace_pending(&state.queue, normal_resume.as_ref().map(|n| n.items.clone()).unwrap_or(restored));
+    drop(_prestart);
     // Mirror the restored queue to `queue.json` *before* clearing
     // `SESSION.in_flight` below, not after: from here until that clear,
     // `queue.json` still doesn't list the tracks that were `in_flight` (they
@@ -4892,6 +4894,7 @@ fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
 /// pass. Tracks already in the queue are never removed by this gate.
 #[tauri::command(async)]
 fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let dirs = resolve_dirs(&app)?;
     let path_buf = PathBuf::from(&path);
@@ -4924,32 +4927,30 @@ fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
     Ok(allow)
 }
 
-/// Persist `allow_non_funkot` and reconfigure a live future source before its
-/// admission atomic is published to the loader.
+/// Persist `allow_non_funkot` and reconfigure the normal queue and any live
+/// future source before publishing the admission atomic to the loader.
 #[tauri::command(async)]
-fn set_allow_non_funkot(app: tauri::AppHandle, allow: bool) -> Result<bool, String> {
+fn set_allow_non_funkot(
+    app: tauri::AppHandle,
+    allow: bool,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     let dirs = resolve_dirs(&app)?;
     let data = Path::new(&dirs.data_dir);
-    if let Some(service) = playlist_service::existing() {
-        playlist_service::reconfigure_admission(&service, allow, PLAYBACK.get(), || {
-            let mut settings = store::load_settings(data);
-            settings.allow_non_funkot = allow;
-            store::save_settings(data, &settings)
-                .map_err(|error| format!("cannot save settings: {error}"))
-        }).map_err(|error| error.message)?;
-        Ok(allow)
-    } else {
-        with_settings_rmw_then(
-            data,
-            |settings| {
-                settings.allow_non_funkot = allow;
-            },
-            |_| {
-                ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
-                allow
-            },
-        )
-    }
+    // Settings can be changed before startup or before `queue_state` has
+    // initialized the service. Create it here so OFF filters the same durable
+    // normal queue/catalog resume that startup will later prefer.
+    let service = playlist_service::existing().unwrap_or_else(|| {
+        playlist_service::get(data, Path::new(&dirs.cache_dir), &state.queue)
+    });
+    playlist_service::reconfigure_admission(&service, allow, PLAYBACK.get(), || {
+        let mut settings = store::load_settings(data);
+        settings.allow_non_funkot = allow;
+        store::save_settings(data, &settings)
+            .map_err(|error| format!("cannot save settings: {error}"))
+    }).map_err(|error| error.message)?;
+    Ok(allow)
 }
 
 /// Current `settings.json` `labeling_mode` (raw, pre-platform-gate).
@@ -5183,6 +5184,7 @@ fn reorder(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
@@ -5236,6 +5238,7 @@ fn dequeue(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<QueueItem, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
@@ -5278,6 +5281,7 @@ fn dequeue(
 fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
     // The source owner serializes claims, progress and all destination edits.
     // Reconcile against the engine before publishing the displayed revision.
+    let _prestart = playlist_service::lock_prestart_queue();
     let service = match playlist_service::existing() {
         Some(service) => service,
         None => { let dirs = resolve_dirs(&app)?;
@@ -5419,6 +5423,7 @@ fn analyzed_cache_entry(
 pub(crate) enum PlaybackAdmission {
     Accepted,
     Rejected,
+    Unavailable,
 }
 
 pub(crate) fn admit_playback_path(
@@ -5431,19 +5436,19 @@ pub(crate) fn admit_playback_path(
         return PlaybackAdmission::Accepted;
     }
     let Ok(hash) = funkot_core::cache::content_hash(path) else {
-        return PlaybackAdmission::Rejected;
+        return PlaybackAdmission::Unavailable;
     };
     if analyzed_cache_entry(cache_dir, &hash).is_none() {
         let Ok(buffer) = funkot_core::decode::decode_file(path) else {
-            return PlaybackAdmission::Rejected;
+            return PlaybackAdmission::Unavailable;
         };
         if funkot_core::cache::fill_missing(path, cache_dir, &buffer).is_err() {
-            return PlaybackAdmission::Rejected;
+            return PlaybackAdmission::Unavailable;
         }
         reapply_overrides(path, cache_dir, data_dir);
     }
     let Some(analysis) = analyzed_cache_entry(cache_dir, &hash) else {
-        return PlaybackAdmission::Rejected;
+        return PlaybackAdmission::Unavailable;
     };
     let override_funkot = store::load_overrides(data_dir)
         .get(&hash)
@@ -5541,9 +5546,11 @@ fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
     });
     let restored = store::restored_pending(&session.in_flight, &saved);
     let state = app.state::<AppState>();
+    let _prestart = playlist_service::lock_prestart_queue();
     let service = playlist_service::get(&data, cache_dir, &state.queue);
     let normal = service.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
     queue::replace_pending(&state.queue, normal.map(|n|n.items).unwrap_or(restored));
+    drop(_prestart);
 
     // The preload is not only a view: from this point the restored entries
     // are editable as ordinary pending rows. Commit that ownership transfer
@@ -8469,6 +8476,7 @@ fn queue_new_arrivals(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<u32, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let added = queue_new_arrivals_locked(&app, &state)?;
     let mut prioritized = false;
@@ -8616,6 +8624,7 @@ fn enqueue_many(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<EnqueueManyResult, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let result = enqueue_many_locked(&app, &state, &paths)?;
     let mut prioritized = false;

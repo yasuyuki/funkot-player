@@ -152,6 +152,19 @@ pub(crate) fn mark_started(queue: &SharedQueue, item: &QueueItem) -> bool {
     true
 }
 
+/// Remove this exact queued occurrence after an effective non-Funkot verdict
+/// while the admission setting is off. Decode/cache failures never use this.
+pub(crate) fn remove_admission_disabled(queue: &SharedQueue, item: &QueueItem) -> bool {
+    let mut q = queue.lock().unwrap();
+    let Some(index) = q.pending.iter().position(|entry| entry.entry_id == item.entry_id) else { return false; };
+    let update = transition(item.entry_id.as_str(), true, Event::AdmissionDisabled(item.entry_id.as_str()));
+    if update.present { return false; }
+    q.pending.remove(index);
+    q.cancel(&item.entry_id);
+    q.blocked.remove(&item.entry_id);
+    true
+}
+
 pub(crate) fn block_reserved(queue: &SharedQueue, item: &QueueItem) -> bool {
     let mut q = queue.lock().unwrap();
     if !q.pending.iter().any(|entry| entry.entry_id == item.entry_id) { return false; }

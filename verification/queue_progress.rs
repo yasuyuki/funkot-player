@@ -7,7 +7,7 @@ mod proofs {
     use super::queue_progress::*;
 
     fn event() -> Event<u64> {
-        match kani::any::<u8>() % 8 {
+        match kani::any::<u8>() % 9 {
             0 => Event::UserAdd(kani::any()),
             1 => Event::AutomaticFill {
                 entry: kani::any(),
@@ -16,13 +16,14 @@ mod proofs {
                 admitted: kani::any(),
             },
             2 => Event::UserDelete(kani::any()),
-            3 => Event::PlaybackStarted {
+            3 => Event::AdmissionDisabled(kani::any()),
+            4 => Event::PlaybackStarted {
                 entry: kani::any(),
                 accepted: kani::any(),
             },
-            4 => Event::Reserve(kani::any()),
-            5 => Event::Reject(kani::any()),
-            6 => Event::Reorder,
+            5 => Event::Reserve(kani::any()),
+            6 => Event::Reject(kani::any()),
+            7 => Event::Reorder,
             _ => Event::Passive,
         }
     }
@@ -44,7 +45,7 @@ mod proofs {
             _ => false,
         };
         let removal = match e {
-            Event::UserDelete(id) => id == target,
+            Event::UserDelete(id) | Event::AdmissionDisabled(id) => id == target,
             Event::PlaybackStarted { entry, accepted } => entry == target && accepted,
             _ => false,
         };
@@ -57,6 +58,7 @@ mod proofs {
             Some(Cause::UserAdd) => assert!(matches!(e, Event::UserAdd(_))),
             Some(Cause::AutomaticFill) => assert!(matches!(e, Event::AutomaticFill { .. })),
             Some(Cause::UserDelete) => assert!(matches!(e, Event::UserDelete(_))),
+            Some(Cause::AdmissionDisabled) => assert!(matches!(e, Event::AdmissionDisabled(_))),
             Some(Cause::PlaybackStarted) => assert!(matches!(e, Event::PlaybackStarted { .. })),
             None => assert_eq!(after.present, before),
         }
@@ -75,6 +77,10 @@ mod proofs {
         kani::cover!(
             before && !after.present && matches!(e, Event::PlaybackStarted { .. }),
             "accepted start removes"
+        );
+        kani::cover!(
+            before && !after.present && matches!(e, Event::AdmissionDisabled(id) if id == target),
+            "admission off removes known non-Funkot"
         );
         kani::cover!(
             before
