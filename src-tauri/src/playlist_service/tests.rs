@@ -378,6 +378,7 @@ fn playback(tracks: &[(usize, PathBuf)], frames: usize) -> crate::Playback {
             stall: crate::StallWatch::new(48_000), was_in_transition: false })) }
 }
 
+
 fn geometry_playback(tracks: &[(usize, PathBuf)]) -> crate::Playback {
     use funkot_core::engine::{Engine, PreparedTrack};
     use std::sync::atomic::AtomicBool;
@@ -480,6 +481,8 @@ fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
     {
         let owner = fixture.service.lock().unwrap();
         assert!(owner.claims[&second.0].cancelled);
+        assert_eq!(owner.normal_source.as_ref().unwrap().lock().unwrap().epoch, owner.epoch,
+            "command source replacement publishes the normal queue generation");
         assert_eq!(owner.normal_items(), items[1..].to_vec());
     }
     assert!(source.next().is_none(), "detached source cannot consume the new owner");
@@ -778,11 +781,18 @@ fn final_source_skips_cached_non_funkot_before_returning_playlist_candidate() {
     fixture.command("select-gate", Action::Select { id: Some(id.clone()) }).unwrap();
     let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
     let (_, path) = source.next().expect("the Funkot candidate should reach core");
-    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(path, accepted);
-    let owner = fixture.service.lock().unwrap();
-    assert_eq!(owner.catalog.run(&id).unwrap().failures.len(), 1);
-    assert_eq!(owner.claims.len(), 1);
+    {
+        let owner = fixture.service.lock().unwrap();
+        let details = owner.details(&id, true).unwrap();
+        assert!(owner.catalog.run(&id).unwrap().failures.is_empty());
+        assert_eq!(details.rows[0].status, "unplayable");
+        assert_eq!(details.rows[0].reason.as_deref(), Some("non_funkot"));
+        assert_eq!(owner.claims.len(), 1);
+    }
+    reconfigure_admission(&fixture.service, true, None, || Ok(())).unwrap();
+    assert_eq!(source.next().map(|(_, path)| path), Some(rejected));
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[test]
@@ -959,5 +969,218 @@ fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
     assert_eq!(pending[0].path, accepted);
     assert_eq!(pending[0].origin, QueueOrigin::Automatic);
     assert!(!crate::analyzed_cache_entry(fixture.cache.path(), &auto_hash).unwrap().is_funkot);
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+
+#[test]
+fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let previous_prepared = crate::NEXT_PREPARED.load(std::sync::atomic::Ordering::Relaxed);
+    let previous_yield = crate::YIELD_FOR_LOADER.load(std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let current = fixture.file("current.wav");
+    let rejected = fixture.file("non-funkot.wav");
+    fixture.store_analysis(&rejected, false);
+    let accepted = fixture.file("funkot.wav");
+    let items = vec![
+        QueueItem::manual(current.clone()),
+        QueueItem::manual(rejected.clone()),
+        QueueItem::manual(accepted.clone()),
+    ];
+    queue::replace_pending(&fixture.queue, items.clone());
+    let normal = HostSource::new(
+        fixture.queue.clone(),
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    );
+    let mut source = configure(&fixture.service, normal);
+    let first = source.next().unwrap();
+    let rejected_future = source.next().unwrap();
+    let reserved_in_flight = {
+        let normal_source = fixture.service.lock().unwrap().normal_source.clone().unwrap();
+        let reserved = normal_source.lock().unwrap().source.next().unwrap();
+        reserved
+    };
+    assert_eq!(reserved_in_flight.1, accepted);
+    let previous_session = {
+        let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = session.clone();
+        session.in_flight = vec![items[0].clone(), items[1].clone(), items[2].clone(), items[2].clone()];
+        previous
+    };
+    let player = playback(&[first.clone(), rejected_future.clone()], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+
+    reconfigure_admission(&fixture.service, false, Some(&player), || Ok(())).unwrap();
+    {
+        let session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(session.in_flight.is_empty());
+    }
+
+    assert!(source.next().is_none(), "the retired source cannot reserve another occurrence");
+    assert!(!crate::NEXT_PREPARED.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(crate::YIELD_FOR_LOADER.load(std::sync::atomic::Ordering::Relaxed));
+    {
+        let owner = fixture.service.lock().unwrap();
+        assert!(owner.claims[&rejected_future.0].cancelled);
+        assert_eq!(owner.current_index, Some(first.0));
+        assert_eq!(owner.normal_items(), items[1..].to_vec());
+        assert_eq!(owner.normal_items().iter().map(|item| &item.entry_id).collect::<Vec<_>>(),
+            items[1..].iter().map(|item| &item.entry_id).collect::<Vec<_>>());
+    }
+    {
+        let render = player.render.lock().unwrap();
+        assert_eq!(render.engine.current_index(), Some(first.0));
+        assert_eq!(render.engine.next_track_path(), None);
+    }
+
+    // The replacement loader owns the new ManagedSource after commit. Use its
+    // retained Funkot occurrence in a prepared Engine to exercise the actual
+    // manual Next action without racing that loader for the source.
+    let accepted_next = (rejected_future.0 + 1, accepted.clone());
+    let next_player = playback(&[first.clone(), accepted_next.clone()], 4096);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut started_accepted = false;
+    {
+        let mut render = next_player.render.lock().unwrap();
+        render.engine.request_nav(funkot_core::engine::NavAction::TransitionToNext);
+    }
+    while std::time::Instant::now() < deadline && !started_accepted {
+        let mut render = next_player.render.lock().unwrap();
+        render.engine.render(&mut [0.0; 128]);
+        for event in render.engine.poll_events() {
+            if let funkot_core::engine::EngineEvent::TrackStarted { path, .. } = event {
+                assert_ne!(path, rejected, "revoked non-Funkot future must never start");
+                started_accepted |= path == accepted;
+            }
+        }
+        drop(render);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    {
+        let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *session = previous_session;
+    }
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+    crate::NEXT_PREPARED.store(previous_prepared, std::sync::atomic::Ordering::Relaxed);
+    crate::YIELD_FOR_LOADER.store(previous_yield, std::sync::atomic::Ordering::Relaxed);
+    assert!(started_accepted, "the replacement source must start the retained Funkot occurrence");
+}
+
+
+#[test]
+fn admission_settings_save_failure_keeps_existing_future() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let current = fixture.file("current.wav");
+    let future = fixture.file("future.wav");
+    let items = vec![QueueItem::manual(current), QueueItem::manual(future.clone())];
+    queue::replace_pending(&fixture.queue, items.clone());
+    let normal = HostSource::new(
+        fixture.queue.clone(),
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    );
+    let mut source = configure(&fixture.service, normal);
+    let first = source.next().unwrap();
+    let second = source.next().unwrap();
+    let player = playback(&[first.clone(), second.clone()], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+    let previous_session = {
+        let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = session.clone();
+        session.in_flight = vec![items[1].clone()];
+        previous
+    };
+
+    let failure = reconfigure_admission(&fixture.service, false, Some(&player), || {
+        Err("settings failed".into())
+    }).unwrap_err();
+
+    assert_eq!(failure.code, "persist_failed");
+    assert!(crate::ALLOW_NON_FUNKOT.load(std::sync::atomic::Ordering::Relaxed));
+    {
+        let owner = fixture.service.lock().unwrap();
+        assert_eq!(owner.epoch, 0);
+        assert!(!owner.claims[&second.0].cancelled);
+        assert_eq!(owner.normal_items(), items[1..].to_vec());
+    }
+    {
+        let session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(session.in_flight, vec![items[1].clone()]);
+        assert_eq!(store::load_session(fixture.data.path()).in_flight, vec![items[1].clone()]);
+    }
+    {
+        let render = player.render.lock().unwrap();
+        assert_eq!(render.engine.source_generation(), 0);
+        assert_eq!(render.engine.next_track_path(), Some(future.as_path()));
+    }
+    {
+        let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *session = previous_session;
+    }
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+
+#[test]
+fn admission_session_save_failure_keeps_existing_future() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let current = fixture.file("current.wav");
+    let future = fixture.file("future.wav");
+    let items = vec![QueueItem::manual(current), QueueItem::manual(future.clone())];
+    queue::replace_pending(&fixture.queue, items.clone());
+    let normal = HostSource::new(
+        fixture.queue.clone(),
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    );
+    let mut source = configure(&fixture.service, normal);
+    let first = source.next().unwrap();
+    let second = source.next().unwrap();
+    let player = playback(&[first.clone(), second.clone()], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+    let previous_session = {
+        let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = session.clone();
+        session.in_flight = vec![items[1].clone()];
+        previous
+    };
+    fs::create_dir(fixture.data.path().join("session.json")).unwrap();
+
+    let failure = reconfigure_admission(&fixture.service, false, Some(&player), || -> Result<(), String> {
+        panic!("settings save must not run after session save failure")
+    }).unwrap_err();
+
+    assert_eq!(failure.code, "persist_failed");
+    assert!(failure.message.contains("cannot save session"));
+    assert!(crate::ALLOW_NON_FUNKOT.load(std::sync::atomic::Ordering::Relaxed));
+    {
+        let owner = fixture.service.lock().unwrap();
+        assert_eq!(owner.epoch, 0);
+        assert!(!owner.claims[&second.0].cancelled);
+        assert_eq!(owner.normal_items(), items[1..].to_vec());
+    }
+    {
+        let session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(session.in_flight, vec![items[1].clone()]);
+    }
+    {
+        let render = player.render.lock().unwrap();
+        assert_eq!(render.engine.source_generation(), 0);
+        assert_eq!(render.engine.next_track_path(), Some(future.as_path()));
+    }
+    {
+        let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *session = previous_session;
+    }
     crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
 }

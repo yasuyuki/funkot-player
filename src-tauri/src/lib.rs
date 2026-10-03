@@ -4918,27 +4918,38 @@ fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -
 #[tauri::command(async)]
 fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
+    let _saving = SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let allow = store::load_settings(Path::new(&dirs.data_dir)).allow_non_funkot;
     ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
     Ok(allow)
 }
 
-/// Persist `allow_non_funkot` and update the live atomic used by folder drain.
-/// The atomic is stored **before** `SAVE_LOCK` is released.
+/// Persist `allow_non_funkot` and reconfigure a live future source before its
+/// admission atomic is published to the loader.
 #[tauri::command(async)]
 fn set_allow_non_funkot(app: tauri::AppHandle, allow: bool) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
     let data = Path::new(&dirs.data_dir);
-    with_settings_rmw_then(
-        data,
-        |settings| {
+    if let Some(service) = playlist_service::existing() {
+        playlist_service::reconfigure_admission(&service, allow, PLAYBACK.get(), || {
+            let mut settings = store::load_settings(data);
             settings.allow_non_funkot = allow;
-        },
-        |_| {
-            ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
-            allow
-        },
-    )
+            store::save_settings(data, &settings)
+                .map_err(|error| format!("cannot save settings: {error}"))
+        }).map_err(|error| error.message)?;
+        Ok(allow)
+    } else {
+        with_settings_rmw_then(
+            data,
+            |settings| {
+                settings.allow_non_funkot = allow;
+            },
+            |_| {
+                ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
+                allow
+            },
+        )
+    }
 }
 
 /// Current `settings.json` `labeling_mode` (raw, pre-platform-gate).

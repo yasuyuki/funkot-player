@@ -68,12 +68,19 @@ use crate::queue_progress::{transition as queue_transition, Event as QueueEvent}
 
 pub struct Service {
     data: PathBuf, cache: PathBuf, queue: SharedQueue, disk: PlaylistStore, catalog: Catalog,
-    normal_source: Option<Arc<Mutex<HostSource>>>, claims: BTreeMap<usize, Claim>, next_index: usize,
+    normal_source: Option<Arc<Mutex<NormalSource>>>, claims: BTreeMap<usize, Claim>, next_index: usize,
     current_index: Option<usize>, epoch: u64, exhausted: bool, ended: bool,
     restored: Option<CurrentOccurrence>, undo: BTreeMap<String, (String, RemovedEntry)>,
     receipts: BTreeMap<String, (String, CommandResult)>, progress_error: bool,
     availability: BTreeMap<String, (String, String)>,
+    admission_blocked: BTreeSet<(String, String)>,
 }
+
+struct NormalSource {
+    epoch: u64,
+    source: HostSource,
+}
+
 type Shared = Arc<Mutex<Service>>;
 static SERVICE: OnceLock<Shared> = OnceLock::new();
 pub fn get(data: &Path, cache: &Path, queue: &SharedQueue) -> Shared {
@@ -97,7 +104,8 @@ impl Service {
             && catalog.remaining(id).is_ok_and(|r| r.is_empty())) && restored.is_none();
         Self { data: data.into(), cache: cache.into(), queue, disk, catalog, normal_source: None,
             claims: BTreeMap::new(), next_index: 0, current_index: None, epoch: 0, exhausted: false, ended,
-            restored, undo: BTreeMap::new(), receipts: BTreeMap::new(), progress_error: false, availability: BTreeMap::new() }
+            restored, undo: BTreeMap::new(), receipts: BTreeMap::new(), progress_error: false, availability: BTreeMap::new(),
+            admission_blocked: BTreeSet::new() }
     }
     pub fn target(&self) -> SourceTarget { SourceTarget { playlist_id: self.catalog.active_id.clone(), generation: self.catalog.generation, revision: self.catalog.revision } }
     pub fn active(&self) -> Option<&str> { self.catalog.active_id.as_deref() }
@@ -279,8 +287,11 @@ impl Service {
     }
     pub fn inspect_entries(&mut self, id: &str) -> Result<Details, CommandError> {
         for entry in self.catalog.definition(id)?.entries.clone() {
-            if let Err(reason) = self.lookup(&entry.track) { self.availability.insert(entry.entry_id, ("missing".into(), reason.into())); }
-            else { self.availability.remove(&entry.entry_id); }
+            if self.admission_blocked.contains(&(id.into(), entry.entry_id.clone())) {
+                self.availability.insert(entry.entry_id, ("unplayable".into(), "non_funkot".into()));
+            } else if let Err(reason) = self.lookup(&entry.track) {
+                self.availability.insert(entry.entry_id, ("missing".into(), reason.into()));
+            } else { self.availability.remove(&entry.entry_id); }
         }
         self.details(id, true)
     }
@@ -302,7 +313,8 @@ impl TrackSource for ManagedSource {
                 } else { None }
             };
             let normal_selected = normal_source.map(|source| {
-                source.lock().unwrap_or_else(|e| e.into_inner()).next()
+                let mut source = source.lock().unwrap_or_else(|e| e.into_inner());
+                (source.epoch == self.epoch).then(|| source.source.next()).flatten()
             });
             let (claim, cache, data) = {
                 let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
@@ -363,7 +375,8 @@ impl TrackSource for ManagedSource {
                             .collect();
                         let mut next = None;
                         for entry in owner.catalog.remaining(&id).ok()? {
-                            if claimed.contains(&entry.entry_id) {
+                            if claimed.contains(&entry.entry_id)
+                                || owner.admission_blocked.contains(&(id.clone(), entry.entry_id.clone())) {
                                 continue;
                             }
                             let path = match owner.lookup(&entry.track) {
@@ -435,11 +448,12 @@ impl TrackSource for ManagedSource {
                     if owner.epoch != self.epoch { return None; }
                     let rejected_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
                         if owner.catalog.active_id.as_deref() != Some(id) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
-                        let _ = owner.catalog.unavailable(id, claim.run, entry, "non_funkot");
-                        owner.catalog.current = None;
+                        owner.admission_blocked.insert((id.clone(), entry.clone()));
+                        owner.availability.insert(entry.clone(), ("unplayable".into(), "non_funkot".into()));
+                        if claim.restoring { owner.catalog.current = None; }
                         false
                     } else {
-                        owner.catalog.current = None;
+                        if claim.restoring { owner.catalog.current = None; }
                         queue::block_reserved(&owner.queue, &claim.item)
                     };
                     owner.save_progress();
@@ -478,8 +492,158 @@ impl TrackSource for ManagedSource {
 }
 pub fn configure(service: &Shared, normal: HostSource) -> ManagedSource {
     let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
-    owner.normal_source = Some(Arc::new(Mutex::new(normal)));
+    owner.normal_source = Some(Arc::new(Mutex::new(NormalSource { epoch: owner.epoch, source: normal })));
     ManagedSource { service: service.clone(), epoch: owner.epoch }
+}
+
+
+/// Persist an admission switch only after the core has accepted a future-source
+/// fence. The old source's normal reservation path is held quiescent while the
+/// epoch changes, so it cannot write a stale session claim after restoration.
+pub fn reconfigure_admission(
+    service: &Shared,
+    allow_non_funkot: bool,
+    playback: Option<&crate::Playback>,
+    persist_settings: impl FnOnce() -> Result<(), String>,
+) -> Result<(), CommandError> {
+    let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
+    if previous == allow_non_funkot {
+        let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        return persist_settings().map_err(|message| CommandError { code: "persist_failed".into(), message });
+    }
+    owner.reconcile_with(playback);
+    let Some(playback) = playback else {
+        if owner.normal_source.is_some() {
+            return Err(error("busy"));
+        }
+        let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        persist_settings().map_err(|message| CommandError { code: "persist_failed".into(), message })?;
+        crate::ALLOW_NON_FUNKOT.store(allow_non_funkot, Ordering::Relaxed);
+        owner.admission_blocked.clear();
+        owner.availability.retain(|_, value| !(value.0 == "unplayable" && value.1 == "non_funkot"));
+        return Ok(());
+    };
+
+    // `ManagedSource::next` releases `service` while `HostSource::next`
+    // reserves and records a queue item. Holding this source lock closes that
+    // gap before the epoch revokes its future claims.
+    let normal_source = owner.normal_source.clone();
+    let mut normal_source_guard = normal_source.as_ref().map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
+    let future = owner.future_claims();
+    let normal_claims: Vec<_> = future.iter().filter(|(_, claim)| claim.source.is_none())
+        .map(|(_, claim)| claim.item.clone()).collect();
+    let mut revoked_normal = normal_claims.clone();
+    if let Some(reserved) = queue::reserved_item(&owner.queue) {
+        let is_current = owner.current_index.and_then(|index| owner.claims.get(&index))
+            .is_some_and(|claim| claim.source.is_none() && claim.item.entry_id == reserved.entry_id);
+        if !is_current && !revoked_normal.iter().any(|claim| claim.entry_id == reserved.entry_id) {
+            revoked_normal.push(reserved);
+        }
+    }
+    let mut normal = owner.normal_items();
+    // Include a reservation observed between HostSource::next and claim
+    // creation: it has no future claim yet, but remains pending after OFF.
+    preserve_claims(&mut normal, &revoked_normal);
+    let next_epoch = owner.epoch + 1;
+    let prepared = PreparedSourceReplacement::new(Box::new(ManagedSource {
+        service: service.clone(), epoch: next_epoch,
+    })).map_err(|_| error("busy"))?;
+    let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+    let token = if crate::AUDITIONING.load(Ordering::Relaxed)
+        || crate::AUDITION_PREPARING.load(Ordering::Relaxed)
+        || render.audition.is_some() {
+        Err(error("auditioning"))
+    } else {
+        render.engine.begin_future_update().map_err(|reason| {
+            if reason == FutureUpdateBusy::Transition && playback.paused.load(Ordering::Relaxed) {
+                error("transition_paused")
+            } else { reason.into() }
+        })
+    }?;
+    if token.current_index() != owner.current_index {
+        render.engine.abort_future_update(token);
+        playback.publish_engine_observation(&render.engine);
+        return Err(error("stale"));
+    }
+    drop(render);
+
+    let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let previous_session = if !revoked_normal.is_empty() {
+        let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = session.clone();
+        let mut updated = previous.clone();
+        updated.in_flight.retain(|item| !revoked_normal.iter()
+            .any(|claim| claim.entry_id == item.entry_id));
+        if let Err(error) = store::save_session(&owner.data, &updated) {
+            drop(session);
+            drop(_saving);
+            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+            render.engine.abort_future_update(token);
+            playback.publish_engine_observation(&render.engine);
+            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save session: {error}") });
+        }
+        *session = updated;
+        Some(previous)
+    } else {
+        None
+    };
+    if let Err(message) = persist_settings() {
+        if let Some(previous) = previous_session {
+            let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(error) = store::save_session(&owner.data, &previous) {
+                *session = previous;
+                drop(session);
+                drop(_saving);
+                let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+                render.engine.abort_future_update(token);
+                playback.publish_engine_observation(&render.engine);
+                return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore session after settings failure: {error}") });
+            }
+            *session = previous;
+        }
+        drop(_saving);
+        let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+        render.engine.abort_future_update(token);
+        playback.publish_engine_observation(&render.engine);
+        return Err(CommandError { code: "persist_failed".into(), message });
+    }
+    crate::ALLOW_NON_FUNKOT.store(allow_non_funkot, Ordering::Relaxed);
+    let current_index = owner.current_index;
+    for (index, claim) in owner.claims.iter_mut() {
+        if Some(*index) != current_index && claim.live {
+            claim.cancelled = true;
+            claim.live = false;
+        }
+    }
+    let blocked = std::mem::take(&mut owner.admission_blocked);
+    for (_, entry) in blocked {
+        if owner.availability.get(&entry) == Some(&("unplayable".into(), "non_funkot".into())) {
+            owner.availability.remove(&entry);
+        }
+    }
+    queue::restore_all(&owner.queue, normal);
+    owner.epoch = next_epoch;
+    owner.exhausted = false;
+    if let Some(normal_source) = normal_source_guard.as_mut() {
+        normal_source.epoch = next_epoch;
+    }
+    drop(normal_source_guard);
+    drop(_saving);
+
+    let retired = {
+        let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+        let retired = render.engine.commit_future_update(token, prepared);
+        playback.publish_engine_observation(&render.engine);
+        retired
+    };
+    crate::NEXT_PREPARED.store(false, Ordering::Relaxed);
+    crate::YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
+    // The retired loader may still be waiting to re-enter ManagedSource::next.
+    // It observes the new epoch only after it acquires this service lock.
+    drop(owner);
+    drop(retired);
+    Ok(())
 }
 pub fn started(index: usize) -> Option<QueueOrigin> {
     if let Some(s) = existing() {
@@ -512,6 +676,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         return if old == &fingerprint { Ok(receipt.clone()) } else { Err(error("stale")) };
     }
     owner.reconcile_with(playback);
+    // A source replacement must snapshot normal work only after the old
+    // HostSource has stopped reserving it. Keep this guard through publication.
+    let normal_source = owner.normal_source.clone();
+    let mut normal_source_guard = normal_source.as_ref()
+        .map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
     if owner.target() != request.target { return Err(error("stale")); }
     let mut next = owner.catalog.clone(); let mut normal = owner.normal_items(); let old_normal = normal.clone();
     let normal_only = owner.active().is_none() && matches!(&request.action, Action::Append { .. } | Action::QueueMove { .. } | Action::QueueRemove { .. });
@@ -520,6 +689,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     let mut result = CommandResult::default(); let mut removed = None; let mut undo_used = None;
     let mut removed_normal = None;
     let mut force_source = false;
+    let mut retired = None;
     match request.action {
         Action::Create { name } => { result.created_id = Some(next.create(name, vec![])?); }
         Action::SaveQueue { name } => {
@@ -692,17 +862,22 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         for (i, claim) in owner.claims.iter_mut() { if Some(*i) != current_index && claim.live { claim.cancelled = true; claim.live = false; } }
         queue::restore_all(&owner.queue, normal);
         owner.epoch = next_epoch; owner.exhausted = false;
+        if let Some(normal_source) = normal_source_guard.as_mut() {
+            normal_source.epoch = next_epoch;
+        }
+        drop(normal_source_guard);
         drop(_saving);
         let playback = playback.unwrap();
-        let retired = { let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
+        retired = Some({ let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
             let retired = render.engine.commit_future_update(fence.unwrap(), prepared.unwrap());
             playback.publish_engine_observation(&render.engine);
-            retired };
-        drop(retired);
+            retired });
     } else if normal != old_normal {
         queue::replace_pending(&owner.queue, normal);
+        drop(normal_source_guard);
         drop(_saving);
     } else {
+        drop(normal_source_guard);
         drop(_saving);
     }
     // Appending to an ended list makes new pending work, but core remains
@@ -712,6 +887,8 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     // entries still replace the ended display after their save succeeds.
     if append_action && result.added > 0 && owner.active().is_some() { owner.ended = false; }
     owner.receipts.insert(request.request_id, (fingerprint, result.clone()));
+    drop(owner);
+    drop(retired);
     Ok(result)
 }
 
