@@ -204,10 +204,10 @@ async function stage({ msix, version, dry }) {
   const { context, page } = await open();
   try {
     await page.goto(config.packagesUrl, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(4000);
-
     const upload = page.locator('input[type="file"]').first();
-    if (!(await upload.count())) {
+    try {
+      await upload.waitFor({ state: 'attached', timeout: 60_000 });
+    } catch {
       await fail(page, 'packages', 'no file input on the Packages page');
     }
     await upload.setInputFiles(msix);
@@ -222,11 +222,12 @@ async function stage({ msix, version, dry }) {
 
     for (const lang of LANGUAGES) {
       await page.goto(config.listings[lang], { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(4000);
       const field = page
         .getByRole('textbox', { name: /what.s new|このバージョンの新機能|新機能/i })
         .first();
-      if (!(await field.count())) {
+      try {
+        await field.waitFor({ timeout: 60_000 });
+      } catch {
         await fail(page, `listing-${lang}`, `no "what's new" field on the ${lang} listing page`);
       }
       await field.fill(notes[lang]);
