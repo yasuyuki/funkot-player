@@ -3,7 +3,7 @@
 //! holds render; the core future fence makes its commit reversible until save.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::sync::atomic::Ordering;
 use funkot_core::engine::{TrackSource, PreparedSourceReplacement, FutureUpdateBusy};
 use crate::{playlists::*, queue::{self, HostSource, QueueItem, QueueOrigin, SharedQueue}, store};
@@ -68,18 +68,33 @@ use crate::queue_progress::{transition as queue_transition, Event as QueueEvent}
 
 pub struct Service {
     data: PathBuf, cache: PathBuf, queue: SharedQueue, disk: PlaylistStore, catalog: Catalog,
-    normal_source: Option<Arc<Mutex<HostSource>>>, claims: BTreeMap<usize, Claim>, next_index: usize,
+    normal_source: Option<Arc<Mutex<NormalSource>>>, claims: BTreeMap<usize, Claim>, next_index: usize,
     current_index: Option<usize>, epoch: u64, exhausted: bool, ended: bool,
     restored: Option<CurrentOccurrence>, undo: BTreeMap<String, (String, RemovedEntry)>,
     receipts: BTreeMap<String, (String, CommandResult)>, progress_error: bool,
     availability: BTreeMap<String, (String, String)>,
+    admission_blocked: BTreeSet<(String, String)>,
 }
+
+struct NormalSource {
+    epoch: u64,
+    source: HostSource,
+}
+
 type Shared = Arc<Mutex<Service>>;
 static SERVICE: OnceLock<Shared> = OnceLock::new();
+// Serializes pre-playback queue commands with service creation. Otherwise a
+// command that checked `existing()` just before OFF creates the service could
+// mutate the queue after OFF has captured its canonical normal snapshot.
+static PRESTART_QUEUE_GATE: Mutex<()> = Mutex::new(());
+pub fn lock_prestart_queue() -> MutexGuard<'static, ()> {
+    PRESTART_QUEUE_GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
 pub fn get(data: &Path, cache: &Path, queue: &SharedQueue) -> Shared {
     SERVICE.get_or_init(|| Arc::new(Mutex::new(Service::new(data, cache, queue.clone())))).clone()
 }
 pub fn existing() -> Option<Shared> { SERVICE.get().cloned() }
+
 impl Service {
     fn new(data: &Path, cache: &Path, queue: SharedQueue) -> Self {
         let disk = PlaylistStore::load(data);
@@ -97,7 +112,8 @@ impl Service {
             && catalog.remaining(id).is_ok_and(|r| r.is_empty())) && restored.is_none();
         Self { data: data.into(), cache: cache.into(), queue, disk, catalog, normal_source: None,
             claims: BTreeMap::new(), next_index: 0, current_index: None, epoch: 0, exhausted: false, ended,
-            restored, undo: BTreeMap::new(), receipts: BTreeMap::new(), progress_error: false, availability: BTreeMap::new() }
+            restored, undo: BTreeMap::new(), receipts: BTreeMap::new(), progress_error: false, availability: BTreeMap::new(),
+            admission_blocked: BTreeSet::new() }
     }
     pub fn target(&self) -> SourceTarget { SourceTarget { playlist_id: self.catalog.active_id.clone(), generation: self.catalog.generation, revision: self.catalog.revision } }
     pub fn active(&self) -> Option<&str> { self.catalog.active_id.as_deref() }
@@ -279,8 +295,14 @@ impl Service {
     }
     pub fn inspect_entries(&mut self, id: &str) -> Result<Details, CommandError> {
         for entry in self.catalog.definition(id)?.entries.clone() {
-            if let Err(reason) = self.lookup(&entry.track) { self.availability.insert(entry.entry_id, ("missing".into(), reason.into())); }
-            else { self.availability.remove(&entry.entry_id); }
+            if self.admission_blocked.contains(&(id.into(), entry.entry_id.clone())) {
+                self.availability.insert(entry.entry_id, ("unplayable".into(), "non_funkot".into()));
+            } else if let Err(reason) = self.lookup(&entry.track) {
+                self.availability.insert(entry.entry_id, ("missing".into(), reason.into()));
+            } else if !self.availability.get(&entry.entry_id)
+                .is_some_and(|(_, reason)| reason == "admission_unavailable") {
+                self.availability.remove(&entry.entry_id);
+            }
         }
         self.details(id, true)
     }
@@ -291,6 +313,7 @@ impl Service {
 pub struct ManagedSource { service: Shared, epoch: u64 }
 impl TrackSource for ManagedSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
+        let mut unavailable_this_call = BTreeSet::new();
         loop {
             // Folder admission can decode an unanalysed track. Keep the
             // service mutex available to UI commands while that work runs.
@@ -302,9 +325,10 @@ impl TrackSource for ManagedSource {
                 } else { None }
             };
             let normal_selected = normal_source.map(|source| {
-                source.lock().unwrap_or_else(|e| e.into_inner()).next()
+                let mut source = source.lock().unwrap_or_else(|e| e.into_inner());
+                (source.epoch == self.epoch).then(|| source.source.next()).flatten()
             });
-            let (claim, cache, data) = {
+            let (claim, cache, data, queue) = {
                 let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                 if owner.epoch != self.epoch {
                     return None;
@@ -363,7 +387,9 @@ impl TrackSource for ManagedSource {
                             .collect();
                         let mut next = None;
                         for entry in owner.catalog.remaining(&id).ok()? {
-                            if claimed.contains(&entry.entry_id) {
+                            if claimed.contains(&entry.entry_id)
+                                || owner.admission_blocked.contains(&(id.clone(), entry.entry_id.clone()))
+                                || unavailable_this_call.contains(&(id.clone(), entry.entry_id.clone())) {
                                 continue;
                             }
                             let path = match owner.lookup(&entry.track) {
@@ -423,50 +449,57 @@ impl TrackSource for ManagedSource {
                     owner.exhausted = true;
                     return None;
                 };
-                (claim, owner.cache.clone(), owner.data.clone())
+                (claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone())
             };
             let allow_non_funkot = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
             let admission = crate::admit_playback_path(&claim.item.path, &cache, &data, allow_non_funkot);
             log::info!("playback admission: {} allow_non_funkot={} result={:?}",
                 claim.item.path.display(), allow_non_funkot, admission);
-            if admission == crate::PlaybackAdmission::Rejected {
-                let rejected_normal = {
+            if admission != crate::PlaybackAdmission::Accepted {
+                let rejected = admission == crate::PlaybackAdmission::Rejected;
+                let blocked_normal = {
                     let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                     if owner.epoch != self.epoch { return None; }
-                    let rejected_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
+                    let blocked_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
                         if owner.catalog.active_id.as_deref() != Some(id) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
-                        let _ = owner.catalog.unavailable(id, claim.run, entry, "non_funkot");
-                        owner.catalog.current = None;
+                        if rejected { owner.admission_blocked.insert((id.clone(), entry.clone())); }
+                        else { unavailable_this_call.insert((id.clone(), entry.clone())); }
+                        owner.availability.insert(entry.clone(), ("unplayable".into(), if rejected { "non_funkot" } else { "admission_unavailable" }.into()));
+                        if claim.restoring { owner.catalog.current = None; }
                         false
                     } else {
-                        owner.catalog.current = None;
-                        queue::block_reserved(&owner.queue, &claim.item)
+                        if claim.restoring { owner.catalog.current = None; }
+                        if rejected { queue::remove_admission_disabled(&owner.queue, &claim.item) }
+                        else { queue::block_reserved(&owner.queue, &claim.item) }
                     };
                     owner.save_progress();
-                    rejected_normal
+                    blocked_normal
                 };
-                if rejected_normal {
+                if rejected && blocked_normal {
+                    let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
                     let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    crate::store::retire_revoked(&mut session.in_flight, &claim.item);
+                    session.in_flight.retain(|item| item.entry_id != claim.item.entry_id);
+                    if let Err(error) = crate::store::save_session(&data, &session) {
+                        log::warn!("cannot retire admission-disabled session item: {error}");
+                    }
                     drop(session);
-                    crate::persist_session();
+                    let pending = queue::pending_snapshot(&queue).into_iter().collect();
+                    if let Err(error) = crate::store::save_queue(&data, &pending) {
+                        log::warn!("cannot save queue after admission-disabled removal: {error}");
+                    }
                 }
                 continue;
             }
             let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
-            if owner.epoch != self.epoch {
-                return None;
-            }
+            if owner.epoch != self.epoch { return None; }
             if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
                 if owner.catalog.active_id.as_deref() != Some(id)
                     || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
                     || !owner.catalog.definition(id).is_ok_and(|definition| {
                         definition.entries.iter().any(|candidate| candidate.entry_id == *entry)
-                    })
-                {
-                    return None;
-                }
+                    }) { return None; }
             }
+            if let Some(entry) = &claim.entry { owner.availability.remove(entry); }
             let index = owner.next_index;
             owner.next_index += 1;
             let path = claim.item.path.clone();
@@ -478,8 +511,257 @@ impl TrackSource for ManagedSource {
 }
 pub fn configure(service: &Shared, normal: HostSource) -> ManagedSource {
     let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
-    owner.normal_source = Some(Arc::new(Mutex::new(normal)));
+    owner.normal_source = Some(Arc::new(Mutex::new(NormalSource { epoch: owner.epoch, source: normal })));
     ManagedSource { service: service.clone(), epoch: owner.epoch }
+}
+
+
+/// Persist an admission switch only after the core has accepted a future-source
+/// fence. The old source's normal reservation path is held quiescent while the
+/// epoch changes, so it cannot write a stale session claim after restoration.
+pub fn reconfigure_admission(
+    service: &Shared,
+    allow_non_funkot: bool,
+    playback: Option<&crate::Playback>,
+    persist_settings: impl FnOnce() -> Result<(), String>,
+) -> Result<(), CommandError> {
+    let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
+    // OFF is a cleanup operation as well as a setting change. The atomic can
+    // already be false while an older source still has admitted normal
+    // reservations, so only an unchanged ON setting may skip the future fence.
+    if previous == allow_non_funkot && allow_non_funkot {
+        let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        return persist_settings().map_err(|message| CommandError { code: "persist_failed".into(), message });
+    }
+    owner.reconcile_with(playback);
+    let Some(playback) = playback else {
+        if owner.normal_source.is_some() {
+            return Err(error("busy"));
+        }
+        let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous_queue = queue::pending_snapshot(&owner.queue).into_iter().collect::<std::collections::VecDeque<_>>();
+        // The setting command can arrive before queue-tab preload. Recover the
+        // same canonical normal source as startup, then append any live items
+        // that were queued after that snapshot by exact occurrence ID.
+        let canonical = match owner.restore_normal() {
+            Some(resume) => resume.items,
+            None => {
+                let session = store::load_session(&owner.data);
+                let saved = store::load_queue(&owner.data).map_err(|error| CommandError {
+                    code: "persist_failed".into(),
+                    message: format!("cannot load queue: {error}"),
+                })?;
+                store::restored_pending(&session.in_flight, &saved)
+            }
+        };
+        let mut normal = merge_normal_items(canonical, previous_queue.iter().cloned());
+        if !allow_non_funkot {
+            let overrides = store::load_overrides(&owner.data);
+            normal.retain(|item| !gated_non_funkot_for_reconfigure(&item.path, &owner.cache, &overrides)
+                || queue_transition(item.entry_id.as_str(), true, QueueEvent::AdmissionDisabled(item.entry_id.as_str())).present);
+        }
+        let queue_changed = !normal.iter().eq(previous_queue.iter());
+        let previous_catalog = owner.catalog.clone();
+        let mut next_catalog = previous_catalog.clone();
+        next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: previous_catalog.normal.as_ref().and_then(|resume| resume.folder_pos) });
+        let catalog_changed = next_catalog != previous_catalog;
+        if queue_changed {
+            let updated = normal.iter().cloned().collect();
+            store::save_queue(&owner.data, &updated).map_err(|error| CommandError {
+                code: "persist_failed".into(), message: format!("cannot save queue: {error}")
+            })?;
+        }
+        if catalog_changed {
+            if let Err(error) = owner.disk.persist(&next_catalog) {
+                if queue_changed { let _ = store::save_queue(&owner.data, &previous_queue); }
+                return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save normal resume: {error:?}") });
+            }
+        }
+        if let Err(message) = persist_settings() {
+            let queue_error = queue_changed.then(|| store::save_queue(&owner.data, &previous_queue)).transpose().err();
+            let catalog_error = catalog_changed.then(|| owner.disk.persist(&previous_catalog)).transpose().err();
+            if let Some(error) = queue_error {
+                return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore queue after settings failure: {error}") });
+            }
+            if let Some(error) = catalog_error {
+                return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore normal resume after settings failure: {error:?}") });
+            }
+            return Err(CommandError { code: "persist_failed".into(), message });
+        }
+        if queue_changed { queue::restore_all(&owner.queue, normal); }
+        if catalog_changed { owner.catalog = next_catalog; owner.progress_error = false; }
+        crate::ALLOW_NON_FUNKOT.store(allow_non_funkot, Ordering::Relaxed);
+        owner.admission_blocked.clear();
+        owner.availability.retain(|_, value| !(value.0 == "unplayable" && value.1 == "non_funkot"));
+        return Ok(());
+    };
+
+    let next_epoch = owner.epoch + 1;
+    let prepared = PreparedSourceReplacement::new(Box::new(ManagedSource {
+        service: service.clone(), epoch: next_epoch,
+    })).map_err(|_| error("busy"))?;
+    // Freeze the core future before waiting for a loader already in
+    // HostSource::next. Do not hold render while taking normal_source.
+    let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+    let token = if crate::AUDITIONING.load(Ordering::Relaxed)
+        || crate::AUDITION_PREPARING.load(Ordering::Relaxed)
+        || render.audition.is_some() {
+        Err(error("auditioning"))
+    } else {
+        render.engine.begin_future_update().map_err(|reason| {
+            if reason == FutureUpdateBusy::Transition && playback.paused.load(Ordering::Relaxed) {
+                error("transition_paused")
+            } else { reason.into() }
+        })
+    }?;
+    if token.current_index() != owner.current_index {
+        render.engine.abort_future_update(token);
+        playback.publish_engine_observation(&render.engine);
+        return Err(error("stale"));
+    }
+    drop(render);
+
+    // ManagedSource releases service while HostSource reserves. Quiesce it
+    // after the core fence so a waiting loader cannot admit the old future.
+    let normal_source = owner.normal_source.clone();
+    let mut normal_source_guard = normal_source.as_ref().map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
+    let future = owner.future_claims();
+    let normal_claims: Vec<_> = future.iter().filter(|(_, claim)| claim.source.is_none())
+        .map(|(_, claim)| claim.item.clone()).collect();
+    let mut revoked_normal = normal_claims.clone();
+    if let Some(reserved) = queue::reserved_item(&owner.queue) {
+        let is_current = owner.current_index.and_then(|index| owner.claims.get(&index))
+            .is_some_and(|claim| claim.source.is_none() && claim.item.entry_id == reserved.entry_id);
+        if !is_current && !revoked_normal.iter().any(|claim| claim.entry_id == reserved.entry_id) {
+            revoked_normal.push(reserved);
+        }
+    }
+    let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let previous_queue = queue::pending_snapshot(&owner.queue).into_iter().collect::<std::collections::VecDeque<_>>();
+    let mut normal = owner.normal_items();
+    preserve_claims(&mut normal, &revoked_normal);
+    if !allow_non_funkot {
+        let overrides = store::load_overrides(&owner.data);
+        normal.retain(|item| !gated_non_funkot_for_reconfigure(&item.path, &owner.cache, &overrides)
+            || queue_transition(item.entry_id.as_str(), true, QueueEvent::AdmissionDisabled(item.entry_id.as_str())).present);
+    }
+    let queue_changed = !normal.iter().eq(previous_queue.iter());
+    let previous_catalog = owner.catalog.clone();
+    let mut next_catalog = previous_catalog.clone();
+    next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: Some(crate::FOLDER_POS.load(Ordering::Relaxed)) });
+    let catalog_changed = next_catalog != previous_catalog;
+
+    let previous_session = if !revoked_normal.is_empty() {
+        let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = session.clone();
+        let mut updated = previous.clone();
+        updated.in_flight.retain(|item| !revoked_normal.iter()
+            .any(|claim| claim.entry_id == item.entry_id));
+        if let Err(error) = store::save_session(&owner.data, &updated) {
+            drop(session);
+            drop(_saving);
+            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+            render.engine.abort_future_update(token);
+            playback.publish_engine_observation(&render.engine);
+            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save session: {error}") });
+        }
+        *session = updated;
+        Some(previous)
+    } else {
+        None
+    };
+    if queue_changed {
+        let updated_queue = normal.iter().cloned().collect();
+        if let Err(error) = store::save_queue(&owner.data, &updated_queue) {
+            if let Some(previous) = previous_session.as_ref() {
+                let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = store::save_session(&owner.data, previous);
+                *session = previous.clone();
+            }
+            drop(_saving);
+            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+            render.engine.abort_future_update(token);
+            playback.publish_engine_observation(&render.engine);
+            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save queue: {error}") });
+        }
+    }
+    if catalog_changed {
+        if let Err(error) = owner.disk.persist(&next_catalog) {
+            if queue_changed { let _ = store::save_queue(&owner.data, &previous_queue); }
+            if let Some(previous) = previous_session.as_ref() {
+                let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = store::save_session(&owner.data, previous);
+                *session = previous.clone();
+            }
+            drop(_saving);
+            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+            render.engine.abort_future_update(token);
+            playback.publish_engine_observation(&render.engine);
+            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save normal resume: {error:?}") });
+        }
+    }
+    if let Err(message) = persist_settings() {
+        let queue_error = queue_changed.then(|| store::save_queue(&owner.data, &previous_queue)).transpose().err();
+        let catalog_error = catalog_changed.then(|| owner.disk.persist(&previous_catalog)).transpose().err();
+        let session_error = if let Some(previous) = previous_session.as_ref() {
+            let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = store::save_session(&owner.data, previous).err();
+            *session = previous.clone();
+            saved
+        } else { None };
+        drop(_saving);
+        let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+        render.engine.abort_future_update(token);
+        playback.publish_engine_observation(&render.engine);
+        if let Some(error) = queue_error {
+            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore queue after settings failure: {error}") });
+        }
+        if let Some(error) = catalog_error {
+            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore normal resume after settings failure: {error:?}") });
+        }
+        if let Some(error) = session_error {
+            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore session after settings failure: {error}") });
+        }
+        return Err(CommandError { code: "persist_failed".into(), message });
+    }
+    if catalog_changed { owner.catalog = next_catalog; owner.progress_error = false; }
+    crate::ALLOW_NON_FUNKOT.store(allow_non_funkot, Ordering::Relaxed);
+    let current_index = owner.current_index;
+    for (index, claim) in owner.claims.iter_mut() {
+        if Some(*index) != current_index && claim.live {
+            claim.cancelled = true;
+            claim.live = false;
+        }
+    }
+    let blocked = std::mem::take(&mut owner.admission_blocked);
+    for (_, entry) in blocked {
+        if owner.availability.get(&entry) == Some(&("unplayable".into(), "non_funkot".into())) {
+            owner.availability.remove(&entry);
+        }
+    }
+    queue::restore_all(&owner.queue, normal);
+    owner.epoch = next_epoch;
+    owner.exhausted = false;
+    if let Some(normal_source) = normal_source_guard.as_mut() {
+        normal_source.epoch = next_epoch;
+    }
+    drop(normal_source_guard);
+    drop(_saving);
+
+    let retired = {
+        let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+        let retired = render.engine.commit_future_update(token, prepared);
+        playback.publish_engine_observation(&render.engine);
+        retired
+    };
+    crate::NEXT_PREPARED.store(false, Ordering::Relaxed);
+    crate::YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
+    // The retired loader may still be waiting to re-enter ManagedSource::next.
+    // It observes the new epoch only after it acquires this service lock.
+    drop(owner);
+    drop(retired);
+    Ok(())
 }
 pub fn started(index: usize) -> Option<QueueOrigin> {
     if let Some(s) = existing() {
@@ -512,6 +794,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         return if old == &fingerprint { Ok(receipt.clone()) } else { Err(error("stale")) };
     }
     owner.reconcile_with(playback);
+    // A source replacement must snapshot normal work only after the old
+    // HostSource has stopped reserving it. Keep this guard through publication.
+    let normal_source = owner.normal_source.clone();
+    let mut normal_source_guard = normal_source.as_ref()
+        .map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
     if owner.target() != request.target { return Err(error("stale")); }
     let mut next = owner.catalog.clone(); let mut normal = owner.normal_items(); let old_normal = normal.clone();
     let normal_only = owner.active().is_none() && matches!(&request.action, Action::Append { .. } | Action::QueueMove { .. } | Action::QueueRemove { .. });
@@ -520,6 +807,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     let mut result = CommandResult::default(); let mut removed = None; let mut undo_used = None;
     let mut removed_normal = None;
     let mut force_source = false;
+    let mut retired = None;
     match request.action {
         Action::Create { name } => { result.created_id = Some(next.create(name, vec![])?); }
         Action::SaveQueue { name } => {
@@ -692,17 +980,22 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         for (i, claim) in owner.claims.iter_mut() { if Some(*i) != current_index && claim.live { claim.cancelled = true; claim.live = false; } }
         queue::restore_all(&owner.queue, normal);
         owner.epoch = next_epoch; owner.exhausted = false;
+        if let Some(normal_source) = normal_source_guard.as_mut() {
+            normal_source.epoch = next_epoch;
+        }
+        drop(normal_source_guard);
         drop(_saving);
         let playback = playback.unwrap();
-        let retired = { let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
+        retired = Some({ let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
             let retired = render.engine.commit_future_update(fence.unwrap(), prepared.unwrap());
             playback.publish_engine_observation(&render.engine);
-            retired };
-        drop(retired);
+            retired });
     } else if normal != old_normal {
         queue::replace_pending(&owner.queue, normal);
+        drop(normal_source_guard);
         drop(_saving);
     } else {
+        drop(normal_source_guard);
         drop(_saving);
     }
     // Appending to an ended list makes new pending work, but core remains
@@ -712,7 +1005,38 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     // entries still replace the ended display after their save succeeds.
     if append_action && result.added > 0 && owner.active().is_some() { owner.ended = false; }
     owner.receipts.insert(request.request_id, (fingerprint, result.clone()));
+    drop(owner);
+    drop(retired);
     Ok(result)
+}
+
+/// This destructive removal path uses the same full content hash as final
+/// admission. It must not trust the index fingerprint: a replacement can keep
+/// its length and mtime while changing content. Unreadable paths stay queued.
+fn gated_non_funkot_for_reconfigure(
+    path: &Path,
+    cache: &Path,
+    overrides: &store::Overrides,
+) -> bool {
+    let Ok(hash) = funkot_core::cache::content_hash(path) else { return false; };
+    let Some(analysis) = crate::analyzed_cache_entry(cache, &hash) else { return false; };
+    let override_funkot = overrides.get(&hash).and_then(|entry| entry.funkot);
+    !store::effective_is_funkot(analysis.is_funkot, override_funkot)
+}
+
+/// Merge the startup-normal snapshot with items added to the live queue
+/// after that snapshot. Matching occurrence IDs retain canonical order.
+fn merge_normal_items(
+    mut canonical: Vec<QueueItem>,
+    live: impl IntoIterator<Item = QueueItem>,
+) -> Vec<QueueItem> {
+    let mut known = canonical.iter().map(|item| item.entry_id.clone()).collect::<std::collections::HashSet<_>>();
+    for item in live {
+        if known.insert(item.entry_id.clone()) {
+            canonical.push(item);
+        }
+    }
+    canonical
 }
 
 /// Keep the uncancellable future once, with new manual entries at the head of

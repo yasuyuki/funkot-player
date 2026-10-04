@@ -1069,11 +1069,13 @@ class PlayerStore {
     }
   }
 
-  async doSetAllowNonFunkot(allow: boolean): Promise<void> {
+  async doSetAllowNonFunkot(allow: boolean): Promise<boolean> {
     try {
       this.allowNonFunkot = await setAllowNonFunkotCmd(allow);
+      return true;
     } catch (e) {
       this.lastError = String(e);
+      return false;
     }
   }
 
