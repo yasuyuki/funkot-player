@@ -328,12 +328,12 @@ impl TrackSource for ManagedSource {
                 let mut source = source.lock().unwrap_or_else(|e| e.into_inner());
                 (source.epoch == self.epoch).then(|| source.source.next()).flatten()
             });
-            let (claim, cache, data, queue) = {
+            let (claim, cache, data, queue, restore) = {
                 let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                 if owner.epoch != self.epoch {
                     return None;
                 }
-                let restored = owner.restored.take().filter(|current| {
+                let restored = owner.restored.clone().filter(|current| {
                     current.origin == PlaybackOrigin::Normal || current.playlist_id.as_deref().is_some_and(|id| {
                         owner.catalog.run(id).is_ok_and(|run| run.run_id == current.run_id)
                             && owner.catalog.definition(id).is_ok_and(|definition| {
@@ -341,7 +341,8 @@ impl TrackSource for ManagedSource {
                             })
                     })
                 });
-                let claim = if let Some(current) = restored {
+                owner.restored = restored.clone();
+                let claim = if let Some(current) = restored.as_ref() {
                     let path = if current.playlist_id.is_some() {
                         owner.lookup(&current.track_ref).ok()
                     } else {
@@ -353,11 +354,12 @@ impl TrackSource for ManagedSource {
                         let _ = owner.catalog.unavailable(id, current.run_id, entry, "missing");
                         owner.catalog.current = None;
                     }
+                    if path.is_none() { owner.restored = None; }
                     path.map(|path| Claim {
-                        source: current.playlist_id,
+                        source: current.playlist_id.clone(),
                         run: current.run_id,
-                        entry: current.entry_id,
-                        track: current.track_ref,
+                        entry: current.entry_id.clone(),
+                        track: current.track_ref.clone(),
                         item: QueueItem::with_origin(
                             path,
                             current.queue_origin.unwrap_or(QueueOrigin::Manual),
@@ -449,7 +451,8 @@ impl TrackSource for ManagedSource {
                     owner.exhausted = true;
                     return None;
                 };
-                (claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone())
+                let restore = claim.restoring.then(|| owner.restored.clone()).flatten();
+                (claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone(), restore)
             };
             let allow_non_funkot = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
             let admission = crate::admit_playback_path(&claim.item.path, &cache, &data, allow_non_funkot);
@@ -460,6 +463,8 @@ impl TrackSource for ManagedSource {
                 let blocked_normal = {
                     let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                     if owner.epoch != self.epoch { return None; }
+                    if claim.restoring && owner.restored.as_ref() != restore.as_ref() { return None; }
+                    if claim.restoring { owner.restored = None; }
                     let blocked_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
                         if owner.catalog.active_id.as_deref() != Some(id) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
                         if rejected { owner.admission_blocked.insert((id.clone(), entry.clone())); }
@@ -499,6 +504,8 @@ impl TrackSource for ManagedSource {
                         definition.entries.iter().any(|candidate| candidate.entry_id == *entry)
                     }) { return None; }
             }
+            if claim.restoring && owner.restored.as_ref() != restore.as_ref() { return None; }
+            if claim.restoring { owner.restored = None; }
             if let Some(entry) = &claim.entry { owner.availability.remove(entry); }
             let index = owner.next_index;
             owner.next_index += 1;
