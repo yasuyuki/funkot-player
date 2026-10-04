@@ -1585,3 +1585,38 @@ fn admission_session_save_failure_keeps_existing_future() {
     }
     crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
 }
+
+#[test]
+fn unavailable_playlist_admission_retries_after_cache_recovers() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(false, std::sync::atomic::Ordering::Relaxed);
+    let fixture = Fixture::new();
+    let decodable = fixture.wav("temporarily-unavailable.wav");
+    let id = fixture.install("retry", vec![Fixture::track(&decodable)]);
+    fixture.command("select-retry", Action::Select { id: Some(id.clone()) }).unwrap();
+    fs::remove_dir_all(fixture.cache.path()).unwrap();
+    fs::write(fixture.cache.path(), b"temporarily unavailable").unwrap();
+
+    let normal = HostSource::new(
+        fixture.queue.clone(),
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    );
+    let mut source = configure(&fixture.service, normal);
+    assert!(source.next().is_none());
+    {
+        let mut owner = fixture.service.lock().unwrap();
+        assert_eq!(owner.catalog.remaining(&id).unwrap().len(), 1);
+        let details = owner.inspect_entries(&id).unwrap();
+        assert_eq!(details.rows[0].reason.as_deref(), Some("admission_unavailable"));
+    }
+
+    fs::remove_file(fixture.cache.path()).unwrap();
+    fs::create_dir(fixture.cache.path()).unwrap();
+    fixture.store_analysis(&decodable, true);
+    assert_eq!(source.next().map(|(_, path)| path), Some(decodable));
+    let details = fixture.service.lock().unwrap().inspect_entries(&id).unwrap();
+    assert_eq!(details.rows[0].reason, None);
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}

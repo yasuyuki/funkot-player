@@ -299,7 +299,10 @@ impl Service {
                 self.availability.insert(entry.entry_id, ("unplayable".into(), "non_funkot".into()));
             } else if let Err(reason) = self.lookup(&entry.track) {
                 self.availability.insert(entry.entry_id, ("missing".into(), reason.into()));
-            } else { self.availability.remove(&entry.entry_id); }
+            } else if !self.availability.get(&entry.entry_id)
+                .is_some_and(|(_, reason)| reason == "admission_unavailable") {
+                self.availability.remove(&entry.entry_id);
+            }
         }
         self.details(id, true)
     }
@@ -310,6 +313,7 @@ impl Service {
 pub struct ManagedSource { service: Shared, epoch: u64 }
 impl TrackSource for ManagedSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
+        let mut unavailable_this_call = BTreeSet::new();
         loop {
             // Folder admission can decode an unanalysed track. Keep the
             // service mutex available to UI commands while that work runs.
@@ -384,7 +388,8 @@ impl TrackSource for ManagedSource {
                         let mut next = None;
                         for entry in owner.catalog.remaining(&id).ok()? {
                             if claimed.contains(&entry.entry_id)
-                                || owner.admission_blocked.contains(&(id.clone(), entry.entry_id.clone())) {
+                                || owner.admission_blocked.contains(&(id.clone(), entry.entry_id.clone()))
+                                || unavailable_this_call.contains(&(id.clone(), entry.entry_id.clone())) {
                                 continue;
                             }
                             let path = match owner.lookup(&entry.track) {
@@ -457,7 +462,8 @@ impl TrackSource for ManagedSource {
                     if owner.epoch != self.epoch { return None; }
                     let blocked_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
                         if owner.catalog.active_id.as_deref() != Some(id) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
-                        owner.admission_blocked.insert((id.clone(), entry.clone()));
+                        if rejected { owner.admission_blocked.insert((id.clone(), entry.clone())); }
+                        else { unavailable_this_call.insert((id.clone(), entry.clone())); }
                         owner.availability.insert(entry.clone(), ("unplayable".into(), if rejected { "non_funkot" } else { "admission_unavailable" }.into()));
                         if claim.restoring { owner.catalog.current = None; }
                         false
@@ -493,6 +499,7 @@ impl TrackSource for ManagedSource {
                         definition.entries.iter().any(|candidate| candidate.entry_id == *entry)
                     }) { return None; }
             }
+            if let Some(entry) = &claim.entry { owner.availability.remove(entry); }
             let index = owner.next_index;
             owner.next_index += 1;
             let path = claim.item.path.clone();
