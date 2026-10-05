@@ -35,6 +35,13 @@ engine index, or a reasoned unavailable/failed observation. Repeats are
 idempotent; invalid observations leave progress unchanged. Valid observations
 must progress, so replacing the implementation with a no-op fails.
 
+The result is exact. A justified start/current is accepted as `Started`, a
+justified failed/unavailable as `Failed`, and anything else as `None`. The cause
+is derived from the observation kind, not from the transition's output.
+`consumed` becomes `before.consumed || justified` and `failed` becomes
+`before.failed || justified failure`. A start therefore never creates or clears
+a failure, including restored `failed && !consumed` states.
+
 - `occurrence_update` quantifies arbitrary before-state, optional registered
   target, optional engine claim and start/current/failure/unavailable/passive
   input. Run IDs are unrestricted `u64`, indices unrestricted `usize`, liveness
@@ -105,3 +112,7 @@ temporary tree and change `Observation::Passive => None` to
 `Observation::Passive => Some(Cause::Started)`. Running the same entry must fail;
 discard that temporary tree's mutation and rerun the unchanged production source.
 This synthetic mutation is not evidence of the device failure's cause.
+The failure contract is checked the same way. Each of these single edits to
+`observe` must fail `occurrence_update` on an assertion, not on compilation:
+delete `progress.failed |= ...`, replace it with `= false` or `= true`, or make
+the failed or unavailable arm return `Cause::Started`.

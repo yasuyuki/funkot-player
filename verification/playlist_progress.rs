@@ -50,12 +50,13 @@ mod proofs {
         let e = observation();
         let after = observe(target, before, c, e);
         let valid = justified(target, c, e);
-        assert!(!after.progress.consumed || before.consumed || valid);
-        assert!(!after.progress.failed || before.failed || after.progress.consumed);
-        assert!(valid == after.accepted.is_some());
-        // Success is required too: a no-op implementation cannot pass.
-        assert!(!valid || after.progress.consumed);
-        assert!(valid || after.progress == before);
+        // The cause follows the observation kind, never the transition's own
+        // result. Exact equality also rejects a no-op implementation.
+        let failure = matches!(e, Observation::Failed { .. } | Observation::Unavailable { .. });
+        let cause = if failure { Cause::Failed } else { Cause::Started };
+        assert_eq!(after.accepted, valid.then_some(cause));
+        assert_eq!(after.progress, Progress { consumed: before.consumed || valid,
+            failed: before.failed || (valid && failure) });
         assert_eq!(observe(target, after.progress, c, e).progress, after.progress);
         kani::cover!(valid && !before.consumed && matches!(e, Observation::Started(_)), "start progresses");
         kani::cover!(valid && !before.consumed && matches!(e, Observation::Current(_)), "snapshot progresses");
