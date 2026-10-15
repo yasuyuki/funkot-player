@@ -1,0 +1,30 @@
+[
+  {
+    "app": "github-actions",
+    "name": "Windows native artifact ownership"
+  },
+  {
+    "app": "github-actions",
+    "name": "Read adopted core commit"
+  },
+  {
+    "app": "github-actions",
+    "name": "Release-only invariants"
+  },
+  {
+    "app": "github-actions",
+    "name": "Playlist occurrence proof"
+  },
+  {
+    "app": "github-actions",
+    "name": "Frontend and native library"
+  },
+  {
+    "app": "github-actions",
+    "name": "Windows frontend and native library"
+  },
+  {
+    "app": "github-actions",
+    "name": "Rust dependency policy"
+  }
+]
