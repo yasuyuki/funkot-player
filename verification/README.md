@@ -105,3 +105,7 @@ temporary tree and change `Observation::Passive => None` to
 `Observation::Passive => Some(Cause::Started)`. Running the same entry must fail;
 discard that temporary tree's mutation and rerun the unchanged production source.
 This synthetic mutation is not evidence of the device failure's cause.
+
+## Engine snapshot coherence
+
+Kani still does not prove concurrent publication. `./scripts/check-engine-snapshot.sh` runs a Loom 0.7.2 check that a reader of `EngineObservation` observes one completed `(current, finished)` pair or nothing. The Kani harnesses, unwind bounds, and cover counts above are unchanged. The agent procedure is `.claude/skills/verify-engine-snapshot/SKILL.md`.
