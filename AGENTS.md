@@ -16,4 +16,4 @@ authentication, or handle signing material. Android builds, signing, Docker
 For UI verification and UI/layout/interaction changes, use [.claude/skills/ui-design/SKILL.md](.claude/skills/ui-design/SKILL.md)
 and [docs/ui-design.md](docs/ui-design.md) before implementation and for rendered-screen review.
 The skill defines the lightweight exception for changes with no layout or hierarchy impact.
-For an engine snapshot, playlist reconcile, or queue-start change, use [.claude/skills/verify-engine-snapshot/SKILL.md](.claude/skills/verify-engine-snapshot/SKILL.md).
+When a change touches `src-tauri/src/engine_observation.rs`, a publish of that observation, or `verification/engine_snapshot`, including a condition-only edit or a rename, use [.claude/skills/verify-engine-snapshot/SKILL.md](.claude/skills/verify-engine-snapshot/SKILL.md).
