@@ -35,6 +35,7 @@ Exit 0 means run the official script before finishing. When the JSON field `assu
 - a rename or delete of that file
 - an added, removed, or edited `publish_engine_observation(` or `observation.publish(`
 - an edit inside the span from the nearest lock within 200 lines above a publish through that publish, using the file text before the edit as well as after it
+- a rename, copy, or delete of a path in `WRITER_COUNTS`, even when the call text is unchanged
 - a change under `verification/engine_snapshot/`, `scripts/check-engine-snapshot.sh`, or this skill
 
 An unrelated UI file does not require a run. `python3 verification/engine_snapshot/check.py --self-test` checks these examples. The official script runs that self-test before Loom, and a self-test failure is a `FAIL`.

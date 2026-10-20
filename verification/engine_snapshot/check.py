@@ -142,13 +142,20 @@ def covered(path):
     return False
 
 
-def parse_name_status(text):
-    paths = []
+def name_status_rows(text):
+    rows = []
     for line in text.splitlines():
         if not line.strip():
             continue
         parts = line.split("\t")
-        paths.extend(parts[1:])
+        rows.append((parts[0], parts[1:]))
+    return rows
+
+
+def parse_name_status(text):
+    paths = []
+    for _, row_paths in name_status_rows(text):
+        paths.extend(row_paths)
     return paths
 
 
@@ -189,9 +196,14 @@ def publish_spans(text):
 def decide(name_status, unified_diff, files, old_files=None):
     reasons = []
     review = []
-    for path in parse_name_status(name_status):
-        if covered(path):
-            reasons.append(f"covered path {path}")
+    for status, paths in name_status_rows(name_status):
+        for path in paths:
+            if covered(path):
+                reasons.append(f"covered path {path}")
+            if path in WRITER_COUNTS and status[:1] in "RDC":
+                message = f"recorded writer path {status} {path}"
+                reasons.append(message)
+                review.append(message)
     hunks, publish_edits = parse_diff(unified_diff)
     for path in publish_edits:
         if not path.endswith(".rs"):
@@ -233,6 +245,12 @@ def self_test(verbose=False):
         {},
     )
     assert renamed["proof_required"]
+    moved_writer = decide(
+        "R100\tsrc-tauri/src/playlist_service.rs\tsrc-tauri/src/playback_publish.rs",
+        "",
+        {},
+    )
+    assert moved_writer["proof_required"] and moved_writer["assumption_review"]
     added = "\n".join([
         "diff --git a/src-tauri/src/side.rs b/src-tauri/src/side.rs",
         "@@ -1 +1 @@",
@@ -309,6 +327,7 @@ def self_test(verbose=False):
     if verbose:
         print("condition-only covered file: required")
         print("rename of engine_observation.rs: required")
+        print("rename of a recorded writer file: required")
         print("new observation.publish file: required")
         print("unrelated UI file: not required")
         print("lock deletion beside a publish: required")
