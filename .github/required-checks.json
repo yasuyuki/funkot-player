@@ -17,6 +17,10 @@
   },
   {
     "app": "github-actions",
+    "name": "Engine snapshot coherence"
+  },
+  {
+    "app": "github-actions",
     "name": "Frontend and native library"
   },
   {
