@@ -8,7 +8,7 @@
 
 The proof was run against that blob with `rustc 1.93.0 (254b59607 2026-01-19)` and Loom 0.7.2. The official script returned `PASS`. A copy that drops the `before == after` recheck made the three concurrent tests fail. The restored production file passed again. The script's `source_sha256` for that blob is `44546ac5dd779cdb8ba7a31d8e7715eee4ee2db69f9a9471ab7c643bb8094167`.
 
-Move `sync_commit` only by the rule in `SKILL.md`.
+Move `sync_commit` only by the rule in `SKILL.md`. A harness-only commit does not move it while `git rev-parse HEAD:src-tauri/src/engine_observation.rs` is still `110c9df1085c3b8639ef87461bc83590b32201b9`.
 
 ## Property
 
@@ -18,7 +18,7 @@ Move `sync_commit` only by the rule in `SKILL.md`.
 
 ## What the tests quantify
 
-Loom's default preemption bound is unlimited. `max_branches` stays at Loom's default of 1_000, which is above the atomic steps in these tests.
+Loom's default preemption bound is unlimited. `max_branches` stays at Loom's default of 1_000, which is above the atomic steps in these tests. The official script fails when `LOOM_MAX_PREEMPTIONS`, `LOOM_MAX_PERMUTATIONS`, `LOOM_MAX_DURATION`, `LOOM_MAX_BRANCHES`, or `LOOM_CHECKPOINT_FILE` is set. Unsetting one of those to obtain a pass changes the recorded bounds.
 
 - `index_and_finished_move_together`: one reader overlaps one publish from `(Some(1), false)` to `(Some(2), true)`.
 - `absent_current_hides_the_stale_index`: one reader overlaps one publish from `(Some(1), false)` to `(None, true)`, the path that skips the `current` store.
@@ -36,6 +36,8 @@ Production `publish` runs while the render mutex is held. Callers at the sync co
 - `publish_engine_observation` in `src-tauri/src/playlist_service.rs` on the source-replacement and save-failure paths, each after `playback.render.lock`
 
 A new caller that publishes without that mutex makes this proof blocked. Two overlapping writers are outside the model.
+
+`WRITER_COUNTS` in `verification/engine_snapshot/check.py` is the executable record of every `publish_engine_observation(` and `observation.publish(` under `src-tauri`. The production callers above are in that set. So are the tests in `engine_observation.rs` and `playlist_service/tests.rs`. Those tests are not production writers. A different file or a different count fails the official script. That failure is not a completed mutex review and is not a passing proof. Update the count only after re-reading each call. The count does not notice a deleted lock that leaves the call in place. `--applies` selects that edit when it falls in the 200 lines above the publish. The farthest production lock found at the sync commit is the audio callback, 86 lines above its publish. A lock farther than 200 lines above its publish is outside that selection.
 
 ## Tool
 
