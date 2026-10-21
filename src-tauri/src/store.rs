@@ -3081,6 +3081,11 @@ mod tests {
         let file = fs::File::open(path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let mut entry = archive.by_name(name).unwrap();
+        assert_eq!(
+            entry.compression(),
+            zip::CompressionMethod::Stored,
+            "{name}"
+        );
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut buf).unwrap();
         buf
