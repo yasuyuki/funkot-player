@@ -743,15 +743,20 @@ mod music_dir_tests {
 
     #[cfg(all(unix, not(target_os = "android")))]
     #[test]
-    fn inspect_picked_music_dir_rejects_an_unlistable_directory() {
+    fn inspect_picked_music_dir_follows_whether_this_process_can_list_the_directory() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let music = root.path().join("Music");
         std::fs::create_dir(&music).unwrap();
         std::fs::set_permissions(&music, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&music).is_ok();
         let result = inspect_picked_music_dir(&music, &root.path().join("data"));
         std::fs::set_permissions(&music, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(result, Err("not_readable"));
+        if readable {
+            assert_eq!(result, Ok(()));
+        } else {
+            assert_eq!(result, Err("not_readable"));
+        }
     }
 
     #[cfg(not(target_os = "android"))]
