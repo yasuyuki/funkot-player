@@ -571,6 +571,40 @@ fn check_music_dir_shape(candidate: &Path, data_dir: &Path) -> Result<(), &'stat
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
+fn inspect_picked_music_dir(path: &Path, data_dir: &Path) -> Result<(), &'static str> {
+    check_music_dir_shape(path, data_dir)?;
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("not_found"),
+        Err(_) => Err("not_readable"),
+        Ok(meta) if !meta.is_dir() => Err("not_a_directory"),
+        Ok(_) => {
+            if std::fs::read_dir(path).is_err() {
+                Err("not_readable")
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn store_picked_music_dir(data_dir: &Path, path: &Path) -> Result<(), String> {
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = store::load_settings(data_dir);
+    let path_changed = settings.music_dir.as_deref() != Some(path);
+    settings.music_dir = Some(path.to_path_buf());
+    if path_changed {
+        settings.arrivals_baseline_done = false;
+    }
+    store::save_settings(data_dir, &settings).map_err(|e| format!("cannot save settings: {e}"))
+}
+
 #[cfg(test)]
 mod music_dir_tests {
     use super::*;
@@ -669,6 +703,104 @@ mod music_dir_tests {
             true
         });
         assert_eq!(probed.into_inner(), vec![configured.to_path_buf()]);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_rejects_a_missing_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        let data = root.path().join("data");
+        assert_eq!(
+            inspect_picked_music_dir(&missing, &data),
+            Err("not_found")
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_rejects_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("track.mp3");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            inspect_picked_music_dir(&file, &root.path().join("data")),
+            Err("not_a_directory")
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_accepts_a_readable_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        assert_eq!(
+            inspect_picked_music_dir(&music, &root.path().join("data")),
+            Ok(())
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn inspect_picked_music_dir_follows_whether_this_process_can_list_the_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        std::fs::set_permissions(&music, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&music).is_ok();
+        let result = inspect_picked_music_dir(&music, &root.path().join("data"));
+        std::fs::set_permissions(&music, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable {
+            assert_eq!(result, Ok(()));
+        } else {
+            assert_eq!(result, Err("not_readable"));
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn store_picked_music_dir_clears_the_baseline_when_the_folder_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        store::save_settings(
+            root.path(),
+            &store::Settings {
+                music_dir: Some(first),
+                arrivals_baseline_done: true,
+                ..store::Settings::default()
+            },
+        )
+        .unwrap();
+        store_picked_music_dir(root.path(), &second).unwrap();
+        let loaded = store::load_settings(root.path());
+        assert_eq!(loaded.music_dir.as_deref(), Some(second.as_path()));
+        assert!(!loaded.arrivals_baseline_done);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn store_picked_music_dir_keeps_the_baseline_for_the_same_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        store::save_settings(
+            root.path(),
+            &store::Settings {
+                music_dir: Some(music.clone()),
+                arrivals_baseline_done: true,
+                ..store::Settings::default()
+            },
+        )
+        .unwrap();
+        store_picked_music_dir(root.path(), &music).unwrap();
+        let loaded = store::load_settings(root.path());
+        assert_eq!(loaded.music_dir.as_deref(), Some(music.as_path()));
+        assert!(loaded.arrivals_baseline_done);
     }
 }
 
@@ -801,7 +933,8 @@ struct SetMusicDirResult {
 /// layer takes the string rather than holding a second, unreachable copy of
 /// it per language.
 ///
-/// Always `async`: `blocking_pick_folder` must never run on the main thread.
+/// Always `async`: `FileDialog::pick_folder` blocks, so it must never run
+/// on the main thread.
 #[tauri::command(async)]
 fn set_music_dir(
     app: tauri::AppHandle,
@@ -816,55 +949,26 @@ fn set_music_dir(
     #[cfg(not(target_os = "android"))]
     {
         use tauri::Manager;
-        use tauri_plugin_dialog::DialogExt;
 
         let dirs = resolve_dirs(&app)?;
 
-        let mut b = app.dialog().file().set_title(&title);
+        let mut dialog = rfd::FileDialog::new().set_title(&title);
         if !dirs.music_dir.is_empty() {
-            b = b.set_directory(&dirs.music_dir);
+            dialog = dialog.set_directory(&dirs.music_dir);
         }
-        if let Some(w) = app.get_webview_window("main") {
-            b = b.set_parent(&w);
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
         }
-        let picked = b.blocking_pick_folder();
-
-        let Some(fp) = picked else {
+        let Some(path) = dialog.pick_folder() else {
             return Ok(SetMusicDirResult {
                 changed: false,
                 dirs,
                 restart_required: false,
             });
         };
-        let path = fp.into_path().map_err(|_| "not_absolute".to_string())?;
-
-        check_music_dir_shape(&path, Path::new(&dirs.data_dir))?;
-        match std::fs::metadata(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("not_found".into()),
-            Err(_) => return Err("not_readable".into()),
-            Ok(m) if !m.is_dir() => return Err("not_a_directory".into()),
-            Ok(_) => {}
-        }
-        if std::fs::read_dir(&path).is_err() {
-            return Err("not_readable".into());
-        }
-
         let data = Path::new(&dirs.data_dir);
-        // Folder picker is done; take locks only for the Settings RMW.
-        let _index = INDEX_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _saving = SAVE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut settings = store::load_settings(data);
-        let path_changed = settings.music_dir.as_deref() != Some(path.as_path());
-        settings.music_dir = Some(path);
-        if path_changed {
-            settings.arrivals_baseline_done = false;
-        }
-        store::save_settings(data, &settings)
-            .map_err(|e| format!("cannot save settings: {e}"))?;
+        inspect_picked_music_dir(&path, data)?;
+        store_picked_music_dir(data, &path)?;
 
         let dirs = resolve_dirs(&app)?;
         let restart_required = *state.started.lock().unwrap();
@@ -9553,13 +9657,6 @@ pub fn run() {
     env_logger::init();
 
     let builder = tauri::Builder::default().manage(AppState::default());
-    // Desktop-only folder-picker for `set_music_dir`. Rust calls it directly
-    // (no `invoke` from the webview), so no `capabilities/default.json`
-    // permission is needed. Not registered on Android: `set_music_dir`'s
-    // Android branch never calls it (see its `#[cfg]` split), and no
-    // folder-picker backend exists there anyway.
-    #[cfg(not(target_os = "android"))]
-    let builder = builder.plugin(tauri_plugin_dialog::init());
     builder
         .setup(|app| {
             // Optional Windows endpoint: failure must never affect launch or audio.
