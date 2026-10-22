@@ -182,7 +182,10 @@ button {
   -webkit-tap-highlight-color: var(--color-tap-highlight);
 }
 
-button:hover:not(:disabled) { background: var(--color-hover-bg); }
+button:hover:not(:disabled) {
+  background: var(--color-hover-bg);
+  border-color: var(--color-text-dim);
+}
 button:active:not(:disabled) {
   background: var(--color-pressed-bg);
   transform: scale(0.98);
@@ -206,6 +209,7 @@ button.quiet, button.menu-item, button[role="menuitem"] {
 }
 button.quiet:hover:not(:disabled), button.menu-item:hover:not(:disabled), button[role="menuitem"]:hover:not(:disabled) {
   background: var(--color-hover-bg);
+  border-color: var(--color-text-dim);
 }
 button.quiet:active:not(:disabled), button.menu-item:active:not(:disabled), button[role="menuitem"]:active:not(:disabled) {
   background: var(--color-pressed-bg);

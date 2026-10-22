@@ -4,6 +4,7 @@
 //! the engine, and its contents survive a restart via `store.rs`.
 
 mod queue;
+mod queue_progress;
 mod transport_fade;
 mod store;
 mod store_cache;
@@ -570,6 +571,40 @@ fn check_music_dir_shape(candidate: &Path, data_dir: &Path) -> Result<(), &'stat
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
+fn inspect_picked_music_dir(path: &Path, data_dir: &Path) -> Result<(), &'static str> {
+    check_music_dir_shape(path, data_dir)?;
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("not_found"),
+        Err(_) => Err("not_readable"),
+        Ok(meta) if !meta.is_dir() => Err("not_a_directory"),
+        Ok(_) => {
+            if std::fs::read_dir(path).is_err() {
+                Err("not_readable")
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn store_picked_music_dir(data_dir: &Path, path: &Path) -> Result<(), String> {
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = store::load_settings(data_dir);
+    let path_changed = settings.music_dir.as_deref() != Some(path);
+    settings.music_dir = Some(path.to_path_buf());
+    if path_changed {
+        settings.arrivals_baseline_done = false;
+    }
+    store::save_settings(data_dir, &settings).map_err(|e| format!("cannot save settings: {e}"))
+}
+
 #[cfg(test)]
 mod music_dir_tests {
     use super::*;
@@ -668,6 +703,104 @@ mod music_dir_tests {
             true
         });
         assert_eq!(probed.into_inner(), vec![configured.to_path_buf()]);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_rejects_a_missing_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        let data = root.path().join("data");
+        assert_eq!(
+            inspect_picked_music_dir(&missing, &data),
+            Err("not_found")
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_rejects_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("track.mp3");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            inspect_picked_music_dir(&file, &root.path().join("data")),
+            Err("not_a_directory")
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_accepts_a_readable_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        assert_eq!(
+            inspect_picked_music_dir(&music, &root.path().join("data")),
+            Ok(())
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn inspect_picked_music_dir_follows_whether_this_process_can_list_the_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        std::fs::set_permissions(&music, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&music).is_ok();
+        let result = inspect_picked_music_dir(&music, &root.path().join("data"));
+        std::fs::set_permissions(&music, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable {
+            assert_eq!(result, Ok(()));
+        } else {
+            assert_eq!(result, Err("not_readable"));
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn store_picked_music_dir_clears_the_baseline_when_the_folder_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        store::save_settings(
+            root.path(),
+            &store::Settings {
+                music_dir: Some(first),
+                arrivals_baseline_done: true,
+                ..store::Settings::default()
+            },
+        )
+        .unwrap();
+        store_picked_music_dir(root.path(), &second).unwrap();
+        let loaded = store::load_settings(root.path());
+        assert_eq!(loaded.music_dir.as_deref(), Some(second.as_path()));
+        assert!(!loaded.arrivals_baseline_done);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn store_picked_music_dir_keeps_the_baseline_for_the_same_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        store::save_settings(
+            root.path(),
+            &store::Settings {
+                music_dir: Some(music.clone()),
+                arrivals_baseline_done: true,
+                ..store::Settings::default()
+            },
+        )
+        .unwrap();
+        store_picked_music_dir(root.path(), &music).unwrap();
+        let loaded = store::load_settings(root.path());
+        assert_eq!(loaded.music_dir.as_deref(), Some(music.as_path()));
+        assert!(loaded.arrivals_baseline_done);
     }
 }
 
@@ -800,7 +933,8 @@ struct SetMusicDirResult {
 /// layer takes the string rather than holding a second, unreachable copy of
 /// it per language.
 ///
-/// Always `async`: `blocking_pick_folder` must never run on the main thread.
+/// Always `async`: `FileDialog::pick_folder` blocks, so it must never run
+/// on the main thread.
 #[tauri::command(async)]
 fn set_music_dir(
     app: tauri::AppHandle,
@@ -815,55 +949,26 @@ fn set_music_dir(
     #[cfg(not(target_os = "android"))]
     {
         use tauri::Manager;
-        use tauri_plugin_dialog::DialogExt;
 
         let dirs = resolve_dirs(&app)?;
 
-        let mut b = app.dialog().file().set_title(&title);
+        let mut dialog = rfd::FileDialog::new().set_title(&title);
         if !dirs.music_dir.is_empty() {
-            b = b.set_directory(&dirs.music_dir);
+            dialog = dialog.set_directory(&dirs.music_dir);
         }
-        if let Some(w) = app.get_webview_window("main") {
-            b = b.set_parent(&w);
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
         }
-        let picked = b.blocking_pick_folder();
-
-        let Some(fp) = picked else {
+        let Some(path) = dialog.pick_folder() else {
             return Ok(SetMusicDirResult {
                 changed: false,
                 dirs,
                 restart_required: false,
             });
         };
-        let path = fp.into_path().map_err(|_| "not_absolute".to_string())?;
-
-        check_music_dir_shape(&path, Path::new(&dirs.data_dir))?;
-        match std::fs::metadata(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("not_found".into()),
-            Err(_) => return Err("not_readable".into()),
-            Ok(m) if !m.is_dir() => return Err("not_a_directory".into()),
-            Ok(_) => {}
-        }
-        if std::fs::read_dir(&path).is_err() {
-            return Err("not_readable".into());
-        }
-
         let data = Path::new(&dirs.data_dir);
-        // Folder picker is done; take locks only for the Settings RMW.
-        let _index = INDEX_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _saving = SAVE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut settings = store::load_settings(data);
-        let path_changed = settings.music_dir.as_deref() != Some(path.as_path());
-        settings.music_dir = Some(path);
-        if path_changed {
-            settings.arrivals_baseline_done = false;
-        }
-        store::save_settings(data, &settings)
-            .map_err(|e| format!("cannot save settings: {e}"))?;
+        inspect_picked_music_dir(&path, data)?;
+        store_picked_music_dir(data, &path)?;
 
         let dirs = resolve_dirs(&app)?;
         let restart_required = *state.started.lock().unwrap();
@@ -2008,9 +2113,9 @@ static MAIN_FRAMES: AtomicU64 = AtomicU64::new(0);
 /// `RenderState` and `open_output_stream`'s `try_lock`.
 static NEXT_PREPARED: AtomicBool = AtomicBool::new(false);
 
-/// Analysis worker yields while this is true: set at Start (`Phase::Starting`),
-/// cleared in the cpal callback once the main engine's next slot is filled
-/// (`NEXT_PREPARED`). Atomic-only so the callback never takes a lock.
+/// Analysis worker yields while the main engine needs its next slot prepared.
+/// The cpal callback updates this after every render, including transitions.
+/// Atomic-only so the callback never takes a lock.
 static YIELD_FOR_LOADER: AtomicBool = AtomicBool::new(false);
 
 /// Mirrors `Engine::frames_until_transition()` for the main engine, same
@@ -2082,11 +2187,100 @@ fn request_skip_next() -> Result<(), String> {
         return Err("skip is disabled while auditioning".into());
     }
     let playback = PLAYBACK.get().ok_or("not playing")?;
-    NAV_REQUESTED_MS.store(now_ms(), Ordering::Relaxed);
-    // A full channel (capacity 8) just means a nav is already queued; that is
-    // normal under repeated taps and not an error worth surfacing.
-    let _ = playback.nav_tx.try_send(NavAction::TransitionToNext);
+    let _request = MANUAL_NEXT_REQUEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if manual_next_owns_analysis(
+        MANUAL_NEXT_PENDING.load(Ordering::Acquire),
+        MANUAL_NEXT_IN_FLIGHT.load(Ordering::Acquire)) {
+        return Ok(());
+    }
+    let current = playback.observation.read()
+        .or_else(|| playback.observation.read())
+        .and_then(|snapshot| snapshot.current)
+        .ok_or("current track not ready")?;
+    MANUAL_NEXT_EXPECTED_INDEX.store(current, Ordering::Release);
+    MANUAL_NEXT_PENDING.store(true, Ordering::Release);
+    drop(_request);
+    // The deck may still be decoding, and a library scan may already own the
+    // decoder. Hold the request until the deck exists and that scan has yielded;
+    // otherwise core can only choose its head-entry fallback.
+    if next_dispatch_ready() && dispatch_manual_next(playback)? {
+        return Ok(());
+    }
+    std::thread::Builder::new()
+        .name("funkot-next-wait".into())
+        .spawn(|| {
+            while MANUAL_NEXT_PENDING.load(Ordering::Acquire) {
+                if matches!(get_phase(), Phase::Idle | Phase::Failed | Phase::Disconnected) {
+                    MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+                    break;
+                }
+                if next_dispatch_ready() {
+                    if let Some(playback) = PLAYBACK.get() {
+                        match dispatch_manual_next(playback) {
+                            Ok(true) => break,
+                            Ok(false) => {}, // channel full: keep this request pending
+                            Err(error) => {
+                                log::warn!("manual Next dispatch failed: {error}");
+                                MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+                                break;
+                            }
+                        }
+                    } else {
+                        MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .map_err(|e| {
+            MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+            e.to_string()
+        })?;
     Ok(())
+}
+
+fn manual_next_owns_analysis(pending: bool, in_flight: bool) -> bool {
+    pending || in_flight
+}
+
+fn manual_next_completed(expected: usize, current: Option<usize>, finished: bool) -> bool {
+    finished || current != Some(expected)
+}
+
+fn next_dispatch_ready() -> bool {
+    NEXT_PREPARED.load(Ordering::Acquire)
+        && !LIBRARY_ANALYSIS_BUSY.load(Ordering::Acquire)
+}
+
+fn dispatch_manual_next(playback: &Playback) -> Result<bool, String> {
+    use std::sync::mpsc::TrySendError;
+    if !MANUAL_NEXT_PENDING.load(Ordering::Acquire) { return Ok(false); }
+    let expected = MANUAL_NEXT_EXPECTED_INDEX.load(Ordering::Acquire);
+    let Some(snapshot) = playback.observation.read() else { return Ok(false); };
+    if snapshot.current != Some(expected) || snapshot.finished {
+        MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+        return Ok(false);
+    }
+    NAV_REQUESTED_MS.store(now_ms(), Ordering::Relaxed);
+    MANUAL_NEXT_IN_FLIGHT.store(true, Ordering::Release);
+    match playback.nav_tx.try_send(NavAction::TransitionToNext) {
+        Ok(()) => {
+            MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+            Ok(true)
+        }
+        Err(error) => {
+            MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::Release);
+            NAV_REQUESTED_MS.store(0, Ordering::Relaxed);
+            match error {
+                TrySendError::Full(_) => Ok(false),
+                TrySendError::Disconnected(_) => {
+                    MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+                    Err("navigation channel disconnected".into())
+                }
+            }
+        }
+    }
 }
 
 /// Whether a nav marked at `marked_ms` (`0` for "no mark") is still fresh
@@ -2127,6 +2321,22 @@ mod nav_origin_tests {
     fn a_mark_past_the_ttl_is_automatic() {
         let ttl_ms = NAV_MARK_TTL.as_millis() as u64;
         assert_eq!(nav_origin(1_000, 1_000 + ttl_ms + 1), Origin::Automatic);
+    }
+
+    #[test]
+    fn current_index_releases_next_without_a_transition_event() {
+        assert!(!manual_next_completed(7, Some(7), false));
+        assert!(manual_next_completed(7, Some(8), false));
+        assert!(manual_next_completed(7, None, true));
+    }
+
+    #[test]
+    fn analysis_yields_for_a_sent_next_even_after_attribution_mark_expires() {
+        let ttl_ms = NAV_MARK_TTL.as_millis() as u64;
+        assert_eq!(nav_origin(1_000, 1_000 + ttl_ms + 1), Origin::Automatic);
+        assert!(manual_next_owns_analysis(false, true));
+        assert!(manual_next_owns_analysis(true, false));
+        assert!(!manual_next_owns_analysis(false, false));
     }
 
     #[test]
@@ -2379,62 +2589,15 @@ fn lock_now_unless_stale(audition: bool) -> Option<std::sync::MutexGuard<'static
     Some(now)
 }
 
-/// Drops everything in `SESSION.in_flight` before `now` and persists the
-/// result. `now` is `NowTracker::now` right after a change — i.e. what just
-/// became the actively-playing track — so this is "forget everything that
-/// finished playing before it", leaving `now` itself (still playing, or at
-/// least still owed to the listener if this is a reserved-but-not-started
-/// entry) and anything reserved after it in place.
-///
-/// A no-op, on purpose, when `now` is `None` or is not found in `in_flight`:
-/// `None` means nothing changed worth retiring over, and "not found" can
-/// happen (the very first `TrackStarted` of a run races `on_reserved`'s own
-/// push over the loader thread and the events thread — either can land
-/// first) without meaning anything is wrong, so guessing at a retirement
-/// here would risk dropping an entry that is still genuinely in flight.
-///
-/// Must never be called for an audition event (`audition == true`): an
-/// audition's `now` is a title swapped into the same [`NOW`] tracker for the
-/// audition's own two tracks (see `install_audition`/`resume_autodj`), not
-/// anything that ever went through `HostSource`/`in_flight` — retiring
-/// against it would either no-op (the common case) or, on an unlucky path
-/// collision, discard real main-queue session state for a track the
-/// audition never actually played to completion.
-/// Returns how `now` reached the queue, read off `in_flight[0]` — which is
-/// `now` itself once the retirement above has run — while the session lock is
-/// still held. `None` when nothing was retired, which is the same "not found"
-/// case documented above and is the honest answer rather than a guess.
-fn retire_in_flight_up_to(now: Option<&Path>) -> Option<QueueOrigin> {
-    let now = now?;
-    let origin;
+/// A queue occurrence is no longer owed once its own playback starts.
+fn retire_started_in_flight(item: &QueueItem) {
     {
         let mut session = SESSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let pos = session
-            .in_flight
-            .iter()
-            .position(|item| item.path.as_path() == now)?;
-        session.in_flight.drain(..pos);
-        origin = session.in_flight.first().map(|item| item.origin);
+        store::retire_revoked(&mut session.in_flight, item);
     }
     persist_session();
-    origin
-}
-
-/// As [`retire_in_flight_up_to`], for a completed transition: the incoming
-/// track is at `in_flight[0]` once `retire_transition` has drained to it.
-fn retire_in_flight_transition(from: &Path, to: &Path) -> Option<QueueOrigin> {
-    let origin;
-    {
-        let mut session = SESSION
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        origin = store::retire_transition(&mut session.in_flight, from, to)
-            .and_then(|_| session.in_flight.first().map(|item| item.origin));
-    }
-    persist_session();
-    origin
 }
 
 /// Heard = this path just became `NowTracker::now`. No duration threshold
@@ -2524,6 +2687,17 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 // buffer + one channel hop (a few ms) of staleness. Position
                 // is displayed to the second, so that is not observable.
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
+                if origin == Origin::Manual {
+                    if let Some(playback) = PLAYBACK.get() {
+                        let render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(plan) = render.engine.last_manual_plan_diagnostic() {
+                            log::info!("manual next plan: reason={}, simple={}, entry={}, start={}",
+                                plan.reason, plan.simple, plan.entry, plan.start);
+                        } else {
+                            log::info!("manual next plan: no local plan (head-only or direct navigation)");
+                        }
+                    }
+                }
                 // Only an interrupt fold moves `now`; a plain TransitionStarted
                 // leaves it alone, so sync only when the title would change.
                 let (changed, now_path) = {
@@ -2537,9 +2711,9 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 if changed {
                     service_sync_state();
                 }
-                // Never for an audition event — see `retire_in_flight_up_to`.
+                // Auditions never consume the main queue.
                 if changed && !audition {
-                    let origin = retire_in_flight_up_to(now_path.as_deref());
+                    let origin = playlist_service::current_queue_origin();
                     // Interrupt fold assigned `now` — record heard (tracker
                     // guard already dropped).
                     if let Some(ref p) = now_path {
@@ -2551,7 +2725,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 event: EngineEvent::TrackStarted { index, path, entry_frame_out },
                 audition,
             } => {
-                if !audition { playlist_service::started(index); }
+                let started_origin = if audition { None } else { playlist_service::started(index) };
                 // See the `MAIN_FRAMES` comment on the TransitionStarted arm
                 // above — same reasoning applies here.
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
@@ -2567,7 +2741,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     service_sync_state();
                 }
                 if changed && !audition {
-                    let origin = retire_in_flight_up_to(now_path.as_deref());
+                    let origin = started_origin;
                     // `on_track_started` assigned `now` (in_progress was none).
                     if let Some(ref p) = now_path {
                         record_heard(p, origin);
@@ -2608,10 +2782,6 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     (completed, changed, tracker.now.clone())
                 };
                 let heard = completed.is_some() && !audition;
-                let main_transition = completed
-                    .as_ref()
-                    .filter(|_| !audition)
-                    .map(|(from, to, _)| (from.clone(), to.clone()));
                 if let Some((from, to, origin)) = completed {
                     log::info!(
                         "transition: {} -> {} ({})",
@@ -2623,9 +2793,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 if changed {
                     service_sync_state();
                 }
-                let origin = main_transition
-                    .map(|(from, to)| retire_in_flight_transition(&from, &to))
-                    .flatten();
+                let origin = if heard { playlist_service::current_queue_origin() } else { None };
                 // Record even when path is unchanged (same-track restart:
                 // `changed` is false but `now = to` was assigned). Skip
                 // no-op TransitionEnded (`completed` is None).
@@ -2766,10 +2934,14 @@ fn open_output_stream(
                         // this callback must never block on one.
                         let next_ready = engine.next_track_path().is_some();
                         NEXT_PREPARED.store(next_ready, Ordering::Relaxed);
-                        if next_ready {
-                            // First next-slot fill ends the Start→loader yield
-                            // window; analysis may resume. Atomic only.
-                            YIELD_FOR_LOADER.store(false, Ordering::Relaxed);
+                        // Re-arm after every transition, so the loader's next
+                        // candidate analysis wins over the library scan.
+                        let finished = engine.is_finished();
+                        YIELD_FOR_LOADER.store(!next_ready && !finished, Ordering::Relaxed);
+                        let expected = MANUAL_NEXT_EXPECTED_INDEX.load(Ordering::Acquire);
+                        if manual_next_completed(expected, engine.current_index(), finished) {
+                            MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+                            MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::Release);
                         }
                         FRAMES_UNTIL_TRANSITION.store(
                             engine.frames_until_transition().unwrap_or(u64::MAX),
@@ -2945,13 +3117,15 @@ fn audio_thread(
     // command only runs while the webview is polling, and the whole point of
     // this app is to keep playing with the screen off.
     let queue_dir = data_dir.clone();
-    let cache_dir_for_skip = cache_dir_for_log.clone();
-    let data_dir_for_skip = data_dir.clone();
     // Cloned before `queue` moves into `HostSource::new` below: the
     // `on_pending_consumed` closure needs its own handle so it can re-read
     // the queue under `SAVE_LOCK` (see the closure body).
     let queue_for_save = Arc::clone(&queue);
     let queue_for_priority = Arc::clone(&queue);
+    let queue_for_reserved = Arc::clone(&queue);
+    let reserved_dir = data_dir.clone();
+    let folder_gate_cache = cache_dir_for_log.clone();
+    let folder_gate_data = data_dir.clone();
     let source = HostSource::new(
         queue,
         DrainPolicy::ContinueFolder {
@@ -2960,10 +3134,15 @@ fn audio_thread(
         },
     )
         .skip_folder_entry(Box::new(move |path| {
-            if ALLOW_NON_FUNKOT.load(Ordering::Relaxed) {
-                return false;
-            }
-            gated_non_funkot(path, &cache_dir_for_skip, &data_dir_for_skip)
+            // Decide before automatic membership is created. A rejected
+            // pending occurrence must remain until playback or user deletion,
+            // so adding an unanalysed non-Funkot path would leave a ghost row.
+            admit_playback_path(
+                path,
+                &folder_gate_cache,
+                &folder_gate_data,
+                ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
+            ) == PlaybackAdmission::Rejected
         }))
         .on_pending_consumed(Box::new(move |_pending| {
             // Ignore the slice this observer is handed — it is a snapshot
@@ -3011,21 +3190,27 @@ fn audio_thread(
                 "loader: preparing {} (analysis: {analysis})",
                 item.path.display()
             );
-            // Record this as in-flight the moment it leaves `pending` (or
-            // the folder-drain fallback), so a process death before it ever
-            // finishes playing does not lose it — see `store::Session` and
+            // Record this as in-flight when reserved. The pending occurrence
+            // remains durable until observed playback starts, so a process
+            // death before it plays cannot lose it — see `store::Session` and
             // `store::restored_pending`. Uses `DATA_DIR` (not `queue_dir`,
             // moved into the `on_pending_consumed` closure above and no
             // longer available here) — `start_impl` sets it before spawning
             // this thread, so it is always populated by the time the loader
             // makes its first call.
+            let _saving = SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut session = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            // A user may have removed this reservation while source.next()
+            // waited for the save lock. QueueRemove saves the session and
+            // replaces the queue under the same lock.
+            if queue::reserved_item(&queue_for_reserved)
+                .is_some_and(|reserved| reserved.entry_id == item.entry_id)
             {
-                let mut session = SESSION
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 session.in_flight.push(item.clone());
+                if let Err(e) = store::save_session(&reserved_dir, &session) {
+                    log::warn!("save_session({}): {e}", reserved_dir.display());
+                }
             }
-            persist_session();
         }))
         .on_folder_pos(Box::new(|pos| {
             FOLDER_POS.store(pos, Ordering::Relaxed);
@@ -3756,16 +3941,12 @@ fn start_impl(
         log::warn!("load_queue({}): {e}", data.display());
         Vec::new()
     });
-    let restored = store::restored_pending(&session.in_flight, &saved, |p| p.exists());
-    let restored = apply_non_funkot_gate_items(
-        restored,
-        &cache,
-        &data,
-        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
-    );
+    let restored = store::restored_pending(&session.in_flight, &saved);
+    let _prestart = playlist_service::lock_prestart_queue();
     let source_owner = playlist_service::get(&data, &cache, &state.queue);
     let normal_resume = source_owner.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
     queue::replace_pending(&state.queue, normal_resume.as_ref().map(|n| n.items.clone()).unwrap_or(restored));
+    drop(_prestart);
     // Mirror the restored queue to `queue.json` *before* clearing
     // `SESSION.in_flight` below, not after: from here until that clear,
     // `queue.json` still doesn't list the tracks that were `in_flight` (they
@@ -3785,7 +3966,7 @@ fn start_impl(
     persist_queue(app, state);
     // `in_flight` has now been folded back into `pending` above, so the
     // in-memory session starts this run with none still outstanding;
-    // `on_reserved` repopulates it as the loader takes tracks back out.
+    // The loader records reservations as in-flight without retiring pending members.
     // Start means "play": do not carry over a previous run's pause. In-process
     // pause still goes through `flip_paused` → SESSION as before.
     {
@@ -4204,6 +4385,8 @@ struct PlayerState {
     /// Monotonic counter bumped after a successful history persist. The UI
     /// re-pulls new arrivals when this changes (not on now-playing alone).
     history_revision: u64,
+    /// Start frame of the audible track; changes when playback actually advances.
+    playback_started_frames: Option<u64>,
 }
 
 fn audition_display_title(path: &Path) -> String {
@@ -4421,6 +4604,7 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
         position_secs,
         duration_secs,
         history_revision: HISTORY_REVISION.load(Ordering::Relaxed),
+        playback_started_frames: now_started_frames,
     }
 }
 
@@ -4814,6 +4998,7 @@ fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
 /// pass. Tracks already in the queue are never removed by this gate.
 #[tauri::command(async)]
 fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let dirs = resolve_dirs(&app)?;
     let path_buf = PathBuf::from(&path);
@@ -4840,27 +5025,36 @@ fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -
 #[tauri::command(async)]
 fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
+    let _saving = SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let allow = store::load_settings(Path::new(&dirs.data_dir)).allow_non_funkot;
     ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
     Ok(allow)
 }
 
-/// Persist `allow_non_funkot` and update the live atomic used by folder drain.
-/// The atomic is stored **before** `SAVE_LOCK` is released.
+/// Persist `allow_non_funkot` and reconfigure the normal queue and any live
+/// future source before publishing the admission atomic to the loader.
 #[tauri::command(async)]
-fn set_allow_non_funkot(app: tauri::AppHandle, allow: bool) -> Result<bool, String> {
+fn set_allow_non_funkot(
+    app: tauri::AppHandle,
+    allow: bool,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     let dirs = resolve_dirs(&app)?;
     let data = Path::new(&dirs.data_dir);
-    with_settings_rmw_then(
-        data,
-        |settings| {
-            settings.allow_non_funkot = allow;
-        },
-        |_| {
-            ALLOW_NON_FUNKOT.store(allow, Ordering::Relaxed);
-            allow
-        },
-    )
+    // Settings can be changed before startup or before `queue_state` has
+    // initialized the service. Create it here so OFF filters the same durable
+    // normal queue/catalog resume that startup will later prefer.
+    let service = playlist_service::existing().unwrap_or_else(|| {
+        playlist_service::get(data, Path::new(&dirs.cache_dir), &state.queue)
+    });
+    playlist_service::reconfigure_admission(&service, allow, PLAYBACK.get(), || {
+        let mut settings = store::load_settings(data);
+        settings.allow_non_funkot = allow;
+        store::save_settings(data, &settings)
+            .map_err(|error| format!("cannot save settings: {error}"))
+    }).map_err(|error| error.message)?;
+    Ok(allow)
 }
 
 /// Current `settings.json` `labeling_mode` (raw, pre-platform-gate).
@@ -5094,6 +5288,7 @@ fn reorder(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
@@ -5121,6 +5316,7 @@ fn reorder(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let item = QueueItem {
+                entry_id: expect.entry_id.clone(),
                 path,
                 origin: expect.origin,
             };
@@ -5146,6 +5342,7 @@ fn dequeue(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<QueueItem, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
         return Err("auditioning".into());
@@ -5171,6 +5368,7 @@ fn dequeue(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let item = QueueItem {
+                entry_id: expect.entry_id.clone(),
                 path,
                 origin: expect.origin,
             };
@@ -5187,6 +5385,7 @@ fn dequeue(
 fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
     // The source owner serializes claims, progress and all destination edits.
     // Reconcile against the engine before publishing the displayed revision.
+    let _prestart = playlist_service::lock_prestart_queue();
     let service = match playlist_service::existing() {
         Some(service) => service,
         None => { let dirs = resolve_dirs(&app)?;
@@ -5297,6 +5496,14 @@ struct LabelStats {
 
 /// Guards against starting a second analysis worker while one is running.
 static ANALYZING: AtomicBool = AtomicBool::new(false);
+/// True only while the background worker decodes or analyses a library file.
+static LIBRARY_ANALYSIS_BUSY: AtomicBool = AtomicBool::new(false);
+/// A manual Next waits for the next deck and for an in-flight library job.
+static MANUAL_NEXT_PENDING: AtomicBool = AtomicBool::new(false);
+/// Keep background analysis out until the requested current track transitions.
+static MANUAL_NEXT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static MANUAL_NEXT_EXPECTED_INDEX: AtomicUsize = AtomicUsize::new(0);
+static MANUAL_NEXT_REQUEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// The cache entry for `path`, but only if it is *complete* -- present and
 /// with `needs_reanalysis` clear. `cache::load` alone is not enough: a kept
@@ -5316,33 +5523,61 @@ fn analyzed_cache_entry(
     funkot_core::cache::load(cache_dir, hash).filter(|a| !a.needs_reanalysis)
 }
 
-/// `true` when the track is analysed and effectively non-Funkot — the gate
-/// condition shared by enqueue reject and folder-drain skip. Unanalysed
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaybackAdmission {
+    Accepted,
+    Rejected,
+    Unavailable,
+}
+
+pub(crate) fn admit_playback_path(
+    path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+    allow_non_funkot: bool,
+) -> PlaybackAdmission {
+    if allow_non_funkot {
+        return PlaybackAdmission::Accepted;
+    }
+    let Ok(hash) = funkot_core::cache::content_hash(path) else {
+        return PlaybackAdmission::Unavailable;
+    };
+    if analyzed_cache_entry(cache_dir, &hash).is_none() {
+        let Ok(buffer) = funkot_core::decode::decode_file(path) else {
+            return PlaybackAdmission::Unavailable;
+        };
+        if funkot_core::cache::fill_missing(path, cache_dir, &buffer).is_err() {
+            return PlaybackAdmission::Unavailable;
+        }
+        reapply_overrides(path, cache_dir, data_dir);
+    }
+    let Some(analysis) = analyzed_cache_entry(cache_dir, &hash) else {
+        return PlaybackAdmission::Unavailable;
+    };
+    let override_funkot = store::load_overrides(data_dir)
+        .get(&hash)
+        .and_then(|override_| override_.funkot);
+    if store::effective_is_funkot(analysis.is_funkot, override_funkot) {
+        PlaybackAdmission::Accepted
+    } else {
+        PlaybackAdmission::Rejected
+    }
+}
+/// `true` when the track is analysed and effectively non-Funkot. Unanalysed
 /// tracks are never gated. Does not consult `allow_non_funkot` (caller does).
 fn gated_non_funkot(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> bool {
-    // Read-only use of the index: never save here. Persist is `refresh_library`
-    // only — otherwise folder-drain / enqueue races with refresh and can
-    // overwrite a pruned index with a stale map. `store_cache` is read-only
-    // for exactly that reason, so it is the right side of that rule.
-    let Ok(hash) = store_cache::content_hash(data_dir, path) else {
-        return false;
-    };
-    let Some(a) = analyzed_cache_entry(cache_dir, &hash) else {
-        return false;
-    };
-    let override_funkot = store::load_overrides(data_dir)
-        .get(&hash)
-        .and_then(|o| o.funkot);
-    !store::effective_is_funkot(a.is_funkot, override_funkot)
+    let Ok(hash) = store_cache::content_hash(data_dir, path) else { return false; };
+    let Some(analysis) = analyzed_cache_entry(cache_dir, &hash) else { return false; };
+    let override_funkot = store::load_overrides(data_dir).get(&hash).and_then(|entry| entry.funkot);
+    !store::effective_is_funkot(analysis.is_funkot, override_funkot)
 }
 
-/// Pending restore can include folder-drain `in_flight`; apply the same gate
-/// as enqueue / folder skip so analysed non-Funkot are not replayed when
-/// `allow` is off. Does not read `ALLOW_NON_FUNKOT` (caller passes it).
+/// Filter a list using only completed analysis. Used by gate unit tests;
+/// actual queue members remain pending until playback admission.
 #[cfg(test)]
 fn apply_non_funkot_gate(
     paths: Vec<PathBuf>,
@@ -5359,24 +5594,8 @@ fn apply_non_funkot_gate(
         .collect()
 }
 
-fn apply_non_funkot_gate_items(
-    items: Vec<QueueItem>,
-    cache_dir: &std::path::Path,
-    data_dir: &std::path::Path,
-    allow: bool,
-) -> Vec<QueueItem> {
-    if allow {
-        return items;
-    }
-    items
-        .into_iter()
-        .filter(|item| !gated_non_funkot(&item.path, cache_dir, data_dir))
-        .collect()
-}
-
-/// Setup-only gate: hash-index + analysis cache + overrides, no music-file I/O.
-/// Path missing from the index, or cache miss, → not gated (same as
-/// `gated_non_funkot` when hash fails / cache misses).
+/// Index-only gate for new-arrival selection, without music-file I/O.
+/// A missing index or cache entry is left for final playback admission.
 fn gated_non_funkot_from_index(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -5394,8 +5613,7 @@ fn gated_non_funkot_from_index(
 }
 
 /// Like [`apply_non_funkot_gate`], but never stats/hashes/exists music files.
-/// Loads hash-index and overrides once. Used by setup preload only;
-/// `start_impl` keeps the strict gate.
+/// Loads hash-index and overrides once for library selection.
 #[cfg(test)]
 fn apply_non_funkot_gate_from_index(
     paths: Vec<PathBuf>,
@@ -5414,27 +5632,8 @@ fn apply_non_funkot_gate_from_index(
         .collect()
 }
 
-fn apply_non_funkot_gate_items_from_index(
-    items: Vec<QueueItem>,
-    cache_dir: &std::path::Path,
-    data_dir: &std::path::Path,
-    allow: bool,
-) -> Vec<QueueItem> {
-    if allow {
-        return items;
-    }
-    let index = store::load_hash_index(data_dir).index;
-    let overrides = store::load_overrides(data_dir);
-    items
-        .into_iter()
-        .filter(|item| {
-            !gated_non_funkot_from_index(&item.path, cache_dir, &index, &overrides)
-        })
-        .collect()
-}
-
-/// Queue-tab preload shared by desktop and Android setup. Does not touch
-/// music files (`exists` is always true; gate is index-only).
+/// Queue-tab preload shared by desktop and Android setup. It does not
+/// inspect music files; playback admission checks each reserved candidate.
 fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
     use tauri::Manager;
     let _ = DATA_DIR.set(data.clone());
@@ -5449,17 +5648,13 @@ fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
         log::warn!("setup: load_queue({}): {e}", data.display());
         Vec::new()
     });
-    let restored = store::restored_pending(&session.in_flight, &saved, |_| true);
-    let restored = apply_non_funkot_gate_items_from_index(
-        restored,
-        cache_dir,
-        &data,
-        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
-    );
+    let restored = store::restored_pending(&session.in_flight, &saved);
     let state = app.state::<AppState>();
+    let _prestart = playlist_service::lock_prestart_queue();
     let service = playlist_service::get(&data, cache_dir, &state.queue);
     let normal = service.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
     queue::replace_pending(&state.queue, normal.map(|n|n.items).unwrap_or(restored));
+    drop(_prestart);
 
     // The preload is not only a view: from this point the restored entries
     // are editable as ordinary pending rows. Commit that ownership transfer
@@ -6724,8 +6919,9 @@ mod cache_state_tests {
             Some(PathBuf::from("/music/r.flac"))
         );
         assert_eq!(
-            pending,
+            pending.iter().map(|item| item.path.clone()).collect::<Vec<_>>(),
             vec![
+                PathBuf::from("/music/r.flac"),
                 PathBuf::from("/music/old.flac"),
                 PathBuf::from("/music/a.flac"),
                 PathBuf::from("/music/m.flac"),
@@ -7236,7 +7432,7 @@ mod arrivals_settings_rmw_tests {
     /// `ALLOW_NON_FUNKOT` is one atomic for the whole test binary, so a test
     /// that asserts on it cannot run beside one that writes it. Every test in
     /// this module that touches the atomic takes this first.
-    static ALLOW_NON_FUNKOT_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static ALLOW_NON_FUNKOT_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_allow_non_funkot() -> MutexGuard<'static, ()> {
         ALLOW_NON_FUNKOT_LOCK
@@ -8384,6 +8580,7 @@ fn queue_new_arrivals(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<u32, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let added = queue_new_arrivals_locked(&app, &state)?;
     let mut prioritized = false;
@@ -8531,6 +8728,7 @@ fn enqueue_many(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<EnqueueManyResult, String> {
+    let _prestart = playlist_service::lock_prestart_queue();
     if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
     let result = enqueue_many_locked(&app, &state, &paths)?;
     let mut prioritized = false;
@@ -8705,9 +8903,10 @@ const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Waits while any of:
 /// - `Phase::Starting` — first non-silent buffer not yet reached
 /// - `Phase::Stalled` — silence; stop competing so the loader can recover
-/// - `Phase::Playing` and `YIELD_FOR_LOADER` — after first sound, still cover
-///   first-track Upgrade and the first next-slot prepare (`get_or_analyze` on
-///   cache miss). Cleared when the cpal callback sees `next_track_path()`.
+/// - `Phase::Playing` and `YIELD_FOR_LOADER` — cover the next-slot prepare
+///   after every transition. Cleared when the cpal callback sees `next_track_path()`.
+/// - `Phase::Playing` with a fresh manual Next request — let local mix planning
+///   finish before starting another library-analysis decode.
 ///
 /// The engine's loader analyses a track itself when the cache has no complete
 /// entry for it (`funkot-core` `cache::get_or_analyze`, reached from
@@ -8716,16 +8915,18 @@ const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// how a press of start turns into a wait for silence.
 ///
 /// If the next slot never fills while still Playing (drain empty, prepare
-/// stuck, …), `YIELD_FOR_LOADER` stays true and each subsequent track wait
-/// can re-arm up to `STARTUP_WAIT`. Idle / Paused / Failed / Disconnected
-/// (or Playing with the flag cleared) does not wait — the plain
-/// press-scan-before-start case.
+/// stuck, …), each subsequent track wait can use up to `STARTUP_WAIT`.
+/// Idle / Paused / Failed / Disconnected do not wait.
 fn wait_out_startup() {
     let until = std::time::Instant::now() + STARTUP_WAIT;
     while std::time::Instant::now() < until {
         let phase = get_phase();
+        let manual_plan_pending = manual_next_owns_analysis(
+            MANUAL_NEXT_PENDING.load(Ordering::Acquire),
+            MANUAL_NEXT_IN_FLIGHT.load(Ordering::Acquire));
         let hold = matches!(phase, Phase::Starting | Phase::Stalled)
-            || (phase == Phase::Playing && YIELD_FOR_LOADER.load(Ordering::Relaxed));
+            || (phase == Phase::Playing && YIELD_FOR_LOADER.load(Ordering::Relaxed))
+            || (matches!(phase, Phase::Playing | Phase::Paused) && manual_plan_pending);
         if !hold {
             break;
         }
@@ -8760,9 +8961,8 @@ fn spawn_analysis_worker(
 
             let total = paths.len();
             for (i, path) in paths.iter().enumerate() {
-                // Yield before starting the next track so Start's
-                // `prepare_first_live` is not fighting an in-flight library
-                // decode. See `wait_out_startup`.
+                // Let playback preparation or a manual Next plan run before
+                // starting another library decode. See `wait_out_startup`.
                 wait_out_startup();
 
                 let name = file_name_str(path);
@@ -8809,6 +9009,18 @@ fn spawn_analysis_worker(
                     continue;
                 }
 
+                // Close the race between the wait and claiming the decoder:
+                // Next can arrive in that gap. A running decode finishes before
+                // dispatch; no subsequent library decode begins during a plan.
+                loop {
+                    LIBRARY_ANALYSIS_BUSY.store(true, Ordering::Release);
+                    let manual_plan = manual_next_owns_analysis(
+                        MANUAL_NEXT_PENDING.load(Ordering::Acquire),
+                        MANUAL_NEXT_IN_FLIGHT.load(Ordering::Acquire));
+                    if !manual_plan { break; }
+                    LIBRARY_ANALYSIS_BUSY.store(false, Ordering::Release);
+                    wait_out_startup();
+                }
                 match funkot_core::decode::decode_file(path) {
                     Ok(buffer) => {
                         if let Err(e) = funkot_core::cache::fill_missing(path, &cache_dir, &buffer) {
@@ -8824,6 +9036,8 @@ fn spawn_analysis_worker(
                         log::warn!("decode failed for {}: {e}", path.display());
                     }
                 }
+
+                LIBRARY_ANALYSIS_BUSY.store(false, Ordering::Release);
 
                 // Built after `reapply_overrides` so a successful run's row
                 // reflects the corrected numbers, not the analyzer's raw ones.
@@ -9443,13 +9657,6 @@ pub fn run() {
     env_logger::init();
 
     let builder = tauri::Builder::default().manage(AppState::default());
-    // Desktop-only folder-picker for `set_music_dir`. Rust calls it directly
-    // (no `invoke` from the webview), so no `capabilities/default.json`
-    // permission is needed. Not registered on Android: `set_music_dir`'s
-    // Android branch never calls it (see its `#[cfg]` split), and no
-    // folder-picker backend exists there anyway.
-    #[cfg(not(target_os = "android"))]
-    let builder = builder.plugin(tauri_plugin_dialog::init());
     builder
         .setup(|app| {
             // Optional Windows endpoint: failure must never affect launch or audio.

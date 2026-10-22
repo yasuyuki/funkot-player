@@ -269,9 +269,9 @@ intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
 ```
 
-**このバージョンの新機能（0.8.0）:**
+**このバージョンの新機能（0.9.0）:**
 ```text
-曲にアプリ内だけのタグを付けられるようになりました。1曲ずつでもまとめてでも編集でき、付けたタグでライブラリを絞り込めます。音楽ファイルは書き換えません。ファイルに埋め込まれた発売年の読み取りも改善しました。
+「次の曲」のつなぎを改善し、拍を合わせられる位置を探してから切り替えるようにしました。非Funkotの再生をオフにすると、判定済みの非Funkot曲を再生待ちから除きます。再生待ちの自動補充とボタンのマウスオーバー表示も改善しました。
 ```
 
 ### English
@@ -317,9 +317,9 @@ Adjust intro / outro
 Flag a bad transition and keep a feedback ZIP
 ```
 
-**What's new in this version (0.8.0):**
+**What's new in this version (0.9.0):**
 ```text
-You can now tag tracks inside the app. Edit tags one track at a time or in bulk, and filter the library by a tag. Your music files are never modified. Release years embedded in files are also read more reliably.
+Next track now searches for a suitable beat-aligned transition point before switching. Turning off non-Funkot playback removes identified non-Funkot tracks from the queue. Automatic queue refill and button hover states have also been improved.
 ```
 
 ### Bahasa Indonesia
@@ -365,9 +365,9 @@ Sesuaikan intro / outro
 Tandai transisi yang tidak pas dan simpan ZIP masukan
 ```
 
-**Yang baru di versi ini (0.8.0):**
+**Yang baru di versi ini (0.9.0):**
 ```text
-Kini Anda dapat memberi tag pada lagu di dalam aplikasi. Tag dapat diubah satu per satu atau sekaligus, dan pustaka dapat disaring berdasarkan tag. Berkas musik tidak diubah. Tahun rilis yang tertanam pada berkas juga dibaca lebih andal.
+Tombol Lagu berikutnya kini mencari titik transisi yang sesuai dengan ketukan sebelum beralih. Saat pemutaran lagu non-Funkot dimatikan, lagu yang telah teridentifikasi sebagai non-Funkot dihapus dari antrean. Pengisian antrean otomatis dan tampilan tombol saat kursor diarahkan juga diperbaiki.
 ```
 
 ---

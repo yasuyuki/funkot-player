@@ -144,6 +144,48 @@ test("hover, pressed, focus, and Windows high contrast keep visible states", asy
     await page.mouse.up();
     await page.keyboard.press("Escape");
     await expect(page.locator(".overflow > .menu")).toHaveCount(0);
+    await page.evaluate(async () => {
+      const { store } = await import("/src/lib/state.svelte.ts");
+      const player = {
+        ...store.player,
+        last_transition: { from: "/fixture/music/track-1.mp3", to: "/fixture/music/track-2.mp3", automatic: true, seconds_ago: 1 },
+      };
+      store.player = player;
+      window.__uiFixture.setReply("player_state", player);
+    });
+    const flag = page.locator(".transport .flag");
+    await expect(flag).toBeEnabled();
+    const flagContrast = () => flag.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext("2d");
+      const luminance = (color) => {
+        context.clearRect(0, 0, 1, 1);
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        const rgba = context.getImageData(0, 0, 1, 1).data;
+        if (rgba[3] !== 255) throw new Error(`Expected opaque flag color: ${color}`);
+        const linear = Array.from(rgba).slice(0, 3).map((value) => {
+          const channel = value / 255;
+          return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+      };
+      const [a, b] = [luminance(style.color), luminance(style.backgroundColor)].sort((x, y) => y - x);
+      return { color: style.color, background: style.backgroundColor, ratio: (a + 0.05) / (b + 0.05) };
+    });
+    await flag.hover();
+    const flagHover = await flagContrast();
+    const flagBounds = await flag.boundingBox();
+    await page.mouse.move(flagBounds.x + flagBounds.width / 2, flagBounds.y + flagBounds.height / 2);
+    await page.mouse.down();
+    const flagPressed = await flagContrast();
+    await page.mouse.move(0, 0);
+    await page.mouse.up();
+    await testInfo.attach(`${preference}-flag-states`, { body: JSON.stringify({ hover: flagHover, pressed: flagPressed }), contentType: "application/json" });
+    expect(flagHover.ratio, `${preference} flag hover ${JSON.stringify(flagHover)}`).toBeGreaterThanOrEqual(4.5);
+    expect(flagPressed.ratio, `${preference} flag pressed ${JSON.stringify(flagPressed)}`).toBeGreaterThanOrEqual(4.5);
     const button = page.getByRole("button", { name: "Start" });
     const idle = await button.evaluate((element) => getComputedStyle(element).backgroundColor);
     await button.hover();

@@ -34,7 +34,7 @@ test("shared controls, dense browsing, history and playback retain readable targ
     window.__uiFixture.setReply("refresh_library", rows);
     store.playHistory = { log: [], log_total: 0, tracks: rows.map((row, i) => ({ ...row, track_hash: row.content_hash, count: i + 1, last_played_ms: 1767225600000, missing: false })) };
     window.__uiFixture.setReply("list_play_history", store.playHistory);
-    store.player = { ...store.player, phase: "playing", now_playing: rows[1].path, duration_secs: 257, position_secs: 60 };
+    store.player = { ...store.player, phase: "playing", now_playing: rows[1].path, playback_started_frames: 48000, duration_secs: 257, position_secs: 60 };
     window.__uiFixture.setReply("player_state", store.player);
   });
   await expect(page.locator("section.library li.row")).toHaveCount(24);
@@ -157,6 +157,23 @@ test("two-column boundary and overflow menu preserve controls and focus", async 
   await capture(page, testInfo, "menu-1024");
   await page.keyboard.press("Escape");
   await expect(menu).toBeFocused();
+});
+
+test("admission toggle reports a failed save and keeps the visible setting", async ({ page }, testInfo) => {
+  await page.goto("/tests/ui/");
+  const menu = page.getByRole("button", { name: "menu", exact: true });
+  await menu.click();
+  const off = page.getByRole("button", { name: "Play non-Funkot too: OFF", exact: true });
+  await expect(off).toBeVisible();
+  await page.evaluate(() => window.__uiFixture.failNext("set_allow_non_funkot", "synthetic save failure"));
+  await off.click();
+  await expect(page.getByRole("status")).toContainText("synthetic save failure");
+  const calls = await page.evaluate(() => window.__uiFixture.calls.filter(call => call.command === "set_allow_non_funkot"));
+  expect(calls).toHaveLength(1);
+  expect(calls[0].args).toEqual({ allow: true });
+  await menu.click();
+  await expect(page.getByRole("button", { name: "Play non-Funkot too: OFF", exact: true })).toBeVisible();
+  await capture(page, testInfo, "admission-save-failed");
 });
 
 test("editor controls preserve shared geometry with translated and enlarged labels", async ({ page }, testInfo) => {

@@ -15,7 +15,6 @@
   let t = $derived(i18n.t);
 
   let primaryBusy = $state(false);
-  let nextBusy = $state(false);
 
   let phase = $derived(store.player?.phase ?? "idle");
   let paused = $derived(store.player?.paused ?? false);
@@ -27,7 +26,7 @@
   let nextEnabled = $derived(
     canSkipNext(phase, auditioning, store.queue),
   );
-  let nextDisabled = $derived(!nextEnabled || nextBusy);
+  let nextDisabled = $derived(!nextEnabled || store.player?.playback_started_frames == null || store.skipNextPending !== null);
 
   async function onPrimaryClick() {
     if (primaryBusy || mode === "off") return;
@@ -40,13 +39,8 @@
   }
 
   async function onNextClick() {
-    if (nextBusy || !nextEnabled) return;
-    nextBusy = true;
-    try {
-      await store.doSkipNext();
-    } finally {
-      nextBusy = false;
-    }
+    if (nextDisabled) return;
+    await store.doSkipNext();
   }
 </script>
 
@@ -138,8 +132,19 @@
     color: var(--color-transport-secondary-text);
   }
 
+  .ctrl.next:not(:disabled):hover {
+    background: var(--color-transport-secondary-text);
+    color: var(--color-transport-secondary-bg);
+    border-color: var(--color-transport-secondary-text);
+  }
+
   .ctrl:disabled {
     background: var(--color-transport-disabled-bg);
     color: var(--color-transport-disabled-text);
+  }
+
+  .ctrl.next:disabled {
+    cursor: not-allowed;
+    opacity: 1;
   }
 </style>
