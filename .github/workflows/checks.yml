@@ -102,6 +102,30 @@ jobs:
           path: ${{ runner.temp }}/playlist-proof
           if-no-files-found: error
 
+  engine-snapshot:
+    name: Engine snapshot coherence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Prepare fixed verifier (cached independently of the app)
+        uses: docker/build-push-action@v7
+        with:
+          context: verification
+          load: true
+          tags: funkot-player-kani:0.68.0
+          cache-from: type=gha,scope=playlist-kani-0.68.0
+          cache-to: type=gha,mode=max,scope=playlist-kani-0.68.0
+      - name: Verify engine snapshot coherence
+        run: ./scripts/check-engine-snapshot.sh "$RUNNER_TEMP/engine-snapshot-proof"
+      - name: Preserve proof results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: engine-snapshot-proof
+          path: ${{ runner.temp }}/engine-snapshot-proof
+          if-no-files-found: error
+
   build-and-test:
     name: Frontend and native library
     runs-on: ubuntu-latest

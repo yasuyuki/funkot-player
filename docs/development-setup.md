@@ -146,6 +146,16 @@ and cgroup v2:
 
 The same check runs in the independent **Playlist occurrence proof** Checks job.
 
+## Engine snapshot coherence
+
+The Loom check uses Rust 1.93 and Loom 0.7.2. It imports the production `EngineObservation` module. With Docker, it reuses the Kani image. Without Docker, it uses host `cargo +1.93.0`.
+
+```sh
+./scripts/check-engine-snapshot.sh /tmp/engine-snapshot-proof
+```
+
+Success is `"status": "PASS"` in the printed summary. That status means the four named tests ran and passed on the production module. A Cargo exit code of 0 with a filtered or missing test is a failure. The playlist proof above is a separate command.
+
 ## Common failures
 
 | Symptom | What to do |
