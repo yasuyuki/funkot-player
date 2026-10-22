@@ -359,10 +359,9 @@ fn lagging_started_event_keeps_snapshot_current_and_consumes_once() {
     let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
     let older = source.next().unwrap();
     let newer = source.next().unwrap();
-    let player = playback(&[older.clone(), newer.clone()], 4096);
-    // The initial engine index matches the older claim. Publish the newer index
-    // so this event and the snapshot disagree.
-    player.observation.publish(Some(newer.0), false);
+    // playback() records the first prepared playlist index. Put the newer claim
+    // first so the snapshot and the older event disagree, without another publish.
+    let player = playback(&[newer.clone(), older.clone()], 4096);
 
     let mut owner = fixture.service.lock().unwrap();
     owner.observe_started(newer.0, Some(&player));
@@ -391,8 +390,7 @@ fn rejected_save_keeps_lagging_start_progress_in_memory() {
     let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
     let older = source.next().unwrap();
     let newer = source.next().unwrap();
-    let player = playback(&[older.clone(), newer.clone()], 4096);
-    player.observation.publish(Some(newer.0), false);
+    let player = playback(&[newer.clone(), older.clone()], 4096);
     let file = fixture.data.path().join("playlists.json");
     fs::write(&file, b"external update").unwrap();
     let mut owner = fixture.service.lock().unwrap();
