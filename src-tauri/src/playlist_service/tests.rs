@@ -350,6 +350,58 @@ fn restarted_run_rejects_delayed_old_start_and_old_engine_snapshot() {
 }
 
 #[test]
+fn lagging_started_event_keeps_snapshot_current_and_consumes_once() {
+    let fixture = Fixture::new();
+    let paths = ["older.wav", "newer.wav", "unplayed.wav"].map(|name| fixture.file(name));
+    let id = fixture.install("set", paths.iter().map(|path| Fixture::track(path)).collect());
+    let other = fixture.install("other", vec![Fixture::track(&paths[0])]);
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let older = source.next().unwrap();
+    let newer = source.next().unwrap();
+    // playback() records the first prepared playlist index. Put the newer claim
+    // first so the snapshot and the older event disagree, without another publish.
+    let player = playback(&[newer.clone(), older.clone()], 4096);
+
+    let mut owner = fixture.service.lock().unwrap();
+    owner.observe_started(newer.0, Some(&player));
+    assert_eq!(owner.current_index, Some(newer.0));
+    assert_eq!(owner.catalog.remaining(&id).unwrap().len(), 2, "the matching event consumes only the snapshot track");
+    owner.observe_started(older.0, Some(&player));
+    assert_eq!(owner.current_index, Some(newer.0), "a lagging event does not replace the newer snapshot");
+    let entries = owner.catalog.definition(&id).unwrap().entries.clone();
+    let run = owner.catalog.run(&id).unwrap();
+    assert!(run.consumed.contains(&entries[0].entry_id));
+    assert!(run.consumed.contains(&entries[1].entry_id));
+    assert!(!run.consumed.contains(&entries[2].entry_id), "an unclaimed row stays unplayed");
+    assert_eq!(owner.catalog.remaining(&other).unwrap().len(), 1);
+    assert!(!owner.claims[&older.0].live);
+    owner.observe_started(older.0, Some(&player));
+    assert_eq!(owner.catalog.run(&id).unwrap().consumed.len(), 2, "a duplicate event does not consume again");
+    assert_eq!(owner.current_index, Some(newer.0));
+}
+
+#[test]
+fn rejected_save_keeps_lagging_start_progress_in_memory() {
+    let fixture = Fixture::new();
+    let paths = ["older.wav", "newer.wav", "unplayed.wav"].map(|name| fixture.file(name));
+    let id = fixture.install("set", paths.iter().map(|path| Fixture::track(path)).collect());
+    fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let older = source.next().unwrap();
+    let newer = source.next().unwrap();
+    let player = playback(&[newer.clone(), older.clone()], 4096);
+    let file = fixture.data.path().join("playlists.json");
+    fs::write(&file, b"external update").unwrap();
+    let mut owner = fixture.service.lock().unwrap();
+    owner.observe_started(older.0, Some(&player));
+    assert_eq!(owner.current_index, Some(newer.0));
+    assert_eq!(owner.catalog.remaining(&id).unwrap().len(), 1, "memory keeps the consumed snapshot and the lagging event");
+    assert!(owner.progress_error);
+    assert_eq!(fs::read(&file).unwrap(), b"external update");
+}
+
+#[test]
 fn failures_require_a_reason_and_a_matching_live_run_claim() {
     let fixture = Fixture::new();
     let a = fixture.file("a.wav");
