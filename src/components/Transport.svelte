@@ -171,7 +171,7 @@
   }
   .flag:not(:disabled):hover {
     background: color-mix(in srgb, var(--color-flag-amber) 35%, var(--color-bg));
-    color: #fff;
+    color: var(--color-text);
     box-shadow: inset 0 0 0 1px var(--color-flag-amber);
     filter: none;
   }

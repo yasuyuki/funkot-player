@@ -351,6 +351,10 @@ export const en = {
   clearPlayCountsFailed: "Could not clear per-song play counts",
   sendFeedback: "Send feedback",
   languageItem: (name: string) => `Language: ${name}`,
+  themePreferenceLabel: "Theme",
+  themeDark: "Dark",
+  themeLight: "Light",
+  themeSystem: "System",
 
   editImmediate: "Changes apply immediately",
   playlistEditing: "Editing playlist",

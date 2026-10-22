@@ -335,6 +335,10 @@ export const ja: Messages = {
   clearPlayCountsFailed: "曲別の再生回数を消せませんでした",
   sendFeedback: "意見を送る",
   languageItem: (name) => `言語: ${name}`,
+  themePreferenceLabel: "テーマ",
+  themeDark: "ダーク",
+  themeLight: "ライト",
+  themeSystem: "システム",
 
   editImmediate: "変更は即時反映されます",
   playlistEditing: "編集中のリスト",

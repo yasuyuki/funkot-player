@@ -508,7 +508,6 @@
   }
 
   .row.non-funkot {
-    opacity: 0.45;
     color: var(--color-text-dim);
   }
 
