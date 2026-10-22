@@ -8,7 +8,7 @@
 
 The proof was run against that blob with `rustc 1.93.0 (254b59607 2026-01-19)` and Loom 0.7.2. The official script returned `PASS`. A copy that drops the `before == after` recheck made the three concurrent tests fail. The restored production file passed again. The script's `source_sha256` for that blob is `44546ac5dd779cdb8ba7a31d8e7715eee4ee2db69f9a9471ab7c643bb8094167`.
 
-Move `sync_commit` only by the rule in `SKILL.md`. A harness-only commit does not move it while `git rev-parse HEAD:src-tauri/src/engine_observation.rs` is still `110c9df1085c3b8639ef87461bc83590b32201b9`.
+Move `sync_commit` only by the Sync record rule in `SKILL.md`.
 
 ## Property
 

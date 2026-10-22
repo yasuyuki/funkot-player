@@ -15,6 +15,20 @@ A reader of `EngineObservation` gets `None` or one completed pair of `current` a
 
 Keep the existing Kani harness names, unwind bounds, and cover counts in `verification/check.py`. This check compiles `src-tauri/src/engine_observation.rs` and leaves that file unchanged.
 
+## Sync record
+
+`sync_commit` names the last commit whose proof meaning was checked. `source_sha256` in the official script's `summary.json` names the bytes that run compiled. A new hash in `summary.json` leaves `bounds.md` unchanged.
+
+The proof meaning is the same when three facts stay true. `publish` and `read` keep the same atomic steps, in the same order, under the same conditions. Every production caller still publishes only while it holds the render mutex, and `WRITER_COUNTS` still names that set. The property in `bounds.md` still describes that behavior.
+
+A comment or a formatting edit keeps those three facts. The outcome is `in sync`. Leave `.claude/skills/verify-engine-snapshot/` and `verification/engine_snapshot/` as they are. Run the official script on the current source. Completion is `summary.json` status `PASS`, `source` ending in `src-tauri/src/engine_observation.rs`, and an empty `git diff` for those two directories.
+
+An intentional change to a `publish` or `read` step is `updated`. Write the new steps into `bounds.md`, rerun the official script to `PASS`, and move `sync_commit` to the commit those steps describe.
+
+A caller that publishes without the render mutex makes the single-writer assumption false. The outcome is `bug` or `blocked`. Leave the property, `WRITER_COUNTS`, and `sync_commit` as they are. A `PASS` from the official script is a result about `engine_observation.rs`. It is not a proof of that caller.
+
+`/maintain-formal-verification-skill` tells the maintainer to set `sync_commit` to the commit just checked. For this check, that move is the `updated` case above. When the two instructions disagree, follow this section.
+
 ## CI and the agent
 
 The Checks job `Engine snapshot coherence` runs `./scripts/check-engine-snapshot.sh` on the pushed commit. A green job means `summary.json` is `PASS` for that commit. It means the four named tests ran and passed, the compiled file is `src-tauri/src/engine_observation.rs`, and the writer set matches `WRITER_COUNTS` in `verification/engine_snapshot/check.py`. It does not re-read a lock edit that leaves those counts unchanged. A green job is not a reason to skip the steps below.
@@ -75,6 +89,6 @@ ENGINE_OBSERVATION_RS="$copy" ENGINE_OBSERVATION_ALLOW_SUBSTITUTE=1 \
 
 4. Rerun the official script. Completion: `PASS`, and `git diff -- src-tauri/src/engine_observation.rs` is empty.
 5. If `check.py` or the test list changed, copy `verification/engine_snapshot` and the four writer files named by `WRITER_COUNTS` to a temp tree, delete one `#[test]` from the copy, and run that copy's `check.py`. Completion: the copy's summary is `FAIL` and names the missing test, even when Cargo's exit code would be 0. Delete the temp tree. Do not point the official script at the copy.
-6. Move `sync_commit` in [bounds.md](bounds.md) to the commit you checked. Do that only after steps 1 and 2 describe that commit, and only when the `engine_observation.rs` blob changed. A harness-only commit leaves `sync_commit` where it is. Leave it when the check is blocked or failing.
+6. Apply the Sync record section. Its completion lines are the completion of this step.
 
 `/maintain-formal-verification-skill` covers edits that skipped this skill.
