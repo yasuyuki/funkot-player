@@ -9,6 +9,15 @@ before changing the member.
 Before changing API, CLI, configuration, or persistent-data contracts, follow
 [the compatibility and data migration policy](docs/development-setup.md#compatibility-and-data-migration).
 
+## Registered branch work
+
+While `agent-branches/state.json` is in the Git common directory, register work
+with the public agent-rules command `branch begin`. `workspace-lifecycle begin`
+refuses this registry. After GitHub merges the topic into the registered remote
+destination, record that merge with `branch accept-remote-merge`, then remove
+the worktree with `branch retire`. Those commands and their refusals are in
+that source's README, under "Registered work and branch enforcement".
+
 This interactive working-set boundary is separate from isolated
 `wsl-agent-lifecycle` clone management. Do not access `.secrets/`, copy
 authentication, or handle signing material. Android builds, signing, Docker
