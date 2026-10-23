@@ -577,6 +577,98 @@ fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
 }
 
 #[test]
+fn source_fences_reject_an_engine_current_the_service_has_not_observed() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    for admission in [false, true] {
+        let fixture = Fixture::new();
+        let items: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| QueueItem::manual(fixture.file(n))).collect();
+        queue::replace_pending(&fixture.queue, items.clone());
+        let normal = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
+        let mut source = configure(&fixture.service, normal);
+        let first = source.next().unwrap(); let second = source.next().unwrap();
+        let player = playback(&[first.clone(), second.clone()], 4096);
+        fixture.service.lock().unwrap().reconcile_with(Some(&player));
+        let playlist = fixture.install("other", vec![]);
+        {
+            // Neither the TrackStarted event nor a new snapshot has reached the service.
+            let mut render = player.render.lock().unwrap();
+            render.engine.request_nav(funkot_core::engine::NavAction::JumpToNextIntro);
+            render.engine.render(&mut [0.0; 128]);
+            assert_eq!(render.engine.current_index(), Some(second.0));
+        }
+        let catalog = fixture.service.lock().unwrap().catalog.clone();
+        let refused = if admission {
+            reconfigure_admission(&fixture.service, false, Some(&player), || Ok(())).err().map(|e| e.code)
+        } else {
+            let request = fixture.request("switch", Action::Select { id: Some(playlist) });
+            command_with(&fixture.service, request, Some(&player)).err().map(|e| e.code)
+        };
+        assert_eq!(refused.as_deref(), Some("stale"));
+        assert!(crate::ALLOW_NON_FUNKOT.load(std::sync::atomic::Ordering::Relaxed));
+        {
+            let owner = fixture.service.lock().unwrap();
+            assert_eq!(owner.catalog, catalog);
+            assert_eq!(owner.epoch, 0);
+            assert_eq!(owner.current_index, Some(first.0));
+            assert!(!owner.claims[&second.0].cancelled, "the audible occurrence keeps its claim");
+            assert_eq!(owner.normal_items(), items[1..].to_vec());
+        }
+        let mut render = player.render.lock().unwrap();
+        assert_eq!(render.engine.source_generation(), 0);
+        assert_eq!(render.engine.current_index(), Some(second.0));
+        let token = render.engine.begin_future_update().expect("stale refusal resolved its fence");
+        render.engine.abort_future_update(token);
+    }
+    crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn failed_removal_of_a_prepared_item_keeps_the_whole_future_until_a_save_succeeds() {
+    let fixture = Fixture::new();
+    let items: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| QueueItem::manual(fixture.file(n))).collect();
+    queue::replace_pending(&fixture.queue, items.clone());
+    let normal = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
+    let mut source = configure(&fixture.service, normal);
+    let first = source.next().unwrap(); let second = source.next().unwrap();
+    let player = playback(&[first.clone(), second.clone()], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+    let remove = |request_id: &str| command_with(&fixture.service,
+        fixture.request(request_id, Action::QueueRemove { index: 0, expect: items[1].clone() }), Some(&player));
+    let file = fixture.data.path().join("playlists.json");
+    let saved = fs::read(&file).unwrap();
+    fs::write(&file, b"external update").unwrap();
+    assert_eq!(remove("failed").err().unwrap().code, "stale");
+    {
+        let owner = fixture.service.lock().unwrap();
+        assert_eq!(owner.epoch, 0);
+        assert!(owner.claims[&second.0].live && !owner.claims[&second.0].cancelled);
+        assert_eq!(owner.normal_items(), items[1..].to_vec());
+        assert_eq!(owner.normal_source.as_ref().unwrap().lock().unwrap().epoch, 0);
+    }
+    {
+        let mut render = player.render.lock().unwrap();
+        assert_eq!(render.engine.source_generation(), 0);
+        assert_eq!(render.engine.next_track_path(), Some(second.1.as_path()));
+        let token = render.engine.begin_future_update().expect("failed save resolved its fence");
+        render.engine.abort_future_update(token);
+    }
+    fs::write(&file, saved).unwrap();
+    remove("saved").unwrap();
+    {
+        let owner = fixture.service.lock().unwrap();
+        assert!(owner.claims[&second.0].cancelled);
+        assert_eq!(owner.normal_items(), items[2..].to_vec());
+    }
+    assert!(source.next().is_none(), "the retired source cannot reserve another occurrence");
+    let render = player.render.lock().unwrap();
+    assert_eq!(render.engine.source_generation(), 1);
+    assert_ne!(render.engine.next_track_path(), Some(second.1.as_path()), "a removed prepared item must not play");
+}
+
+#[test]
 fn removing_unprepared_row_during_transition_does_not_require_a_source_fence() {
     let fixture = Fixture::new();
     let paths: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| fixture.file(n)).collect();
@@ -1109,6 +1201,8 @@ fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
     {
         let owner = fixture.service.lock().unwrap();
         assert!(owner.claims[&rejected_future.0].cancelled);
+        assert_eq!(owner.epoch, 1);
+        assert_eq!(owner.normal_source.as_ref().unwrap().lock().unwrap().epoch, owner.epoch);
         assert_eq!(owner.current_index, Some(first.0));
         assert_eq!(owner.normal_items(), items[2..].to_vec());
         assert_eq!(owner.normal_items().iter().map(|item| &item.entry_id).collect::<Vec<_>>(),
@@ -1569,9 +1663,11 @@ fn admission_settings_save_failure_keeps_existing_future() {
         assert_eq!(store::load_session(fixture.data.path()).in_flight, vec![items[1].clone()]);
     }
     {
-        let render = player.render.lock().unwrap();
+        let mut render = player.render.lock().unwrap();
         assert_eq!(render.engine.source_generation(), 0);
         assert_eq!(render.engine.next_track_path(), Some(future.as_path()));
+        let token = render.engine.begin_future_update().expect("failed save resolved its fence");
+        render.engine.abort_future_update(token);
     }
     {
         let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1627,9 +1723,11 @@ fn admission_session_save_failure_keeps_existing_future() {
         assert_eq!(session.in_flight, vec![items[1].clone()]);
     }
     {
-        let render = player.render.lock().unwrap();
+        let mut render = player.render.lock().unwrap();
         assert_eq!(render.engine.source_generation(), 0);
         assert_eq!(render.engine.next_track_path(), Some(future.as_path()));
+        let token = render.engine.begin_future_update().expect("failed save resolved its fence");
+        render.engine.abort_future_update(token);
     }
     {
         let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
