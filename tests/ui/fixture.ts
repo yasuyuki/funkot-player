@@ -51,6 +51,8 @@ const snapshot: TrackTagsSnapshot = {
 
 const replies: Record<string, unknown> = {
   get_locale: "en",
+  playback_recovery_status: { kind: "ready" },
+  resolve_playback_recovery: { kind: "ready" },
   app_dirs: { music_dir: "/fixture/music", cache_dir: "/fixture/cache", data_dir: "/fixture/data", music_dir_custom: "/fixture/music", music_dir_unavailable: false, music_dir_needed: false, music_dir_configurable: true },
   take_pending_import: { tracks: 0, skipped: 0, failed: 0, in_flight: false },
   get_allow_non_funkot: false, set_allow_non_funkot: true, get_labeling_mode: false,

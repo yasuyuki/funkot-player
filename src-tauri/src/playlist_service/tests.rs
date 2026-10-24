@@ -73,6 +73,40 @@ impl Fixture {
 }
 
 #[test]
+fn conflict_resolution_hydrates_the_live_queue_after_its_single_durable_commit() {
+    let data = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let queue = queue::new_shared_queue();
+    let queue_items = vec![QueueItem::manual(data.path().join("queue-a.wav")), QueueItem::manual(data.path().join("queue-a.wav"))];
+    let catalog_items = vec![QueueItem::automatic(data.path().join("catalog-b.wav"))];
+    let mut catalog = Catalog::default();
+    catalog.normal = Some(NormalResume { items: catalog_items, folder_pos: Some(4) });
+    fs::write(data.path().join("queue.json"), serde_json::to_vec(&queue_items).unwrap()).unwrap();
+    fs::write(data.path().join("session.json"), serde_json::to_vec(&store::Session::new()).unwrap()).unwrap();
+    fs::write(data.path().join("playlists.json"), serde_json::to_vec(&catalog).unwrap()).unwrap();
+    fs::write(data.path().join("settings.json"), serde_json::to_vec(&store::Settings::default()).unwrap()).unwrap();
+    let mut service = Service::new(data.path(), cache.path(), queue.clone());
+    let token = match service.recovery_status() {
+        crate::playback_state::PlaybackRecoveryStatus::LegacyNormalConflict { token, .. } => token,
+        status => panic!("expected conflict, got {status:?}"),
+    };
+
+    crate::playback_state::set_fail_persist_stage(3);
+    assert!(service.resolve_legacy_normal_conflict(token, crate::playback_state::LegacyNormalChoice::QueueFile).is_err());
+    assert!(matches!(service.recovery_status(), crate::playback_state::PlaybackRecoveryStatus::LegacyNormalConflict { .. }));
+    assert!(queue::pending_snapshot(&queue).is_empty());
+
+    let restored = service.resolve_legacy_normal_conflict(token, crate::playback_state::LegacyNormalChoice::QueueFile).unwrap();
+    assert_eq!(restored.folder_pos, Some(4));
+    assert_eq!(queue::pending_snapshot(&queue), queue_items);
+    assert_eq!(service.catalog.normal.as_ref().unwrap().items, queue_items);
+    assert_eq!(service.recovery_status(), crate::playback_state::PlaybackRecoveryStatus::Ready);
+    let snapshot = crate::playback_state::PlaybackStore::open(data.path()).snapshot().unwrap();
+    assert_eq!(snapshot.queue, queue_items);
+    assert_eq!(snapshot.session, store::Session::new());
+}
+
+#[test]
 fn moved_identity_resolves_but_changed_content_is_skipped_once_without_fallback() {
     let fixture = Fixture::new();
     let original = fixture.file("original.wav");

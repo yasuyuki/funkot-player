@@ -100,7 +100,7 @@ pub enum PlaylistError {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LoadState { Missing, Ready, Corrupt, UnsupportedSchema, IoError, Busy, Stale }
+pub enum LoadState { Missing, Ready, LegacyNormalConflict, Corrupt, UnsupportedSchema, IoError, Busy, Stale }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedEntry {
@@ -323,6 +323,10 @@ impl PlaylistStore {
         self.inner.load_state()
     }
 
+    pub fn recovery_status(&self) -> crate::playback_state::PlaybackRecoveryStatus {
+        self.inner.recovery_status()
+    }
+
     pub fn snapshot(&self) -> Result<Catalog, PlaylistError> {
         self.inner.snapshot().map(|state| state.catalog)
     }
@@ -345,6 +349,15 @@ impl PlaylistStore {
         mutate: impl FnOnce(&mut crate::playback_state::PlaybackState) -> Result<R, PlaylistError>,
     ) -> Result<R, PlaylistError> {
         self.inner.update(mutate)
+    }
+
+    pub(crate) fn resolve_legacy_normal_conflict<R>(
+        &self,
+        token: u64,
+        choice: crate::playback_state::LegacyNormalChoice,
+        prepare: impl FnOnce(&mut crate::playback_state::PlaybackState) -> Result<R, PlaylistError>,
+    ) -> Result<R, PlaylistError> {
+        self.inner.resolve_legacy_normal_conflict(token, choice, prepare)
     }
 }
 
