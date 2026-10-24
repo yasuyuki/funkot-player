@@ -6,6 +6,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::playlists::{Catalog, LoadState, PlaylistError};
+use crate::playback_recovery::{
+    classify_legacy_normal, restore_missing_current_identity, IdentityRestoration, LegacyNormalImport,
+};
 use crate::queue::QueueItem;
 use crate::store::{Session, Settings};
 
@@ -456,11 +459,14 @@ fn read_snapshot_or_legacy(
     let Some(bytes) = read_bytes(dir, FILE_NAME).map_err(|_| LoadState::IoError)? else {
         let sources = LegacySources::read(dir)?;
         let saved_queue = crate::store::load_legacy_queue_strict(dir)?;
-        let queue_exists = saved_queue.is_some();
-        let queue = saved_queue.unwrap_or_default();
         let session = crate::store::load_legacy_session_strict(dir)?;
         let settings = crate::store::load_legacy_settings_strict(dir)?;
         let catalog = crate::playlists::load_legacy_catalog_strict(dir)?;
+        let legacy_normal_import = classify_legacy_normal(
+            saved_queue.as_deref(),
+            catalog.normal.as_ref().map(|normal| normal.items.as_slice()),
+        );
+        let queue = saved_queue.unwrap_or_default();
         let mut snapshot = PlaybackState {
             queue,
             session,
@@ -468,15 +474,26 @@ fn read_snapshot_or_legacy(
             settings,
             ..PlaybackState::default()
         };
-        if queue_exists && snapshot.catalog.normal.as_ref().is_some_and(|normal| snapshot.queue != normal.items) {
-            let queue_snapshot = legacy_normal_candidate(&snapshot, snapshot.queue.clone())?;
-            let catalog_items = snapshot.catalog.normal.as_ref().unwrap().items.clone();
-            let catalog_snapshot = legacy_normal_candidate(&snapshot, catalog_items)?;
-            return Ok(ReadSnapshot::LegacyNormalConflict(LegacyNormalConflict {
-                token: next_recovery_token()?, queue_snapshot, catalog_snapshot, sources,
-            }));
+        match legacy_normal_import {
+            LegacyNormalImport::KeepQueue => {}
+            LegacyNormalImport::UseCatalog => {
+                snapshot.queue = snapshot.catalog.normal.as_ref()
+                    .expect("legacy import selected a catalog normal queue")
+                    .items
+                    .clone();
+            }
+            LegacyNormalImport::Conflict => {
+                let queue_snapshot = legacy_normal_candidate(&snapshot, snapshot.queue.clone())?;
+                let catalog_items = snapshot.catalog.normal.as_ref()
+                    .expect("legacy conflict has normal queue")
+                    .items
+                    .clone();
+                let catalog_snapshot = legacy_normal_candidate(&snapshot, catalog_items)?;
+                return Ok(ReadSnapshot::LegacyNormalConflict(LegacyNormalConflict {
+                    token: next_recovery_token()?, queue_snapshot, catalog_snapshot, sources,
+                }));
+            }
         }
-        import_legacy_normal_source(&mut snapshot, queue_exists)?;
         restore_legacy_normal_current_identity(&mut snapshot);
         snapshot.validate().map_err(|_| LoadState::Corrupt)?;
         return Ok(ReadSnapshot::Snapshot { load_state: LoadState::Missing, snapshot, bytes: None });
@@ -527,41 +544,31 @@ fn require_saved_occurrence_ids(value: &serde_json::Value) -> Result<(), LoadSta
     Ok(())
 }
 
-fn import_legacy_normal_source(snapshot: &mut PlaybackState, queue_exists: bool) -> Result<(), LoadState> {
-    if let Some(normal) = &snapshot.catalog.normal {
-        // A catalog-only deletion and an interrupted queue-only automatic add
-        // can leave identical legacy files. Neither copy establishes ordering.
-        if queue_exists && snapshot.queue != normal.items {
-            return Err(LoadState::Stale);
-        }
-        snapshot.queue = normal.items.clone();
-    }
-    Ok(())
-}
-
 fn restore_legacy_normal_current_identity(snapshot: &mut PlaybackState) {
-    let Some(current) = snapshot.catalog.current.as_ref().filter(|current| {
-        current.origin == crate::playlists::PlaybackOrigin::Normal
-            && current.queue_item.is_none()
-    }) else {
+    let Some(current) = snapshot.catalog.current.as_ref() else {
         return;
     };
+    let normal = current.origin == crate::playlists::PlaybackOrigin::Normal;
     let matching_item = snapshot.session.in_flight.first().filter(|item| {
         item.path == current.track_ref.preferred_path
             && Some(item.origin) == current.queue_origin
-    })
-        .cloned();
-    let new_item = matching_item.is_none().then(|| {
-        QueueItem::with_origin(
-            current.track_ref.preferred_path.clone(),
-            current.queue_origin.unwrap_or(crate::queue::QueueOrigin::Manual),
-        )
-    });
-    if let Some(current) = snapshot.catalog.current.as_mut() {
-        current.queue_item = matching_item.or_else(|| new_item.clone());
-    }
-    if let Some(item) = new_item {
-        snapshot.session.in_flight.insert(0, item);
+    }).cloned();
+    let path = current.track_ref.preferred_path.clone();
+    let origin = current.queue_origin.unwrap_or(crate::queue::QueueOrigin::Manual);
+    match restore_missing_current_identity(
+        normal,
+        current.queue_item.as_ref(),
+        matching_item,
+        || QueueItem::with_origin(path, origin),
+    ) {
+        IdentityRestoration::Preserve => {}
+        IdentityRestoration::Reuse(item) => {
+            snapshot.catalog.current.as_mut().expect("current remains present").queue_item = Some(item);
+        }
+        IdentityRestoration::Create(item) => {
+            snapshot.catalog.current.as_mut().expect("current remains present").queue_item = Some(item.clone());
+            snapshot.session.in_flight.insert(0, item);
+        }
     }
 }
 

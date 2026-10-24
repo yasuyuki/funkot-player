@@ -16,6 +16,7 @@ mod playlist_progress;
 mod playlist_service;
 mod engine_observation;
 mod playback_diagnostics;
+mod playback_recovery;
 mod playback_state;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
