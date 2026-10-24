@@ -419,11 +419,11 @@ pub(crate) fn load_legacy_settings_strict(dir: &Path) -> Result<Settings, LoadSt
     serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)
 }
 
-/// Load settings from the coherent playback state. A recovery restriction
-/// returns defaults only for display and never authorizes a replacement write.
+/// Load settings from a coherent snapshot or an unchanged recovery conflict.
+/// A settings read never authorizes a replacement write.
 pub fn load_settings(dir: &Path) -> Settings {
-    match PlaybackStore::open(dir.to_path_buf()).snapshot() {
-        Ok(state) => state.settings,
+    match PlaybackStore::open(dir.to_path_buf()).settings_snapshot() {
+        Ok(settings) => settings,
         Err(error) => {
             log::warn!("cannot load coherent playback state: {error:?}");
             Settings::default()

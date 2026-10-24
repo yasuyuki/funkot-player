@@ -27,6 +27,16 @@ export const en = {
   pauseLabel: "Pause",
   nextTrackLabel: "Next track",
 
+  playbackRecoveryTitle: "Choose the current queue",
+  playbackRecoverySummary: "Two saved queue orders differ. Choose one before starting playback.",
+  playbackRecoveryReview: "Review saved queues",
+  playbackRecoveryDialog: "Choose the current queue",
+  playbackRecoveryExplain: "We cannot tell which saved queue is newer. Choose the order that should become the current queue.",
+  playbackRecoveryQueueFile: (count: number) => `Player queue (${count} ${count === 1 ? "item" : "items"})`,
+  playbackRecoveryCatalogNormal: (count: number) => `Playlist-saved queue (${count} ${count === 1 ? "item" : "items"})`,
+  playbackRecoveryPreserved: "Both original saved queues are preserved.",
+  playbackRecoveryFailed: "Could not save that choice. Review the queues and try again.",
+
   // --- Now playing ---
   phaseIdle: "Idle",
   phaseStarting: "Starting",

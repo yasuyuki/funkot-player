@@ -10,6 +10,7 @@
   import NewArrivalsBanner from "./components/NewArrivalsBanner.svelte";
   import TransitionStrip from "./components/TransitionStrip.svelte";
   import Transport from "./components/Transport.svelte";
+  import PlaybackRecovery from "./components/PlaybackRecovery.svelte";
   import OverflowMenu from "./components/OverflowMenu.svelte";
   import Toast from "./components/Toast.svelte";
   import LogView from "./components/LogView.svelte";
@@ -177,6 +178,9 @@
 {/if}
 
 {#if ui.mode === "play"}
+  <UiBoundary>
+    <PlaybackRecovery />
+  </UiBoundary>
   <div class="playback-blocks">
     <div class="transport-block">
       <UiBoundary>

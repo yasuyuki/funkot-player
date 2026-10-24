@@ -22,6 +22,16 @@ export const ja: Messages = {
   pauseLabel: "一時停止",
   nextTrackLabel: "次の曲",
 
+  playbackRecoveryTitle: "現在の再生待ちを選ぶ",
+  playbackRecoverySummary: "保存された2つの再生待ちの順番が異なります。選ぶまで再生は開始できません。",
+  playbackRecoveryReview: "保存された再生待ちを確認",
+  playbackRecoveryDialog: "現在の再生待ちを選ぶ",
+  playbackRecoveryExplain: "どちらが新しいかは判別できません。現在の再生待ちにする順番を選んでください。",
+  playbackRecoveryQueueFile: (count) => `プレイヤーの再生待ち（${count}項目）`,
+  playbackRecoveryCatalogNormal: (count) => `プレイリストに保存された再生待ち（${count}項目）`,
+  playbackRecoveryPreserved: "元の2つの保存済み再生待ちはどちらも保持されます。",
+  playbackRecoveryFailed: "選択を保存できませんでした。再生待ちを確認してもう一度お試しください。",
+
   // --- Now playing ---
   phaseIdle: "待機中",
   phaseStarting: "準備中",

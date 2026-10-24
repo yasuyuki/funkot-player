@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::playlists::{Catalog, LoadState, PlaylistError};
 use crate::queue::QueueItem;
@@ -59,6 +60,25 @@ pub struct PlaybackState {
     pub session: Session,
     pub catalog: Catalog,
     pub settings: Settings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlaybackRecoveryStatus {
+    Ready,
+    LegacyNormalConflict {
+        token: u64,
+        queue_file_items: usize,
+        catalog_normal_items: usize,
+    },
+    Blocked { reason: LoadState },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyNormalChoice {
+    QueueFile,
+    CatalogNormal,
 }
 
 impl Default for PlaybackState {
@@ -157,11 +177,52 @@ enum StoreState {
         bytes: Option<Vec<u8>>,
         load_state: LoadState,
     },
+    LegacyNormalConflict(LegacyNormalConflict),
     ReadOnly(LoadState),
+}
+
+#[derive(Clone)]
+struct LegacySources {
+    queue: Option<Vec<u8>>,
+    session: Option<Vec<u8>>,
+    catalog: Option<Vec<u8>>,
+    settings: Option<Vec<u8>>,
+}
+
+impl LegacySources {
+    fn read(dir: &Path) -> Result<Self, LoadState> {
+        Ok(Self {
+            queue: read_bytes(dir, "queue.json").map_err(|_| LoadState::IoError)?,
+            session: read_bytes(dir, "session.json").map_err(|_| LoadState::IoError)?,
+            catalog: read_bytes(dir, "playlists.json").map_err(|_| LoadState::IoError)?,
+            settings: read_bytes(dir, "settings.json").map_err(|_| LoadState::IoError)?,
+        })
+    }
+
+    fn matches(&self, dir: &Path) -> Result<bool, LoadState> {
+        Ok(read_bytes(dir, FILE_NAME).map_err(|_| LoadState::IoError)?.is_none()
+            && read_bytes(dir, "queue.json").map_err(|_| LoadState::IoError)? == self.queue
+            && read_bytes(dir, "session.json").map_err(|_| LoadState::IoError)? == self.session
+            && read_bytes(dir, "playlists.json").map_err(|_| LoadState::IoError)? == self.catalog
+            && read_bytes(dir, "settings.json").map_err(|_| LoadState::IoError)? == self.settings)
+    }
+}
+
+struct LegacyNormalConflict {
+    token: u64,
+    queue_snapshot: PlaybackState,
+    catalog_snapshot: PlaybackState,
+    sources: LegacySources,
+}
+
+enum ReadSnapshot {
+    Snapshot { load_state: LoadState, snapshot: PlaybackState, bytes: Option<Vec<u8>> },
+    LegacyNormalConflict(LegacyNormalConflict),
 }
 
 static STORES: LazyLock<Mutex<HashMap<PathBuf, Weak<PlaybackStore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_RECOVERY_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 impl PlaybackStore {
     pub fn open(dir: impl Into<PathBuf>) -> Arc<Self> {
@@ -172,7 +233,7 @@ impl PlaybackStore {
         }
         let (lock, state) = match acquire_lock(&dir) {
             Ok(lock) => match read_snapshot_or_legacy(&dir) {
-                Ok((LoadState::Missing, snapshot, _)) => {
+                Ok(ReadSnapshot::Snapshot { load_state: LoadState::Missing, snapshot, .. }) => {
                     let bytes = serde_json::to_vec_pretty(&snapshot)
                         .map_err(io::Error::other)
                         .and_then(|bytes| persist_snapshot(&dir, &bytes).map(|()| bytes));
@@ -188,13 +249,17 @@ impl PlaybackStore {
                         Err(_) => (Some(lock), StoreState::ReadOnly(LoadState::IoError)),
                     }
                 },
-                Ok((load_state, snapshot, bytes)) => (
+                Ok(ReadSnapshot::Snapshot { load_state, snapshot, bytes }) => (
                     Some(lock),
                     StoreState::Ready {
                         snapshot,
                         bytes,
                         load_state,
                     },
+                ),
+                Ok(ReadSnapshot::LegacyNormalConflict(conflict)) => (
+                    Some(lock),
+                    StoreState::LegacyNormalConflict(conflict),
                 ),
                 Err(state) => (Some(lock), StoreState::ReadOnly(state)),
             },
@@ -223,7 +288,24 @@ impl PlaybackStore {
         }
         match &*state {
             StoreState::Ready { load_state, .. } => load_state.clone(),
+            StoreState::LegacyNormalConflict(_) => LoadState::LegacyNormalConflict,
             StoreState::ReadOnly(state) => state.clone(),
+        }
+    }
+
+    pub fn recovery_status(&self) -> PlaybackRecoveryStatus {
+        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if snapshot_bytes_changed(&self.dir, &state) {
+            return PlaybackRecoveryStatus::Blocked { reason: LoadState::Stale };
+        }
+        match &*state {
+            StoreState::Ready { .. } => PlaybackRecoveryStatus::Ready,
+            StoreState::LegacyNormalConflict(conflict) => PlaybackRecoveryStatus::LegacyNormalConflict {
+                token: conflict.token,
+                queue_file_items: conflict.queue_snapshot.queue.len(),
+                catalog_normal_items: conflict.catalog_snapshot.queue.len(),
+            },
+            StoreState::ReadOnly(reason) => PlaybackRecoveryStatus::Blocked { reason: reason.clone() },
         }
     }
 
@@ -234,6 +316,30 @@ impl PlaybackStore {
         }
         match &*state {
             StoreState::Ready { snapshot, .. } => Ok(snapshot.clone()),
+            StoreState::LegacyNormalConflict(_) => Err(PlaylistError::StoreReadOnly {
+                state: LoadState::LegacyNormalConflict,
+            }),
+            StoreState::ReadOnly(state) => Err(PlaylistError::StoreReadOnly {
+                state: state.clone(),
+            }),
+        }
+    }
+
+    pub fn settings_snapshot(&self) -> Result<Settings, PlaylistError> {
+        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &*state {
+            StoreState::Ready { snapshot, .. } => {
+                if snapshot_bytes_changed(&self.dir, &state) {
+                    Err(PlaylistError::Stale)
+                } else {
+                    Ok(snapshot.settings.clone())
+                }
+            }
+            StoreState::LegacyNormalConflict(conflict) => match conflict.sources.matches(&self.dir) {
+                Ok(true) => Ok(conflict.queue_snapshot.settings.clone()),
+                Ok(false) => Err(PlaylistError::Stale),
+                Err(state) => Err(PlaylistError::StoreReadOnly { state }),
+            },
             StoreState::ReadOnly(state) => Err(PlaylistError::StoreReadOnly {
                 state: state.clone(),
             }),
@@ -245,16 +351,16 @@ impl PlaybackStore {
         if self._lock.is_none() {
             return Err(read_only(&state));
         }
-        let (load_state, snapshot, bytes) =
-            read_snapshot_or_legacy(&self.dir).map_err(|state| PlaylistError::StoreReadOnly {
-                state,
-            })?;
-        *state = StoreState::Ready {
-            snapshot: snapshot.clone(),
-            bytes,
-            load_state,
-        };
-        Ok(snapshot)
+        match read_snapshot_or_legacy(&self.dir).map_err(|state| PlaylistError::StoreReadOnly { state })? {
+            ReadSnapshot::Snapshot { load_state, snapshot, bytes } => {
+                *state = StoreState::Ready { snapshot: snapshot.clone(), bytes, load_state };
+                Ok(snapshot)
+            }
+            ReadSnapshot::LegacyNormalConflict(conflict) => {
+                *state = StoreState::LegacyNormalConflict(conflict);
+                Err(PlaylistError::StoreReadOnly { state: LoadState::LegacyNormalConflict })
+            }
+        }
     }
 
     pub fn update<R>(
@@ -299,12 +405,56 @@ impl PlaybackStore {
         };
         Ok(value)
     }
+
+    pub(crate) fn resolve_legacy_normal_conflict<R>(
+        &self,
+        token: u64,
+        choice: LegacyNormalChoice,
+        prepare: impl FnOnce(&mut PlaybackState) -> Result<R, PlaylistError>,
+    ) -> Result<R, PlaylistError> {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self._lock.is_none() {
+            return Err(read_only(&state));
+        }
+        let conflict = match &*state {
+            StoreState::LegacyNormalConflict(conflict) => conflict,
+            StoreState::ReadOnly(_) => return Err(read_only(&state)),
+            StoreState::Ready { .. } => return Err(PlaylistError::Stale),
+        };
+        if conflict.token != token {
+            return Err(PlaylistError::Stale);
+        }
+        match conflict.sources.matches(&self.dir) {
+            Ok(true) => {}
+            Ok(false) => return Err(PlaylistError::Stale),
+            Err(state) => return Err(PlaylistError::StoreReadOnly { state }),
+        }
+        let mut snapshot = match choice {
+            LegacyNormalChoice::QueueFile => conflict.queue_snapshot.clone(),
+            LegacyNormalChoice::CatalogNormal => conflict.catalog_snapshot.clone(),
+        };
+        let value = prepare(&mut snapshot)?;
+        snapshot.validate()?;
+        let encoded = serde_json::to_vec_pretty(&snapshot).map_err(|error| PlaylistError::PersistFailed {
+            message: error.to_string(),
+        })?;
+        persist_snapshot(&self.dir, &encoded).map_err(|error| PlaylistError::PersistFailed {
+            message: error.to_string(),
+        })?;
+        *state = StoreState::Ready {
+            snapshot,
+            bytes: Some(encoded),
+            load_state: LoadState::Ready,
+        };
+        Ok(value)
+    }
 }
 
 fn read_snapshot_or_legacy(
     dir: &Path,
-) -> Result<(LoadState, PlaybackState, Option<Vec<u8>>), LoadState> {
+) -> Result<ReadSnapshot, LoadState> {
     let Some(bytes) = read_bytes(dir, FILE_NAME).map_err(|_| LoadState::IoError)? else {
+        let sources = LegacySources::read(dir)?;
         let saved_queue = crate::store::load_legacy_queue_strict(dir)?;
         let queue_exists = saved_queue.is_some();
         let queue = saved_queue.unwrap_or_default();
@@ -318,10 +468,18 @@ fn read_snapshot_or_legacy(
             settings,
             ..PlaybackState::default()
         };
+        if queue_exists && snapshot.catalog.normal.as_ref().is_some_and(|normal| snapshot.queue != normal.items) {
+            let queue_snapshot = legacy_normal_candidate(&snapshot, snapshot.queue.clone())?;
+            let catalog_items = snapshot.catalog.normal.as_ref().unwrap().items.clone();
+            let catalog_snapshot = legacy_normal_candidate(&snapshot, catalog_items)?;
+            return Ok(ReadSnapshot::LegacyNormalConflict(LegacyNormalConflict {
+                token: next_recovery_token()?, queue_snapshot, catalog_snapshot, sources,
+            }));
+        }
         import_legacy_normal_source(&mut snapshot, queue_exists)?;
         restore_legacy_normal_current_identity(&mut snapshot);
         snapshot.validate().map_err(|_| LoadState::Corrupt)?;
-        return Ok((LoadState::Missing, snapshot, None));
+        return Ok(ReadSnapshot::Snapshot { load_state: LoadState::Missing, snapshot, bytes: None });
     };
     let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)?;
     match value.get("schema_version").and_then(serde_json::Value::as_u64) {
@@ -335,7 +493,22 @@ fn read_snapshot_or_legacy(
         PlaylistError::StoreReadOnly { state } => state,
         _ => LoadState::Corrupt,
     })?;
-    Ok((LoadState::Ready, snapshot, Some(bytes)))
+    Ok(ReadSnapshot::Snapshot { load_state: LoadState::Ready, snapshot, bytes: Some(bytes) })
+}
+
+fn next_recovery_token() -> Result<u64, LoadState> {
+    NEXT_RECOVERY_TOKEN.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
+        token.checked_add(1)
+    }).map_err(|_| LoadState::IoError)
+}
+
+fn legacy_normal_candidate(snapshot: &PlaybackState, items: Vec<QueueItem>) -> Result<PlaybackState, LoadState> {
+    let mut candidate = snapshot.clone();
+    candidate.queue = items.clone();
+    candidate.catalog.normal.as_mut().expect("legacy conflict has normal queue").items = items;
+    restore_legacy_normal_current_identity(&mut candidate);
+    candidate.validate().map_err(|_| LoadState::Corrupt)?;
+    Ok(candidate)
 }
 
 fn require_saved_occurrence_ids(value: &serde_json::Value) -> Result<(), LoadState> {
@@ -367,25 +540,22 @@ fn import_legacy_normal_source(snapshot: &mut PlaybackState, queue_exists: bool)
 }
 
 fn restore_legacy_normal_current_identity(snapshot: &mut PlaybackState) {
-    let current = snapshot.catalog.current.as_ref().filter(|current| {
+    let Some(current) = snapshot.catalog.current.as_ref().filter(|current| {
         current.origin == crate::playlists::PlaybackOrigin::Normal
             && current.queue_item.is_none()
-    });
-    let matching_item = current
-        .and_then(|current| {
-            snapshot.session.in_flight.first().filter(|item| {
-                item.path == current.track_ref.preferred_path
-                    && Some(item.origin) == current.queue_origin
-            })
-        })
+    }) else {
+        return;
+    };
+    let matching_item = snapshot.session.in_flight.first().filter(|item| {
+        item.path == current.track_ref.preferred_path
+            && Some(item.origin) == current.queue_origin
+    })
         .cloned();
-    let new_item = current.and_then(|current| {
-        matching_item.is_none().then(|| {
-            QueueItem::with_origin(
-                current.track_ref.preferred_path.clone(),
-                current.queue_origin.unwrap_or(crate::queue::QueueOrigin::Manual),
-            )
-        })
+    let new_item = matching_item.is_none().then(|| {
+        QueueItem::with_origin(
+            current.track_ref.preferred_path.clone(),
+            current.queue_origin.unwrap_or(crate::queue::QueueOrigin::Manual),
+        )
     });
     if let Some(current) = snapshot.catalog.current.as_mut() {
         current.queue_item = matching_item.or_else(|| new_item.clone());
@@ -467,6 +637,9 @@ fn acquire_lock(dir: &Path) -> io::Result<File> {
 
 fn read_only(state: &StoreState) -> PlaylistError {
     match state {
+        StoreState::LegacyNormalConflict(_) => PlaylistError::StoreReadOnly {
+            state: LoadState::LegacyNormalConflict,
+        },
         StoreState::ReadOnly(state) => PlaylistError::StoreReadOnly {
             state: state.clone(),
         },

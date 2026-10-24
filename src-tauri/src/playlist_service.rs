@@ -15,9 +15,17 @@ pub struct CommandError { pub code: String, pub message: String }
 fn error(code: &str) -> CommandError { CommandError { code: code.into(), message: code.into() } }
 impl From<PlaylistError> for CommandError {
     fn from(value: PlaylistError) -> Self {
-        let json = serde_json::to_value(value).unwrap();
-        Self { code: json["code"].as_str().unwrap_or("persist_failed").into(),
-            message: json["message"].as_str().unwrap_or("").into() }
+        match value {
+            PlaylistError::StoreReadOnly { state } => Self {
+                code: "store_read_only".into(),
+                message: serde_json::to_string(&state).unwrap_or_else(|_| "io_error".into()),
+            },
+            other => {
+                let json = serde_json::to_value(other).unwrap();
+                Self { code: json["code"].as_str().unwrap_or("persist_failed").into(),
+                    message: json["message"].as_str().unwrap_or("").into() }
+            }
+        }
     }
 }
 impl From<FutureUpdateBusy> for CommandError {
@@ -121,6 +129,9 @@ impl Service {
     pub fn store_status(&self) -> String {
         if self.progress_error { return "persist_failed".into(); }
         serde_json::to_value(self.disk.load_state()).unwrap().as_str().unwrap_or("io_error").into()
+    }
+    pub fn recovery_status(&self) -> crate::playback_state::PlaybackRecoveryStatus {
+        self.disk.recovery_status()
     }
     pub fn catalog_view(&self) -> CatalogView {
         CatalogView { revision: self.catalog.revision, active_id: self.catalog.active_id.clone(), generation: self.catalog.generation,
@@ -310,35 +321,7 @@ impl Service {
     pub fn restore_saved_queue(&mut self) -> Result<RestoredPlayback, CommandError> {
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (restored, pending, clear_normal_current) = self.disk.update(|state| {
-            let session = state.session.clone();
-            let settings = state.settings.clone();
-            let folder_pos = state.catalog.normal.as_ref().and_then(|resume| resume.folder_pos);
-            let current = state.catalog.current.as_ref()
-                .filter(|current| current.origin == PlaybackOrigin::Normal)
-                .and_then(|current| current.queue_item.clone());
-            let active = state.catalog.active_id.is_some();
-            let pending = if active {
-                let mut pending = state.catalog.normal.as_ref().map(|normal| normal.items.clone())
-                    .unwrap_or_else(|| store::restored_pending(&session.in_flight, &state.queue));
-                if let Some(current) = &current {
-                    pending.retain(|item| item.entry_id != current.entry_id);
-                }
-                pending
-            } else {
-                let mut in_flight = session.in_flight.clone();
-                if let Some(current) = &current {
-                    in_flight.retain(|item| item.entry_id != current.entry_id);
-                    in_flight.insert(0, current.clone());
-                }
-                store::restored_pending(&in_flight, &state.queue)
-            };
-            let clear_normal_current = !active && current.is_some();
-            if clear_normal_current {
-                state.catalog.current = None;
-            }
-            state.queue = pending.clone();
-            state.session = store::Session::new();
-            Ok((RestoredPlayback { session, settings, folder_pos }, pending, clear_normal_current))
+            Ok(restored_playback_from_state(state))
         })?;
         if clear_normal_current {
             self.catalog.current = None;
@@ -348,8 +331,76 @@ impl Service {
         *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = store::Session::new();
         Ok(restored)
     }
+    pub fn resolve_legacy_normal_conflict(
+        &mut self,
+        token: u64,
+        choice: crate::playback_state::LegacyNormalChoice,
+    ) -> Result<RestoredPlayback, CommandError> {
+        let next_epoch = self.epoch.checked_add(1).ok_or_else(|| error("persist_failed"))?;
+        let (restored, pending, _, catalog) = self.disk.resolve_legacy_normal_conflict(
+            token,
+            choice,
+            |state| {
+                let (restored, pending, clear_normal_current) = restored_playback_from_state(state);
+                Ok((restored, pending, clear_normal_current, state.catalog.clone()))
+            },
+        )?;
+        self.catalog = catalog;
+        self.restored = self.catalog.resume_after_restart();
+        self.normal_source = None;
+        self.claims.clear();
+        self.next_index = 0;
+        self.current_index = None;
+        self.epoch = next_epoch;
+        self.exhausted = false;
+        self.ended = self.catalog.active_id.as_deref().is_some_and(|id| {
+            self.catalog.definition(id).is_ok_and(|definition| !definition.entries.is_empty())
+                && self.catalog.remaining(id).is_ok_and(|remaining| remaining.is_empty())
+        }) && self.restored.is_none();
+        self.undo.clear();
+        self.receipts.clear();
+        self.progress_error = false;
+        self.availability.clear();
+        self.admission_blocked.clear();
+        queue::replace_pending(&self.queue, pending);
+        Ok(restored)
+    }
     pub fn restore_normal(&self) -> Option<NormalResume> { self.catalog.active_id.as_ref().and(self.catalog.normal.clone()) }
     pub fn has_playlist(&self) -> bool { self.active().is_some() }
+}
+
+fn restored_playback_from_state(
+    state: &mut crate::playback_state::PlaybackState,
+) -> (RestoredPlayback, Vec<QueueItem>, bool) {
+    let session = state.session.clone();
+    let settings = state.settings.clone();
+    let folder_pos = state.catalog.normal.as_ref().and_then(|resume| resume.folder_pos);
+    let current = state.catalog.current.as_ref()
+        .filter(|current| current.origin == PlaybackOrigin::Normal)
+        .and_then(|current| current.queue_item.clone());
+    let active = state.catalog.active_id.is_some();
+    let pending = if active {
+        let mut pending = state.catalog.normal.as_ref().map(|normal| normal.items.clone())
+            .unwrap_or_else(|| store::restored_pending(&session.in_flight, &state.queue));
+        if let Some(current) = &current {
+            pending.retain(|item| item.entry_id != current.entry_id);
+        }
+        pending
+    } else {
+        let mut in_flight = session.in_flight.clone();
+        if let Some(current) = &current {
+            in_flight.retain(|item| item.entry_id != current.entry_id);
+            in_flight.insert(0, current.clone());
+        }
+        store::restored_pending(&in_flight, &state.queue)
+    };
+    let clear_normal_current = !active && current.is_some();
+    if clear_normal_current {
+        state.catalog.current = None;
+    }
+    state.queue = pending.clone();
+    state.session = store::Session::new();
+    (RestoredPlayback { session, settings, folder_pos }, pending, clear_normal_current)
 }
 
 pub struct ManagedSource { service: Shared, epoch: u64 }
@@ -781,6 +832,16 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     if request.request_id.trim().is_empty() { return Err(error("invalid_input")); }
     let fingerprint = serde_json::to_string(&request).unwrap();
     let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
+    match owner.recovery_status() {
+        crate::playback_state::PlaybackRecoveryStatus::Ready => {}
+        crate::playback_state::PlaybackRecoveryStatus::Blocked { reason: LoadState::Stale } => {
+            return Err(error("stale"));
+        }
+        crate::playback_state::PlaybackRecoveryStatus::LegacyNormalConflict { .. }
+        | crate::playback_state::PlaybackRecoveryStatus::Blocked { .. } => {
+            return Err(error("store_read_only"));
+        }
+    }
     if let Some((old, receipt)) = owner.receipts.get(&request.request_id) {
         return if old == &fingerprint { Ok(receipt.clone()) } else { Err(error("stale")) };
     }
