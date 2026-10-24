@@ -147,7 +147,6 @@ fn process_termination_recovers_one_complete_revision_at_every_commit_cut() {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
-        drop(stores);
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let expected = format!("playback-cut:{stage}");
         loop {
@@ -161,6 +160,7 @@ fn process_termination_recovers_one_complete_revision_at_every_commit_cut() {
                 break;
             }
         }
+        drop(stores);
         child.kill().unwrap();
         assert!(!child.wait().unwrap().success());
         let reopened = PlaybackStore::open(fixture.root.path());
