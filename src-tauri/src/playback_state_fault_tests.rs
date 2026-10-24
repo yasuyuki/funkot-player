@@ -473,3 +473,30 @@ fn legacy_missing_ids_are_generated_once_and_stay_stable_after_reopen() {
     assert_eq!(fs::read(dir.path().join("queue.json")).unwrap(), queue);
     assert_eq!(fs::read(dir.path().join("session.json")).unwrap(), session);
 }
+
+#[test]
+fn suspended_normal_identity_conflicts_without_current_are_read_only() {
+    for conflict_in_session in [false, true] {
+        let fixture = Fixture::new();
+        let mut state = fixture.before.clone();
+        let selected = state.catalog.create("Active", vec![]).unwrap();
+        state.catalog.select(Some(selected)).unwrap();
+        state.catalog.current = None;
+        let mut conflict = state.catalog.normal.as_ref().unwrap().items[0].clone();
+        conflict.path = PathBuf::from("/synthetic/conflicting-suspended.flac");
+        state.queue.clear();
+        state.session.in_flight.clear();
+        if conflict_in_session {
+            state.session.in_flight.push(conflict);
+        } else {
+            state.queue.push(conflict);
+        }
+        let bytes = serde_json::to_vec(&state).unwrap();
+        fs::write(fixture.root.path().join(FILE_NAME), &bytes).unwrap();
+        let store = PlaybackStore::open(fixture.root.path());
+        assert_eq!(store.load_state(), LoadState::Corrupt);
+        assert!(store.snapshot().is_err());
+        assert!(crate::store::save_session(fixture.root.path(), &Session::new()).is_err());
+        assert_eq!(fs::read(fixture.root.path().join(FILE_NAME)).unwrap(), bytes);
+    }
+}
