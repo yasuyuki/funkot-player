@@ -93,7 +93,9 @@ impl PlaybackState {
         validate_occurrences(&self.queue, &self.session.in_flight)
             .map_err(|message| PlaylistError::PersistFailed { message })?;
         if let Some(normal) = &self.catalog.normal {
-            validate_occurrences(&normal.items, &[])
+            validate_occurrences(&normal.items, &self.queue)
+                .map_err(|message| PlaylistError::PersistFailed { message })?;
+            validate_occurrences(&normal.items, &self.session.in_flight)
                 .map_err(|message| PlaylistError::PersistFailed { message })?;
         }
         if let Some(current) = self.catalog.current.as_ref()
