@@ -7,15 +7,9 @@
 //!
 //! # Why the app keeps its own copy of the manual bars
 //!
-//! The engine already stores them in its analysis cache, but that cache is
-//! keyed by `CACHE_VERSION` and thrown away wholesale when the analyzer
-//! changes: `cache::load` returns `None` on a version mismatch, and the next
-//! scan re-analyzes the file and overwrites the entry. A correction the user
-//! typed in would disappear silently at the next engine update — which is
-//! exactly when the analyzer's own numbers move and the correction matters
-//! most. Keeping our own copy lets the app re-apply it after every fresh
-//! analysis, and it is the honest ownership anyway: what the listener decided
-//! is the app's data, not a byproduct of an analysis run.
+//! The engine preserves manual values when converting the immediately preceding
+//! cache version. The app also owns corrections independently of that conversion
+//! window and cache retention. It reapplies its stored corrections after analysis.
 //!
 //! Entries are keyed by `funkot_core::cache::content_hash`, the same key the
 //! engine's cache uses, so moving or renaming a file keeps its corrections.

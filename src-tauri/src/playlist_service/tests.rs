@@ -47,6 +47,7 @@ impl Fixture {
         let buffer = funkot_core::decode::AudioBuffer { sample_rate: 48_000, frames: 48_000 * 30, samples: Vec::new() };
         let mut analysis = funkot_core::cache::provisional(&buffer, path.file_name().unwrap().to_str().unwrap());
         analysis.is_funkot = is_funkot;
+        analysis.needs_reanalysis = false;
         let hash = funkot_core::cache::content_hash(path).unwrap();
         funkot_core::cache::store(self.cache.path(), &hash, &analysis).unwrap();
         let mut index = store::load_hash_index(self.data.path()).index;
@@ -1512,6 +1513,7 @@ fn disabling_admission_keeps_missing_and_same_fingerprint_replacement() {
     };
     let mut replacement_analysis = funkot_core::cache::provisional(&buffer, "replacement");
     replacement_analysis.is_funkot = true;
+    replacement_analysis.needs_reanalysis = false;
     funkot_core::cache::store(fixture.cache.path(), &replacement_hash, &replacement_analysis).unwrap();
     queue::replace_pending(&fixture.queue, vec![missing_item.clone(), replaced_item.clone()]);
 
