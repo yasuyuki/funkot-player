@@ -5501,7 +5501,9 @@ mod cache_state_tests {
             frames: 48_000 * 200,
             samples: Vec::new(),
         };
-        (track, funkot_core::cache::provisional(&buffer, "track.wav"))
+        let mut analysis = funkot_core::cache::provisional(&buffer, "track.wav");
+        analysis.needs_reanalysis = false;
+        (track, analysis)
     }
 
     fn store_for(track: &Path, cache_dir: &Path, analysis: &funkot_core::TrackAnalysis) {
@@ -5850,6 +5852,58 @@ mod cache_state_tests {
 
         let out = apply_non_funkot_gate_from_index(vec![track.clone()], &cache.0, &data.0, true);
         assert_eq!(out, vec![track]);
+    }
+
+    #[test]
+    fn adopted_core_reanalyzes_v14_without_losing_player_manual_edits_or_undo() {
+        let cache = TempDir::new("v14-player-cache");
+        let data = TempDir::new("v14-player-data");
+        let (track, mut old) = track_with_analysis(&cache.0);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let cache_file = cache.0.join(format!("{hash}.json"));
+        old.version = 14;
+        old.intro_bars = 8;
+        old.outro_structure_bars = 8;
+        std::fs::write(&cache_file, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(analyzed_cache_entry(&cache.0, &hash).is_none());
+        set_bars_impl(&cache.0, &data.0, &track, Some(8), Some(8), true).unwrap();
+        let sample_rate = 8_000;
+        let frames = sample_rate * 64;
+        let mut samples = vec![0.0f32; frames * 2];
+        for beat in 0..192 {
+            let start = (beat as f64 * sample_rate as f64 / 3.0).round() as usize;
+            for offset in 0..(sample_rate * 80 / 1000).min(frames - start) {
+                let time = offset as f64 / sample_rate as f64;
+                let value = (0.8 * (-time / 0.03).exp()
+                    * (2.0 * std::f64::consts::PI * 60.0 * time).sin()) as f32;
+                samples[(start + offset) * 2] = value;
+                samples[(start + offset) * 2 + 1] = value;
+            }
+        }
+        let buffer = funkot_core::decode::AudioBuffer {
+            sample_rate: sample_rate as u32, frames: frames as u64, samples,
+        };
+        let fresh = funkot_core::cache::get_or_analyze(&track, &cache.0, &buffer).unwrap();
+        assert_eq!(fresh.version, 15);
+        assert_eq!((fresh.intro_bars, fresh.outro_structure_bars, fresh.outro_bars), (8, 8, 24));
+        std::fs::remove_file(&cache_file).unwrap();
+        let rebuilt = funkot_core::cache::get_or_analyze(&track, &cache.0, &buffer).unwrap();
+        assert!(!rebuilt.intro_bars_manual && !rebuilt.outro_structure_bars_manual);
+        reapply_overrides(&track, &cache.0, &data.0);
+        let restarted = funkot_core::cache::load(&cache.0, &hash).unwrap();
+        assert!(restarted.intro_bars_manual && restarted.outro_structure_bars_manual);
+        assert!(!restarted.outro_bars_manual);
+        assert_eq!((restarted.intro_bars, restarted.outro_structure_bars, restarted.outro_bars), (8, 8, 24));
+        assert_eq!(store::load_overrides(&data.0).get(&hash).unwrap().intro_bars, Some(8));
+        set_bars_impl(&cache.0, &data.0, &track, Some(16), Some(16), false).unwrap();
+        funkot_core::cache::purge_auto(&cache.0).unwrap();
+        let automatic = funkot_core::cache::get_or_analyze(&track, &cache.0, &buffer).unwrap();
+        reapply_overrides(&track, &cache.0, &data.0);
+        let restarted = funkot_core::cache::load(&cache.0, &hash).unwrap();
+        assert!(!restarted.intro_bars_manual && !restarted.outro_structure_bars_manual
+            && !restarted.outro_bars_manual);
+        assert!(automatic.intro_bars >= 16 && automatic.outro_structure_bars >= 16);
+        assert!(!store::load_overrides(&data.0).contains_key(&hash));
     }
 
     /// Cancel/undo with `mark_manual = false` must clear the touched side's
@@ -7625,8 +7679,8 @@ fn mark_arrivals_baseline_done(data_dir: &Path) -> Result<(), String> {
 ///
 /// Only the sides present in `o` are written; the rest stay whatever the
 /// analyzer decided. Run after every fresh analysis — the analyzer has just
-/// overwritten the entry, and a `CACHE_VERSION` bump discards it entirely, so
-/// this is what makes a correction outlive an engine update.
+/// committed its result. The library copy also retains corrections independently
+/// of the cache's supported conversion window.
 fn apply_override(
     cache_dir: &std::path::Path,
     hash: &str,
