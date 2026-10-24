@@ -16,6 +16,7 @@ mod playlist_progress;
 mod playlist_service;
 mod engine_observation;
 mod playback_diagnostics;
+mod playback_state;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
 #[cfg(any(target_os = "windows", test))]
@@ -34,7 +35,7 @@ use funkot_core::engine::{
 };
 use funkot_core::EngineOptions;
 
-use queue::{DrainPolicy, HostSource, QueueEdit, QueueItem, QueueOrigin, SharedQueue};
+use queue::{DrainPolicy, HostSource, QueueItem, QueueOrigin, SharedQueue};
 
 /// Global handle to the running engine's playback controls.
 ///
@@ -79,7 +80,7 @@ static PLAYBACK: OnceLock<Playback> = OnceLock::new();
 /// it) finds this empty and just skips saving; see `persist_session`.
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Live copy of `settings.json`'s `allow_non_funkot`. Folder drain reads this
+/// Live copy of the playback snapshot's `allow_non_funkot` setting. Folder drain reads this
 /// on the loader thread; `set_allow_non_funkot` updates it without restart.
 static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 
@@ -88,9 +89,9 @@ static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 /// `startForegroundService` would otherwise create a ghost notification.
 static SERVICE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Live copy of `settings.json`'s `locale`, or empty when the listener has
-/// not picked one. Exists for the Android `currentLocaleTag` JNI entry, which
-/// Kotlin calls with no `AppHandle` to reach `settings.json` through — the
+/// Live copy of the playback snapshot's `locale`, or empty when the listener
+/// has not picked one. Exists for the Android `currentLocaleTag` JNI entry,
+/// which Kotlin calls with no `AppHandle` to reach the persisted setting through — the
 /// same reason `LAST_SESSION_META` exists for `currentTitle`. Empty means
 /// "follow the device locale", which is what Android resource selection does
 /// on its own.
@@ -112,7 +113,7 @@ const LABELING_HEAD_SECS: f64 = 20.0;
 /// しまわないための、唯一の実効的な関門。
 const LABELING_AVAILABLE: bool = !cfg!(target_os = "android");
 
-/// `settings.json`'s raw `labeling_mode` gated by platform availability. The
+/// The playback snapshot's raw `labeling_mode` gated by platform availability. The
 /// mode is fixed at `Engine` construction (no live switch — see
 /// `EngineOptions::head_only_secs`), so this is the one place that decides
 /// whether a session actually runs with labeling prefetch on.
@@ -495,6 +496,9 @@ fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
         .app_data_dir()
         .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
     let cache = base.join("funkot-cache");
+    // Rescue the preceding standalone generation before the first unified
+    // settings read can create its replacement snapshot.
+    ensure_dirs(None, &cache, &base)?;
     let configured = store::load_settings(&base).music_dir;
     let (music, unavailable, needed) = resolve_music_dir(configured.as_deref(), |p| {
         std::fs::read_dir(p).is_ok()
@@ -1200,9 +1204,8 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
 /// [`SESSION`] → queue (`src-tauri/src/queue.rs`) → render.
 static INDEX_LOCK: Mutex<()> = Mutex::new(());
 
-/// Serialises writes under `data_dir` (`queue.json`, `flags.json`,
-/// `labels.json`, `library.json`, `history.json`, `session.json`, and Settings
-/// RMW).
+/// Serialises writes under `data_dir` (the playback snapshot plus `flags.json`,
+/// `labels.json`, `library.json`, and `history.json`).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
 /// really do overlap — tapping ✕ on one row and ↑ on another in quick
@@ -3867,9 +3870,9 @@ fn ensure_tracks_available(paths: &[PathBuf], dir: &Path) -> Result<(), String> 
 /// gated behind a `load_persisted_queue` argument, to keep cold-start
 /// audition's pending queue empty while the loader served folder tracks
 /// (`on_pending_consumed` only runs when something was actually taken from
-/// `pending`, so leaving it empty kept `queue.json` untouched). That gate is
-/// gone now: `store::restored_pending` folds `session.in_flight` in ahead of
-/// `queue.json`'s own contents, so whatever the loader pops — pending or
+/// `pending`, so leaving it empty kept its persisted snapshot component untouched).
+/// That gate is gone now: `store::restored_pending` folds `session.in_flight`
+/// in ahead of the snapshot queue component, so whatever the loader pops — pending or
 /// folder-drain alike — is recorded via `on_reserved` and survives a crash
 /// either way, and there is no longer a reason to suppress the restore.
 /// Injection still happens exactly once, here, before the loader thread
@@ -3921,67 +3924,19 @@ fn start_impl(
     // Fixed for the life of this `Engine` — there is no live labeling switch
     // (see `EngineOptions::head_only_secs`), so `effective_labeling_mode` is
     // resolved once here and carried straight into `audio_thread`.
-    let labeling_mode = {
-        let settings = store::load_settings(&data);
-        ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
-        effective_labeling_mode(settings.labeling_mode)
-    };
-
-    // Restore whatever was still mid-flight or pending from a previous run
-    // before the engine starts pulling from the queue. `in_flight` (tracks
-    // `HostSource::next` had already popped but not finished playing) goes
-    // first, then `queue.json`'s own contents — see `store::restored_pending`
-    // for why order and de-duplication both matter here. `replace_pending`
-    // overwrites rather than appends: anything queued in this process since
-    // launch was already mirrored into `queue.json` by the command that
-    // queued it, so appending would duplicate every entry queued before
-    // start was pressed.
-    let session = store::load_session(&data);
-    let saved = store::load_queue(&data).unwrap_or_else(|e| {
-        log::warn!("load_queue({}): {e}", data.display());
-        Vec::new()
-    });
-    let restored = store::restored_pending(&session.in_flight, &saved);
     let _prestart = playlist_service::lock_prestart_queue();
     let source_owner = playlist_service::get(&data, &cache, &state.queue);
-    let normal_resume = source_owner.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
-    queue::replace_pending(&state.queue, normal_resume.as_ref().map(|n| n.items.clone()).unwrap_or(restored));
+    let restored = source_owner.lock().unwrap_or_else(|e| e.into_inner())
+        .restore_saved_queue().map_err(|error| error.message)?;
     drop(_prestart);
-    // Mirror the restored queue to `queue.json` *before* clearing
-    // `SESSION.in_flight` below, not after: from here until that clear,
-    // `queue.json` still doesn't list the tracks that were `in_flight` (they
-    // only exist in memory now), while `session.json` still does. No save
-    // site can currently race in and `persist_session()` during this window —
-    // every path that reaches `flip_paused` (`toggle_pause`, the JNI
-    // callback) requires `PLAYBACK.get()` to be `Some`, and `PLAYBACK.set` only
-    // happens inside `audio_thread`, which is spawned after this function's
-    // restore runs and while `state.started`'s guard is still held — but
-    // fixing the order this way costs nothing either way, and it is the
-    // difference between "no known window" and "silently reintroduced" the
-    // next time a save site is added here. Writing `queue.json` first means
-    // every track restored this run is always findable on disk in at least
-    // one of the two files, however the process dies; on the next restore,
-    // `restored_pending`'s own de-duplication absorbs a track landing in
-    // both.
-    persist_queue(app, state);
-    // `in_flight` has now been folded back into `pending` above, so the
-    // in-memory session starts this run with none still outstanding;
-    // The loader records reservations as in-flight without retiring pending members.
-    // Start means "play": do not carry over a previous run's pause. In-process
-    // pause still goes through `flip_paused` → SESSION as before.
-    {
-        let mut s = SESSION
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        s.in_flight = Vec::new();
-        s.paused = false;
-    }
-    persist_session();
+    ALLOW_NON_FUNKOT.store(restored.settings.allow_non_funkot, Ordering::Relaxed);
+    let labeling_mode = effective_labeling_mode(restored.settings.labeling_mode);
+    let session = restored.session;
     // Where `DrainPolicy::ContinueFolder` resumes folder cycling — see
     // `store::restored_folder_pos`. Computed here, before `paths` moves into
     // `audio_thread` below, from `in_flight`'s *last* entry (the most
     // recently reserved track, whichever queue it came from).
-    let folder_pos = normal_resume.as_ref().and_then(|n| n.folder_pos).unwrap_or_else(||
+    let folder_pos = restored.folder_pos.unwrap_or_else(||
         store::restored_folder_pos(
             &paths,
             session
@@ -4964,64 +4919,6 @@ struct QueueSnapshot {
     folder_len: usize,
 }
 
-/// Save the queue's current pending contents to `queue.json`. Failure is
-/// logged, not propagated: the in-memory queue mutation already succeeded,
-/// and losing the on-disk mirror is not worth failing the caller's command
-/// over.
-fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
-    let data_dir = match resolve_dirs(app) {
-        Ok(d) => PathBuf::from(d.data_dir),
-        Err(e) => {
-            log::warn!("save_queue: cannot resolve data dir: {e}");
-            return;
-        }
-    };
-    // Snapshot and write under one lock, so concurrent commands cannot write
-    // out of order; see `SAVE_LOCK`. Poisoning is not a concern: nothing under
-    // this guard can panic in a way that leaves shared state half-updated, so
-    // recovering the guard is better than taking the app down over a stale
-    // mirror.
-    let _saving = SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let pending: VecDeque<QueueItem> = queue::snapshot(&state.queue).into_iter().collect();
-    if let Err(e) = store::save_queue(&data_dir, &pending) {
-        log::warn!("save_queue({}): {e}", data_dir.display());
-    }
-}
-
-/// Append `path` to the tail of the pending queue. Returns the pending
-/// queue's length after the insert.
-///
-/// Rejects with `"non_funkot"` when the track is analysed, effectively
-/// non-Funkot, and `allow_non_funkot` is false. Unanalysed tracks always
-/// pass. Tracks already in the queue are never removed by this gate.
-#[tauri::command(async)]
-fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    let dirs = resolve_dirs(&app)?;
-    let path_buf = PathBuf::from(&path);
-    if !ALLOW_NON_FUNKOT.load(Ordering::Relaxed)
-        && gated_non_funkot(
-            &path_buf,
-            Path::new(&dirs.cache_dir),
-            Path::new(&dirs.data_dir),
-        )
-    {
-        return Err("non_funkot".into());
-    }
-    let len = queue::enqueue(&state.queue, path_buf);
-    let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
-    let prioritized = try_prioritize_manual(&state.queue, request);
-    persist_queue(&app, &state);
-    if prioritized {
-        persist_session();
-    }
-    Ok(len)
-}
-
-/// Current `allow_non_funkot` setting (also mirrors [`ALLOW_NON_FUNKOT`]).
 #[tauri::command(async)]
 fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
@@ -5048,11 +4945,9 @@ fn set_allow_non_funkot(
     let service = playlist_service::existing().unwrap_or_else(|| {
         playlist_service::get(data, Path::new(&dirs.cache_dir), &state.queue)
     });
-    playlist_service::reconfigure_admission(&service, allow, PLAYBACK.get(), || {
-        let mut settings = store::load_settings(data);
+    playlist_service::reconfigure_admission(&service, allow, PLAYBACK.get(), |settings| {
         settings.allow_non_funkot = allow;
-        store::save_settings(data, &settings)
-            .map_err(|error| format!("cannot save settings: {error}"))
+        Ok(())
     }).map_err(|error| error.message)?;
     Ok(allow)
 }
@@ -5144,58 +5039,6 @@ fn with_settings_rmw_then<R>(
     Ok(after_save(&settings))
 }
 
-/// `queue::edit_displayed`'s `revoke` argument for the main engine: hands
-/// back `Engine::next_track_path`'s track, or `None` if there is nothing left
-/// to take back.
-///
-/// Holds `playback.render`'s lock only long enough to call
-/// `Engine::revoke_next` — a few microseconds. The discarded
-/// `PreparedTrack`'s actual teardown happens on a separate thread
-/// (`retire_prepared`, funkot-core `engine.rs`), specifically so this call
-/// does not have to wait on it. This is the same lock the cpal callback
-/// takes with `try_lock` (`open_output_stream`), so — exactly as with
-/// `install_audition`/`resume_autodj` swapping the audition engine in and
-/// out — it is possible, if unlikely, for one audio buffer to lose that race
-/// and render silence.
-///
-/// Returns `None` (which `edit_displayed` turns into `EditError::TooLate`)
-/// if the main engine has not started yet, or if an audition engine is
-/// currently installed: `RenderState::audition` is what the callback is
-/// actually rendering then, so the main engine's `next_track` cannot
-/// meaningfully be revoked out from under it.
-///
-/// Re-checks `AUDITIONING`/`AUDITION_PREPARING` here, after taking the render
-/// lock, rather than trusting `reorder`/`dequeue`'s own entry check: those
-/// flags and `RenderState::audition` do not flip atomically together.
-/// `install_audition` sets `AUDITIONING` *before* it takes the render lock to
-/// install the engine, so a caller that got past the entry check could still
-/// find `state.audition` empty here and revoke anyway — a harmless but
-/// unintended extra re-decode. The reverse order is also possible in
-/// principle (an audition engine landing in `RenderState` a moment before
-/// its flag is set), so both the flags and `state.audition.is_some()` are
-/// checked, and either one alone is enough to refuse.
-fn revoke_reserved() -> Option<PathBuf> {
-    let playback = PLAYBACK.get()?;
-    let mut state = playback
-        .render
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if state.audition.is_some()
-        || AUDITIONING.load(Ordering::Relaxed)
-        || AUDITION_PREPARING.load(Ordering::Relaxed)
-    {
-        return None;
-    }
-    let path = state.engine.revoke_next();
-    if path.is_some() {
-        NEXT_PREPARED.store(false, Ordering::Relaxed);
-    }
-    path
-}
-
-/// Same engine-side revoke as [`revoke_reserved`], but rechecks the manual
-/// priority deadline from the engine while holding the render lock. Atomics
-/// used by the watchdog are only a wake-up hint and may lag a buffer.
 fn revoke_reserved_for_manual_priority() -> Option<PathBuf> {
     let playback = PLAYBACK.get()?;
     let mut state = playback
@@ -5268,119 +5111,6 @@ fn try_prioritize_manual(queue: &SharedQueue, request: u64) -> bool {
     true
 }
 
-/// Move an item within the *displayed* queue list (`[displayed reserved?] ++
-/// pending`; index `0` is next-up `reserved` when present — matches `QueueSnapshot` and
-/// `queue::QueueEdit`'s doc comment). `expect` must be the path currently
-/// shown at `from`, so a caller acting on a stale view is rejected instead of
-/// moving whatever now happens to be there.
-///
-/// Errors are one of `queue::EditError::as_str`'s codes (`"too_late"` /
-/// `"stale"` / `"out_of_range"`), or `"auditioning"` while an audition is
-/// running or still preparing. `src/lib/tauri.ts` and `src/lib/state.svelte.ts`
-/// match on these exact strings to choose a Japanese toast message — keep
-/// this contract in sync on both sides; changing one without the other fails
-/// silently (an unrecognised code just falls through to a generic message).
-#[tauri::command(async)]
-fn reorder(
-    from: usize,
-    to: usize,
-    expect: QueueItem,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<(), String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
-        return Err("auditioning".into());
-    }
-    // `revoke_reserved`'s return value, captured here so it can be applied to
-    // `SESSION.in_flight` after `edit_displayed` returns and both the queue
-    // and render locks it was called under are released — see
-    // `store::retire_revoked`'s doc comment for why this matters (otherwise a
-    // restart brings the reordered-away track right back).
-    let mut revoked: Option<PathBuf> = None;
-    queue::edit_displayed(
-        &state.queue,
-        QueueEdit::Move { from, to },
-        &expect,
-        || {
-            let path = revoke_reserved();
-            revoked = path.clone();
-            path
-        },
-    )
-    .map_err(|e| e.as_str().to_string())?;
-    if let Some(path) = revoked {
-        {
-            let mut session = SESSION
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let item = QueueItem {
-                entry_id: expect.entry_id.clone(),
-                path,
-                origin: expect.origin,
-            };
-            store::retire_revoked(&mut session.in_flight, &item);
-        }
-        persist_session();
-    }
-    persist_queue(&app, &state);
-    Ok(())
-}
-
-/// Remove the item at displayed index `index` (see `reorder`'s doc comment
-/// for what "displayed" means and the error-code contract with the
-/// frontend). `expect` must be the path currently shown there.
-///
-/// Returns the removed path on success — `edit_displayed` only succeeds once
-/// it has confirmed the path at `index` equals `expect`, so `expect` itself
-/// is that path.
-#[tauri::command(async)]
-fn dequeue(
-    index: usize,
-    expect: QueueItem,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<QueueItem, String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
-        return Err("auditioning".into());
-    }
-    // See `reorder`'s matching comment: `revoke_reserved`'s result is applied
-    // to `SESSION.in_flight` only after `edit_displayed` returns, once the
-    // queue/render locks it ran under are released.
-    let mut revoked: Option<PathBuf> = None;
-    queue::edit_displayed(
-        &state.queue,
-        QueueEdit::Remove { index },
-        &expect,
-        || {
-            let path = revoke_reserved();
-            revoked = path.clone();
-            path
-        },
-    )
-    .map_err(|e| e.as_str().to_string())?;
-    if let Some(path) = revoked {
-        {
-            let mut session = SESSION
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let item = QueueItem {
-                entry_id: expect.entry_id.clone(),
-                path,
-                origin: expect.origin,
-            };
-            store::retire_revoked(&mut session.in_flight, &item);
-        }
-        persist_session();
-    }
-    persist_queue(&app, &state);
-    Ok(expect)
-}
-
-/// Current queue contents, for the UI to render.
 #[tauri::command(async)]
 fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
     // The source owner serializes claims, progress and all destination edits.
@@ -5637,48 +5367,20 @@ fn apply_non_funkot_gate_from_index(
 fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
     use tauri::Manager;
     let _ = DATA_DIR.set(data.clone());
-    let session = store::load_session(&data);
-    let settings = store::load_settings(&data);
-    ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
-    // Earliest point settings are on hand. Seeding here rather than waiting
-    // for the UI's `get_locale` means a notification raised before the WebView
-    // has finished starting already speaks the right language.
-    *LOCALE_TAG.lock().unwrap() = settings.locale.clone().unwrap_or_default();
-    let saved = store::load_queue(&data).unwrap_or_else(|e| {
-        log::warn!("setup: load_queue({}): {e}", data.display());
-        Vec::new()
-    });
-    let restored = store::restored_pending(&session.in_flight, &saved);
     let state = app.state::<AppState>();
     let _prestart = playlist_service::lock_prestart_queue();
     let service = playlist_service::get(&data, cache_dir, &state.queue);
-    let normal = service.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
-    queue::replace_pending(&state.queue, normal.map(|n|n.items).unwrap_or(restored));
+    let restored = match service.lock().unwrap_or_else(|e| e.into_inner()).restore_saved_queue() {
+        Ok(restored) => restored,
+        Err(error) => {
+            log::warn!("setup: cannot safely recover saved playback state: {}", error.message);
+            return;
+        }
+    };
     drop(_prestart);
+    ALLOW_NON_FUNKOT.store(restored.settings.allow_non_funkot, Ordering::Relaxed);
+    *LOCALE_TAG.lock().unwrap() = restored.settings.locale.unwrap_or_default();
 
-    // The preload is not only a view: from this point the restored entries
-    // are editable as ordinary pending rows. Commit that ownership transfer
-    // before the UI can delete/reorder them, otherwise start_impl reloads the
-    // old session.json and resurrects rows the listener already removed.
-    // Write queue first, then clear session, so a crash cannot lose an
-    // in-flight track from both files. Use the already-resolved data path;
-    // persist_queue would call resolve_dirs and probe a potentially slow SMB
-    // music folder on the GUI thread.
-    let _saving = SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let pending: VecDeque<QueueItem> = queue::snapshot(&state.queue).into_iter().collect();
-    match store::save_restored_queue_and_clear_session(&data, &pending) {
-        Ok(()) => {
-            let mut live = SESSION
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *live = store::Session::new();
-        }
-        Err(e) => {
-            log::warn!("setup: cannot persist preloaded queue/session: {e}");
-        }
-    }
 }
 
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.
@@ -8570,53 +8272,6 @@ fn list_new_arrivals_impl(data_dir: &std::path::Path) -> Result<Vec<store::NewAr
     ))
 }
 
-/// Queue every current new arrival at the front of pending (explicit action).
-///
-/// Locking / persist split: [`queue_new_arrivals_locked`] holds
-/// `INDEX_LOCK` → `SAVE_LOCK` → `SESSION` → queue, then drops all four before
-/// [`persist_queue`] (which takes `SAVE_LOCK` → queue again).
-#[tauri::command(async)]
-fn queue_new_arrivals(
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<u32, String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    let added = queue_new_arrivals_locked(&app, &state)?;
-    let mut prioritized = false;
-    if added > 0 {
-        let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
-        prioritized = try_prioritize_manual(&state.queue, request);
-    }
-    persist_queue(&app, &state);
-    if prioritized {
-        persist_session();
-    }
-    Ok(added)
-}
-
-/// Extract / gate / prepend under INDEX → SAVE → SESSION → queue, then release all
-/// guards before returning so the caller can safely call [`persist_queue`].
-fn queue_new_arrivals_locked(app: &tauri::AppHandle, state: &AppState) -> Result<u32, String> {
-    let dirs = resolve_dirs(app)?;
-    let _index = INDEX_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _saving = SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let session = SESSION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    queue_new_arrivals_under_locks(
-        Path::new(&dirs.data_dir),
-        Path::new(&dirs.cache_dir),
-        &state.queue,
-        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
-        &session.in_flight,
-    )
-}
-
 /// Testable body of [`queue_new_arrivals_locked`]: no `AppHandle`.
 ///
 /// After return, `SAVE_LOCK` and the queue lock are free (so
@@ -8708,66 +8363,6 @@ struct EnqueueManyResult {
     rejected: u32,
     /// Already reserved, pending, playing, or in flight.
     skipped: u32,
-}
-
-/// Add `paths` to the queue as manual items, in order, at the manual boundary.
-///
-/// Two things differ from single [`enqueue`], both deliberate:
-///
-/// * a path that is already reserved / pending / now-playing / in-flight is
-///   **skipped rather than duplicated** (`queue::prepend_pending_filtered`),
-///   where tapping `+` twice queues the track twice;
-/// * a non-Funkot path is **counted**, not turned into a failed call — one
-///   rejected row out of forty must not lose the other thirty-nine.
-///
-/// Empty `paths` is `Ok` with all zeros. Locking / persist split is
-/// [`queue_new_arrivals`]'s: all guards drop before [`persist_queue`].
-#[tauri::command(async)]
-fn enqueue_many(
-    paths: Vec<String>,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<EnqueueManyResult, String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    let result = enqueue_many_locked(&app, &state, &paths)?;
-    let mut prioritized = false;
-    if result.added > 0 {
-        let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
-        prioritized = try_prioritize_manual(&state.queue, request);
-    }
-    persist_queue(&app, &state);
-    if prioritized {
-        persist_session();
-    }
-    Ok(result)
-}
-
-/// Gate / prepend under INDEX → SAVE → SESSION → queue, then release all
-/// guards before returning so the caller can safely call [`persist_queue`].
-fn enqueue_many_locked(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    paths: &[String],
-) -> Result<EnqueueManyResult, String> {
-    let dirs = resolve_dirs(app)?;
-    let _index = INDEX_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _saving = SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let session = SESSION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Ok(enqueue_many_under_locks(
-        Path::new(&dirs.data_dir),
-        Path::new(&dirs.cache_dir),
-        &state.queue,
-        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
-        &session.in_flight,
-        paths,
-    ))
 }
 
 /// Testable body of [`enqueue_many_locked`]: no `AppHandle`.
@@ -9663,8 +9258,8 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             current_track_http::start(current_track_http_snapshot);
             // Preload the queue tab before ▶ is pressed: `start_impl` is
-            // otherwise the only place `queue.json` / `session.json` get
-            // read, so without this the queue screen shows nothing until
+            // otherwise the only place the playback snapshot queue/session components
+            // get read, so without this the queue screen shows nothing until
             // the listener starts playback at least once. `start_impl`
             // restores again (`exists` + strict gate) and overwrites;
             // this preload skips music-folder I/O so the GUI thread
@@ -9747,12 +9342,7 @@ pub fn run() {
             clear_track_play_count,
             remove_play_log_entry,
             list_new_arrivals,
-            queue_new_arrivals,
             list_play_history,
-            enqueue,
-            enqueue_many,
-            reorder,
-            dequeue,
             queue_state,
             get_allow_non_funkot,
             set_allow_non_funkot,

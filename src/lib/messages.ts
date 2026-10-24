@@ -49,7 +49,6 @@ export function queueErrorMessage(t: Messages, code: string): string {
   }
 }
 
-/// `EnqueueManyResult` → toast text.
 ///
 /// The two ways a path can fail mean different things, so they are reported
 /// separately rather than as one "some were not added": `skipped` is "already

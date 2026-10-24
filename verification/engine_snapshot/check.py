@@ -21,7 +21,7 @@ TESTS = [
 # Production and test publishes of this snapshot. A different set fails the run.
 WRITER_COUNTS = {
     "src-tauri/src/lib.rs": 4,
-    "src-tauri/src/playlist_service.rs": 9,
+    "src-tauri/src/playlist_service.rs": 6,
     "src-tauri/src/engine_observation.rs": 2,
     "src-tauri/src/playlist_service/tests.rs": 2,
 }

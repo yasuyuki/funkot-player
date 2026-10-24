@@ -100,11 +100,44 @@ updates counters and publishes changed records. Upgrade `main_callback_frame`
 is observed at the callback boundary, not an exact event timestamp. These
 measurements do not prove audible output quality and are outside the Kani model.
 
-For sensitivity checking, copy this driver and production module into an isolated
-temporary tree and change `Observation::Passive => None` to
-`Observation::Passive => Some(Cause::Started)`. Running the same entry must fail;
-discard that temporary tree's mutation and rerun the unchanged production source.
-This synthetic mutation is not evidence of the device failure's cause.
+The same runner checks sensitivity in isolated temporary copies. It changes
+`Observation::Passive => None` to `Observation::Passive => Some(Cause::Started)`
+and queue membership's `None => present` to `None => false`. Each named harness
+must finish with a failing safety assertion. Compilation errors, missing results,
+timeouts, and a mutation that passes fail the runner. The original five harness
+names, cover counts, unwind bounds, and total deadline stay unchanged.
+The summary records each mutation as `EXPECTED_FAIL` and hashes the unmodified
+production source. These mutations do not identify a device failure's cause.
+
+## Queue membership
+
+`verification/queue_progress.rs` imports production
+`src-tauri/src/queue_progress.rs`. `membership_update` quantifies an arbitrary
+`u64` occurrence ID, before-membership, and every event variant. Only an
+authorized add, automatic fill, delete, admission rejection, or accepted
+playback start may change membership. Reservation, preparation rejection,
+reordering, and passive events preserve it. Repeating an event is idempotent.
+Its ten covers check both progress and preservation.
+
+`distinct_occurrences` assumes two different arbitrary IDs and checks that one
+event cannot change both. Its two covers require each occurrence to be
+independently changeable. Equal audio paths do not merge occurrence IDs.
+`automatic_fill_requires_exhausted_selection` checks that a usable unreserved
+entry, an unsolicited request, or an inadmissible candidate prevents automatic
+insertion. It has three covers. These three harnesses have no loops or
+unwinding restriction.
+
+These are per-occurrence transition proofs. They do not prove collection
+lookups, snapshot serialization, multi-field transactions, filesystem
+replacement, or recovery after termination. Persistence acceptance uses the
+real-file restart and failure-injection tests in the native library suite.
+
+The coherent playback snapshot commits through serialization, file replacement,
+and a store mutex. There is no separate pure old/new winner rule to prove:
+recovery reads the one authoritative file and rejects malformed or conflicting
+identities. A hand-written crash model would assume the filesystem guarantee
+that needs checking. Issue #81 therefore adds real-process termination, failed
+commit/recovery, and identity-conflict tests rather than another Kani model.
 
 ## Engine snapshot coherence
 

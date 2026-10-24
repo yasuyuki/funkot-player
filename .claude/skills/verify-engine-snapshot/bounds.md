@@ -39,6 +39,12 @@ A new caller that publishes without that mutex makes this proof blocked. Two ove
 
 `WRITER_COUNTS` in `verification/engine_snapshot/check.py` is the executable record of every `publish_engine_observation(` and `observation.publish(` under `src-tauri`. The production callers above are in that set. So are the tests in `engine_observation.rs` and `playlist_service/tests.rs`. Those tests are not production writers. A different file or a different count fails the official script. That failure is not a completed mutex review and is not a passing proof. Update the count only after re-reading each call. The count does not notice a deleted lock that leaves the call in place. `--applies` selects that edit when it falls in the 200 lines above the publish. The farthest production lock found at the sync commit is the audio callback, 86 lines above its publish. A lock farther than 200 lines above its publish is outside that selection.
 
+## Writer review for crash recovery
+
+At product commit `a79a0c1a31797e8740a118eeff2bfd593ba8739d`, the observation module and its blob above are unchanged. The service writer count changes from nine to six because failed multi-file save rollback branches were removed. Every remaining production publish in `lib.rs` and `playlist_service.rs` was re-read and remains inside the render mutex. `WRITER_COUNTS` records that reviewed set; the official four-test Loom run passes. This is writer-inventory drift, not a change to the seqlock model or its sync commit.
+
+A test copy with the final quiescent `#[test]` removed returned `FAIL` for the missing named test even though its remaining tests passed. The production check and all four tests remain intact.
+
 ## Tool
 
 Kani 0.68 compiles concurrent code as sequential code, and its own documentation says atomic proofs must not be trusted. A sequential Kani run of `publish` then `read` still passes after the sequence recheck is removed, so it cannot guard this property.
