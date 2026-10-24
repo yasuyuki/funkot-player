@@ -158,16 +158,16 @@ impl PersistedQueueItem {
     }
 }
 
-pub(crate) fn load_legacy_queue_strict(dir: &Path) -> Result<Vec<QueueItem>, LoadState> {
+pub(crate) fn load_legacy_queue_strict(dir: &Path) -> Result<Option<Vec<QueueItem>>, LoadState> {
     let path = dir.join(QUEUE_FILE);
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(LoadState::IoError),
     };
     let items: Vec<PersistedQueueItem> =
         serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)?;
-    Ok(items.into_iter().map(PersistedQueueItem::into_item).collect())
+    Ok(Some(items.into_iter().map(PersistedQueueItem::into_item).collect()))
 }
 
 /// Load the queue from the coherent playback state.

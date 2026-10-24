@@ -315,39 +315,71 @@ fn legacy_component_corruption_preserves_every_original() {
 }
 
 #[test]
-fn legacy_catalog_edits_survive_migration_when_the_old_queue_mirror_is_stale() {
-    let dir = tempfile::tempdir().unwrap();
+fn legacy_catalog_queue_disagreement_preserves_both_possible_histories() {
     let kept = QueueItem::manual(PathBuf::from("/synthetic/kept.flac"));
     let deleted = QueueItem::manual(PathBuf::from("/synthetic/deleted.flac"));
     let added = QueueItem::manual(PathBuf::from("/synthetic/added.flac"));
-    let mut catalog = Catalog::default();
-    catalog.normal = Some(NormalResume {
-        items: vec![kept.clone(), added.clone()],
-        folder_pos: Some(2),
-    });
-    let originals = [
-        (
-            "queue.json",
-            serde_json::to_vec(&vec![kept.clone(), deleted.clone()]).unwrap(),
-        ),
-        ("session.json", serde_json::to_vec(&Session::new()).unwrap()),
-        ("playlists.json", serde_json::to_vec(&catalog).unwrap()),
-        (
-            "settings.json",
-            serde_json::to_vec(&Settings::default()).unwrap(),
-        ),
-    ];
-    for (name, bytes) in &originals {
-        fs::write(dir.path().join(name), bytes).unwrap();
+    let automatic = QueueItem::automatic(PathBuf::from("/synthetic/automatic.flac"));
+    for (normal, queue) in [
+        (vec![kept.clone(), added.clone()], vec![kept.clone(), deleted.clone()]),
+        (vec![kept.clone(), deleted], vec![kept, added]),
+        (vec![], vec![automatic]),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = Catalog::default();
+        catalog.normal = Some(NormalResume { items: normal, folder_pos: Some(2) });
+        let originals = [
+            ("queue.json", serde_json::to_vec(&queue).unwrap()),
+            ("session.json", serde_json::to_vec(&Session::new()).unwrap()),
+            ("playlists.json", serde_json::to_vec(&catalog).unwrap()),
+            ("settings.json", serde_json::to_vec(&Settings::default()).unwrap()),
+        ];
+        for (name, bytes) in &originals { fs::write(dir.path().join(name), bytes).unwrap(); }
+        let store = PlaybackStore::open(dir.path());
+        assert_eq!(store.load_state(), LoadState::Stale);
+        assert!(store.snapshot().is_err());
+        assert!(crate::store::save_session(dir.path(), &Session::new()).is_err());
+        assert!(!dir.path().join(FILE_NAME).exists());
+        for (name, bytes) in originals { assert_eq!(fs::read(dir.path().join(name)).unwrap(), bytes); }
     }
+}
+
+#[test]
+fn legacy_catalog_is_imported_when_the_queue_file_is_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let item = QueueItem::manual(PathBuf::from("/synthetic/only-catalog.flac"));
+    let mut catalog = Catalog::default();
+    catalog.normal = Some(NormalResume { items: vec![item.clone()], folder_pos: None });
+    let bytes = serde_json::to_vec(&catalog).unwrap();
+    fs::write(dir.path().join("playlists.json"), &bytes).unwrap();
     let snapshot = PlaybackStore::open(dir.path()).snapshot().unwrap();
-    let restored = crate::store::restored_pending(&snapshot.session.in_flight, &snapshot.queue);
-    assert_eq!(restored, vec![kept, added]);
-    assert!(!restored
-        .iter()
-        .any(|item| item.entry_id == deleted.entry_id));
-    for (name, bytes) in originals {
-        assert_eq!(fs::read(dir.path().join(name)).unwrap(), bytes);
+    assert_eq!(snapshot.queue, vec![item]);
+    assert_eq!(fs::read(dir.path().join("playlists.json")).unwrap(), bytes);
+}
+
+#[test]
+fn legacy_old_queue_new_session_and_new_queue_old_session_restore_each_id_once() {
+    let current = QueueItem::manual(PathBuf::from("/synthetic/repeated.flac"));
+    let prepared = QueueItem::manual(current.path.clone());
+    let unrelated = QueueItem::automatic(PathBuf::from("/synthetic/unrelated.flac"));
+    for old_queue in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = if old_queue { vec![current.clone(), prepared.clone(), unrelated.clone()] }
+            else { vec![prepared.clone(), unrelated.clone()] };
+        let session = Session { in_flight: if old_queue { vec![current.clone(), prepared.clone()] }
+            else { vec![current.clone()] }, paused: false };
+        let queue_bytes = serde_json::to_vec(&queue).unwrap();
+        let session_bytes = serde_json::to_vec(&session).unwrap();
+        fs::write(dir.path().join("queue.json"), &queue_bytes).unwrap();
+        fs::write(dir.path().join("session.json"), &session_bytes).unwrap();
+        let store = PlaybackStore::open(dir.path());
+        let state = store.snapshot().unwrap();
+        assert_eq!(crate::store::restored_pending(&state.session.in_flight, &state.queue),
+            vec![current.clone(), prepared.clone(), unrelated.clone()]);
+        drop(store);
+        assert_eq!(PlaybackStore::open(dir.path()).snapshot().unwrap(), state);
+        assert_eq!(fs::read(dir.path().join("queue.json")).unwrap(), queue_bytes);
+        assert_eq!(fs::read(dir.path().join("session.json")).unwrap(), session_bytes);
     }
 }
 
