@@ -305,7 +305,9 @@ fn read_snapshot_or_legacy(
     dir: &Path,
 ) -> Result<(LoadState, PlaybackState, Option<Vec<u8>>), LoadState> {
     let Some(bytes) = read_bytes(dir, FILE_NAME).map_err(|_| LoadState::IoError)? else {
-        let queue = crate::store::load_legacy_queue_strict(dir)?;
+        let saved_queue = crate::store::load_legacy_queue_strict(dir)?;
+        let queue_exists = saved_queue.is_some();
+        let queue = saved_queue.unwrap_or_default();
         let session = crate::store::load_legacy_session_strict(dir)?;
         let settings = crate::store::load_legacy_settings_strict(dir)?;
         let catalog = crate::playlists::load_legacy_catalog_strict(dir)?;
@@ -316,12 +318,8 @@ fn read_snapshot_or_legacy(
             settings,
             ..PlaybackState::default()
         };
-        import_legacy_normal_source(&mut snapshot);
+        import_legacy_normal_source(&mut snapshot, queue_exists)?;
         restore_legacy_normal_current_identity(&mut snapshot);
-        // Before unified persistence, successful normal queue commands wrote
-        // `catalog.normal` without necessarily replacing `queue.json`. That
-        // cache is therefore the N-1 authority whenever no playlist is active.
-        // Once imported, queue/session are the sole normal-source authority.
         snapshot.validate().map_err(|_| LoadState::Corrupt)?;
         return Ok((LoadState::Missing, snapshot, None));
     };
@@ -356,12 +354,16 @@ fn require_saved_occurrence_ids(value: &serde_json::Value) -> Result<(), LoadSta
     Ok(())
 }
 
-fn import_legacy_normal_source(snapshot: &mut PlaybackState) {
-    if snapshot.catalog.active_id.is_none() {
-        if let Some(normal) = &snapshot.catalog.normal {
-            snapshot.queue = normal.items.clone();
+fn import_legacy_normal_source(snapshot: &mut PlaybackState, queue_exists: bool) -> Result<(), LoadState> {
+    if let Some(normal) = &snapshot.catalog.normal {
+        // A catalog-only deletion and an interrupted queue-only automatic add
+        // can leave identical legacy files. Neither copy establishes ordering.
+        if queue_exists && snapshot.queue != normal.items {
+            return Err(LoadState::Stale);
         }
+        snapshot.queue = normal.items.clone();
     }
+    Ok(())
 }
 
 fn restore_legacy_normal_current_identity(snapshot: &mut PlaybackState) {

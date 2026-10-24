@@ -19,7 +19,7 @@ ignore 対象は、消えたときのコストで分かれる。**保護する�
 
 `playback-state.json` はキューの出現ID、再開中の曲、名前付きリストの構成・曲順・進行、設定を一つのスナップショットとして保存する。再生してもリスト構成は消えない。保存成功を返す編集は、このファイルの置換が終わっている。応答前のプロセス停止では、編集前または編集後のスナップショットが残る。電源喪失によるファイルシステムの metadata 消失まで保証するものではない。
 
-直前世代の `queue.json`・`session.json`・`playlists.json`・`settings.json` から変換し、移行元の bytes は残す。新ファイルが存在したら移行元へ自動で戻らない。破損・未知 schema・読取不能は空の正常データへ置き換えず、保存・編集を制限する。これらのファイルを cache として削除しない。正常な backup を戻す場合は player を終了し、現在の原本を保全してから対応 schema の backup を同じ data directory に戻す。
+直前世代の `queue.json`・`session.json`・`playlists.json`・`settings.json` から変換し、移行元の bytes は残す。旧キューと catalog 内の通常キューが食い違う場合は、新旧の順序を判定できないため原本を保持して read-only にし、自動変換しない。新ファイルが存在したら移行元へ自動で戻らない。破損・未知 schema・読取不能は空の正常データへ置き換えず、保存・編集を制限する。これらのファイルを cache として削除しない。正常な backup を戻す場合は player を終了し、現在の原本を保全してから対応 schema の backup を同じ data directory に戻す。
 
 `playlists.lock` は保存データを使う間、OS の排他 lock を保持する。同じ data directory を使う別 process の保存を防ぐ。process 終了で lock は解放されるため、lockfile の存在だけを異常と判断して削除しない。リスト名・曲名・path を含む保存スナップショットは feedback ZIP に含めない。
 
