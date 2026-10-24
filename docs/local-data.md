@@ -8,18 +8,20 @@ ignore 対象は、消えたときのコストで分かれる。**保護する�
 | 再生成可能 | `src-tauri/target/`、`src-tauri/gen/`、`node_modules/`、`dist/`、`packaging/msix/{out,staging}/` | 消してよい。ビルドで戻る |
 | 外部から再取得 | `.desktop-data/Music/`（267MB、手で入れた試聴用トラック）、`testdata/funkot-rel-paths.txt` | 消してよい。音源ルートから入れ直す |
 | 高コストな派生 | `testdata/*-shots/`（UI 確認のスクショ、計 27MB）、`testdata/funkot-transfer*.log`、`testdata/push_manifest_p10.txt` | 消してよい。smoke を流し直せば取れる |
-| キャッシュ・ローカル状態 | `.desktop-data/{CacheStorage,WebKitCache,storage,logs,queue.json,session.json,window.json,history.json,play-log.jsonl}`、`.win-run.stamp` | 消してよい |
+| キャッシュ・ローカル状態 | `.desktop-data/{CacheStorage,WebKitCache,storage,logs,window.json,history.json,play-log.jsonl}`、`.win-run.stamp` | 消してよい |
 | 手動編集を含む解析キャッシュ | `.desktop-data/funkot-cache/` | 自動解析だけとは限らない。下記の手動情報を確認して保全する |
-| **再生成不可** | `HANDOFF.md`、`ISSUES.md`、data directory の `track-tags.json` と `playlists.json` | **保全する。** `track-tags.json` は利用者が付けた制作年・タグ追加・自動タグの除外を content hash ごとに持つ。解析 cache の削除や再解析では再生成できない。破損・未知 schema のときは原本を上書きせず、タグ編集だけを停止して再生を続ける。 |
+| **再生成不可** | `HANDOFF.md`、`ISSUES.md`、data directory の `track-tags.json`、`playback-state.json`、移行元の `queue.json`・`session.json`・`playlists.json`・`settings.json` | **保全する。** `track-tags.json` は利用者が付けた制作年・タグ追加・自動タグの除外を content hash ごとに持つ。解析 cache の削除や再解析では再生成できない。破損・未知 schema のときは原本を上書きせず、タグ編集だけを停止して再生を続ける。 |
 | 秘密 | `.secrets/upload-keystore.jks`、`src-tauri/gen/android/keystore.properties` | **リポジトリにもバックアップにも入れない。** 別途退避済み。`scripts/pack-signing-backup.sh` 参照 |
 
 `track-tags.json` の編集中は同じ directory の `track-tags.lock` で複数 process の read-modify-write を直列化する。lockfile が残っている場合は、タグ編集を busy として止め、既存の再生を続ける。クラッシュ後の復旧では、同じ data directory を使う player process がすべて終了していることを確認してから、その lockfile だけを除去する。破損または未知 schema の JSON はその前に別の安全な場所へコピーし、元ファイルを置換しない。
 
 正常な backup を復元するときも player を終了し、破損・未知 schema の原本を保全した後、backup の schema に対応する player で同じ data directory へ復元する。自動で空の JSON に置き換えない。今回タグの export/import 機能はなく、既存 feedback ZIP に `track-tags.json` を自動追加しない。共有範囲は別途判断する。
 
-`playlists.json` は名前付きリストの構成・曲順と各リストの今回の進行、通常キューの再開状態を保存する。再生しても構成は消えない。再生成できないため、cache やキューだけの一時状態として削除しない。破損・未知 schema・保存エラーのときは編集を成功扱いせず、原本を保全する。復元時は player を終了してから、対応 schema の backup を同じ data directory に戻す。
+`playback-state.json` はキューの出現ID、再開中の曲、名前付きリストの構成・曲順・進行、設定を一つのスナップショットとして保存する。再生してもリスト構成は消えない。保存成功を返す編集は、このファイルの置換が終わっている。応答前のプロセス停止では、編集前または編集後のスナップショットが残る。電源喪失によるファイルシステムの metadata 消失まで保証するものではない。
 
-`playlists.lock` は player の起動中に OS の排他 lock を保持する。同じ data directory を使う別 process はプレイリストを書き換えられない。process 終了で lock は解放されるため、lockfile の存在だけを異常と判断して削除しない。リスト名・曲名・path を含む `playlists.json` は feedback ZIP に含めない。
+直前世代の `queue.json`・`session.json`・`playlists.json`・`settings.json` から変換し、移行元の bytes は残す。新ファイルが存在したら移行元へ自動で戻らない。破損・未知 schema・読取不能は空の正常データへ置き換えず、保存・編集を制限する。これらのファイルを cache として削除しない。正常な backup を戻す場合は player を終了し、現在の原本を保全してから対応 schema の backup を同じ data directory に戻す。
+
+`playlists.lock` は保存データを使う間、OS の排他 lock を保持する。同じ data directory を使う別 process の保存を防ぐ。process 終了で lock は解放されるため、lockfile の存在だけを異常と判断して削除しない。リスト名・曲名・path を含む保存スナップショットは feedback ZIP に含めない。
 
 player の手動補正は data directory の `library.json` に保存し、解析 cache にも反映する。
 `library.json`、ラベル、手動フラグを持つ cache を、再生成可能な自動解析だけとみなして

@@ -162,7 +162,7 @@ fn stale_save_aborts_without_publishing_candidate_or_altering_claims() {
     fixture.service.lock().unwrap().started(index);
     let (catalog, current, future) = { let owner = fixture.service.lock().unwrap();
         (owner.catalog.clone(), owner.current_index, owner.future_claims().into_iter().map(|(i, _)| i).collect::<Vec<_>>()) };
-    let file = fixture.data.path().join("playlists.json");
+    let file = fixture.data.path().join("playback-state.json");
     fs::write(&file, b"external update").unwrap();
     assert_eq!(fixture.command("rename", Action::Rename { id: id.clone(), name: "after".into() }).err().unwrap().code, "stale");
     let owner = fixture.service.lock().unwrap();
@@ -391,7 +391,7 @@ fn rejected_save_keeps_lagging_start_progress_in_memory() {
     let older = source.next().unwrap();
     let newer = source.next().unwrap();
     let player = playback(&[newer.clone(), older.clone()], 4096);
-    let file = fixture.data.path().join("playlists.json");
+    let file = fixture.data.path().join("playback-state.json");
     fs::write(&file, b"external update").unwrap();
     let mut owner = fixture.service.lock().unwrap();
     owner.observe_started(older.0, Some(&player));
@@ -524,7 +524,7 @@ fn failed_source_save_aborts_real_engine_fence_and_keeps_prepared_next() {
     let player = playback(&[first,second], 4096);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
     let before = fixture.service.lock().unwrap().catalog.clone();
-    fs::write(fixture.data.path().join("playlists.json"), b"external update").unwrap();
+    fs::write(fixture.data.path().join("playback-state.json"), b"external update").unwrap();
     let request = fixture.request("switch", Action::Select { id: Some(other) });
     assert_eq!(command_with(&fixture.service, request, Some(&player)).err().unwrap().code, "stale");
     let mut render = player.render.lock().unwrap();
@@ -601,7 +601,7 @@ fn source_fences_reject_an_engine_current_the_service_has_not_observed() {
         }
         let catalog = fixture.service.lock().unwrap().catalog.clone();
         let refused = if admission {
-            reconfigure_admission(&fixture.service, false, Some(&player), || Ok(())).err().map(|e| e.code)
+            reconfigure_admission(&fixture.service, false, Some(&player), |_| Ok(())).err().map(|e| e.code)
         } else {
             let request = fixture.request("switch", Action::Select { id: Some(playlist) });
             command_with(&fixture.service, request, Some(&player)).err().map(|e| e.code)
@@ -637,7 +637,7 @@ fn failed_removal_of_a_prepared_item_keeps_the_whole_future_until_a_save_succeed
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
     let remove = |request_id: &str| command_with(&fixture.service,
         fixture.request(request_id, Action::QueueRemove { index: 0, expect: items[1].clone() }), Some(&player));
-    let file = fixture.data.path().join("playlists.json");
+    let file = fixture.data.path().join("playback-state.json");
     let saved = fs::read(&file).unwrap();
     fs::write(&file, b"external update").unwrap();
     assert_eq!(remove("failed").err().unwrap().code, "stale");
@@ -749,7 +749,7 @@ fn append_after_terminal_service_restart_clears_ended_without_starting_playback(
     let action = Action::Append { tracks: vec![a, b].into_iter().map(|path| TrackTarget {
         path: path.to_string_lossy().into(), expected_hash: None,
     }).collect(), mode: "many".into() };
-    let file = fixture.data.path().join("playlists.json"); let saved = fs::read(&file).unwrap();
+    let file = fixture.data.path().join("playback-state.json"); let saved = fs::read(&file).unwrap();
     fs::write(&file, b"external update").unwrap();
     assert_eq!(fixture.command("failed-append", action.clone()).err().unwrap().code, "stale");
     assert!(fixture.service.lock().unwrap().details(&id, false).unwrap().ended);
@@ -819,7 +819,7 @@ fn restart_replays_normal_current_before_selected_playlist_without_queue_duplica
         owner.catalog.select(Some(id.clone())).unwrap();
         owner.catalog.current = Some(CurrentOccurrence { playlist_id: None, run_id: 0, entry_id: None,
             track_ref: TrackRef { content_hash: String::new(), preferred_path: normal.clone(), title: String::new(), artist: String::new() },
-            origin: PlaybackOrigin::Normal, queue_origin: Some(QueueOrigin::Automatic) });
+            origin: PlaybackOrigin::Normal, queue_origin: Some(QueueOrigin::Automatic), queue_item: Some(QueueItem::automatic(normal.clone())) });
         owner.catalog.normal = Some(NormalResume { items: vec![], folder_pos: Some(7) });
         owner.disk.persist(&owner.catalog).unwrap();
     }
@@ -913,7 +913,7 @@ fn waking_finite_tail_keeps_a_current_restore_that_has_not_started_yet() {
         owner.catalog.select(Some(id)).unwrap();
         let current = CurrentOccurrence { playlist_id: None, run_id: 0, entry_id: None,
             track_ref: Fixture::track(&path), origin: PlaybackOrigin::Normal,
-            queue_origin: Some(QueueOrigin::Automatic) };
+            queue_origin: Some(QueueOrigin::Automatic), queue_item: Some(QueueItem::automatic(path.clone())) };
         owner.catalog.current = Some(current.clone()); owner.restored = Some(current);
         owner.disk.persist(&owner.catalog).unwrap();
     }
@@ -960,7 +960,7 @@ fn final_source_skips_cached_non_funkot_before_returning_playlist_candidate() {
         assert_eq!(details.rows[0].reason.as_deref(), Some("non_funkot"));
         assert_eq!(owner.claims.len(), 1);
     }
-    reconfigure_admission(&fixture.service, true, None, || Ok(())).unwrap();
+    reconfigure_admission(&fixture.service, true, None, |_| Ok(())).unwrap();
     assert_eq!(source.next().map(|(_, path)| path), Some(rejected));
     crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
 }
@@ -1002,6 +1002,9 @@ fn folder_preparation_allows_queue_edits_and_does_not_play_a_deleted_reservation
 
 #[test]
 fn deleting_a_reserved_automatic_item_retires_its_restart_claim() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock().unwrap_or_else(|e| e.into_inner());
+    let previous_session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let fixture = Fixture::new();
     let item = QueueItem::automatic(fixture.file("reserved.wav"));
     queue::replace_pending(&fixture.queue, vec![item.clone()]);
@@ -1024,7 +1027,9 @@ fn deleting_a_reserved_automatic_item_retires_its_restart_claim() {
     let Fixture { data, cache, queue, service } = fixture;
     drop(service);
     let reopened = Service::new(data.path(), cache.path(), queue);
-    assert!(reopened.restore_normal().unwrap().items.is_empty());
+    assert!(store::load_queue(data.path()).unwrap().is_empty());
+    assert!(reopened.restore_normal().is_none());
+    *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = previous_session;
 }
 
 #[test]
@@ -1185,7 +1190,7 @@ fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
     let player = playback(&[first.clone(), rejected_future.clone()], 4096);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
 
-    reconfigure_admission(&fixture.service, false, Some(&player), || Ok(())).unwrap();
+    reconfigure_admission(&fixture.service, false, Some(&player), |_| Ok(())).unwrap();
     {
         let session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(session.in_flight.is_empty());
@@ -1281,7 +1286,7 @@ fn off_revokes_prepared_automatic_non_funkot_when_switching_from_on() {
     let player = playback(&[current.clone(), prepared], 4096);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
 
-    reconfigure_admission(&fixture.service, false, Some(&player), || Ok(())).unwrap();
+    reconfigure_admission(&fixture.service, false, Some(&player), |_| Ok(())).unwrap();
 
     assert!(queue::pending_snapshot(&fixture.queue).is_empty());
     assert!(store::load_queue(fixture.data.path()).unwrap().is_empty());
@@ -1327,7 +1332,7 @@ fn off_reapplies_cleanup_when_admission_atomic_is_already_false() {
     // This models a settings read that has already published OFF while an old
     // source still owns a prepared non-Funkot future.
     crate::ALLOW_NON_FUNKOT.store(false, std::sync::atomic::Ordering::Relaxed);
-    reconfigure_admission(&fixture.service, false, Some(&player), || Ok(())).unwrap();
+    reconfigure_admission(&fixture.service, false, Some(&player), |_| Ok(())).unwrap();
 
     assert!(queue::pending_snapshot(&fixture.queue).is_empty());
     assert!(store::load_queue(fixture.data.path()).unwrap().is_empty());
@@ -1355,11 +1360,12 @@ fn disabling_admission_persists_filtered_normal_resume_for_startup() {
     let accepted_item = QueueItem::manual(accepted);
     queue::replace_pending(&fixture.queue, vec![rejected_item.clone(), accepted_item.clone()]);
 
-    reconfigure_admission(&fixture.service, false, None, || Ok(())).unwrap();
+    reconfigure_admission(&fixture.service, false, None, |_| Ok(())).unwrap();
     let Fixture { data, cache, queue, service } = fixture;
     drop(service);
     let reopened = Service::new(data.path(), cache.path(), queue);
-    let restored = reopened.restore_normal().unwrap().items;
+    let restored = store::load_queue(data.path()).unwrap();
+    assert!(reopened.restore_normal().is_none());
     assert_eq!(restored, vec![accepted_item], "startup keeps the original accepted occurrence");
     assert!(!restored.iter().any(|item| item.entry_id == rejected_item.entry_id),
         "startup must not restore the OFF-deleted occurrence");
@@ -1386,6 +1392,7 @@ fn idle_off_hydrates_persisted_normal_before_filtering() {
             folder_pos: Some(4),
         });
         owner.disk.persist(&owner.catalog).unwrap();
+        store::save_queue(owner.data.as_path(), &std::collections::VecDeque::from([rejected_item.clone(), accepted_item.clone()])).unwrap();
     }
 
     // This models the settings command before queue-tab preload: no global
@@ -1394,11 +1401,12 @@ fn idle_off_hydrates_persisted_normal_before_filtering() {
     drop(service);
     assert!(queue::pending_snapshot(&queue).is_empty());
     let idle = Arc::new(Mutex::new(Service::new(data.path(), cache.path(), queue.clone())));
-    reconfigure_admission(&idle, false, None, || Ok(())).unwrap();
+    reconfigure_admission(&idle, false, None, |_| Ok(())).unwrap();
     assert_eq!(queue::pending_snapshot(&queue), vec![accepted_item.clone()]);
     drop(idle);
     let reopened = Service::new(data.path(), cache.path(), queue);
-    assert_eq!(reopened.restore_normal().unwrap().items, vec![accepted_item]);
+    assert!(reopened.restore_normal().is_none());
+    assert_eq!(store::load_queue(data.path()).unwrap(), vec![accepted_item]);
     crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1423,6 +1431,7 @@ fn idle_off_merges_live_enqueue_with_persisted_normal() {
             folder_pos: Some(4),
         });
         owner.disk.persist(&owner.catalog).unwrap();
+        store::save_queue(owner.data.as_path(), &std::collections::VecDeque::from([rejected_item.clone(), accepted_item.clone()])).unwrap();
     }
 
     // A manual enqueue that began before service initialization has already
@@ -1431,11 +1440,12 @@ fn idle_off_merges_live_enqueue_with_persisted_normal() {
     drop(service);
     queue::replace_pending(&queue, vec![fresh_item.clone()]);
     let idle = Arc::new(Mutex::new(Service::new(data.path(), cache.path(), queue.clone())));
-    reconfigure_admission(&idle, false, None, || Ok(())).unwrap();
+    reconfigure_admission(&idle, false, None, |_| Ok(())).unwrap();
     assert_eq!(queue::pending_snapshot(&queue), vec![accepted_item.clone(), fresh_item.clone()]);
     drop(idle);
     let reopened = Service::new(data.path(), cache.path(), queue);
-    assert_eq!(reopened.restore_normal().unwrap().items, vec![accepted_item, fresh_item]);
+    assert!(reopened.restore_normal().is_none());
+    assert_eq!(store::load_queue(data.path()).unwrap(), vec![accepted_item, fresh_item]);
     crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1454,7 +1464,7 @@ fn disabling_admission_hashes_a_cached_manual_index_miss() {
     let rejected_item = QueueItem::manual(rejected);
     queue::replace_pending(&fixture.queue, vec![rejected_item]);
 
-    reconfigure_admission(&fixture.service, false, None, || Ok(())).unwrap();
+    reconfigure_admission(&fixture.service, false, None, |_| Ok(())).unwrap();
     assert!(queue::pending_snapshot(&fixture.queue).is_empty(),
         "OFF removes an effective non-Funkot manual index miss");
     crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
@@ -1505,7 +1515,7 @@ fn disabling_admission_keeps_missing_and_same_fingerprint_replacement() {
     funkot_core::cache::store(fixture.cache.path(), &replacement_hash, &replacement_analysis).unwrap();
     queue::replace_pending(&fixture.queue, vec![missing_item.clone(), replaced_item.clone()]);
 
-    reconfigure_admission(&fixture.service, false, None, || Ok(())).unwrap();
+    reconfigure_admission(&fixture.service, false, None, |_| Ok(())).unwrap();
     assert_eq!(queue::pending_snapshot(&fixture.queue), vec![missing_item, replaced_item],
         "OFF retains missing paths and same-fingerprint replacements until final admission verifies them");
     crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
@@ -1542,7 +1552,7 @@ fn disabling_admission_fences_engine_before_a_blocked_normal_source_releases() {
     let service = fixture.service.clone();
     let worker_player = Arc::clone(&player);
     let worker = std::thread::spawn(move || {
-        reconfigure_admission(&service, false, Some(&worker_player), || Ok(()))
+        reconfigure_admission(&service, false, Some(&worker_player), |_| Ok(()))
     });
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1638,6 +1648,7 @@ fn admission_settings_save_failure_keeps_existing_future() {
     let second = source.next().unwrap();
     let player = playback(&[first.clone(), second.clone()], 4096);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
+    let persisted_session = store::load_session(fixture.data.path());
     let previous_session = {
         let mut session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = session.clone();
@@ -1645,7 +1656,7 @@ fn admission_settings_save_failure_keeps_existing_future() {
         previous
     };
 
-    let failure = reconfigure_admission(&fixture.service, false, Some(&player), || {
+    let failure = reconfigure_admission(&fixture.service, false, Some(&player), |_| {
         Err("settings failed".into())
     }).unwrap_err();
 
@@ -1660,7 +1671,7 @@ fn admission_settings_save_failure_keeps_existing_future() {
     {
         let session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(session.in_flight, vec![items[1].clone()]);
-        assert_eq!(store::load_session(fixture.data.path()).in_flight, vec![items[1].clone()]);
+        assert_eq!(store::load_session(fixture.data.path()), persisted_session);
     }
     {
         let mut render = player.render.lock().unwrap();
@@ -1703,20 +1714,20 @@ fn admission_session_save_failure_keeps_existing_future() {
         session.in_flight = vec![items[1].clone()];
         previous
     };
-    fs::create_dir(fixture.data.path().join("session.json")).unwrap();
+    fs::remove_file(fixture.data.path().join("playback-state.json")).unwrap();
+    fs::create_dir(fixture.data.path().join("playback-state.json")).unwrap();
 
-    let failure = reconfigure_admission(&fixture.service, false, Some(&player), || -> Result<(), String> {
+    let failure = reconfigure_admission(&fixture.service, false, Some(&player), |_| -> Result<(), String> {
         panic!("settings save must not run after session save failure")
     }).unwrap_err();
 
-    assert_eq!(failure.code, "persist_failed");
-    assert!(failure.message.contains("cannot save session"));
+    assert_eq!(failure.code, "store_read_only");
     assert!(crate::ALLOW_NON_FUNKOT.load(std::sync::atomic::Ordering::Relaxed));
     {
         let owner = fixture.service.lock().unwrap();
         assert_eq!(owner.epoch, 0);
         assert!(!owner.claims[&second.0].cancelled);
-        assert_eq!(owner.normal_items(), items[1..].to_vec());
+        assert!(owner.normal_items().iter().any(|item| item == &items[1]));
     }
     {
         let session = crate::SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1769,4 +1780,81 @@ fn unavailable_playlist_admission_retries_after_cache_recovers() {
     let details = fixture.service.lock().unwrap().inspect_entries(&id).unwrap();
     assert_eq!(details.rows[0].reason, None);
     crate::ALLOW_NON_FUNKOT.store(previous, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn restored_normal_current_is_offered_once_before_any_start_observation() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock().unwrap_or_else(|e| e.into_inner());
+    let previous_session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let fixture = Fixture::new();
+    let path = fixture.file("repeated-current.wav");
+    let current = QueueItem::manual(path.clone());
+    let next = QueueItem::manual(path.clone());
+    let saved_current = CurrentOccurrence {
+        playlist_id: None, run_id: 0, entry_id: None,
+        track_ref: Fixture::track(&path), origin: PlaybackOrigin::Normal,
+        queue_origin: Some(current.origin), queue_item: Some(current.clone()),
+    };
+    fixture.service.lock().unwrap().disk.update(|state| {
+        state.catalog.current = Some(saved_current);
+        state.queue = vec![next.clone()];
+        state.session = store::Session { in_flight: vec![current.clone()], paused: false };
+        Ok(())
+    }).unwrap();
+    let queue = queue::new_shared_queue();
+    let service = Arc::new(Mutex::new(Service::new(fixture.data.path(), fixture.cache.path(), queue.clone())));
+    service.lock().unwrap().restore_saved_queue().unwrap();
+    let normal = HostSource::new(queue, queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
+    let mut source = configure(&service, normal);
+    let (first, _) = source.next().unwrap();
+    let (second, _) = source.next().unwrap();
+    let owner = service.lock().unwrap();
+    assert_eq!(owner.claims[&first].item.entry_id, current.entry_id);
+    assert_eq!(owner.claims[&second].item.entry_id, next.entry_id);
+    assert_ne!(owner.claims[&first].item.entry_id, owner.claims[&second].item.entry_id);
+    let saved = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+    let restored = store::restored_pending(&saved.session.in_flight, &saved.queue);
+    assert_eq!(restored.iter().filter(|item| item.entry_id == current.entry_id).count(), 1);
+    drop(owner);
+    *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = previous_session;
+}
+
+#[test]
+fn restore_transfer_uses_latest_successful_edits_and_publishes_after_commit() {
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock().unwrap_or_else(|e| e.into_inner());
+    let previous_session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let fixture = Fixture::new();
+    let a = QueueItem::manual(fixture.file("restore-a.wav"));
+    let b = QueueItem::manual(fixture.file("restore-b.wav"));
+    fixture.service.lock().unwrap().disk.update(|state| {
+        state.queue = vec![a.clone(), b.clone()];
+        Ok(())
+    }).unwrap();
+    fixture.service.lock().unwrap().restore_saved_queue().unwrap();
+    fixture.command("delete-before-start", Action::QueueRemove { index: 0, expect: a.clone() }).unwrap();
+    fixture.service.lock().unwrap().restore_saved_queue().unwrap();
+    assert_eq!(queue::pending_snapshot(&fixture.queue), vec![b.clone()]);
+    let path = fixture.file("restore-added.wav");
+    fixture.command("append-before-start", Action::Append {
+        tracks: vec![TrackTarget { path: path.to_string_lossy().into(), expected_hash: None }],
+        mode: "single".into(),
+    }).unwrap();
+    let accepted = queue::pending_snapshot(&fixture.queue);
+    fixture.service.lock().unwrap().restore_saved_queue().unwrap();
+    assert_eq!(queue::pending_snapshot(&fixture.queue), accepted);
+    let durable_only = QueueItem::manual(fixture.file("durable-session.wav"));
+    fixture.service.lock().unwrap().disk.update(|state| {
+        state.session.in_flight = vec![durable_only];
+        Ok(())
+    }).unwrap();
+    let before = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+    let live = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    crate::playback_state::set_fail_persist_stage(3);
+    assert!(fixture.service.lock().unwrap().restore_saved_queue().is_err());
+    assert_eq!(queue::pending_snapshot(&fixture.queue), accepted);
+    assert_eq!(*crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()), live);
+    assert_eq!(crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap(), before);
+    *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = previous_session;
 }

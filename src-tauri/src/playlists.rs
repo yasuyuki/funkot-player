@@ -5,21 +5,20 @@
 //! `persist` succeeds.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use unicode_normalization::UnicodeNormalization;
 
+use crate::playback_state::PlaybackStore;
 use crate::queue::{QueueItem, QueueOrigin};
 use crate::playlist_progress::{self as progress, Claim as ProgressClaim, Observation, Occurrence, Progress};
 
-const FILE_NAME: &str = "playlists.json";
-const LOCK_NAME: &str = "playlists.lock";
+const FILE_NAME: &str = "playback-state.json";
+const LEGACY_FILE_NAME: &str = "playlists.json";
 pub const SCHEMA_VERSION: u32 = 1;
-#[cfg(test)]
-thread_local! { static FAIL_PERSIST_STAGE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrackRef {
@@ -61,6 +60,8 @@ pub struct CurrentOccurrence {
     /// Retains manual/automatic priority when a suspended normal current is
     /// requeued after restart. Playlist currents always leave this `None`.
     #[serde(default)] pub queue_origin: Option<QueueOrigin>,
+    /// Exact normal-queue occurrence identity for restart de-duplication.
+    #[serde(default)] pub queue_item: Option<QueueItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -99,7 +100,7 @@ pub enum PlaylistError {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LoadState { Missing, Ready, Corrupt, UnsupportedSchema, IoError, Busy }
+pub enum LoadState { Missing, Ready, Corrupt, UnsupportedSchema, IoError, Busy, Stale }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedEntry {
@@ -307,74 +308,68 @@ impl Catalog {
 fn invalid(message: impl Into<String>) -> PlaylistError { PlaylistError::InvalidInput { message: message.into() } }
 fn normalized_name(name: &str) -> Option<String> { let name: String = name.trim().nfc().collect(); if name.is_empty() || name.chars().any(char::is_control) { None } else { Some(name.chars().flat_map(char::to_lowercase).collect()) } }
 
-pub struct PlaylistStore { dir: PathBuf, state: Mutex<StoreState>, _lock: Option<File> }
-enum StoreState { Ready { catalog: Catalog, bytes: Option<Vec<u8>>, load_state: LoadState }, ReadOnly(LoadState) }
+pub struct PlaylistStore {
+    inner: Arc<PlaybackStore>,
+}
 
 impl PlaylistStore {
     pub fn load(dir: impl Into<PathBuf>) -> Self {
-        let dir = dir.into();
-        let (lock, state) = match acquire_lock(&dir) {
-            Ok(lock) => match read_catalog(&dir) {
-                Ok((load_state, catalog, bytes)) => (Some(lock), StoreState::Ready { catalog, bytes, load_state }),
-                Err(state) => (Some(lock), StoreState::ReadOnly(state)),
-            },
-            Err(error) => (None, StoreState::ReadOnly(if error.kind() == io::ErrorKind::WouldBlock { LoadState::Busy } else { LoadState::IoError })),
-        };
-        Self { dir, state: Mutex::new(state), _lock: lock }
+        Self {
+            inner: PlaybackStore::open(dir.into()),
+        }
     }
-    pub fn load_state(&self) -> LoadState { match &*self.state.lock().expect("playlist store mutex poisoned") { StoreState::Ready { load_state, .. } => load_state.clone(), StoreState::ReadOnly(state) => state.clone() } }
-    pub fn snapshot(&self) -> Result<Catalog, PlaylistError> { match &*self.state.lock().expect("playlist store mutex poisoned") { StoreState::Ready { catalog, .. } => Ok(catalog.clone()), StoreState::ReadOnly(state) => Err(PlaylistError::StoreReadOnly { state: state.clone() }) } }
+
+    pub fn load_state(&self) -> LoadState {
+        self.inner.load_state()
+    }
+
+    pub fn snapshot(&self) -> Result<Catalog, PlaylistError> {
+        self.inner.snapshot().map(|state| state.catalog)
+    }
+
     pub fn reload(&self) -> Result<Catalog, PlaylistError> {
-        let mut state = self.state.lock().expect("playlist store mutex poisoned");
-        if self._lock.is_none() { return Err(read_only(&state)); }
-        let (load_state, catalog, bytes) = read_catalog(&self.dir).map_err(|state| PlaylistError::StoreReadOnly { state })?;
-        *state = StoreState::Ready { catalog: catalog.clone(), bytes, load_state }; Ok(catalog)
+        self.inner.reload().map(|state| state.catalog)
     }
-    /// Writes the candidate only if the file's exact previous bytes still match
-    /// this session's snapshot.  The in-memory snapshot changes after replace.
+
     pub fn persist(&self, candidate: &Catalog) -> Result<(), PlaylistError> {
         candidate.validate()?;
-        let mut state = self.state.lock().expect("playlist store mutex poisoned");
-        let StoreState::Ready { bytes, .. } = &*state else { return Err(read_only(&state)); };
-        let observed = read_bytes(&self.dir).map_err(|_| PlaylistError::StoreReadOnly { state: LoadState::IoError })?;
-        if &observed != bytes { return Err(PlaylistError::Stale); }
-        persist_catalog(&self.dir, candidate).map_err(|e| PlaylistError::PersistFailed { message: e.to_string() })?;
-        let encoded = serde_json::to_vec_pretty(candidate).map_err(|e| PlaylistError::PersistFailed { message: e.to_string() })?;
-        *state = StoreState::Ready { catalog: candidate.clone(), bytes: Some(encoded), load_state: LoadState::Ready }; Ok(())
+        let candidate = candidate.clone();
+        self.inner.update(|state| {
+            state.catalog = candidate;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn update<R>(
+        &self,
+        mutate: impl FnOnce(&mut crate::playback_state::PlaybackState) -> Result<R, PlaylistError>,
+    ) -> Result<R, PlaylistError> {
+        self.inner.update(mutate)
     }
 }
 
-fn read_bytes(dir: &Path) -> io::Result<Option<Vec<u8>>> { match fs::read(dir.join(FILE_NAME)) { Ok(bytes) => Ok(Some(bytes)), Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None), Err(e) => Err(e) } }
-fn read_catalog(dir: &Path) -> Result<(LoadState, Catalog, Option<Vec<u8>>), LoadState> {
-    let Some(bytes) = read_bytes(dir).map_err(|_| LoadState::IoError)? else { return Ok((LoadState::Missing, Catalog::default(), None)); };
+pub(crate) fn load_legacy_catalog_strict(dir: &Path) -> Result<Catalog, LoadState> {
+    let Some(bytes) = read_bytes(dir).map_err(|_| LoadState::IoError)? else {
+        return Ok(Catalog::default());
+    };
     let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)?;
-    match value.get("schema_version").and_then(serde_json::Value::as_u64) { Some(v) if v == u64::from(SCHEMA_VERSION) => {}, Some(_) => return Err(LoadState::UnsupportedSchema), None => return Err(LoadState::Corrupt) }
+    match value.get("schema_version").and_then(serde_json::Value::as_u64) {
+        Some(version) if version == u64::from(SCHEMA_VERSION) => {}
+        Some(_) => return Err(LoadState::UnsupportedSchema),
+        None => return Err(LoadState::Corrupt),
+    }
     let catalog: Catalog = serde_json::from_value(value).map_err(|_| LoadState::Corrupt)?;
-    catalog.validate().map_err(|_| LoadState::Corrupt)?; Ok((LoadState::Ready, catalog, Some(bytes)))
+    catalog.validate().map_err(|_| LoadState::Corrupt)?;
+    Ok(catalog)
 }
-fn persist_catalog(dir: &Path, catalog: &Catalog) -> io::Result<()> {
-    fs::create_dir_all(dir)?; let bytes = serde_json::to_vec_pretty(catalog).map_err(io::Error::other)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    #[cfg(test)] fail_persist_stage(1)?;
-    tmp.write_all(&bytes)?;
-    #[cfg(test)] fail_persist_stage(2)?;
-    tmp.as_file().sync_all()?;
-    #[cfg(test)] fail_persist_stage(3)?;
-    tmp.persist(dir.join(FILE_NAME)).map_err(|e| e.error)?; Ok(())
+
+fn read_bytes(dir: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(dir.join(LEGACY_FILE_NAME)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
-#[cfg(test)]
-fn fail_persist_stage(stage: u8) -> io::Result<()> {
-    if FAIL_PERSIST_STAGE.with(|failure| { if failure.get() == stage { failure.set(0); true } else { false } }) { Err(io::Error::other("injected persist failure")) } else { Ok(()) }
-}
-fn acquire_lock(dir: &Path) -> io::Result<File> {
-    fs::create_dir_all(dir)?; let file = OpenOptions::new().read(true).write(true).create(true).open(dir.join(LOCK_NAME))?;
-    #[cfg(target_os = "android")]
-    { let result = unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB) }; if result != 0 { return Err(io::Error::last_os_error()); } }
-    #[cfg(not(target_os = "android"))]
-    file.try_lock()?;
-    Ok(file)
-}
-fn read_only(state: &StoreState) -> PlaylistError { match state { StoreState::ReadOnly(state) => PlaylistError::StoreReadOnly { state: state.clone() }, StoreState::Ready { .. } => unreachable!() } }
 
 #[cfg(test)]
 mod tests {
@@ -396,20 +391,20 @@ mod tests {
         let mut c = Catalog::default(); let id = c.create("Set", vec![track("A"), track("B")]).unwrap(); let a = c.definition(&id).unwrap().entries[0].entry_id.clone(); c.mark_started(&id, 0, &a).unwrap(); c.move_entry(&id, &a, 1).unwrap(); assert_eq!(c.remaining(&id).unwrap()[0].track.title, "B"); c.restart(&id).unwrap(); assert_eq!(entries(&c, &id), vec!["B", "A"]); assert_eq!(c.remaining(&id).unwrap().len(), 2);
     }
     #[test] fn restart_resume_never_resurrects_deleted_occurrence() {
-        let mut c = Catalog::default(); let id = c.create("Set", vec![track("A")]).unwrap(); let e = c.definition(&id).unwrap().entries[0].clone(); c.mark_started(&id, 0, &e.entry_id).unwrap(); c.current = Some(CurrentOccurrence { playlist_id: Some(id.clone()), run_id: 0, entry_id: Some(e.entry_id.clone()), track_ref: e.track, origin: PlaybackOrigin::Playlist, queue_origin: None }); c.remove(&id, &e.entry_id).unwrap(); assert!(c.resume_after_restart().is_none());
+        let mut c = Catalog::default(); let id = c.create("Set", vec![track("A")]).unwrap(); let e = c.definition(&id).unwrap().entries[0].clone(); c.mark_started(&id, 0, &e.entry_id).unwrap(); c.current = Some(CurrentOccurrence { playlist_id: Some(id.clone()), run_id: 0, entry_id: Some(e.entry_id.clone()), track_ref: e.track, origin: PlaybackOrigin::Playlist, queue_origin: None, queue_item: None }); c.remove(&id, &e.entry_id).unwrap(); assert!(c.resume_after_restart().is_none());
     }
     #[test] fn corrupt_and_unknown_schema_are_read_only() {
         let dir = tempfile::tempdir().unwrap(); fs::write(dir.path().join(FILE_NAME), b"{").unwrap(); let store = PlaylistStore::load(dir.path()); assert_eq!(store.load_state(), LoadState::Corrupt); assert!(store.snapshot().is_err()); drop(store);
         fs::write(dir.path().join(FILE_NAME), br#"{"schema_version":99}"#).unwrap(); let store = PlaylistStore::load(dir.path()); assert_eq!(store.load_state(), LoadState::UnsupportedSchema);
     }
-    #[test] fn store_cas_and_lock_preserve_existing_snapshot() {
-        let dir = tempfile::tempdir().unwrap(); let first = PlaylistStore::load(dir.path()); let second = PlaylistStore::load(dir.path()); assert_eq!(second.load_state(), LoadState::Busy); let mut candidate = first.snapshot().unwrap(); candidate.create("Set", vec![]).unwrap(); first.persist(&candidate).unwrap(); assert_eq!(first.snapshot().unwrap(), candidate); drop(first); let reopened = PlaylistStore::load(dir.path()); assert_eq!(reopened.snapshot().unwrap(), candidate);
+    #[test] fn store_reuses_one_process_snapshot_and_preserves_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap(); let first = PlaylistStore::load(dir.path()); let second = PlaylistStore::load(dir.path()); assert_eq!(second.load_state(), LoadState::Ready); let mut candidate = first.snapshot().unwrap(); candidate.create("Set", vec![]).unwrap(); first.persist(&candidate).unwrap(); assert_eq!(second.snapshot().unwrap(), candidate); drop(first); let reopened = PlaylistStore::load(dir.path()); assert_eq!(reopened.snapshot().unwrap(), candidate);
     }
-    #[test] fn busy_store_cannot_reload_or_persist() {
-        let dir = tempfile::tempdir().unwrap(); let first = PlaylistStore::load(dir.path()); let second = PlaylistStore::load(dir.path()); assert!(matches!(second.reload(), Err(PlaylistError::StoreReadOnly { state: LoadState::Busy }))); let candidate = first.snapshot().unwrap(); assert!(matches!(second.persist(&candidate), Err(PlaylistError::StoreReadOnly { state: LoadState::Busy })));
+    #[test] fn shared_store_reloads_and_persists_through_one_cached_handle() {
+        let dir = tempfile::tempdir().unwrap(); let first = PlaylistStore::load(dir.path()); let second = PlaylistStore::load(dir.path()); let mut candidate = first.snapshot().unwrap(); candidate.create("Set", vec![]).unwrap(); second.persist(&candidate).unwrap(); assert_eq!(first.reload().unwrap(), candidate);
     }
     #[test] fn normal_current_resume_retains_queue_origin() {
-        let mut catalog = Catalog::default(); let current = CurrentOccurrence { playlist_id: None, run_id: 0, entry_id: None, track_ref: track("normal"), origin: PlaybackOrigin::Normal, queue_origin: Some(QueueOrigin::Automatic) };
+        let mut catalog = Catalog::default(); let current = CurrentOccurrence { playlist_id: None, run_id: 0, entry_id: None, track_ref: track("normal"), origin: PlaybackOrigin::Normal, queue_origin: Some(QueueOrigin::Automatic), queue_item: None };
         catalog.current = Some(current.clone()); assert_eq!(catalog.resume_after_restart(), Some(current)); assert!(catalog.current.is_none());
     }
     #[test] fn failure_consumes_once_and_keeps_first_reason() {
@@ -426,6 +421,6 @@ mod tests {
     #[test] fn failed_atomic_write_keeps_file_and_snapshot() {
         let dir = tempfile::tempdir().unwrap(); let store = PlaylistStore::load(dir.path()); let mut initial = store.snapshot().unwrap(); initial.create("Old", vec![]).unwrap(); store.persist(&initial).unwrap(); let before = fs::read(dir.path().join(FILE_NAME)).unwrap();
         let mut candidate = initial.clone(); candidate.create("New", vec![]).unwrap();
-        for stage in 1..=3 { FAIL_PERSIST_STAGE.with(|failure| failure.set(stage)); assert!(matches!(store.persist(&candidate), Err(PlaylistError::PersistFailed { .. }))); assert_eq!(fs::read(dir.path().join(FILE_NAME)).unwrap(), before); assert_eq!(store.snapshot().unwrap(), initial); }
+        for stage in 1..=3 { crate::playback_state::set_fail_persist_stage(stage); assert!(matches!(store.persist(&candidate), Err(PlaylistError::PersistFailed { .. }))); assert_eq!(fs::read(dir.path().join(FILE_NAME)).unwrap(), before); assert_eq!(store.snapshot().unwrap(), initial); }
     }
 }

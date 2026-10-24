@@ -1,7 +1,9 @@
-//! Persistence for the playback queue (`queue.json`), the bar counts the
-//! user has corrected by hand (`library.json`), transition flags the
-//! listener marked as bad (`flags.json`), human Funkot / non-Funkot
-//! labels (`labels.json`), and play history (`history.json`).
+//! Persistence for the coherent playback snapshot (`playback-state.json`),
+//! the bar counts the user has corrected by hand (`library.json`), transition
+//! flags the listener marked as bad (`flags.json`), human Funkot / non-Funkot
+//! labels (`labels.json`), and play history (`history.json`). Standalone
+//! queue, session, settings, and playlist files are a one-generation import
+//! source only.
 //!
 //! # Why the app keeps its own copy of the manual bars
 //!
@@ -42,6 +44,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 
+use crate::playback_state::PlaybackStore;
+use crate::playlists::LoadState;
 use crate::queue::{QueueItem, QueueOrigin};
 
 const QUEUE_FILE: &str = "queue.json";
@@ -137,22 +141,7 @@ pub fn migrate_from(old_dir: &Path, dir: &Path) {
     }
 }
 
-/// Load the queue previously saved under `dir`.
-///
-/// Returns an empty `Vec` (not an error) if the file does not exist yet, so
-/// first-run callers do not need to special-case "no queue saved".
-pub fn load_queue(dir: &Path) -> io::Result<Vec<QueueItem>> {
-    let path = dir.join(QUEUE_FILE);
-    let bytes = match fs::read(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let paths: Vec<PersistedQueueItem> = serde_json::from_slice(&bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    Ok(paths.into_iter().map(PersistedQueueItem::into_item).collect())
-}
-
+/// Persisted queue representation accepted only during strict legacy import.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum PersistedQueueItem {
@@ -169,35 +158,56 @@ impl PersistedQueueItem {
     }
 }
 
-/// Persist `queue`'s current contents under `dir`, overwriting any previous
-/// save.
+pub(crate) fn load_legacy_queue_strict(dir: &Path) -> Result<Vec<QueueItem>, LoadState> {
+    let path = dir.join(QUEUE_FILE);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(LoadState::IoError),
+    };
+    let items: Vec<PersistedQueueItem> =
+        serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)?;
+    Ok(items.into_iter().map(PersistedQueueItem::into_item).collect())
+}
+
+/// Load the queue from the coherent playback state.
+pub fn load_queue(dir: &Path) -> io::Result<Vec<QueueItem>> {
+    PlaybackStore::open(dir.to_path_buf())
+        .snapshot()
+        .map(|state| state.queue)
+        .map_err(persistence_io_error)
+}
+
+/// Persist the queue as one component of the coherent playback state.
 pub fn save_queue<T>(dir: &Path, queue: &VecDeque<T>) -> io::Result<()>
 where
     T: Clone + Into<QueueItem>,
 {
-    let paths: Vec<QueueItem> = queue.iter().cloned().map(Into::into).collect();
-    let json = serde_json::to_vec_pretty(&paths)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(QUEUE_FILE), json)
+    let queue = queue.iter().cloned().map(Into::into).collect();
+    PlaybackStore::open(dir.to_path_buf())
+        .update(|state| {
+            state.queue = queue;
+            Ok(())
+        })
+        .map_err(persistence_io_error)
 }
 
 /// Playback state restored across a restart: which tracks were already
 /// mid-flight (out of `pending` but not yet finished playing) and whether
 /// the transport was paused.
 ///
-/// Deliberately does not include a position within `in_flight[0]` — a
-/// restart always resumes that track from the top. `session.json` is not in
-/// [`migrate_from`]'s file list: unlike `queue.json`/`library.json`/
-/// `flags.json`, it never existed at the old cache-dir location this app
-/// once used, so there is nothing to rescue.
+/// Deliberately does not include a position within `in_flight[0]`; a restart
+/// always resumes that track from the top. The session lives in the coherent
+/// playback snapshot, with `session.json` retained only for one-generation
+/// import when no snapshot exists.
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     /// Tracks `HostSource::next` (`src-tauri/src/queue.rs`) has already
     /// popped from `pending` but that had not finished playing as of the
     /// last save. Index `0` is the engine's active track; anything after it
-    /// is reserved ahead of it. These never appear in `queue.json` (that
-    /// file mirrors `pending` only), which is exactly why a plain restart
-    /// used to lose the first two tracks — see [`restored_pending`].
+    /// is reserved ahead of it. These never appear in the snapshot's queue
+    /// component (which mirrors `pending` only), which is exactly why a plain
+    /// restart used to lose the first two tracks — see [`restored_pending`].
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_queue_items")]
     pub in_flight: Vec<QueueItem>,
@@ -222,30 +232,37 @@ impl Session {
     }
 }
 
-/// Load the session previously saved under `dir`.
-///
-/// Missing or corrupt → [`Session::new`] (same policy as [`load_flags`] /
-/// [`load_dismissed`]): losing a restart's worth of "what was playing" is
-/// recoverable, refusing to launch is not.
-pub fn load_session(dir: &Path) -> Session {
+/// Strictly read the immediately preceding standalone session generation.
+pub(crate) fn load_legacy_session_strict(dir: &Path) -> Result<Session, LoadState> {
     let bytes = match fs::read(dir.join(SESSION_FILE)) {
-        Ok(b) => b,
-        Err(_) => return Session::new(),
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Session::new()),
+        Err(_) => return Err(LoadState::IoError),
     };
-    match serde_json::from_slice(&bytes) {
-        Ok(session) => session,
-        Err(e) => {
-            log::warn!("{SESSION_FILE} is unreadable, starting fresh: {e}");
+    serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)
+}
+
+/// Load the session from the coherent playback state. A recovery restriction
+/// leaves runtime playback empty but subsequent writes remain rejected.
+pub fn load_session(dir: &Path) -> Session {
+    match PlaybackStore::open(dir.to_path_buf()).snapshot() {
+        Ok(state) => state.session,
+        Err(error) => {
+            log::warn!("cannot load coherent playback state: {error:?}");
             Session::new()
         }
     }
 }
 
-/// Persist `session` under `dir`, overwriting any previous save.
+/// Persist the session as one component of the coherent playback state.
 pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
-    let json = serde_json::to_vec_pretty(session)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(SESSION_FILE), json)
+    let session = session.clone();
+    PlaybackStore::open(dir.to_path_buf())
+        .update(|state| {
+            state.session = session;
+            Ok(())
+        })
+        .map_err(persistence_io_error)
 }
 
 /// Logical inner size of the desktop window, remembered across launches.
@@ -327,18 +344,23 @@ pub fn save_window_frame(dir: &Path, frame: &WindowFrame) -> io::Result<()> {
     write_atomic(&dir.join(WINDOW_FILE), &json)
 }
 
-/// Make a restored queue the durable editable owner of all session entries.
-/// Queue is written first so a crash between writes duplicates at worst;
-/// [`restored_pending`] removes that overlap on the next launch.
+/// Make a restored queue the durable editable owner of all session entries
+/// in one coherent playback-state commit.
 pub fn save_restored_queue_and_clear_session(
     dir: &Path,
     queue: &VecDeque<QueueItem>,
 ) -> io::Result<()> {
-    save_queue(dir, queue)?;
-    save_session(dir, &Session::new())
+    let queue = queue.iter().cloned().collect();
+    PlaybackStore::open(dir.to_path_buf())
+        .update(|state| {
+            state.queue = queue;
+            state.session = Session::new();
+            Ok(())
+        })
+        .map_err(persistence_io_error)
 }
 
-/// User-configurable app settings (`settings.json`).
+/// User-configurable app settings in the coherent playback snapshot.
 ///
 /// `music_dir`, when set, is the folder the listener picked via
 /// `set_music_dir` (desktop only); `None` means no folder has been chosen
@@ -393,34 +415,41 @@ impl Default for Settings {
     }
 }
 
-/// Load settings previously saved under `dir`.
-///
-/// Missing or corrupt → [`Settings::default`] (same policy as
-/// [`load_session`] / [`load_flags`]): losing a folder choice is
-/// recoverable, refusing to launch is not. A missing file is expected on
-/// every first run and stays silent; a corrupt one logs a warning.
-pub fn load_settings(dir: &Path) -> Settings {
+/// Strictly read the immediately preceding standalone settings generation.
+pub(crate) fn load_legacy_settings_strict(dir: &Path) -> Result<Settings, LoadState> {
     let bytes = match fs::read(dir.join(SETTINGS_FILE)) {
-        Ok(b) => b,
-        Err(_) => return Settings::default(),
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Settings::default()),
+        Err(_) => return Err(LoadState::IoError),
     };
-    match serde_json::from_slice(&bytes) {
-        Ok(settings) => settings,
-        Err(e) => {
-            log::warn!("{SETTINGS_FILE} is unreadable, using defaults: {e}");
+    serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)
+}
+
+/// Load settings from the coherent playback state. A recovery restriction
+/// returns defaults only for display and never authorizes a replacement write.
+pub fn load_settings(dir: &Path) -> Settings {
+    match PlaybackStore::open(dir.to_path_buf()).snapshot() {
+        Ok(state) => state.settings,
+        Err(error) => {
+            log::warn!("cannot load coherent playback state: {error:?}");
             Settings::default()
         }
     }
 }
 
-/// Persist `settings` under `dir`, overwriting any previous save.
-///
-/// Writes through a uniquely named temp file in the same directory, then
-/// renames into place so lock-free readers never observe a torn JSON.
+/// Persist settings as one component of the coherent playback state.
 pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
-    let json = serde_json::to_vec_pretty(settings)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    write_atomic(&dir.join(SETTINGS_FILE), &json)
+    let settings = settings.clone();
+    PlaybackStore::open(dir.to_path_buf())
+        .update(|state| {
+            state.settings = settings;
+            Ok(())
+        })
+        .map_err(persistence_io_error)
+}
+
+fn persistence_io_error(error: crate::playlists::PlaylistError) -> io::Error {
+    io::Error::other(format!("{error:?}"))
 }
 
 /// Restore the active occurrence first, then manual and automatic entries.
@@ -658,7 +687,7 @@ pub fn load_hash_index(dir: &Path) -> LoadedHashIndex {
 
 /// Persist `index` under `dir`, overwriting any previous save.
 ///
-/// Same atomic write policy as [`save_settings`].
+/// This independent derived index uses its existing atomic write helper.
 pub fn save_hash_index(dir: &Path, index: &HashIndex) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(index)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -2353,7 +2382,10 @@ mod tests {
 
         let mut queue: VecDeque<PathBuf> = VecDeque::new();
         queue.push_back(PathBuf::from("/music/a.flac"));
-        save_queue(&old.0, &queue).unwrap();
+        fs::write(
+            old.0.join(QUEUE_FILE),
+            serde_json::to_vec_pretty(&queue).unwrap(),
+        ).unwrap();
         let mut o = Overrides::new();
         o.insert(
             "aaa".into(),
