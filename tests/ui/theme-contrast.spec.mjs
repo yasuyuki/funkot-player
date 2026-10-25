@@ -36,6 +36,25 @@ function assertContrast(value, label, minimum) {
   expect(value.ratio, `${label} ${JSON.stringify(value)}`).toBeGreaterThanOrEqual(minimum);
 }
 
+test("selected queue titles remain readable while hovered", async ({ page }, testInfo) => {
+  await page.goto("/tests/ui/");
+  await page.getByRole("button", { name: "menu", exact: true }).waitFor({ state: "visible" });
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Up next", exact: true }).click();
+  const selected = page.locator("section.queue .row-select").first();
+  await selected.click();
+  for (const preference of ["light", "dark"]) {
+    await chooseTheme(page, preference);
+    await page.keyboard.press("Escape");
+    await selected.hover();
+    const contrast = await new AxeBuilder({ page }).include("section.queue .row.selected").withRules(["color-contrast"]).analyze();
+    expect(contrast.violations, `${preference} selected queue text`).toEqual([]);
+    expect(contrast.incomplete, `${preference} selected queue text incomplete`).toEqual([]);
+    const titleContrast = await new AxeBuilder({ page }).include("section.queue .row.selected .title").withRules(["color-contrast-enhanced"]).analyze();
+    expect(titleContrast.violations, `${preference} selected queue title 7:1`).toEqual([]);
+    expect(titleContrast.incomplete, `${preference} selected queue title incomplete`).toEqual([]);
+  }
+});
+
 async function measureNormalThemeSurfaces(page) {
   return page.evaluate(() => {
     const color = (value) => {
