@@ -258,8 +258,13 @@ export function skipNext(): Promise<void> {
   return ipc.invoke<void>("skip_next");
 }
 
-export function refreshLibrary(kickAnalysis = true): Promise<TrackRow[]> {
-  return ipc.invoke<TrackRow[]>("refresh_library", { kickAnalysis });
+export interface LibraryScanResult {
+  rows: TrackRow[];
+  persistence_error: string | null;
+}
+
+export function refreshLibrary(kickAnalysis = true): Promise<LibraryScanResult> {
+  return ipc.invoke<LibraryScanResult>("refresh_library", { kickAnalysis });
 }
 
 export interface QueueItem {

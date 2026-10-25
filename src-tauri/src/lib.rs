@@ -20,6 +20,8 @@ mod playback_recovery;
 mod playback_state;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
+#[cfg(test)]
+mod library_scan_tests;
 #[cfg(any(target_os = "windows", test))]
 mod current_track_http;
 
@@ -7450,44 +7452,52 @@ struct LibraryScanProgress {
     done: usize,
 }
 
-/// Scan `music_dir` (recursively, subfolders included) for supported tracks
-/// and report what the analysis cache already knows about each.
-///
-/// When `kick_analysis` is true, starts a background analysis worker for any
-/// unanalyzed tracks (startup / manual 再スキャン). When false, returns the
-/// listing only — used after `analysis-done` so permanent analysis failures
-/// (e.g. silent files) cannot re-queue forever via refresh → analyze → done.
-///
-/// Holds [`INDEX_LOCK`] for the whole resolve → stamp/baseline → commit
-/// transaction. Takes [`SAVE_LOCK`] only at commit when marking the arrivals
-/// baseline done (after a successful index save).
+#[derive(serde::Serialize)]
+struct LibraryScanResult {
+    rows: Vec<TrackRow>,
+    persistence_error: Option<String>,
+}
+
+struct ScannedLibrary {
+    reply: LibraryScanResult,
+    pending_analysis: Vec<PathBuf>,
+}
+
 #[tauri::command(async)]
-fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<TrackRow>, String> {
+fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<LibraryScanResult, String> {
     use tauri::Emitter;
-
-    let _index_guard = INDEX_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
+    let _index_guard = INDEX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let dirs = resolve_dirs(&app)?;
     if dirs.music_dir_needed {
         tag_service::publish(Path::new(&dirs.data_dir), Default::default());
-        return Ok(Vec::new());
+        return Ok(LibraryScanResult { rows: Vec::new(), persistence_error: None });
     }
     let music_dir = PathBuf::from(&dirs.music_dir);
     let cache_dir = PathBuf::from(&dirs.cache_dir);
     let data_dir = PathBuf::from(&dirs.data_dir);
+    let result = scan_library_under_index_lock(&music_dir, &cache_dir, &data_dir, |progress| {
+        let _ = app.emit("library-scan", progress);
+    })?;
+    if kick_analysis {
+        analyze_these(&app, result.pending_analysis, &cache_dir, &data_dir);
+    }
+    Ok(result.reply)
+}
+
+fn scan_library_under_index_lock(
+    music_dir: &Path,
+    cache_dir: &Path,
+    data_dir: &Path,
+    mut progress: impl FnMut(LibraryScanProgress),
+) -> Result<ScannedLibrary, String> {
 
     let baseline_done = store::load_settings(&data_dir).arrivals_baseline_done;
 
-    let _ = app.emit(
-        "library-scan",
-        LibraryScanProgress {
+    progress(LibraryScanProgress {
             phase: "walking".into(),
             found: 0,
             done: 0,
-        },
-    );
+        });
 
     let (paths, complete) = scan_tracks(&music_dir)?;
     let overrides = store::load_overrides(&data_dir);
@@ -7495,22 +7505,18 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let history = store::load_history(&data_dir);
     let loaded_index = store::load_hash_index(&data_dir);
     let provenance = loaded_index.provenance;
-    let next_added_order = store::next_added_order(&loaded_index.index)
-        .ok_or_else(|| "library addition order exhausted".to_string())?;
+    let next_added_order = store::next_added_order(&loaded_index.index);
     let mut hash_index = loaded_index.index;
     let scan_now = store::utc_rfc3339_now();
     let original_keys: std::collections::BTreeSet<String> =
         hash_index.keys().cloned().collect();
     let found = paths.len();
 
-    let _ = app.emit(
-        "library-scan",
-        LibraryScanProgress {
+    progress(LibraryScanProgress {
             phase: "hashing".into(),
             found,
             done: 0,
-        },
-    );
+        });
 
     // Explicit loop (not `.map`) so we can emit progress after each resolve.
     let mut rows: Vec<TrackRow> = Vec::with_capacity(found);
@@ -7542,7 +7548,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
                     .is_some_and(|prior| prior != &resolved.hash)
                 {
                     if let Some(entry) = hash_index.get_mut(&path_key) {
-                        entry.added_order = Some(next_added_order);
+                        entry.added_order = next_added_order;
                     }
                 }
                 (Some(resolved.hash), Some(tags))
@@ -7558,14 +7564,11 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
             hash.as_deref(),
             tags,
         ));
-        let _ = app.emit(
-            "library-scan",
-            LibraryScanProgress {
+        progress(LibraryScanProgress {
                 phase: "hashing".into(),
                 found,
                 done: rows.len(),
-            },
-        );
+            });
     }
 
     if complete {
@@ -7589,17 +7592,10 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     }
 
     let plan = store::arrivals_commit_plan(kind, complete);
-    if plan.save_index {
-        store::stamp_missing_added_order(&mut hash_index, next_added_order)
-            .ok_or_else(|| "library addition order exhausted".to_string())?;
-    }
-    for row in &mut rows {
-        row.added_order = hash_index
-            .get(&row.path)
-            .and_then(|entry| entry.added_order);
-    }
+    let ordering_ready = !plan.save_index || next_added_order
+        .and_then(|order| store::stamp_missing_added_order(&mut hash_index, order)).is_some();
     let mut index_saved = false;
-    let commit_result = commit_arrivals_after_scan(
+    let commit_result = if ordering_ready { commit_arrivals_after_scan(
         &data_dir,
         &hash_index,
         plan,
@@ -7609,10 +7605,18 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
             Ok(())
         },
         mark_arrivals_baseline_done,
-    );
+    ) } else { Err("library addition order exhausted".into()) };
+
+    store_cache::with_index(data_dir, |index| {
+        for row in &mut rows {
+            row.added_order = index.get(&row.path)
+                .filter(|entry| Some(&entry.hash) == row.content_hash.as_ref())
+                .and_then(|entry| entry.added_order);
+        }
+    });
 
     // A later baseline-settings failure does not undo a successful index save.
-    // Publish that committed metadata revision before returning the error, so
+    // Publish that committed metadata revision before returning the warning, so
     // an editor cannot accept the old automatic snapshot against the new index.
     if index_saved || !plan.save_index {
       let committed = store_cache::with_index(&data_dir, |index| {
@@ -7623,22 +7627,11 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
       });
       tag_service::publish(&data_dir, committed);
     }
-    commit_result?;
-
-    if kick_analysis {
-        // Reuse what `track_row` already worked out so we do not hash every
-        // file a second time: `analyzed` is exactly
-        // `analyzed_cache_entry(...).is_some()`.
-        let pending: Vec<PathBuf> = paths
-            .iter()
-            .zip(&rows)
-            .filter(|(_, row)| !row.analyzed)
-            .map(|(path, _)| path.clone())
-            .collect();
-        analyze_these(&app, pending, &cache_dir, &data_dir);
-    }
-
-    Ok(rows)
+    let persistence_error = commit_result.err();
+    if let Some(error) = &persistence_error { log::warn!("library persistence: {error}"); }
+    let pending_analysis = paths.into_iter().zip(&rows)
+        .filter(|(_, row)| !row.analyzed).map(|(path, _)| path).collect();
+    Ok(ScannedLibrary { reply: LibraryScanResult { rows, persistence_error }, pending_analysis })
 }
 
 #[tauri::command(async)]

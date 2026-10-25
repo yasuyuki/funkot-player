@@ -435,11 +435,12 @@ class PlayerStore {
     let applied = false;
     try {
       // List only — do not re-queue analysis (would loop on permanent failures).
-      const rows = await refreshLibrary(false);
+      const { rows, persistence_error } = await refreshLibrary(false);
       if (gen !== this.#refreshGen) return;
       this.library = new Map(rows.map((r) => [r.path, r]));
+      if (persistence_error !== null) this.lastError = persistence_error;
       await this.reloadTrackTags();
-      applied = true;
+      applied = persistence_error === null;
     } catch (e) {
       // Ignore on analysis-done the same way legacy did: a stray error here
       // shouldn't disrupt the UI after the worker itself has finished.
@@ -1185,7 +1186,7 @@ class PlayerStore {
     const owedEpoch = this.#libraryRefreshOwedEpoch;
     const gen = ++this.#refreshGen;
     try {
-      const rows = await refreshLibrary();
+      const { rows, persistence_error } = await refreshLibrary();
       if (gen !== this.#refreshGen) {
         attempt = "stale";
         this.#libraryRefreshOwed = nextLibraryRefreshOwed(
@@ -1198,16 +1199,17 @@ class PlayerStore {
         return { ok: false, error: "stale" };
       }
       this.library = new Map(rows.map((r) => [r.path, r]));
+      if (persistence_error !== null) this.lastError = persistence_error;
       await this.reloadTrackTags();
-      attempt = "success";
+      attempt = persistence_error === null ? "success" : "error";
       this.#libraryRefreshOwed = nextLibraryRefreshOwed(
         this.#libraryRefreshOwed,
-        "success",
+        attempt,
         consume,
         owedEpoch,
         this.#libraryRefreshOwedEpoch,
       );
-      this.#requestArrivalsPull();
+      if (persistence_error === null) this.#requestArrivalsPull();
       return { ok: true, count: rows.length };
     } catch (e) {
       const error = String(e);
