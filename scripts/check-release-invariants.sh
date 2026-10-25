@@ -68,8 +68,13 @@ check_load_class_literals() {
     return 1
 }
 
+check_android_signed_release_build() {
+    sh ./scripts/android-signed-release-build.test.sh
+}
+
 check_jni_keep_rules      || status=1
 check_load_class_literals || status=1
+check_android_signed_release_build || status=1
 
 if [ "$status" = 0 ]; then
     echo "release-only invariants: OK"
