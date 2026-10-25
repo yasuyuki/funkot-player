@@ -10,6 +10,28 @@ async function chooseTheme(page, value) {
   return trigger;
 }
 
+test("short library pages paint the full viewport without padding overflow", async ({ page }) => {
+  await page.goto("/tests/ui/");
+  await page.getByRole("button", { name: "menu", exact: true }).waitFor({ state: "visible" });
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.library = new Map();
+    window.__uiFixture.setReply("refresh_library", { rows: [], persistence_error: null });
+  });
+  await expect(page.locator("section.library li.row")).toHaveCount(0);
+  for (const preference of ["light", "dark"]) {
+    await chooseTheme(page, preference);
+    await page.keyboard.press("Escape");
+    const geometry = await page.evaluate(() => ({
+      bodyHeight: document.body.getBoundingClientRect().height,
+      viewportHeight: innerHeight,
+      scrollHeight: document.documentElement.scrollHeight,
+    }));
+    expect(geometry.bodyHeight, `${preference} body covers the viewport`).toBeGreaterThanOrEqual(geometry.viewportHeight);
+    expect(geometry.scrollHeight, `${preference} padding does not add scrolling`).toBe(geometry.viewportHeight);
+  }
+});
+
 function assertContrast(value, label, minimum) {
   expect(value.ratio, `${label} ${JSON.stringify(value)}`).toBeGreaterThanOrEqual(minimum);
 }
@@ -109,7 +131,7 @@ async function captureBodyCanvas(page) {
   const viewport = page.viewportSize();
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   return page.screenshot({
-    clip: { x: 4, y: Math.floor(viewport.height / 2), width: 8, height: 8 },
+    clip: { x: 4, y: viewport.height - 12, width: 8, height: 8 },
     animations: "disabled",
   });
 }
