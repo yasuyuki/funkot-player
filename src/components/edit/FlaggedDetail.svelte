@@ -224,10 +224,10 @@
       <div class="selected-partner">
         <strong>{outgoing ? flaggedTitle(t, row.title, row.missing) : flaggedTitle(t, selectedPartner.title, selectedPartner.missing)} → {outgoing ? flaggedTitle(t, selectedPartner.title, selectedPartner.missing) : flaggedTitle(t, row.title, row.missing)}</strong>
         {#if selectedPartner.missing}<span>{flaggedTitle(t, selectedPartner.title, true)}</span>{/if}
-        <button type="button" class="primary" disabled={unavailable || busy} onclick={() => listenPartner(selectedPartner.path, outgoing)}>{outgoing ? t.listenTransitionTo(flaggedTitle(t, selectedPartner.title, selectedPartner.missing)) : t.listenTransitionFrom(flaggedTitle(t, selectedPartner.title, selectedPartner.missing))}</button>
+        <button type="button" class="primary" disabled={unavailable || busy || store.playbackRecovery?.kind !== "ready"} onclick={() => listenPartner(selectedPartner.path, outgoing)}>{outgoing ? t.listenTransitionTo(flaggedTitle(t, selectedPartner.title, selectedPartner.missing)) : t.listenTransitionFrom(flaggedTitle(t, selectedPartner.title, selectedPartner.missing))}</button>
       </div>
     {/if}
-    <button type="button" class="quiet again" disabled={!againEnabled || busy} onclick={onAgain}>{t.listenAgain}</button>
+    <button type="button" class="quiet again" disabled={!againEnabled || busy || store.playbackRecovery?.kind !== "ready"} onclick={onAgain}>{t.listenAgain}</button>
   </section>
 
   <div class="actions edit-footer">

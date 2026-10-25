@@ -179,6 +179,35 @@ export function appDirs(): Promise<AppDirs> {
   return ipc.invoke<AppDirs>("app_dirs");
 }
 
+/// The one explicit decision required when two legacy normal-queue histories
+/// disagree. The token is opaque: clients only return it to the resolver.
+export type PlaybackRecoveryStatus =
+  | { kind: "ready" }
+  | {
+      kind: "legacy_normal_conflict";
+      token: number;
+      queue_file_items: number;
+      catalog_normal_items: number;
+    }
+  | { kind: "blocked"; reason: string };
+
+export type PlaybackRecoveryChoice = "queue_file" | "catalog_normal";
+
+export interface PlaybackRecoveryRequest {
+  token: number;
+  choice: PlaybackRecoveryChoice;
+}
+
+export function playbackRecoveryStatus(): Promise<PlaybackRecoveryStatus> {
+  return ipc.invoke<PlaybackRecoveryStatus>("playback_recovery_status");
+}
+
+export function resolvePlaybackRecovery(
+  request: PlaybackRecoveryRequest,
+): Promise<PlaybackRecoveryStatus> {
+  return ipc.invoke<PlaybackRecoveryStatus>("resolve_playback_recovery", { request });
+}
+
 /// Opens the Music folder (explorer / open / xdg-open) and returns its
 /// absolute path. Desktop only: the UI hides the menu item on Android, where
 /// the folder cannot be opened at all (see `open_music_dir` in `lib.rs`).

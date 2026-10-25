@@ -20,6 +20,16 @@ export const id: Messages = {
   pauseLabel: "Jeda",
   nextTrackLabel: "Lagu berikutnya",
 
+  playbackRecoveryTitle: "Pilih antrean saat ini",
+  playbackRecoverySummary: "Dua urutan antrean tersimpan berbeda. Pemutaran menunggu pilihan Anda.",
+  playbackRecoveryReview: "Tinjau antrean tersimpan",
+  playbackRecoveryDialog: "Pilih antrean saat ini",
+  playbackRecoveryExplain: "Kami tidak dapat mengetahui antrean mana yang lebih baru. Pilih urutan yang menjadi antrean saat ini.",
+  playbackRecoveryQueueFile: (count) => `Antrean pemutar (${count} entri)`,
+  playbackRecoveryCatalogNormal: (count) => `Antrean tersimpan di daftar putar (${count} entri)`,
+  playbackRecoveryPreserved: "Kedua antrean tersimpan asli tetap dipertahankan.",
+  playbackRecoveryFailed: "Pilihan itu tidak dapat disimpan. Tinjau antrean dan coba lagi.",
+
   // --- Now playing ---
   phaseIdle: "Siaga",
   phaseStarting: "Menyiapkan",

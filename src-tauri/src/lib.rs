@@ -16,6 +16,7 @@ mod playlist_progress;
 mod playlist_service;
 mod engine_observation;
 mod playback_diagnostics;
+mod playback_recovery;
 mod playback_state;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
@@ -7322,6 +7323,38 @@ mod arrivals_settings_rmw_tests {
     }
 
     #[test]
+    fn legacy_queue_conflict_keeps_library_commit_available_and_baseline_pending() {
+        let dir = TempDir::new("library-legacy-conflict");
+        let queue = vec![QueueItem::manual(PathBuf::from("/synthetic/player.flac"))];
+        let mut catalog = playlists::Catalog::default();
+        catalog.normal = Some(playlists::NormalResume {
+            items: vec![QueueItem::manual(PathBuf::from("/synthetic/playlist.flac"))],
+            folder_pos: None,
+        });
+        let originals = [
+            ("queue.json", serde_json::to_vec(&queue).unwrap()),
+            ("playlists.json", serde_json::to_vec(&catalog).unwrap()),
+        ];
+        for (name, bytes) in &originals {
+            std::fs::write(dir.0.join(name), bytes).unwrap();
+        }
+        assert!(playback_state::PlaybackStore::open(&dir.0).snapshot().is_err());
+        commit_arrivals_after_scan(
+            &dir.0,
+            &store::HashIndex::new(),
+            store::ArrivalsCommitPlan { save_index: true, mark_baseline_done: true },
+            store::save_hash_index,
+            mark_arrivals_baseline_done,
+        ).expect("detected tracks must remain available during queue recovery");
+        assert_eq!(store::load_hash_index(&dir.0).provenance, store::HashIndexProvenance::Loaded);
+        assert!(!store::load_settings(&dir.0).arrivals_baseline_done);
+        assert!(!dir.0.join("playback-state.json").exists());
+        for (name, bytes) in originals {
+            assert_eq!(std::fs::read(dir.0.join(name)).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn baseline_flag_save_failure_makes_commit_fail() {
         let dir = TempDir::new("baseline-save-fail");
         let index = store::HashIndex::new();
@@ -7615,6 +7648,53 @@ fn list_track_tags(app: tauri::AppHandle) -> Result<tag_service::Snapshot, tag_s
 }
 
 #[tauri::command(async)]
+fn playback_recovery_status(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<playback_state::PlaybackRecoveryStatus, playlist_service::CommandError> {
+    let dirs = resolve_dirs(&app).map_err(|message| playlist_service::CommandError {
+        code: "store_read_only".into(), message,
+    })?;
+    let service = playlist_service::get(
+        Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue,
+    );
+    let owner = service.lock().unwrap_or_else(|error| error.into_inner());
+    Ok(owner.recovery_status())
+}
+
+#[derive(serde::Deserialize)]
+struct PlaybackRecoveryRequest {
+    token: u64,
+    choice: playback_state::LegacyNormalChoice,
+}
+
+#[tauri::command(async)]
+fn resolve_playback_recovery(
+    request: PlaybackRecoveryRequest,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<playback_state::PlaybackRecoveryStatus, playlist_service::CommandError> {
+    let started = state.started.lock().unwrap_or_else(|error| error.into_inner());
+    if *started {
+        return Err(playlist_service::CommandError { code: "busy".into(), message: "playback has started".into() });
+    }
+    let _prestart = playlist_service::lock_prestart_queue();
+    let dirs = resolve_dirs(&app).map_err(|message| playlist_service::CommandError {
+        code: "store_read_only".into(), message,
+    })?;
+    let service = playlist_service::get(
+        Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue,
+    );
+    let mut owner = service.lock().unwrap_or_else(|error| error.into_inner());
+    let _saving = SAVE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let restored = owner.resolve_legacy_normal_conflict(request.token, request.choice)?;
+    *SESSION.lock().unwrap_or_else(|error| error.into_inner()) = store::Session::new();
+    ALLOW_NON_FUNKOT.store(restored.settings.allow_non_funkot, Ordering::Relaxed);
+    *LOCALE_TAG.lock().unwrap_or_else(|error| error.into_inner()) = restored.settings.locale.unwrap_or_default();
+    Ok(owner.recovery_status())
+}
+
+#[tauri::command(async)]
 fn playlist_catalog(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<playlist_service::CatalogView, playlist_service::CommandError> {
     let dirs = resolve_dirs(&app).map_err(|message| playlist_service::CommandError { code: "store_read_only".into(), message })?;
     let service = playlist_service::get(Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue);
@@ -7657,7 +7737,10 @@ fn commit_arrivals_after_scan(
         save_index(data_dir, index)
             .map_err(|e| format!("cannot save hash-index.json: {e}"))?;
     }
-    if plan.mark_baseline_done {
+    if plan.mark_baseline_done
+        && playback_state::PlaybackStore::open(data_dir).load_state()
+            != playlists::LoadState::LegacyNormalConflict
+    {
         mark_baseline(data_dir)?;
     }
     Ok(())
@@ -9380,6 +9463,8 @@ pub fn run() {
             dismiss_flags,
             undo_last_dismiss,
             refresh_library,
+            playback_recovery_status,
+            resolve_playback_recovery,
             list_track_tags,
             playlist_catalog,
             playlist_entries,

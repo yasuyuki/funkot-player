@@ -109,6 +109,28 @@ names, cover counts, unwind bounds, and total deadline stay unchanged.
 The summary records each mutation as `EXPECTED_FAIL` and hashes the unmodified
 production source. These mutations do not identify a device failure's cause.
 
+## Playback recovery
+
+`verification/playback_recovery.rs` directly imports
+`src-tauri/src/playback_recovery.rs`. The classifier proof represents each
+legacy queue and catalog source as absent or as a sequence of zero to two
+arbitrary `u8` equality IDs. It proves that an absent catalog keeps the queue,
+an absent queue or equal sources use the catalog, and unequal present sources
+return `Conflict`. The identity proof uses opaque `u8` IDs and proves that an
+existing identity is retained for either origin, a playlist current is left
+unchanged, and a missing normal current reuses its first matching identity or
+creates one item exactly once.
+
+The proof does not prove the caller's path and origin mapping from real
+`QueueItem` values, legacy JSON decoding, snapshot persistence, filesystem
+replacement, lock ordering, or service publication. Native recovery and
+real-process interruption tests remain the authority for those behaviors.
+
+The runner also changes the existing-identity guard and the unequal-source
+`Conflict` branch in separate temporary copies. Each corresponding harness
+must finish with a failing safety assertion. A compile error, timeout, or
+passing mutation fails the run.
+
 ## Queue membership
 
 `verification/queue_progress.rs` imports production
