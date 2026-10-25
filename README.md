@@ -134,7 +134,7 @@ Some devices hide `Android/data` from MTP entirely; on those, sharing is the
 only route. Only the music shows up over MTP either way — queue, analysis
 cache, and your bar-count corrections stay on the phone.
 
-Bulk / resume-safe push from WSL over wireless adb (hundreds of tracks): see
+Repeatable copying of recognized Funkot tracks from a PC over adb: see
 [docs/adb-music-transfer.md](docs/adb-music-transfer.md).
 
 ## Local companion integration (Windows)

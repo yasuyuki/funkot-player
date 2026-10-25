@@ -29,6 +29,9 @@ jobs:
       - name: Test native generation, deployment and completion
         working-directory: funkot-player
         run: ./scripts/win-build.test.ps1 -OwnerPython (Get-Command python).Source
+      - name: Test repeatable music transfer
+        working-directory: funkot-player
+        run: python -B -m unittest discover -s scripts -p test_adb_push_music_list.py
 
   core-pin:
     name: Read adopted core commit
@@ -47,6 +50,9 @@ jobs:
       # No `path:` and no sibling checkout: unlike the Windows workflows this
       # job builds nothing, so it needs neither funkot-core nor a toolchain.
       - uses: actions/checkout@v7
+
+      - name: Test repeatable music transfer
+        run: python3 -B -m unittest discover -s scripts -p test_adb_push_music_list.py
 
       # Checks that need no toolchain live in one script, so that the same
       # command runs here and on a developer's machine. Keep this job free of
