@@ -389,15 +389,24 @@ test("hover, pressed, focus, and Windows high contrast keep visible states", asy
   await queue.getByRole("button", { name: "Select Pulse" }).first().click();
   const selected = queue.locator(".row.selected");
   await expect(selected).toBeVisible();
+  await selected.locator(".row-select").hover();
   const colors = await selected.evaluate((element) => {
     const row = getComputedStyle(element);
     const button = getComputedStyle(element.querySelector("button"));
-    return { forced: matchMedia("(forced-colors: active)").matches, outline: row.outlineStyle, width: parseFloat(row.outlineWidth), buttonColor: button.color, buttonBackground: button.backgroundColor };
+    const probe = document.createElement("span");
+    probe.style.cssText = "color:ButtonText;background:ButtonFace";
+    element.append(probe);
+    const system = getComputedStyle(probe);
+    const result = { forced: matchMedia("(forced-colors: active)").matches, outline: row.outlineStyle, width: parseFloat(row.outlineWidth), buttonColor: button.color, buttonBackground: button.backgroundColor, systemColor: system.color, systemBackground: system.backgroundColor };
+    probe.remove();
+    return result;
   });
   expect(colors.forced).toBe(true);
   expect(colors.outline).toBe("solid");
   expect(colors.width).toBeGreaterThanOrEqual(2);
   expect(colors.buttonColor).not.toBe(colors.buttonBackground);
+  expect(colors.buttonColor).toBe(colors.systemColor);
+  expect(colors.buttonBackground).toBe(colors.systemBackground);
   const path = testInfo.outputPath(`${testInfo.project.name}-forced-colors.png`);
   await page.screenshot({ path, animations: "disabled" });
   await testInfo.attach("forced-colors", { path, contentType: "image/png" });
