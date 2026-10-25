@@ -131,8 +131,7 @@ fn process_termination_recovers_one_complete_revision_at_every_commit_cut() {
         let candidate_dir = tempfile::tempdir().unwrap();
         let candidate = candidate_dir.path().join("candidate.json");
         fs::write(&candidate, serde_json::to_vec(&fixture.after).unwrap()).unwrap();
-        // A forked child can retain other tests' flock handles until exec.
-        let stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
+        let stores = process_spawn_guard();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

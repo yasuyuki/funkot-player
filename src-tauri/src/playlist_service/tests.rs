@@ -279,6 +279,8 @@ fn preparing_and_finished_empty_engine_do_not_consume_playlist_occurrences() {
 
 #[test]
 fn real_engine_events_for_all_prepared_occurrences_are_consumed_by_index() {
+    let _globals = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new();
     let a = fixture.file("a.wav");
     let b = fixture.file("b.wav");

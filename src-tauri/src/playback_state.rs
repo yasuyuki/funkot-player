@@ -227,6 +227,13 @@ static STORES: LazyLock<Mutex<HashMap<PathBuf, Weak<PlaybackStore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_RECOVERY_TOKEN: AtomicU64 = AtomicU64::new(1);
 
+/// Keep store opens excluded until a forked child confirms exec, which closes inherited flock handles.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn process_spawn_guard() -> impl Drop {
+    STORES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl PlaybackStore {
     pub fn open(dir: impl Into<PathBuf>) -> Arc<Self> {
         let dir = dir.into();

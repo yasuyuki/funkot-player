@@ -61,9 +61,9 @@ const replies: Record<string, unknown> = {
   playlist_catalog: { revision: 4, active_id: "night", generation: 2, store_status: "ready", lists: [{ id: "night", name: "Night set with an intentionally very long name", revision: 4, total: 5, remaining: 2 }, { id: "empty", name: "Empty list", revision: 1, total: 0, remaining: 0 }] },
   playlist_command: { created_id: null, undo_id: "undo-1", added: 1, rejected: 0, skipped: 0 },
   playlist_entries: { id: "night", name: "Night set with an intentionally very long name", revision: 4, run_id: 2, total: 5, ended: false, skipped: 1, rows: [{ entry_id: "played", path: rows[1].path, title: rows[1].title, artist: rows[1].artist, status: "played", reason: null }, { entry_id: "current", path: rows[2].path, title: rows[2].title, artist: rows[2].artist, status: "current", reason: null }, { entry_id: "missing", path: rows[3].path, title: rows[3].title, artist: rows[3].artist, status: "missing", reason: "missing" }, { entry_id: "a", path: rows[0].path, title: rows[0].title, artist: rows[0].artist, status: "pending", reason: null }, { entry_id: "a-again", path: rows[0].path, title: rows[0].title, artist: rows[0].artist, status: "prepared", reason: null }] },
-  refresh_library: rows, list_track_tags: snapshot, list_new_arrivals: [], list_flagged_tracks: flaggedRows,
+  refresh_library: { rows, persistence_error: null }, list_track_tags: snapshot, list_new_arrivals: [], list_flagged_tracks: flaggedRows,
   set_bars: null, dismiss_flags: 1, undo_last_dismiss: null, audition_transition: null, audition_again: null,
-  list_play_history: { log: [], tracks: [], log_total: 0 },
+  list_play_history: { log: [], tracks: [], log_total: 0 }, poll_log: [],
 };
 const calls: Array<{ command: string; args: unknown }> = [];
 const delayed = new Set<string>();
@@ -94,7 +94,7 @@ const ipc: TauriIpc = {
     });
     if (command === "set_bars") {
       const request = args as { path: string; introBars: number | null; outroStructureBars: number | null; markManual?: boolean };
-      const source = (replies.refresh_library as TrackRow[]).find((row) => row.path === request.path);
+      const source = (replies.refresh_library as { rows: TrackRow[] }).rows.find((row) => row.path === request.path);
       if (!source) throw new Error("fixture set_bars target missing");
       const updated = {
         ...source,

@@ -223,6 +223,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check library availability and rendered theme transitions
+        shell: pwsh
+        run: |
+          npx --no-install playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run ui:capture -- tests/ui/library-scan.spec.mjs tests/ui/theme-contrast.spec.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   dependency-policy:
     name: Rust dependency policy

@@ -140,7 +140,10 @@
     --color-input-border: var(--gray-12);
   }
 }
+html { background: var(--color-bg); }
 body {
+  box-sizing: border-box;
+  min-height: 100vh;
   font: 16px/1.5 system-ui, sans-serif;
   margin: 0;
   /* Tauri on Android draws edge-to-edge: without this the first control sits
@@ -257,7 +260,7 @@ summary {
 }
 
 @media (forced-colors: active) {
-  body, dialog, [role="dialog"] { background: Canvas; color: CanvasText; }
+  html, body, dialog, [role="dialog"] { background: Canvas; color: CanvasText; }
   button, input, select, textarea { background: ButtonFace; color: ButtonText; border-color: ButtonText; }
   button:disabled { color: GrayText; border-color: GrayText; }
   :where(button, input, select, textarea, summary):focus-visible { outline: 2px solid Highlight; }

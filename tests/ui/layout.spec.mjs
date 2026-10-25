@@ -31,7 +31,7 @@ test("shared controls, dense browsing, history and playback retain readable targ
     const { store } = await import("/src/lib/state.svelte.ts");
     const rows = Array.from({ length: 24 }, (_, i) => ({ ...store.libraryList[i % 6], path: `/fixture/music/dense-${i}.mp3`, content_hash: String(i).padStart(64, "0") }));
     store.library = new Map(rows.map(row => [row.path, row]));
-    window.__uiFixture.setReply("refresh_library", rows);
+    window.__uiFixture.setReply("refresh_library", { rows, persistence_error: null });
     store.playHistory = { log: [], log_total: 0, tracks: rows.map((row, i) => ({ ...row, track_hash: row.content_hash, count: i + 1, last_played_ms: 1767225600000, missing: false })) };
     window.__uiFixture.setReply("list_play_history", store.playHistory);
     store.player = { ...store.player, phase: "playing", now_playing: rows[1].path, playback_started_frames: 48000, duration_secs: 257, position_secs: 60 };
