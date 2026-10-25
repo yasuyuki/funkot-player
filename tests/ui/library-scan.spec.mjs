@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 
 test("a scan persistence warning keeps readable tracks visible and leaves a retry available", async ({ page }, testInfo) => {
   await page.goto("/tests/ui/");
+  await page.getByRole("button", { name: "menu", exact: true }).waitFor({ state: "visible" });
   await expect(page.locator("section.library li.row")).toHaveCount(6);
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");
