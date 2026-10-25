@@ -239,6 +239,7 @@ fn process_cut_during_baseline_commit_recovers_a_complete_snapshot_and_retries()
     for stage in 0..=4 {
         let fixture = Fixture::new();
         fixture.save_default_playback_state();
+        let stores = playback_state::process_spawn_guard();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -267,6 +268,7 @@ fn process_cut_during_baseline_commit_recovers_a_complete_snapshot_and_retries()
                 break;
             }
         }
+        drop(stores);
         child.kill().unwrap();
         assert!(!child.wait().unwrap().success());
 
