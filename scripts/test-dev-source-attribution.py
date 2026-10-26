@@ -21,7 +21,7 @@ def command(argv, cwd=None, env=None):
 def git(path, *args):
     result = command(['git', '-C', str(path), *args])
     if result.returncode:
-        raise RuntimeError(result.stderr)
+        raise RuntimeError(result.stderr or result.stdout)
     return result.stdout.strip()
 
 
@@ -50,8 +50,14 @@ def main():
         core_src.write_text('pub fn value() -> u8 { 1 }\n')
         git(core, 'init', '-q')
         git(core, 'add', 'Cargo.toml', 'funkot-core')
-        git(core, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Core A')
-        core_a = git(core, 'rev-parse', 'HEAD')
+        def commit_core(message):
+            path = 'funkot-core/src/lib.rs'
+            blob = git(core, 'hash-object', '-w', path)
+            git(core, 'update-index', '--cacheinfo', '100644', blob, path)
+            git(core, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', message)
+            assert git(core, 'rev-parse', 'HEAD:' + path) == blob
+            return git(core, 'rev-parse', 'HEAD')
+        core_a = commit_core('Core A')
 
         def fixture(name, value=1):
             path = work / name
@@ -158,15 +164,11 @@ def main():
         original_core = core_src.read_bytes()
         preserve_metadata(core_src, original_core.replace(b'{ 1 }', b'{ 2 }'))
         run(a, label='dirty-core-rejected', expect_reject=True)
-        git(core, 'add', 'funkot-core/src/lib.rs')
-        git(core, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Core B')
-        core_b = git(core, 'rev-parse', 'HEAD')
+        core_b = commit_core('Core B')
         run(a, label='wrong-pin-rejected', expect_reject=True)
         run(a, core_value=2, candidate=core_b, label='explicit-core-candidate')
         preserve_metadata(core_src, original_core)
-        git(core, 'add', 'funkot-core/src/lib.rs')
-        git(core, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Core A again')
-        run(a, candidate=git(core, 'rev-parse', 'HEAD'), label='core-content-restored')
+        run(a, candidate=commit_core('Core A again'), label='core-content-restored')
         print(json.dumps(dict(status='PASS', calls=len(records))), flush=True)
     finally:
         inspect = command(['docker', 'volume', 'inspect', volume])
