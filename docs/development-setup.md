@@ -133,6 +133,40 @@ Notes:
   scripts listed in `.github/workflows/checks.yml` as well. Engine changes also require its
   own workspace tests and any real-audio acceptance required by its development instructions.
 
+## Compare a captured manual Next
+
+The optional Windows diagnostic capture connects one manual Next to its exact
+Engine request, applied plan, transition and fade end. It is disabled during
+normal use. Use the existing protected test profile and process-specific
+loopback recorder. Prepare the input, endpoint, recorder and build identities
+before requesting permission to start sound.
+
+Set `FUNKOT_NAVIGATION_CAPTURE_DIR` to an existing unused private directory
+before starting the player. The capture writes `navigation-header.json`,
+`navigation.jsonl` and `callbacks.csv`. It records full input hashes and the
+actual EngineOptions. Callbacks send bounded value records. A writer thread
+serializes them. Any lost record makes the comparison incomplete.
+
+After the selected operation and required transport controls, create `STOP`
+in that directory. Keep the loopback recorder running until
+`navigation-complete.json` exists, then finalize it before closing the player.
+An abrupt player exit without the capture footer is incomplete.
+
+Use the adopted core's existing `manual_nav_acceptance` example with
+`--at-frame` from the accepted request's `active_playhead`, the recorded sample
+rate, and `--engine-options` pointing to the capture header. `--reuse-cache`
+accepts a private copy of the captured cache. Its JSON records actual trace,
+source, executable, input hashes and the WAV's Engine frame origin.
+
+Run `node scripts/audio-anomaly-detector.cjs compare capture.json replay.json - result.json`.
+The two manifests describe actual source, executable, input and recording files.
+The runnable fixture in `scripts/audio-anomaly-comparison.test.cjs` demonstrates
+their format. Expected decisions come only from the hashed real-engine trace.
+The comparison supports one Next and reports ambiguous or missing requests as
+incomplete. Same-rate PCM correlations are observations, not an audio-quality
+PASS. A new endpoint needs its own calibration. Cross-rate PCM alignment and
+hardware timing guarantees remain outside this comparison.
+
 ## Playlist occurrence proof
 
 [The bounded Kani check](../verification/README.md) shares the production progress
