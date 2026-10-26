@@ -21,6 +21,8 @@ mod playback_state;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
 #[cfg(test)]
+mod manual_plan_log_tests;
+#[cfg(test)]
 mod library_scan_tests;
 #[cfg(any(target_os = "windows", test))]
 mod current_track_http;
@@ -2672,6 +2674,19 @@ fn record_heard(path: &Path, origin: Option<QueueOrigin>) {
     }
 }
 
+fn log_manual_plan(render: &Mutex<RenderState>) {
+    let plan = {
+        let render = render.lock().unwrap_or_else(|e| e.into_inner());
+        render.engine.last_manual_plan_diagnostic()
+    };
+    if let Some(plan) = plan {
+        log::info!("manual next plan: reason={}, simple={}, entry={}, start={}",
+            plan.reason, plan.simple, plan.entry, plan.start);
+    } else {
+        log::info!("manual next plan: no local plan (head-only or direct navigation)");
+    }
+}
+
 fn events_thread(rx: Receiver<PlaybackEvent>) {
     for ev in rx {
         match ev {
@@ -2695,13 +2710,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
                 if origin == Origin::Manual {
                     if let Some(playback) = PLAYBACK.get() {
-                        let render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(plan) = render.engine.last_manual_plan_diagnostic() {
-                            log::info!("manual next plan: reason={}, simple={}, entry={}, start={}",
-                                plan.reason, plan.simple, plan.entry, plan.start);
-                        } else {
-                            log::info!("manual next plan: no local plan (head-only or direct navigation)");
-                        }
+                        log_manual_plan(&playback.render);
                     }
                 }
                 // Only an interrupt fold moves `now`; a plain TransitionStarted
