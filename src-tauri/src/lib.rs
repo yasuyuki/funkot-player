@@ -16,6 +16,7 @@ mod playlist_progress;
 mod playlist_service;
 mod engine_observation;
 mod playback_diagnostics;
+mod navigation_capture;
 mod playback_recovery;
 mod playback_state;
 #[cfg(test)]
@@ -2191,6 +2192,7 @@ fn now_ms() -> u64 {
 /// `onNativeControl` action 1 — go through this so the mark is never set in
 /// one place and missed in the other.
 fn request_skip_next() -> Result<(), String> {
+    navigation_capture::request_next();
     if AUDITIONING.load(Ordering::Relaxed) {
         return Err("skip is disabled while auditioning".into());
     }
@@ -2880,6 +2882,7 @@ fn open_output_stream(
     observation: Arc<engine_observation::EngineObservation>,
     diagnostics: Arc<playback_diagnostics::PlaybackDiagnostics>,
     err_log: Sender<String>,
+    capture: Option<navigation_capture::CaptureSink>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = host
@@ -2904,14 +2907,27 @@ fn open_output_stream(
     let stream = device
         .build_output_stream(
             config,
-            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 // First thing, unconditionally: this is the proof the callback is
                 // still alive at all, including while paused. See
                 // `CALLBACK_TICKS` and `CallbackWatch`.
-                CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed);
+                let sequence = CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+                let output_frames = (out.len() / 2) as u64;
+                let timestamp = capture.as_ref().map(|_| info.timestamp());
+                let record_capture = |engine_start, engine_end, paused, audition, render_lock_miss, trace_dropped| {
+                    if let (Some(capture), Some(timestamp)) = (&capture, &timestamp) {
+                        capture.record(navigation_capture::CallbackRecord {
+                            sequence, callback_qpc_100ns: (timestamp.callback.as_nanos() / 100) as u64,
+                            playback_qpc_100ns: (timestamp.playback.as_nanos() / 100) as u64,
+                            output_frames, engine_start, engine_end,
+                            paused, audition, render_lock_miss, trace_dropped,
+                        });
+                    }
+                };
                 // try_lock: never block the realtime callback on the audio
                 // thread's reopen / drop path (same idea as funkot-cli ClipPlayer).
                 let Ok(mut state) = render.try_lock() else {
+                    record_capture(None, None, paused.load(Ordering::Relaxed), false, true, 0);
                     diagnostics.record_render_lock_miss((out.len() / 2) as u64);
                     out.fill(0.0);
                     return;
@@ -2920,6 +2936,8 @@ fn open_output_stream(
                 // effect next time, continuing from the same fade level.
                 let requested_pause = paused.load(Ordering::Relaxed);
                 if requested_pause && transport_fade.is_silent() {
+                    let frame = state.engine.render_frame();
+                    record_capture(Some(frame), Some(frame), true, state.audition.is_some(), false, state.engine.navigation_trace_dropped() as u64);
                     out.fill(0.0);
                     state.stall.reset_silence();
                     set_phase(Phase::Paused);
@@ -2930,6 +2948,7 @@ fn open_output_stream(
                 // so the engine borrow ends before `stall` / `was_in_transition`.
                 // Stamp `audition` at send time from this buffer's engine choice.
                 let audition = state.audition.is_some();
+                let engine_start = state.engine.render_frame();
                 let (events, in_transition, render_diagnostics) = {
                     let engine = match state.audition.as_mut() {
                         Some(aud) => aud,
@@ -2994,6 +3013,8 @@ fn open_output_stream(
                 if let Some(render_diagnostics) = render_diagnostics {
                     core_diagnostics.observe(render_diagnostics, || MAIN_FRAMES.load(Ordering::Relaxed), &diagnostics);
                 }
+                record_capture(Some(engine_start), Some(state.engine.render_frame()), requested_pause,
+                    audition, false, state.engine.navigation_trace_dropped() as u64);
                 // Publish the main engine before its events are sent. Audition
                 // leaves the main observation unchanged while it is frozen.
                 if !audition {
@@ -3141,6 +3162,10 @@ fn audio_thread(
     let reserved_dir = data_dir.clone();
     let folder_gate_cache = cache_dir_for_log.clone();
     let folder_gate_data = data_dir.clone();
+    let capture_inputs: Vec<PathBuf> = if std::env::var_os("FUNKOT_NAVIGATION_CAPTURE_DIR").is_some() {
+        paths.iter().cloned().chain(queue::snapshot(&queue).into_iter().map(|item| item.path))
+            .collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+    } else { Vec::new() };
     let source = HostSource::new(
         queue,
         DrainPolicy::ContinueFolder {
@@ -3232,6 +3257,7 @@ fn audio_thread(
         }));
     let source_owner = playlist_service::get(&data_dir, &playlist_cache, &queue_for_priority);
     let source = playlist_service::configure(&source_owner, source);
+    let capture_options = options.clone();
     let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
         Err(e) => {
@@ -3242,6 +3268,14 @@ fn audio_thread(
     };
     // Never block in the audio callback.
     engine.set_realtime(true);
+    let capture = match navigation_capture::start(&mut engine, &capture_options, &capture_inputs) {
+        Ok(capture) => capture,
+        Err(error) => {
+            say!("FAIL: navigation capture preflight: {error}");
+            set_phase(Phase::Failed);
+            return;
+        }
+    };
     say!("engine created");
 
     // Grab the nav sender before `engine` moves into `RenderState`, and publish
@@ -3305,6 +3339,7 @@ fn audio_thread(
         Arc::clone(&observation),
         Arc::clone(&diagnostics),
         log.clone(),
+        capture.clone(),
     ) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -3394,6 +3429,7 @@ fn audio_thread(
                     Arc::clone(&observation),
                     Arc::clone(&diagnostics),
                     log.clone(),
+                    capture.clone(),
                 ) {
                     Ok(s) => {
                         cb_watch =

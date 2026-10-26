@@ -406,13 +406,23 @@ function scan(file,refFile,calibrationFile,packetFile,callbackFile,outFile,offli
     const p=packets[Math.max(0,lo-1)];
     if(p&&first.frame<p.file_frame+p.frames)first.qpc100ns=p.qpc_100ns+Math.round((first.frame-p.file_frame)*1e7/RATE);
   }
-  const output={classification:first?.classification||'clean',first,pcmCandidates:candidates,candidateDetails,maxScore,maxOfflineScore,offline:offline?{manifestSha256:offline.manifestSha256,referenceSha256:offline.manifest.sha256,coverage:offlineCoverage,matchedWindows:offlineWindows.size}:null,continuity:c,timing:cb,alignment:aligned.alignment,active:aligned.active,captureFrames:target.frames,analysisSeconds:Number(process.hrtime.bigint()-t0)/1e9,inputSha256:sha(file)};
+  const output={classification:first?.classification||'clean',first,pcmCandidates:candidates,candidateDetails,maxScore,maxOfflineScore,offline:offline?{manifestSha256:offline.manifestSha256,referenceSha256:offline.manifest.sha256,coverage:offlineCoverage,matchedWindows:offlineWindows.size}:null,continuity:c,timing:cb,alignment:aligned.alignment,active:aligned.active,captureFrames:target.frames,analysisSeconds:Number(process.hrtime.bigint()-t0)/1e9,inputSha256:sha(file),calibrationSha256:sha(calibrationFile),packetSha256:sha(packetFile),callbackSha256:sha(callbackFile)};
   fs.writeFileSync(outFile,JSON.stringify(output,null,2)+'\n');
   console.log(JSON.stringify({classification:output.classification,frame:first?.frame,pcmCandidates:candidates,maxScore,analysisSeconds:output.analysisSeconds}));
 }
-const [mode,...args]=process.argv.slice(2);
-if(mode==='calibrate'&&(args.length===4||args.length===5))calibrate(...args);
-else if(mode==='scan'&&args.length===7)scan(...args);
-else if(mode==='inject'&&args.length===5)injectFile(args[0],args[1],Number(args[2]),args[3],Number(args[4]));
-else if(mode==='clip'&&args.length===7)controlClip(args[0],args[1],Number(args[2]),Number(args[3]),Number(args[4]),args[5],Number(args[6]));
-else {console.error('Usage: node detect.cjs calibrate clean-a.wav clean-b.wav calibration.json offline-manifest.json [validation-clean.wav] | scan capture.wav clean.wav calibration.json packets.csv callbacks.csv result.json offline-manifest.json | inject input.wav output.wav frame type amplitude | clip input.wav output.wav startFrame frameCount controlFrame type amplitude');process.exitCode=2;}
+function compare(captureManifestFile,replayFile,scanFile,outFile) {
+  const { compareEvidence } = require('./audio-anomaly-comparison.cjs');
+  const output=compareEvidence({captureManifestPath:captureManifestFile,replayPath:replayFile,scanPath:scanFile});
+  fs.writeFileSync(outFile,JSON.stringify(output,null,2)+'\n');
+  console.log(JSON.stringify({classification:output.classification,soundQuality:output.soundQuality,comparable:output.comparable,findings:output.findings.length}));
+}
+module.exports={RATE,wav,localOffset};
+if(require.main===module){
+  const [mode,...args]=process.argv.slice(2);
+  if(mode==='calibrate'&&(args.length===4||args.length===5))calibrate(...args);
+  else if(mode==='scan'&&args.length===7)scan(...args);
+  else if(mode==='compare'&&args.length===4)compare(...args);
+  else if(mode==='inject'&&args.length===5)injectFile(args[0],args[1],Number(args[2]),args[3],Number(args[4]));
+  else if(mode==='clip'&&args.length===7)controlClip(args[0],args[1],Number(args[2]),Number(args[3]),Number(args[4]),args[5],Number(args[6]));
+  else {console.error('Usage: node detect.cjs calibrate clean-a.wav clean-b.wav calibration.json offline-manifest.json [validation-clean.wav] | scan capture.wav clean.wav calibration.json packets.csv callbacks.csv result.json offline-manifest.json | compare capture-manifest.json replay.json scan-result.json|- result.json | inject input.wav output.wav frame type amplitude | clip input.wav output.wav startFrame frameCount controlFrame type amplitude');process.exitCode=2;}
+}
