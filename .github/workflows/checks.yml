@@ -164,6 +164,10 @@ jobs:
         run: |
           ./dev.sh sh -ec 'npm ci; npm test; npm run check; npm run build; cargo test --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol --lib'
 
+      - name: Verify Cargo source attribution through dev.sh
+        working-directory: funkot-player
+        run: python3 scripts/test-dev-source-attribution.py
+
   windows-build-and-test:
     name: Windows frontend and native library
     runs-on: windows-latest
