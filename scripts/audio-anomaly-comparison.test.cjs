@@ -48,7 +48,7 @@ function fixture(t) {
   const trace = [
     { kind: 'requested', request_id: 1, label: 'next-1', action: 'transition_to_next' },
     { kind: 'accepted', generation: 7, action: 'next', render_frame: 441, active_playhead: 220, current_index: 0, source_generation: 9, target_index: 1, target_source_generation: 10, active_preview: false, active_head_only: false, target_preview: false, target_head_only: false },
-    { kind: 'plan_applied', generation: 7, render_frame: 442, plan: { generation: 8, start: 430, entry: 12, simple: false, reason: 'manual' } },
+    { kind: 'plan_applied', generation: 7, render_frame: 442, plan: { generation: 7, start: 430, entry: 12, simple: false, reason: 'manual' } },
     { kind: 'transition_started', generation: 7, render_frame: 500 }, { kind: 'fade_completed', generation: 7, render_frame: 600 },
     { kind: 'capture_end', callback_records_dropped: 0, trace_dropped: 0 }
   ];
@@ -68,6 +68,85 @@ function run(input, scan = input.scanFile) {
 }
 function save(input) { writeJson(input.captureFile, input.capture); writeJson(input.replayFile, input.replay); }
 function saveReplayTrace(input) { writeJson(input.replayTraceFile, input.replayTrace); }
+
+test('independent runs may have different navigation generations and engine origins', t => {
+  const input = fixture(t);
+  for (const event of input.replayTrace.navigation_trace) {
+    event.generation += 13;
+    event.render_frame += 7571;
+    if (event.plan) event.plan.generation += 13;
+  }
+  saveReplayTrace(input);
+  assert.equal(run(input).classification, 'clean');
+});
+
+test('transition timing relative to the accepted request must still match', t => {
+  const input = fixture(t);
+  input.replayTrace.navigation_trace.find(row => row.kind === 'transition_started').render_frame++;
+  saveReplayTrace(input);
+  assert.equal(run(input).classification, 'condition_mismatch');
+});
+
+test('a plan from a different accepted generation is incomplete', t => {
+  const input = fixture(t);
+  input.replayTrace.navigation_trace.find(row => row.kind === 'plan_applied').plan.generation++;
+  saveReplayTrace(input);
+  assert.equal(run(input).classification, 'incomplete');
+});
+
+function pauseCallbacks(input, engineRate, advances) {
+  const headerFile = path.join(input.root, 'capture', 'header.json');
+  const header = JSON.parse(fs.readFileSync(headerFile, 'utf8'));
+  header.options.output_sample_rate = engineRate;
+  header.transport = 'transport_fade';
+  writeJson(headerFile, header);
+  input.replayTrace.options.output_sample_rate = engineRate;
+  input.replayTrace.engine_options.output_sample_rate = engineRate;
+  saveReplayTrace(input);
+  let engine = 1000;
+  const rows = ['sequence,callback_qpc_100ns,playback_qpc_100ns,output_frames,engine_start,engine_end,paused,audition,render_lock_miss,trace_dropped', '1,0,0,1000,0,1000,0,0,0,0'];
+  advances.forEach((advance, index) => {
+    rows.push(`${index + 2},${(index + 1) * 100000},${(index + 1) * 100000},480,${engine},${engine + advance},1,0,0,0`);
+    engine += advance;
+  });
+  write(path.join(input.root, 'capture', 'callbacks.csv'), rows.join('\n') + '\n');
+}
+
+test('the existing pause envelope may render its tail before the engine freezes', t => {
+  for (const rate of [44100, 48000]) {
+    const input = fixture(t), tail = Math.round(rate * 0.010);
+    pauseCallbacks(input, rate, [192, tail - 192, 0, 0]);
+    assert.equal(run(input, '-').classification, 'comparable');
+  }
+});
+
+test('paused engine advancement beyond the transport tail is a capture fault', t => {
+  const input = fixture(t);
+  pauseCallbacks(input, 48000, [192, 289]);
+  assert.ok(run(input, '-').findings.some(finding => finding.code === 'paused_engine_advanced'));
+});
+
+test('a frozen paused engine cannot restart its tail without resume', t => {
+  const input = fixture(t);
+  pauseCallbacks(input, 48000, [192, 0, 1]);
+  assert.ok(run(input, '-').findings.some(finding => finding.code === 'paused_engine_advanced'));
+});
+
+test('an unknown pause envelope cannot explain paused engine advancement', t => {
+  const input = fixture(t);
+  pauseCallbacks(input, 48000, [480, 0]);
+  const file = path.join(input.root, 'capture', 'header.json');
+  const header = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete header.transport;
+  writeJson(file, header);
+  assert.equal(run(input, '-').classification, 'incomplete');
+});
+
+test('render lock misses cannot produce a comparable run', t => {
+  const input = fixture(t), callbacks = path.join(input.root, 'capture', 'callbacks.csv');
+  write(callbacks, fs.readFileSync(callbacks, 'utf8').replace('1000,0,0,0,0', '1000,0,0,1,0'));
+  assert.equal(run(input, '-').classification, 'capture_fault');
+});
 
 test('missing baseline observation is incomplete', t => {
   const input = fixture(t), traceFile = path.join(input.root, 'capture', 'trace.json');

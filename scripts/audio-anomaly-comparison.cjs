@@ -6,10 +6,11 @@ const { RATE, wav, localOffset } = require('./audio-anomaly-detector.cjs');
 const QPC_PER_SECOND = 10000000n;
 const navigationFields = [
   'source_generation', 'target_source_generation', 'active_index', 'target_index', 'active_preview', 'active_head_only', 'target_preview', 'target_head_only',
-  'request_engine_frame', 'request_active_playhead_frame', 'plan_generation',
+  'request_active_playhead_frame', 'plan_engine_frame',
   'plan_start_frame', 'entry_frame',
   'transition_engine_frame', 'fade_end_engine_frame', 'engine_rate', 'reason', 'simple'
 ];
+const relativeEngineFrames = new Set(['plan_engine_frame', 'transition_engine_frame', 'fade_end_engine_frame']);
 
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
@@ -133,7 +134,9 @@ function navigationOperations(rows, engineRate, findings, requestLabels = new Ma
     const { accepted, plan_applied: applied, transition_started: transition, fade_completed: fade } = group;
     if (!applied || !transition || !fade) { record(findings, 'incomplete', 'navigation_trace_missing', { id }); continue; }
     const plan = field(applied, 'plan');
-    const operation = { id, label: `next-${id}`, ...(requestLabels.has(id) ? { requestLabel: requestLabels.get(id) } : {}), source_generation: field(accepted, 'source_generation'), target_source_generation: field(accepted, 'target_source_generation'), active_index: field(accepted, 'current_index'), target_index: field(accepted, 'target_index'), active_preview: field(accepted, 'active_preview'), active_head_only: field(accepted, 'active_head_only'), target_preview: field(accepted, 'target_preview'), target_head_only: field(accepted, 'target_head_only'), request_engine_frame: field(accepted, 'render_frame'), request_active_playhead_frame: field(accepted, 'active_playhead'), plan_generation: field(plan, 'generation'), plan_engine_frame: field(applied, 'render_frame'), plan_start_frame: field(plan, 'start'), entry_frame: field(plan, 'entry'), transition_engine_frame: field(transition, 'render_frame'), fade_end_engine_frame: field(fade, 'render_frame'), engine_rate: engineRate, reason: field(plan, 'reason'), simple: field(plan, 'simple') };
+    if (plan.generation !== accepted.generation) record(findings, 'incomplete', 'plan_generation_unmatched', { id });
+    for (const event of [accepted, applied, transition, fade]) integer(event.render_frame, 'navigation render frame');
+    const operation = { id, label: `next-${navigation.length + 1}`, ...(requestLabels.has(id) ? { requestLabel: requestLabels.get(id) } : {}), source_generation: field(accepted, 'source_generation'), target_source_generation: field(accepted, 'target_source_generation'), active_index: field(accepted, 'current_index'), target_index: field(accepted, 'target_index'), active_preview: field(accepted, 'active_preview'), active_head_only: field(accepted, 'active_head_only'), target_preview: field(accepted, 'target_preview'), target_head_only: field(accepted, 'target_head_only'), request_engine_frame: field(accepted, 'render_frame'), request_active_playhead_frame: field(accepted, 'active_playhead'), plan_generation: field(plan, 'generation'), plan_engine_frame: field(applied, 'render_frame'), plan_start_frame: field(plan, 'start'), entry_frame: field(plan, 'entry'), transition_engine_frame: field(transition, 'render_frame'), fade_end_engine_frame: field(fade, 'render_frame'), engine_rate: engineRate, reason: field(plan, 'reason'), simple: field(plan, 'simple') };
     if (operation.plan_engine_frame > operation.transition_engine_frame) record(findings, 'incomplete', 'plan_after_transition', { id });
     navigation.push(operation);
   }
@@ -146,10 +149,19 @@ function captureOperations(traceFile, callbackFile, headerFile, findings) {
   const callbacks = callbackCsv(callbackFile), clock = [], transport = [];
   if (!callbacks.length) fail('callbacks are empty');
   let previousPaused = callbacks[0].paused, previousSequence = callbacks[0].sequence;
+  const pauseTailFrames = Math.max(2, Math.round(engineRate * 0.010));
+  let pausedFrames = 0, pausedFrozen = false;
   for (const [index, callback] of callbacks.entries()) {
     if ((index && callback.sequence !== previousSequence + 1) || ![0, 1].includes(callback.paused) || ![0, 1].includes(callback.render_lock_miss) || callback.trace_dropped !== 0) record(findings, 'incomplete', 'callback_observation_invalid');
     if (callback.render_lock_miss) record(findings, 'capture_fault', 'render_lock_miss');
-    if (callback.paused && callback.engine_start !== null && callback.engine_end !== callback.engine_start) record(findings, 'capture_fault', 'paused_engine_advanced');
+    if (!callback.paused) { pausedFrames = 0; pausedFrozen = false; }
+    else if (callback.engine_start !== null) {
+      const advance = callback.engine_end - callback.engine_start;
+      if (advance && header.transport !== 'transport_fade') record(findings, 'incomplete', 'pause_envelope_unverified');
+      pausedFrames += advance;
+      if (advance < 0 || (pausedFrozen && advance !== 0) || pausedFrames > pauseTailFrames) record(findings, 'capture_fault', 'paused_engine_advanced');
+      if (advance === 0) pausedFrozen = true;
+    }
     if (callback.engine_start !== null && callback.engine_end > callback.engine_start) clock.push({ engine_start_frame: callback.engine_start, engine_end_frame: callback.engine_end, playback_qpc_100ns: callback.playback_qpc_100ns });
     if (index && callback.paused !== previousPaused) transport.push({ id: `${callback.paused ? 'pause' : 'resume'}-${callback.sequence}`, label: callback.paused ? 'pause' : 'resume', playback_qpc_100ns: callback.playback_qpc_100ns });
     previousPaused = callback.paused;
@@ -226,12 +238,14 @@ function compareOperations(capture, replay, findings) {
     const observed = capture.operations[index], expected = replay.operations[index];
     if (!observed || !expected || typeof observed !== 'object' || typeof expected !== 'object') { record(findings, 'incomplete', 'operation_invalid', { index }); continue; }
     if (typeof observed.id !== 'string' || typeof observed.label !== 'string' || !observed.id || !observed.label || typeof expected.label !== 'string' || !expected.label) { record(findings, 'incomplete', 'operation_identity_missing', { index }); continue; }
-    if (observed.label !== expected.label || (observed.label.startsWith('next-') && observed.id !== expected.id)) record(findings, 'condition_mismatch', 'operation_label_or_order', { index });
+    if (observed.label !== expected.label) record(findings, 'condition_mismatch', 'operation_label_or_order', { index });
     if (observed.label.startsWith('next-')) {
       if (typeof observed.requestLabel !== 'string' || !/^next-\d+$/.test(observed.requestLabel)) record(findings, 'incomplete', 'request_label_missing', { index });
       for (const field of navigationFields) {
         if (!(field in observed) || !(field in expected)) { record(findings, 'incomplete', 'navigation_observation_missing', { index, field }); continue; }
-        if (observed[field] !== expected[field]) record(findings, 'condition_mismatch', 'navigation_value', { index, field });
+        const observedValue = relativeEngineFrames.has(field) ? observed[field] - observed.request_engine_frame : observed[field];
+        const expectedValue = relativeEngineFrames.has(field) ? expected[field] - expected.request_engine_frame : expected[field];
+        if (observedValue !== expectedValue) record(findings, 'condition_mismatch', 'navigation_value', { index, field });
       }
       matching.push(observed);
     }
