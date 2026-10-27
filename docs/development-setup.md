@@ -158,6 +158,11 @@ rate, and `--engine-options` pointing to the capture header. `--reuse-cache`
 accepts a private copy of the captured cache. Its JSON records actual trace,
 source, executable, input hashes and the WAV's Engine frame origin.
 
+Navigation generations identify events within one Engine run. Compare separate
+runs at the same active playhead and by timing relative to request acceptance;
+their generation numbers and output-frame origins can differ. A pause request
+renders the existing transport envelope before the Engine freezes.
+
 Run `node scripts/audio-anomaly-detector.cjs compare capture.json replay.json - result.json`.
 The two manifests describe actual source, executable, input and recording files.
 The runnable fixture in `scripts/audio-anomaly-comparison.test.cjs` demonstrates
