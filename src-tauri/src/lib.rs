@@ -2902,6 +2902,16 @@ fn open_output_stream(
         sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
+    if let Some(capture) = &capture {
+        let endpoint_id = device
+            .id()
+            .map_err(|e| format!("output device id: {e}"))?
+            .id()
+            .to_owned();
+        capture
+            .open_output_stream(endpoint_id, sample_rate)
+            .map_err(|e| format!("navigation capture output-stream receipt: {e}"))?;
+    }
     let mut transport_fade = transport_fade::TransportFade::new(sample_rate);
     let mut core_diagnostics = playback_diagnostics::CoreDiagnosticsPublisher::new(&diagnostics);
     let stream = device
@@ -2924,6 +2934,10 @@ fn open_output_stream(
                         });
                     }
                 };
+                if navigation_capture::gate_output(capture.as_ref(), out) {
+                    record_capture(None, None, true, false, false, 0);
+                    return;
+                }
                 // try_lock: never block the realtime callback on the audio
                 // thread's reopen / drop path (same idea as funkot-cli ClipPlayer).
                 let Ok(mut state) = render.try_lock() else {
