@@ -34,6 +34,187 @@ function file(base, descriptor, name) {
   if (!fs.statSync(resolved).isFile()) fail(`${name}.file is not a file`);
   return { sha256: hash(resolved), file: resolved };
 }
+function sha256(value, name) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) fail(`${name} must be a SHA-256 digest`);
+  return value;
+}
+function checkedFile(base, descriptor, name) {
+  object(descriptor, name);
+  const actual = file(base, descriptor, name);
+  if (sha256(descriptor.sha256, `${name}.sha256`) !== actual.sha256) fail(`${name} hash does not match ${descriptor.file}`);
+  return actual;
+}
+function nonempty(value, name) {
+  if (typeof value !== 'string' || !value.trim()) fail(`${name} is required`);
+  return value;
+}
+function positive(value, name) {
+  integer(value, name);
+  if (!value) fail(`${name} must be positive`);
+  return value;
+}
+function endpointObservation(value, name, processId, stream) {
+  object(value, name);
+  if (positive(value.process_id, `${name}.process_id`) !== processId) fail(`${name}.process_id does not match receipt`);
+  const observed = {
+    endpoint_id: nonempty(value.endpoint_id, `${name}.endpoint_id`),
+    rate: positive(value.rate, `${name}.rate`),
+    channels: positive(value.channels, `${name}.channels`),
+    sample_format: nonempty(value.sample_format, `${name}.sample_format`),
+    session_id: nonempty(value.session_id, `${name}.session_id`)
+  };
+  for (const field of ['endpoint_id', 'rate', 'channels', 'sample_format']) if (observed[field] !== stream[field]) fail(`${name}.${field} does not match stream`);
+  return observed;
+}
+function endpointReceipt(base, descriptor, name) {
+  const receiptFile = checkedFile(base, descriptor, name);
+  const receipt = json(receiptFile.file, name);
+  if (receipt.schema !== 1) fail(`${name}.schema is unsupported`);
+  const processId = positive(receipt.process_id, `${name}.process_id`);
+  const streamValue = object(receipt.stream, `${name}.stream`);
+  const stream = {
+    endpoint_id: nonempty(streamValue.endpoint_id, `${name}.stream.endpoint_id`),
+    rate: positive(streamValue.rate, `${name}.stream.rate`),
+    channels: positive(streamValue.channels, `${name}.stream.channels`),
+    sample_format: nonempty(streamValue.sample_format, `${name}.stream.sample_format`)
+  };
+  const before = endpointObservation(receipt.session?.before, `${name}.session.before`, processId, stream);
+  const after = endpointObservation(receipt.session?.after, `${name}.session.after`, processId, stream);
+  if (before.session_id !== after.session_id) fail(`${name}.session changed`);
+  return { file: receiptFile, runId: nonempty(receipt.run_id, `${name}.run_id`), processId, route: stream };
+}
+function sameRoute(left, right) {
+  return ['endpoint_id', 'rate', 'channels', 'sample_format'].every(field => left[field] === right[field]);
+}
+function captureEndpointBinding(endpoint, header, findings) {
+  try {
+    if (nonempty(header.run_id, 'navigation header.run_id') !== endpoint.runId || positive(header.process_id, 'navigation header.process_id') !== endpoint.processId) record(findings, 'condition_mismatch', 'endpoint_capture_operation');
+  } catch {
+    record(findings, 'incomplete', 'endpoint_capture_operation_unverified');
+  }
+}
+function coverage(value, captureFrames, name, allowIncomplete = false) {
+  object(value, name);
+  const total = integer(value.total_windows, `${name}.total_windows`);
+  const audio = integer(value.audio_windows, `${name}.audio_windows`);
+  const intentional = integer(value.intentional_windows, `${name}.intentional_windows`);
+  const unclassified = integer(value.unclassified_windows, `${name}.unclassified_windows`);
+  if (total !== audio + intentional || (!allowIncomplete && (unclassified !== 0 || value.complete !== true)) || (allowIncomplete && value.complete !== false)) fail(`${name} is incomplete`);
+  if (!Array.isArray(value.ranges) || !value.ranges.length) fail(`${name}.ranges is required`);
+  let expected = 0, audioRanges = 0, intentionalRanges = 0, unclassifiedRanges = 0;
+  for (const [index, range] of value.ranges.entries()) {
+    object(range, `${name}.ranges[${index}]`);
+    const start = integer(range.start, `${name}.ranges[${index}].start`), end = integer(range.end, `${name}.ranges[${index}].end`);
+    if (start !== expected || end <= start || !['audio', 'intentional', ...(allowIncomplete ? ['unclassified'] : [])].includes(range.kind)) fail(`${name}.ranges is not contiguous`);
+    expected = end;
+    if (range.kind === 'audio') audioRanges++; else if (range.kind === 'intentional') intentionalRanges++; else unclassifiedRanges++;
+  }
+  if (expected !== captureFrames || audio !== audioRanges || intentional !== intentionalRanges || (allowIncomplete && unclassified < unclassifiedRanges)) fail(`${name}.ranges does not match window counts`);
+}
+function scanEvidence(scan, name, options) {
+  object(scan, name);
+  if (scan.schema !== 1) fail(`${name}.schema is unsupported`);
+  if (!['clean', 'pcm_transient', 'dropout', 'timing_glitch', 'capture_fault', 'incomplete'].includes(scan.classification)) fail(`${name}.classification is unsupported`);
+  const frames = integer(scan.captureFrames, `${name}.captureFrames`);
+  if (options.captureFrames !== undefined && frames !== options.captureFrames) fail(`${name}.captureFrames does not match capture`);
+  for (const field of ['inputSha256', 'calibrationSha256', 'packetSha256', 'callbackSha256', 'endpointReceiptSha256', 'referenceSha256']) sha256(scan[field], `${name}.${field}`);
+  if (options.pcmSha256 && scan.inputSha256 !== options.pcmSha256) fail(`${name}.inputSha256 does not match PCM`);
+  if (options.calibrationSha256 && scan.calibrationSha256 !== options.calibrationSha256) fail(`${name}.calibrationSha256 does not match calibration`);
+  if (options.packetsSha256 && scan.packetSha256 !== options.packetsSha256) fail(`${name}.packetSha256 does not match packets`);
+  if (options.callbacksSha256 && scan.callbackSha256 !== options.callbacksSha256) fail(`${name}.callbackSha256 does not match callbacks`);
+  if (options.endpointReceiptSha256 && scan.endpointReceiptSha256 !== options.endpointReceiptSha256) fail(`${name}.endpointReceiptSha256 does not match endpoint receipt`);
+  if (options.referenceHashes && !options.referenceHashes.includes(scan.referenceSha256)) fail(`${name}.referenceSha256 does not match expected reference`);
+  coverage(scan.coverage, frames, `${name}.coverage`, scan.classification === 'incomplete');
+  scanConsistency(scan, name);
+  return scan;
+}
+function scanConsistency(scan, name) {
+  const candidates = scan.pcmCandidates;
+  if (candidates !== undefined && (!Number.isSafeInteger(candidates) || candidates < 0)) fail(`${name}.pcmCandidates is invalid`);
+  const first = scan.first;
+  if (first !== undefined && first !== null) {
+    object(first, `${name}.first`);
+    if (!['pcm_transient', 'dropout', 'timing_glitch', 'capture_fault', 'incomplete'].includes(first.classification)) fail(`${name}.first.classification is invalid`);
+    if (first.classification !== scan.classification) fail(`${name}.classification contradicts first`);
+  }
+  if (['pcm_transient', 'dropout', 'timing_glitch'].includes(scan.classification) && (!first || first.classification !== scan.classification)) fail(`${name}.first is required for ${scan.classification}`);
+  if (scan.classification === 'clean' && (first || candidates > 0)) fail(`${name}.clean classification has anomaly evidence`);
+}
+function scanSignals(scan) {
+  return Boolean(scan.first) || (Number.isSafeInteger(scan.pcmCandidates) && scan.pcmCandidates > 0);
+}
+function calibrationReceipt(base, calibration, endpoint, findings) {
+  const calibrationFile = checkedFile(base, calibration, 'capture.calibration');
+  const receiptFile = checkedFile(base, calibration.receipt, 'capture.calibration.receipt');
+  const receipt = json(receiptFile.file, 'capture.calibration.receipt');
+  if (receipt.schema !== 1) fail('capture.calibration.receipt.schema is unsupported');
+  if (sha256(receipt.detector_calibration_sha256, 'capture.calibration.receipt.detector_calibration_sha256') !== calibrationFile.sha256) fail('calibration receipt does not bind calibration');
+  const calibrationEndpoint = endpointReceipt(path.dirname(receiptFile.file), receipt.endpoint_receipt, 'capture.calibration.receipt.endpoint_receipt');
+  if (!sameRoute(endpoint.route, calibrationEndpoint.route)) record(findings, 'condition_mismatch', 'endpoint_calibration');
+  const calibrationData = json(calibrationFile.file, 'calibration');
+  if (calibrationData.schema !== 3) fail('calibration.schema is unsupported');
+  if (sha256(calibrationData.provenance?.detectorSha256, 'calibration.provenance.detectorSha256') !== hash(path.join(__dirname, 'audio-anomaly-detector.cjs'))) fail('calibration detector does not match comparator detector');
+  const baseline = object(calibrationData.baseline, 'calibration.baseline');
+  const referenceHashes = [sha256(baseline.aSha256, 'calibration.baseline.aSha256'), sha256(baseline.bSha256, 'calibration.baseline.bSha256')];
+  const windowFrames = positive(calibrationData.windowFrames, 'calibration.windowFrames');
+  const baselineArtifacts = ['a', 'b'].map(label => {
+    const provenance = object(calibrationData.provenance?.[label], `calibration.provenance.${label}`);
+    const artifacts = {};
+    for (const name of ['capture', 'reference', 'packets', 'callbacks', 'endpoint_receipt']) artifacts[name] = checkedFile(path.dirname(calibrationFile.file), provenance[name], `calibration.provenance.${label}.${name}`);
+    const observedEndpoint = endpointReceipt(path.dirname(calibrationFile.file), provenance.endpoint_receipt, `calibration.provenance.${label}.endpoint_receipt`);
+    if (nonempty(provenance.runId, `calibration.provenance.${label}.runId`) !== observedEndpoint.runId || positive(provenance.processId, `calibration.provenance.${label}.processId`) !== observedEndpoint.processId || !sameRoute(calibrationEndpoint.route, observedEndpoint.route)) fail(`calibration.provenance.${label} does not bind calibration endpoint`);
+    return artifacts;
+  });
+  if (!Array.isArray(receipt.controls)) fail('capture.calibration.receipt.controls is required');
+  const controls = new Map();
+  for (const [index, control] of receipt.controls.entries()) {
+    object(control, `capture.calibration.receipt.controls[${index}]`);
+    if (!['negative', 'pcm_transient', 'dropout'].includes(control.kind) || controls.has(control.kind)) fail('calibration control kind is invalid');
+    const controlName = `capture.calibration.receipt.controls[${index}]`;
+    const controlFile = checkedFile(path.dirname(receiptFile.file), control.scan, `${controlName}.scan`);
+    const audio = object(control.audio, `${controlName}.audio`), artifacts = {};
+    for (const name of ['pcm', 'reference', 'packets', 'callbacks']) artifacts[name] = checkedFile(path.dirname(receiptFile.file), audio[name], `${controlName}.audio.${name}`);
+    const pcmInfo = wavInfo(artifacts.pcm.file, `${controlName} PCM`);
+    wavInfo(artifacts.reference.file, `${controlName} reference`);
+    packetAnchors(numericCsv(artifacts.packets.file, ['file_frame', 'qpc_100ns', 'frames'], `${controlName} packets`), pcmInfo.frames);
+    callbackCsv(artifacts.callbacks.file);
+    const controlScan = scanEvidence(json(controlFile.file, `calibration control ${control.kind}`), `calibration control ${control.kind}`, { captureFrames: pcmInfo.frames, pcmSha256: artifacts.pcm.sha256, calibrationSha256: calibrationFile.sha256, packetsSha256: artifacts.packets.sha256, callbacksSha256: artifacts.callbacks.sha256, endpointReceiptSha256: calibrationEndpoint.file.sha256, referenceHashes: [artifacts.reference.sha256] });
+    if (controlScan.classification !== (control.kind === 'negative' ? 'clean' : control.kind)) fail(`calibration control ${control.kind} classification does not match`);
+    if (control.kind === 'negative' && control.injection) fail('negative calibration control must not have injection evidence');
+    controls.set(control.kind, { artifacts, scan: controlScan, injection: control.injection, controlName });
+  }
+  if (controls.size !== 3) fail('calibration controls are incomplete');
+  const negative = controls.get('negative');
+  if (!baselineArtifacts.some((artifacts, index) => artifacts.capture.sha256 === negative.artifacts.pcm.sha256 && artifacts.reference.sha256 === negative.artifacts.reference.sha256 && referenceHashes[index] === negative.artifacts.reference.sha256)) fail('negative calibration control does not bind baseline recording');
+  for (const kind of ['pcm_transient', 'dropout']) {
+    const control = controls.get(kind);
+    if (control.artifacts.pcm.sha256 === negative.artifacts.pcm.sha256) fail(`${kind} calibration control aliases negative PCM`);
+    const injectionFile = checkedFile(path.dirname(receiptFile.file), control.injection, `${control.controlName}.injection`);
+    const injection = json(injectionFile.file, `${control.controlName}.injection`);
+    if (injection.schema !== 1 || injection.type !== (kind === 'dropout' ? 'dropout24' : kind)) fail(`${kind} calibration injection type is invalid`);
+    const frame = integer(injection.frame, `${kind} calibration injection frame`);
+    if (!Number.isFinite(injection.amplitude) || sha256(injection.input_sha256, `${kind} calibration injection input_sha256`) !== negative.scan.inputSha256 || sha256(injection.output_sha256, `${kind} calibration injection output_sha256`) !== control.artifacts.pcm.sha256) fail(`${kind} calibration injection does not bind PCM`);
+    if (!control.scan.first || !Number.isSafeInteger(control.scan.first.frame) || Math.abs(control.scan.first.frame - frame) > windowFrames) fail(`${kind} calibration scan first frame does not bind injection`);
+  }
+  return { file: calibrationFile, receipt: receiptFile, referenceHashes };
+}
+function sourceReceipt(base, descriptor, endpoint, input, headerHashes, derived) {
+  const receiptFile = checkedFile(base, descriptor, 'capture.source_receipt');
+  const receipt = json(receiptFile.file, 'capture.source_receipt');
+  if (receipt.schema !== 1 || receipt.mode !== 'fixed_input') fail('capture.source_receipt is not a fixed-input receipt');
+  if (nonempty(receipt.run_id, 'capture.source_receipt.run_id') !== endpoint.runId) fail('capture.source_receipt.run_id does not match endpoint receipt');
+  const hashes = identityHashes(input);
+  if (!Array.isArray(receipt.ordered_input_hashes) || !receipt.ordered_input_hashes.length) fail('capture.source_receipt.ordered_input_hashes is invalid');
+  receipt.ordered_input_hashes.forEach((value, index) => sha256(value, `capture.source_receipt.ordered_input_hashes[${index}]`));
+  if (new Set(receipt.ordered_input_hashes).size !== receipt.ordered_input_hashes.length) fail('capture.source_receipt has duplicate input content');
+  if (canonical(receipt.ordered_input_hashes) !== canonical(hashes) || canonical(headerHashes) !== canonical(hashes)) fail('capture.source_receipt input hashes do not match identities');
+  if (receipt.source_edits !== 0) fail('capture.source_receipt records source edits');
+  const before = object(receipt.before, 'capture.source_receipt.before'), after = object(receipt.after, 'capture.source_receipt.after');
+  const revision = nonempty(before.revision, 'capture.source_receipt.before.revision');
+  if (nonempty(after.revision, 'capture.source_receipt.after.revision') !== revision || sha256(before.input_sha256, 'capture.source_receipt.before.input_sha256') !== input.sha256 || sha256(after.input_sha256, 'capture.source_receipt.after.input_sha256') !== input.sha256) fail('capture.source_receipt changed input or revision');
+  for (const operation of derived.operations) for (const field of ['active_index', 'target_index']) if (!Number.isSafeInteger(operation[field]) || operation[field] < 0 || operation[field] >= hashes.length) fail(`capture source ${field} is outside fixed input`);
+  return receiptFile;
+}
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (!value || typeof value !== 'object') return JSON.stringify(value);
@@ -71,7 +252,7 @@ function identity(base, descriptor, name) {
   }).sort((left, right) => left.file.localeCompare(right.file));
   return { sha256: crypto.createHash('sha256').update(canonical(entries)).digest('hex'), manifestSha256: manifest.sha256, files: entries };
 }
-function identityHashes(identityValue) { return identityValue.files ? identityValue.files.map(file => file.sha256).sort() : [identityValue.sha256]; }
+function identityHashes(identityValue) { return identityValue.files ? identityValue.files.map(file => file.sha256) : [identityValue.sha256]; }
 function numericCsv(fileName, required, name) {
   const lines = fs.readFileSync(fileName, 'utf8').split(/\r?\n/).filter(line => line && !line.startsWith('#'));
   if (!lines.length) fail(`${name} is empty`);
@@ -123,11 +304,15 @@ function navigationOperations(rows, engineRate, findings, requestLabels = new Ma
     if (event.kind === 'requested') continue;
     if (typeof event.kind !== 'string' || !('generation' in event)) fail('navigation trace event is malformed');
     const id = String(event.generation), kind = event.kind.toLowerCase();
+    if (kind === 'cancelled') { record(findings, 'incomplete', 'navigation_cancelled'); continue; }
     if (kind === 'accepted') {
       acceptedCount++;
       if (['next', 'transition_to_next'].includes(String(event.action).toLowerCase())) groups.set(id, { accepted: event });
     }
-    else if (groups.has(id)) groups.get(id)[kind] = event;
+    else if (groups.has(id)) {
+      if (groups.get(id)[kind]) record(findings, 'incomplete', 'navigation_trace_duplicate', { id, kind });
+      else groups.get(id)[kind] = event;
+    }
   }
   const navigation = [];
   for (const [id, group] of groups) {
@@ -137,6 +322,12 @@ function navigationOperations(rows, engineRate, findings, requestLabels = new Ma
     if (plan.generation !== accepted.generation) record(findings, 'incomplete', 'plan_generation_unmatched', { id });
     for (const event of [accepted, applied, transition, fade]) integer(event.render_frame, 'navigation render frame');
     const operation = { id, label: `next-${navigation.length + 1}`, ...(requestLabels.has(id) ? { requestLabel: requestLabels.get(id) } : {}), source_generation: field(accepted, 'source_generation'), target_source_generation: field(accepted, 'target_source_generation'), active_index: field(accepted, 'current_index'), target_index: field(accepted, 'target_index'), active_preview: field(accepted, 'active_preview'), active_head_only: field(accepted, 'active_head_only'), target_preview: field(accepted, 'target_preview'), target_head_only: field(accepted, 'target_head_only'), request_engine_frame: field(accepted, 'render_frame'), request_active_playhead_frame: field(accepted, 'active_playhead'), plan_generation: field(plan, 'generation'), plan_engine_frame: field(applied, 'render_frame'), plan_start_frame: field(plan, 'start'), entry_frame: field(plan, 'entry'), transition_engine_frame: field(transition, 'render_frame'), fade_end_engine_frame: field(fade, 'render_frame'), engine_rate: engineRate, reason: field(plan, 'reason'), simple: field(plan, 'simple') };
+    const operationEvents = [applied, transition, fade];
+    const productionFields = ['source_generation', 'target_source_generation', 'current_index', 'target_index'];
+    if (operationEvents.some(event => productionFields.some(name => name in event))) for (const event of operationEvents) for (const name of productionFields) {
+      if (!(name in event)) record(findings, 'incomplete', 'navigation_source_observation_missing', { id, name });
+      else if (event[name] !== accepted[name]) record(findings, 'incomplete', 'navigation_source_observation_changed', { id, name });
+    }
     if (operation.plan_engine_frame > operation.transition_engine_frame) record(findings, 'incomplete', 'plan_after_transition', { id });
     navigation.push(operation);
   }
@@ -170,21 +361,23 @@ function captureOperations(traceFile, callbackFile, headerFile, findings) {
   const rows = jsonLines(traceFile, 'navigation trace'), footer = rows.pop();
   if (!footer || footer.kind !== 'capture_end') fail('navigation trace footer is missing');
   if (footer.callback_records_dropped !== 0 || footer.trace_dropped !== 0) record(findings, 'incomplete', 'trace_dropped');
-  return { operations: navigationOperations(rows, engineRate, findings, requestedLabels(rows, findings)), callback_clock: clock, transport };
+  const last = callbacks.at(-1);
+  for (const [field, value] of [['last_callback_sequence', last.sequence], ['last_playback_qpc_100ns', last.playback_qpc_100ns], ['last_output_frames', last.output_frames], ['last_engine_frame', last.engine_end]]) if (!(field in footer) || footer[field] !== value) record(findings, 'incomplete', 'capture_end_unverified', { field });
+  return { operations: navigationOperations(rows, engineRate, findings, requestedLabels(rows, findings)), callback_clock: clock, transport, finalCallback: last };
 }
 function wavInfo(fileName, name) {
   const bytes = fs.readFileSync(fileName);
   if (bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE') fail(`${name} is not a WAV file`);
-  let channels, rate, bits, dataSize;
+  let format, channels, rate, bits, dataSize;
   for (let offset = 12; offset + 8 <= bytes.length;) {
     const id = bytes.toString('ascii', offset, offset + 4), size = bytes.readUInt32LE(offset + 4);
     if (offset + 8 + size > bytes.length) fail(`${name} has a truncated chunk`);
-    if (id === 'fmt ' && size >= 16) { channels = bytes.readUInt16LE(offset + 10); rate = bytes.readUInt32LE(offset + 12); bits = bytes.readUInt16LE(offset + 22); }
+    if (id === 'fmt ' && size >= 16) { format = bytes.readUInt16LE(offset + 8); channels = bytes.readUInt16LE(offset + 10); rate = bytes.readUInt32LE(offset + 12); bits = bytes.readUInt16LE(offset + 22); }
     if (id === 'data') dataSize = size;
     offset += 8 + size + size % 2;
   }
   if (!channels || !rate || !bits || dataSize === undefined || bits % 8 || dataSize % (channels * (bits / 8))) fail(`${name} has an invalid PCM layout`);
-  return { frames: dataSize / (channels * (bits / 8)), rate };
+  return { frames: dataSize / (channels * (bits / 8)), rate, format, channels, bits };
 }
 function packetAnchors(packets, captureFrames) {
   if (packets.length < 2) fail('at least two packet anchors are required');
@@ -210,6 +403,14 @@ function qpcToCaptureFrame(packets, qpc) {
     return addFraction(fraction(BigInt(start.file_frame)), fraction(BigInt(end.file_frame - start.file_frame) * BigInt(deltaQpc.numerator), period * BigInt(deltaQpc.denominator)));
   }
   fail('QPC is outside a bounded packet interval');
+}
+function finalCallbackCoverage(packets, callback, captureRate, captureFrames, findings) {
+  try {
+    const playbackEnd = addFraction(fraction(BigInt(callback.playback_qpc_100ns)), fraction(BigInt(callback.output_frames) * QPC_PER_SECOND, BigInt(captureRate)));
+    if (compareFraction(qpcToCaptureFrame(packets, playbackEnd), fraction(BigInt(captureFrames))) > 0) record(findings, 'incomplete', 'final_callback_not_covered');
+  } catch {
+    record(findings, 'incomplete', 'final_callback_not_covered');
+  }
 }
 function callbackQpc(clock, engineFrame, engineRate, name) {
   for (const [index, callback] of clock.entries()) {
@@ -268,7 +469,9 @@ function sameRateAlignment(captureFile, captureRate, replayTrace, replayBase, li
   const audio = replayAudio(replayBase, replayTrace);
   if (!audio) return { classification: 'incomplete', reason: 'replay_audio_missing' };
   if (!Number.isSafeInteger(audio.sampleRate) || !Number.isSafeInteger(audio.engineStartFrame)) return { classification: 'incomplete', reason: 'replay_audio_metadata_missing', replayWavSha256: hash(audio.file) };
-  if (captureRate !== audio.sampleRate) return { classification: 'incomplete', reason: 'cross_rate_pcm_alignment', replayWavSha256: hash(audio.file), captureRate, replayRate: audio.sampleRate };
+  const referenceInfo = wavInfo(audio.file, 'replay WAV');
+  if (audio.sampleRate !== referenceInfo.rate) return { classification: 'incomplete', reason: 'replay_audio_rate_mismatch', replayWavSha256: hash(audio.file), replayRate: referenceInfo.rate };
+  if (captureRate !== referenceInfo.rate) return { classification: 'incomplete', reason: 'cross_rate_pcm_alignment', replayWavSha256: hash(audio.file), captureRate, replayRate: referenceInfo.rate };
   if (captureRate !== RATE) return { classification: 'incomplete', reason: 'unsupported_same_rate', replayWavSha256: hash(audio.file), captureRate };
   const target = wav(captureFile), reference = wav(audio.file), windows = [];
   for (const field of ['request_engine_frame', 'transition_engine_frame', 'fade_end_engine_frame']) {
@@ -284,6 +487,19 @@ function sameRateAlignment(captureFile, captureRate, replayTrace, replayBase, li
   const offsets = windows.map(window => window.offsetFrames);
   return { classification: 'measured', replayWavSha256: hash(audio.file), windows, residualFrames: { lower: Math.min(...offsets), upper: Math.max(...offsets), span: Math.max(...offsets) - Math.min(...offsets) } };
 }
+function sameConditionScope(endpoint, header, capturePcm, replayTrace, replayBase, soundQualityFindings) {
+  try {
+    const captureEngineRate = positive(header.options?.output_sample_rate, 'navigation header engine rate');
+    const replayEngineRate = positive(replayTrace.engine_options?.output_sample_rate, 'replay engine rate');
+    const replay = replayAudio(replayBase, replayTrace);
+    if (!replay) fail('replay audio is missing');
+    const replayPcm = wavInfo(replay.file, 'replay WAV');
+    const f32Stereo = pcm => pcm.format === 3 && pcm.channels === 2 && pcm.bits === 32;
+    if (endpoint.rate !== captureEngineRate || captureEngineRate !== capturePcm.rate || capturePcm.rate !== replayEngineRate || replayEngineRate !== replayPcm.rate || replay.sampleRate !== replayPcm.rate || endpoint.channels !== 2 || endpoint.sample_format !== 'f32' || !f32Stereo(capturePcm) || !f32Stereo(replayPcm)) record(soundQualityFindings, 'incomplete', 'same_condition_pcm_scope');
+  } catch {
+    record(soundQualityFindings, 'incomplete', 'same_condition_pcm_scope_unverified');
+  }
+}
 function comparableOptions(value) {
   object(value, 'engine options');
   const copy = { ...value };
@@ -294,7 +510,7 @@ function comparableOptions(value) {
 function traceBinding(trace, replay, replayBase, identities, replayExecutable, findings) {
   const inputHashes = trace.input?.content_hashes;
   if (!Array.isArray(inputHashes) || inputHashes.some(value => typeof value !== 'string')) record(findings, 'incomplete', 'replay_trace_input_hashes_missing');
-  else if (canonical([...inputHashes].sort()) !== canonical(identityHashes(identities.replay.input))) record(findings, 'condition_mismatch', 'replay_trace_input_hashes');
+  else if (canonical(inputHashes) !== canonical(identityHashes(identities.replay.input))) record(findings, 'condition_mismatch', 'replay_trace_input_hashes');
   if (typeof trace.core_source_sha256 !== 'string') record(findings, 'incomplete', 'replay_trace_core_source_missing');
   else if (trace.core_source_sha256 !== identities.replay.core.sha256) record(findings, 'condition_mismatch', 'replay_trace_core_source');
   if (typeof trace.executable_sha256 !== 'string') record(findings, 'incomplete', 'replay_trace_executable_missing');
@@ -308,6 +524,7 @@ function traceBinding(trace, replay, replayBase, identities, replayExecutable, f
 }
 function compareEvidence({ captureManifestPath, replayPath, scanPath }) {
   const findings = [];
+  const soundQualityFindings = [];
   try {
     const capture = json(captureManifestPath, 'capture manifest'), replay = json(replayPath, 'replay');
     const captureBase = path.dirname(captureManifestPath), replayBase = path.dirname(replayPath);
@@ -332,17 +549,22 @@ function compareEvidence({ captureManifestPath, replayPath, scanPath }) {
     const captureHeader = file(captureBase, capture.header, 'capture.header');
     const replayTrace = file(replayBase, replay.trace, 'replay.trace');
     const expectedTrace = json(replayTrace.file, 'replay trace');
-    const calibration = object(capture.calibration, 'capture.calibration');
-    const calibrationFile = file(captureBase, calibration, 'capture.calibration');
-    try {
-      object(capture.endpoint, 'capture.endpoint');
-      object(calibration.endpoint, 'capture.calibration.endpoint');
-      if (canonical(capture.endpoint) !== canonical(calibration.endpoint)) record(findings, 'condition_mismatch', 'endpoint_calibration');
-    } catch (error) { record(findings, 'incomplete', 'endpoint_calibration_unverified', { error: error.message }); }
-    const headerInputHashes = json(captureHeader.file, 'navigation header').input?.content_hashes;
-    if (!Array.isArray(headerInputHashes) || headerInputHashes.some(value => typeof value !== 'string')) record(findings, 'incomplete', 'header_input_hashes_missing');
-    else if (canonical([...headerInputHashes].sort()) !== canonical(identityHashes(identities.capture.input))) record(findings, 'condition_mismatch', 'header_input_hashes');
     const captureHeaderData = json(captureHeader.file, 'navigation header');
+    const endpoint = endpointReceipt(captureBase, capture.endpoint_receipt, 'capture.endpoint_receipt');
+    captureEndpointBinding(endpoint, captureHeaderData, findings);
+    let calibrationEvidence = null;
+    let calibration = { classification: 'incomplete', reason: 'calibration_missing' };
+    if (capture.calibration) try {
+      calibrationEvidence = calibrationReceipt(captureBase, object(capture.calibration, 'capture.calibration'), endpoint, soundQualityFindings);
+      calibration = { classification: 'verified', receiptSha256: calibrationEvidence.receipt.sha256 };
+    } catch {
+      calibration = { classification: 'incomplete', reason: 'calibration_unverified' };
+      record(soundQualityFindings, 'incomplete', 'calibration_unverified');
+    }
+    if (!calibrationEvidence) record(soundQualityFindings, 'incomplete', calibration.reason);
+    const calibrationFile = calibrationEvidence?.file;
+    const headerInputHashes = json(captureHeader.file, 'navigation header').input?.content_hashes;
+    if (!Array.isArray(headerInputHashes) || headerInputHashes.some((value, index) => { try { sha256(value, `header.input.content_hashes[${index}]`); return false; } catch { return true; } })) record(findings, 'incomplete', 'header_input_hashes_missing');
     const coreRevisions = [capture.core_git, replay.core_git, expectedTrace.runtime?.core_revision];
     if (coreRevisions.some(value => value !== undefined)) {
       if (coreRevisions.some(value => typeof value !== 'string')) record(findings, 'incomplete', 'core_git_unverified');
@@ -355,17 +577,10 @@ function compareEvidence({ captureManifestPath, replayPath, scanPath }) {
     const pcmInfo = wavInfo(pcm.file, 'capture PCM');
     if (integer(audio.capture_rate, 'capture.audio.capture_rate') !== pcmInfo.rate) record(findings, 'capture_fault', 'capture_rate');
     const scan = scanPath === '-' ? null : json(scanPath, 'scan result');
-    if (scan) {
-      integer(scan.captureFrames, 'scan.captureFrames');
-      if (scan.captureFrames !== pcmInfo.frames) record(findings, 'capture_fault', 'scan_pcm_frames');
-      packetAnchors(packets, pcmInfo.frames);
-      if (scan.inputSha256 !== pcm.sha256) record(findings, 'condition_mismatch', 'scan_pcm');
-      if (scan.calibrationSha256 !== calibrationFile.sha256) record(findings, 'condition_mismatch', 'scan_calibration');
-      if (scan.packetSha256 !== packetsFile.sha256 || scan.callbackSha256 !== callbacks.sha256) record(findings, 'condition_mismatch', 'scan_capture_records');
-    } else {
-      packetAnchors(packets, pcmInfo.frames);
-    }
+    packetAnchors(packets, pcmInfo.frames);
     const derived = captureOperations(captureTrace.file, callbacks.file, captureHeader.file, findings);
+    finalCallbackCoverage(packets, derived.finalCallback, pcmInfo.rate, pcmInfo.frames, findings);
+    const sourceReceiptFile = sourceReceipt(captureBase, capture.source_receipt, endpoint, identities.capture.input, headerInputHashes, derived);
     if (expectedTrace.navigation_trace_dropped !== 0) record(findings, 'incomplete', 'replay_trace_dropped');
     const replayOperations = navigationOperations(expectedTrace.navigation_trace, expectedTrace.options?.output_sample_rate, findings);
     const normalizedReplay = { operations: replayOperations };
@@ -397,14 +612,37 @@ function compareEvidence({ captureManifestPath, replayPath, scanPath }) {
     const last = navigation.at(-1), finalFade = last && mapped[`${last.id}\u0000fade_completed`];
     if (finalFade && mapped.capture_end && compareFraction(mapped.capture_end.lower, finalFade.upper) < 0) record(findings, 'incomplete', 'fade_not_covered');
     if (navigation[0] && mapped.capture_start && mapped[`${navigation[0].id}\u0000accepted`] && compareFraction(mapped.capture_start.upper, mapped[`${navigation[0].id}\u0000accepted`].lower) > 0) record(findings, 'incomplete', 'request_not_covered');
-    const pcmAlignment = sameRateAlignment(pcm.file, pcmInfo.rate, expectedTrace, path.dirname(replayTrace.file), navigation, replayOperations, mapped);
+    const pcmMeasurement = sameRateAlignment(pcm.file, pcmInfo.rate, expectedTrace, path.dirname(replayTrace.file), navigation, replayOperations, mapped);
+    sameConditionScope(endpoint.route, captureHeaderData, pcmInfo, expectedTrace, path.dirname(replayTrace.file), soundQualityFindings);
+    let scanEvidenceValue = null;
+    if (scan) {
+      if (!calibrationEvidence) record(soundQualityFindings, 'incomplete', 'scan_calibration_unverified');
+      if (pcmMeasurement.classification !== 'measured') record(soundQualityFindings, 'incomplete', 'scan_reference_unmeasured');
+      scanEvidenceValue = scanEvidence(scan, 'scan', {
+        captureFrames: pcmInfo.frames,
+        pcmSha256: pcm.sha256,
+        ...(calibrationFile ? { calibrationSha256: calibrationFile.sha256 } : {}),
+        packetsSha256: packetsFile.sha256,
+        callbacksSha256: callbacks.sha256,
+        endpointReceiptSha256: endpoint.file.sha256,
+        ...(pcmMeasurement.classification === 'measured' ? { referenceHashes: [pcmMeasurement.replayWavSha256] } : {})
+      });
+      if (scanEvidenceValue.classification === 'capture_fault') record(findings, 'capture_fault', 'scan_capture_fault');
+    }
     const kinds = new Set(findings.map(item => item.kind));
-    const scanClassification = scan?.classification ?? null;
-    const classification = kinds.has('capture_fault') ? 'capture_fault' : kinds.has('incomplete') ? 'incomplete' : kinds.has('condition_mismatch') ? 'condition_mismatch' : scanClassification === null ? 'comparable' : scanClassification;
-    return { schema: 1, classification, soundQuality: 'incomplete', comparable: !kinds.size, findings, identities, files: { pcmSha256: pcm.sha256, packetsSha256: packetsFile.sha256, callbacksSha256: callbacks.sha256, captureTraceSha256: captureTrace.sha256, replayTraceSha256: replayTrace.sha256, replayExecutableSha256: replayExecutable.sha256, calibrationSha256: calibrationFile.sha256 }, mappedCaptureFrames: mapped, transportCoverage, pcmAlignment, scanClassification };
+    const classification = kinds.has('capture_fault') ? 'capture_fault' : kinds.has('incomplete') ? 'incomplete' : kinds.has('condition_mismatch') ? 'condition_mismatch' : 'comparable';
+    let soundQuality = 'incomplete';
+    if (classification === 'comparable' && calibrationEvidence && !soundQualityFindings.length && scanEvidenceValue && pcmMeasurement.classification === 'measured') {
+      if (scanEvidenceValue.classification === 'clean' && !scanSignals(scanEvidenceValue)) soundQuality = 'no_anomaly_detected';
+      else if (['pcm_transient', 'dropout', 'timing_glitch'].includes(scanEvidenceValue.classification)) soundQuality = 'anomaly_detected';
+    }
+    const scanObservation = scanEvidenceValue ? { classification: scanEvidenceValue.classification, coverage: scanEvidenceValue.coverage, ...(scanEvidenceValue.first ? { first: scanEvidenceValue.first } : {}) } : null;
+    return { schema: 1, classification, soundQuality, soundQualityScope: 'fixed_input_only', comparable: classification === 'comparable', findings, soundQualityFindings, calibration, identities, files: { pcmSha256: pcm.sha256, packetsSha256: packetsFile.sha256, callbacksSha256: callbacks.sha256, captureTraceSha256: captureTrace.sha256, replayTraceSha256: replayTrace.sha256, replayExecutableSha256: replayExecutable.sha256, ...(calibrationFile ? { calibrationSha256: calibrationFile.sha256 } : {}), endpointReceiptSha256: endpoint.file.sha256, sourceReceiptSha256: sourceReceiptFile.sha256 }, mappedCaptureFrames: mapped, transportCoverage, pcmMeasurement, pcmAlignment: pcmMeasurement, scanClassification: scanEvidenceValue?.classification ?? null, scanObservation };
   } catch (error) {
-    const incomplete = /missing|empty|outside callback playback coverage/.test(error.message);
-    return { schema: 1, classification: incomplete ? 'incomplete' : 'capture_fault', soundQuality: 'incomplete', comparable: false, findings: [...findings, { kind: incomplete ? 'incomplete' : 'capture_fault', code: 'evidence_unreadable', detail: error.message }] };
+    const mismatch = /does not match|input hashes/.test(error.message);
+    const incomplete = !mismatch && /missing|empty|incomplete|contradicts|has anomaly|outside callback playback coverage|must be|required|unsupported|receipt|coverage|baseline|schema|endpoint|source_receipt/.test(error.message);
+    const kind = mismatch ? 'condition_mismatch' : incomplete ? 'incomplete' : 'capture_fault';
+    return { schema: 1, classification: kind, soundQuality: 'incomplete', comparable: false, findings: [...findings, { kind, code: 'evidence_unreadable', detail: error.message }] };
   }
 }
 

@@ -147,6 +147,12 @@ before starting the player. The capture writes `navigation-header.json`,
 actual EngineOptions. Callbacks send bounded value records. A writer thread
 serializes them. Any lost record makes the comparison incomplete.
 
+Set `FUNKOT_NAVIGATION_REQUIRE_START_SIGNAL=1` with that directory to open the
+real output stream in silence. Match the writer's `output-stream.jsonl` to an
+external process-session observation before requesting the user's sound signal.
+Only then write its matching `START.json`. The authorization schema is exercised
+in `src-tauri/src/navigation_capture.rs`. A reopened stream clears that signal.
+
 After the selected operation and required transport controls, create `STOP`
 in that directory. Keep the loopback recorder running until
 `navigation-complete.json` exists, then finalize it before closing the player.
@@ -166,11 +172,33 @@ renders the existing transport envelope before the Engine freezes.
 Run `node scripts/audio-anomaly-detector.cjs compare capture.json replay.json - result.json`.
 The two manifests describe actual source, executable, input and recording files.
 The runnable fixture in `scripts/audio-anomaly-comparison.test.cjs` demonstrates
-their format. Expected decisions come only from the hashed real-engine trace.
+their format. The capture manifest also binds hashed endpoint, calibration and
+fixed-input source receipts. Endpoint receipts record the before and after
+process session observations. Calibration receipts bind the calibration bytes,
+the stable endpoint route and complete negative, transient and dropout scans.
+Each control also binds its captured PCM, reference WAV, packet and callback
+records. Positive controls bind the injected PCM transformation. A missing or
+invalid calibration leaves the separately derived plan comparison available,
+but leaves sound quality incomplete.
+The source receipt supports one fixed, unique-content input sequence. Managed
+playlist scope is incomplete. Expected decisions come only from the hashed
+real-engine trace and complete all-window scan coverage.
 The comparison supports one Next and reports ambiguous or missing requests as
 incomplete. Same-rate PCM correlations are observations, not an audio-quality
-PASS. A new endpoint needs its own calibration. Cross-rate PCM alignment and
-hardware timing guarantees remain outside this comparison.
+PASS. It reports comparison evidence separately from `soundQuality`. A
+no-anomaly result requires a complete clean scan, measured PCM alignment, and
+one same-condition route: the endpoint, capture engine, captured WAV, replay
+engine and replay WAV must all be 48 kHz stereo `f32`. Cross-rate timing can
+still compare the plan, but its sound quality is incomplete. A new endpoint
+needs its own calibration. Audibility outside the fixed input and hardware
+timing guarantees remain outside this comparison.
+
+For state-aware PCM inspection, use the detector's `calibrate-state` command
+with two independent negative recordings, then `scan-state` for the target and
+offline injected controls. The state descriptors bind the PCM, replay, endpoint,
+packet and callback files. Every recorded frame needs an audio comparison or a
+verified intentional-silence state. See `scripts/audio-anomaly-detector.test.cjs`
+for a runnable fixture. Unknown states and incomplete coverage stay incomplete.
 
 ## Playlist occurrence proof
 

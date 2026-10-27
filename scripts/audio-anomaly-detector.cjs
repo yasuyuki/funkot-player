@@ -182,12 +182,13 @@ function eachOfflineWindow(target,offline,visit) {
   return {windows,skippedSeconds:skipped,skippedByReason,minCorrelation:Number.isFinite(minCorrelation)?minCorrelation:null,minGain,maxGain};
 }
 function featureScore(m,t) {
+  const ratio=(value,threshold)=>value/Math.max(threshold,1e-12);
   return Math.max(
-    Math.min(m.rms/t.rms,Math.max(m.difference/t.difference,m.high/t.high)),
-    Math.min(m.peak/t.peak,m.high/t.high),
-    Math.min(m.impulse/t.impulse,m.short8/t.short8),
-    Math.min(m.short8/t.short8,m.short32/t.short32),
-    Math.min(m.residual8/t.residual8,m.short8/t.short8)
+    Math.min(ratio(m.rms,t.rms),Math.max(ratio(m.difference,t.difference),ratio(m.high,t.high))),
+    Math.min(ratio(m.peak,t.peak),ratio(m.high,t.high)),
+    Math.min(ratio(m.impulse,t.impulse),ratio(m.short8,t.short8)),
+    Math.min(ratio(m.short8,t.short8),ratio(m.short32,t.short32)),
+    Math.min(ratio(m.residual8,t.residual8),ratio(m.short8,t.short8))
   );
 }
 function featurePositive(m,t) { return featureScore(m,t)>1; }
@@ -410,6 +411,506 @@ function scan(file,refFile,calibrationFile,packetFile,callbackFile,outFile,offli
   fs.writeFileSync(outFile,JSON.stringify(output,null,2)+'\n');
   console.log(JSON.stringify({classification:output.classification,frame:first?.frame,pcmCandidates:candidates,maxScore,analysisSeconds:output.analysisSeconds}));
 }
+function stateCsv(file) {
+    const lines = fs.readFileSync(file, 'utf8').trim().split(/\r?\n/).filter(line => line && !line.startsWith('#'));
+    if (!lines.length)
+        throw Error('Empty CSV');
+    const header = lines.shift().split(',');
+    if (new Set(header).size !== header.length)
+        throw Error('Duplicate CSV header');
+    return {
+        header, rows: lines.map((line, index) => {
+            const values = line.split(',');
+            if (values.length !== header.length)
+                throw Error(`Malformed CSV row ${index + 2}`);
+            return Object.fromEntries(header.map((name, i) => [name, values[i]]));
+        })
+    };
+}
+function stateInteger(value, name, nullable = false) {
+    if (nullable && (value === '' || value === 'null' || value === null))
+        return null;
+    if (!/^\d+$/.test(String(value)))
+        throw Error(`Invalid ${name}`);
+    const result = Number(value);
+    if (!Number.isSafeInteger(result))
+        throw Error(`Unsafe ${name}`);
+    return result;
+}
+function stateFile(base, descriptor, name) {
+    if (!descriptor || typeof descriptor.file !== 'string' || !/^[0-9a-f]{64}$/.test(descriptor.sha256 || ''))
+        throw Error(`Invalid ${name} descriptor`);
+    const file = path.resolve(base, descriptor.file);
+    if (!fs.existsSync(file) || sha(file) !== descriptor.sha256)
+        throw Error(`${name} descriptor does not bind bytes`);
+    return {
+        file, sha256: descriptor.sha256
+    };
+}
+function stateRoute(endpoint) {
+    const tuple = value => ({
+        endpoint_id: value?.endpoint_id, rate: value?.rate, channels: value?.channels, sample_format: value?.sample_format
+    });
+    const nonblank = value => typeof value === 'string' && value.trim().length > 0;
+    if (endpoint?.schema !== 1 || !nonblank(endpoint.run_id) || !Number.isSafeInteger(endpoint.process_id) || endpoint.process_id <= 0 || !endpoint.stream || !endpoint.session?.before || !endpoint.session?.after)
+        throw Error('Invalid endpoint receipt');
+    const beforeReceipt = endpoint.session.before, afterReceipt = endpoint.session.after;
+    const stream = tuple(endpoint.stream), before = tuple(beforeReceipt), after = tuple(afterReceipt);
+    if (!nonblank(stream.endpoint_id) || stream.rate !== RATE || stream.channels !== 2 || stream.sample_format !== 'f32' || JSON.stringify(stream) !== JSON.stringify(before) || JSON.stringify(stream) !== JSON.stringify(after) || beforeReceipt.process_id !== endpoint.process_id || afterReceipt.process_id !== endpoint.process_id || !nonblank(beforeReceipt.session_id) || beforeReceipt.session_id !== afterReceipt.session_id)
+        throw Error('Endpoint route observation mismatch');
+    return {
+        tuple: stream, hash: crypto.createHash('sha256').update(JSON.stringify(stream)).digest('hex')
+    };
+}
+function statePackets(file, frames) {
+    const parsed = stateCsv(file);
+    for (const name of ['file_frame', 'qpc_100ns', 'frames'])
+        if (!parsed.header.includes(name))
+            throw Error(`Missing packet ${name}`);
+    let expected = 0, lastQpc = -1, fault = null;
+    const rows = parsed.rows.map((row, index) => {
+        const packet = {
+            file_frame: stateInteger(row.file_frame, `packet ${index} frame`), qpc_100ns: stateInteger(row.qpc_100ns, `packet ${index} QPC`), frames: stateInteger(row.frames, `packet ${index} frames`), flags: parsed.header.includes('flags') ? stateInteger(row.flags, `packet ${index} flags`) : 0
+        };
+        if (!packet.frames || packet.file_frame !== expected || packet.qpc_100ns <= lastQpc || packet.flags)
+            fault ??= packet.file_frame;
+        expected += packet.frames;
+        lastQpc = packet.qpc_100ns;
+        return packet;
+    });
+    if (!rows.length || expected !== frames)
+        fault ??= expected;
+    return {
+        rows, fault
+    };
+}
+function stateCallbacks(file) {
+    const parsed = stateCsv(file), current = ['sequence', 'callback_qpc_100ns', 'playback_qpc_100ns', 'output_frames', 'engine_start', 'engine_end', 'paused', 'audition', 'render_lock_miss', 'trace_dropped'];
+    const legacy = ['sequence', 'start_qpc', 'playback_100ns', 'main_frames', 'flags'];
+    const currentSchema = current.every(name => parsed.header.includes(name)), legacySchema = legacy.every(name => parsed.header.includes(name));
+    if (!currentSchema && !legacySchema)
+        throw Error('Unsupported callback timing schema');
+    let prior = -1;
+    const rows = parsed.rows.map((row, index) => {
+        const callback = currentSchema ? {
+            sequence: stateInteger(row.sequence, `callback ${index} sequence`), callback_qpc_100ns: stateInteger(row.callback_qpc_100ns, `callback ${index} QPC`), playback_qpc_100ns: stateInteger(row.playback_qpc_100ns, `callback ${index} playback QPC`), output_frames: stateInteger(row.output_frames, `callback ${index} output frames`), engine_start: stateInteger(row.engine_start, `callback ${index} engine start`, true), engine_end: stateInteger(row.engine_end, `callback ${index} engine end`, true), paused: stateInteger(row.paused, `callback ${index} paused`), audition: stateInteger(row.audition, `callback ${index} audition`), render_lock_miss: stateInteger(row.render_lock_miss, `callback ${index} lock`), trace_dropped: stateInteger(row.trace_dropped, `callback ${index} trace dropped`)
+        }
+            : {
+                sequence: stateInteger(row.sequence, `callback ${index} sequence`), callback_qpc_100ns: stateInteger(row.start_qpc, `callback ${index} QPC`), playback_qpc_100ns: stateInteger(row.playback_100ns, `callback ${index} playback QPC`), output_frames: stateInteger(row.main_frames, `callback ${index} output frames`), engine_start: null, engine_end: null, paused: null, audition: null, render_lock_miss: stateInteger(row.flags, `callback ${index} flags`) & 1, trace_dropped: 0
+            };
+        if (callback.sequence !== prior + 1 && index)
+            callback.sequenceGap = true;
+        prior = callback.sequence;
+        return callback;
+    });
+    return {
+        rows, currentSchema
+    };
+}
+function stateFrameAtQpc(packets, qpc) {
+    for (let i = 0; i < packets.length; i++) {
+        const a = packets[i], b = packets[i + 1];
+        const endQpc = b ? b.qpc_100ns : a.qpc_100ns + Math.round(a.frames * 1e7 / RATE), endFrame = b ? b.file_frame : a.file_frame + a.frames;
+        if (qpc >= a.qpc_100ns && qpc <= endQpc)
+            return a.file_frame + (qpc - a.qpc_100ns) * (endFrame - a.file_frame) / (endQpc - a.qpc_100ns);
+    }
+    return null;
+}
+function stateRangeKind(range) {
+    return range.kind === 'audio' ? 'audio' : range.kind === 'intentional' ? 'intentional' : 'unclassified';
+}
+function stateZero(wave, start, end) {
+    for (let frame = start; frame < end; frame++)
+        for (let ch = 0; ch < 2; ch++)
+            if (wave.sample(frame, ch) !== 0)
+                return false;
+    return true;
+}
+function stateLoad(inputFile) {
+    const base = path.dirname(inputFile), state = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
+    if (state.schema !== 1 || !Array.isArray(state.ranges) || typeof state.routehash !== 'string' || !state.routehash)
+        throw Error('Invalid state schema');
+    const files = Object.fromEntries(['capture', 'reference', 'packets', 'callbacks', 'endpoint_receipt'].map(name => [name, stateFile(base, state[name], name)]));
+    const capture = wav(files.capture.file), reference = wav(files.reference.file), packets = statePackets(files.packets.file, capture.frames), callbacks = stateCallbacks(files.callbacks.file);
+    if (reference.frames < 1)
+        throw Error('Empty state reference');
+    const endpoint = JSON.parse(fs.readFileSync(files.endpoint_receipt.file, 'utf8'));
+    const route = stateRoute(endpoint);
+    if (state.routehash !== route.hash)
+        throw Error('State route hash does not bind endpoint receipt');
+    const issues = [], ranges = [];
+    let cursor = 0;
+    for (const [index, raw] of state.ranges.entries()) {
+        const range = {
+            ...raw, start: raw.start, end: raw.end, kind: stateRangeKind(raw)
+        };
+        if (!Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.start !== cursor || range.end <= range.start || range.end > capture.frames)
+            issues.push(`range_${index}_partition`);
+        cursor = range.end;
+        if (range.kind === 'audio' && (!Number.isSafeInteger(range.reference_start) || range.reference_start < 0 || range.reference_start + (range.end - range.start) > reference.frames)) {
+            range.kind = 'unclassified';
+            issues.push(`range_${index}_reference`);
+        }
+        if (range.kind === 'intentional' && !['paused', 'diagnostic_gate', 'capture_preroll', 'capture_postroll'].includes(range.reason)) {
+            range.kind = 'unclassified';
+            issues.push(`range_${index}_reason`);
+        }
+        ranges.push(range);
+    }
+    if (cursor !== capture.frames)
+        issues.push('partition_end');
+    return {
+        state, stateSha256: sha(inputFile), files, capture, reference, packets, callbacks, endpoint, route, ranges, issues
+    };
+}
+function stateTiming(input, thresholds) {
+    const faults = [], incomplete = [], glitches = [], rows = input.callbacks.rows, packets = input.packets.rows;
+    if (input.packets.fault !== null)
+        faults.push({
+            code: 'packet_coverage', frame: input.packets.fault
+        });
+    if (!rows.length)
+        incomplete.push({
+            code: 'callbacks_missing'
+        });
+    let maxGap = 0, maxPlaybackGap = 0;
+    for (const [index, row] of rows.entries()) {
+        if (row.sequenceGap)
+            faults.push({
+                code: 'callback_sequence_gap', sequence: row.sequence
+            });
+        if (row.render_lock_miss)
+            faults.push({
+                code: 'render_lock_miss', sequence: row.sequence
+            });
+        if (row.trace_dropped)
+            faults.push({
+                code: 'trace_dropped', sequence: row.sequence
+            });
+        if (!input.callbacks.currentSchema)
+            incomplete.push({
+                code: 'legacy_callback_schema'
+            });
+        if (index) {
+            const previous = rows[index - 1], gap = (row.callback_qpc_100ns - previous.callback_qpc_100ns) / 10000, playback = (row.playback_qpc_100ns - previous.playback_qpc_100ns) / 10000;
+            maxGap = Math.max(maxGap, gap);
+            maxPlaybackGap = Math.max(maxPlaybackGap, playback);
+            if (thresholds && (gap > thresholds.callbackGapMs || playback < 0 || playback > thresholds.playbackGapMs))
+                glitches.push({
+                    code: 'callback_timing', sequence: row.sequence, gap, playback
+                });
+        }
+    }
+    return {
+        classification: faults.length ? 'capture_fault' : incomplete.length ? 'incomplete' : glitches.length ? 'timing_glitch' : 'clean', faults, incomplete, glitches, maxGapMs: maxGap, maxPlaybackGapMs: maxPlaybackGap, packets: packets.length, callbacks: rows.length
+    };
+}
+function stateValidateRanges(input) {
+    const problems = [...input.issues], rows = input.callbacks.rows, first = rows[0], last = rows.at(-1);
+    const interval = row => {
+        const start = stateFrameAtQpc(input.packets.rows, row.playback_qpc_100ns);
+        return start === null ? null : {
+            start, end: start + row.output_frames
+        };
+    };
+    for (const [index, range] of input.ranges.entries()) {
+        if (range.kind === 'unclassified')
+            continue;
+        const preroll = range.kind === 'intentional' && range.reason === 'capture_preroll';
+        const postroll = range.kind === 'intentional' && range.reason === 'capture_postroll';
+        if (preroll || postroll) {
+            if (!stateZero(input.capture, range.start, range.end))
+                problems.push(`range_${index}_intentional_pcm`);
+            if (preroll && (!first || range.end > stateFrameAtQpc(input.packets.rows, first.playback_qpc_100ns) + 1))
+                problems.push(`range_${index}_preroll`);
+            if (postroll && (!last || range.start < stateFrameAtQpc(input.packets.rows, last.playback_qpc_100ns) + last.output_frames - 1))
+                problems.push(`range_${index}_postroll`);
+            continue;
+        }
+        const selected = rows.filter(row => row.sequence >= range.first_sequence && row.sequence <= range.last_sequence);
+        if (!Number.isSafeInteger(range.first_sequence) || !Number.isSafeInteger(range.last_sequence) || !selected.length || selected[0].sequence !== range.first_sequence || selected.at(-1).sequence !== range.last_sequence) {
+            problems.push(`range_${index}_callbacks`);
+            continue;
+        }
+        const overlapping = rows.filter(row => {
+            const span = interval(row);
+            return span && span.start < range.end && span.end > range.start;
+        });
+        if (overlapping.some(row => row.sequence < range.first_sequence || row.sequence > range.last_sequence))
+            problems.push(`range_${index}_callback_span`);
+        let covered = range.start;
+        for (const row of selected) {
+            const span = interval(row);
+            if (!span) {
+                problems.push(`range_${index}_qpc`);
+                continue;
+            }
+            if (span.start > covered + 1)
+                problems.push(`range_${index}_callback_span`);
+            covered = Math.max(covered, span.end);
+            if (range.kind === 'intentional' && (!input.callbacks.currentSchema || row.paused !== 1 || row.audition !== 0 || row.render_lock_miss !== 0 || row.trace_dropped !== 0 || (row.engine_start === null) !== (row.engine_end === null) || (row.engine_start !== null && row.engine_start !== row.engine_end)))
+                problems.push(`range_${index}_intentional_state`);
+        }
+        if (covered < range.end - 1)
+            problems.push(`range_${index}_callback_span`);
+        if (range.kind === 'intentional' && !stateZero(input.capture, range.start, range.end))
+            problems.push(`range_${index}_intentional_pcm`);
+    }
+    return problems;
+}
+function stateFit(target, reference, range) {
+    let sx = 0, sy = 0, sxx = 0, sxy = 0, n = 0;
+    for (let frame = range.start; frame < range.end; frame++)
+        for (let ch = 0; ch < 2; ch++) {
+            const x = reference.sample(range.reference_start + frame - range.start, ch), y = target.sample(frame, ch);
+            if (Math.abs(x) <= ACTIVE_LEVEL || Math.abs(y) <= ACTIVE_LEVEL)
+                continue;
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+            n++;
+        }
+    const gain = (sxy - sx * sy / n) / (sxx - sx * sx / n);
+    return {
+        gain, dc: (sy - gain * sx) / n
+    };
+}
+function stateMetrics(target, reference, range, start, count, fitResult) {
+    const values = [], curves = [];
+    let sum = 0, peak = 0, difference = 0, high = 0, impulse = 0, diffN = 0, highN = 0;
+    for (let i = 0; i < count; i++)
+        for (let ch = 0; ch < 2; ch++) {
+            const residual = target.sample(start + i, ch) - (fitResult.gain * reference.sample(range.reference_start + start + i - range.start, ch) + fitResult.dc);
+            values.push(residual);
+            sum += residual * residual;
+            peak = Math.max(peak, Math.abs(residual));
+        }
+    for (let i = 0; i < count; i++)
+        for (let ch = 0; ch < 2; ch++) {
+            const at = (i * 2) + ch, previous = i ? values[at - 2] : values[at], next = i + 1 < count ? values[at + 2] : values[at], curve = Math.abs(previous - 2 * values[at] + next);
+            curves.push(curve);
+            impulse = Math.max(impulse, curve);
+            if (i > 1 && i + 2 < count) {
+                difference += (values[at] - values[at - 2]) ** 2;
+                diffN++;
+                high += (values[at] - (values[at - 4] + values[at - 2] + values[at] + values[at + 2] + values[at + 4]) / 5) ** 2;
+                highN++;
+            }
+        }
+    const result = {
+        rms: Math.sqrt(sum / Math.max(1, count * 2)), peak, difference: Math.sqrt(difference / Math.max(1, diffN)), high: Math.sqrt(high / Math.max(1, highN)), impulse
+    };
+    for (const width of [8, 32]) {
+        let short = 0, residual = 0;
+        for (let offset = 0; offset < count; offset += 8) {
+            const length = Math.min(width, count - offset);
+            for (let ch = 0; ch < 2; ch++) {
+                let a = 0, b = 0;
+                for (let i = 0; i < length; i++) {
+                    a += curves[(offset + i) * 2 + ch] ** 2;
+                    b += values[(offset + i) * 2 + ch] ** 2;
+                }
+                short = Math.max(short, Math.sqrt(a / length));
+                residual = Math.max(residual, Math.sqrt(b / length));
+            }
+        }
+        result[`short${width}`] = short;
+        result[`residual${width}`] = residual;
+    }
+    return result;
+}
+function stateWindows(input, visit, validateFit = true) {
+    for (const range of input.ranges)
+        if (range.kind === 'audio') {
+            const fitResult = stateFit(input.capture, input.reference, range);
+            if (!Number.isFinite(fitResult.gain) || !Number.isFinite(fitResult.dc) || (validateFit && (Math.abs(fitResult.gain - 1) > 0.05 || Math.abs(fitResult.dc) > 0.05)))
+                throw Error(`Gain/DC mismatch at ${range.start}`);
+            for (let start = range.start; start < range.end; start += WINDOW)
+                visit(range, start, Math.min(WINDOW, range.end - start), stateMetrics(input.capture, input.reference, range, start, Math.min(WINDOW, range.end - start), fitResult), fitResult);
+        }
+}
+function stateThresholds(stats) {
+    return Object.fromEntries(keys.map(key => [key, Math.max(stats[key].max * 1.25, 1e-12)]));
+}
+function stateContinuity(wave, ranges) {
+    let first = null, maxZero = 0, nonfinite = null, maxDelta = 0, zero = 0, previousEnd = null;
+    for (const range of ranges) {
+        if (range.kind !== 'audio') {
+            zero = 0;
+            previousEnd = null;
+            continue;
+        }
+        if (previousEnd !== range.start)
+            zero = 0;
+        for (let frame = range.start; frame < range.end; frame++) {
+            let both = true;
+            for (let ch = 0; ch < 2; ch++) {
+                const value = wave.sample(frame, ch);
+                if (!Number.isFinite(value))
+                    nonfinite ??= frame;
+                if (Math.abs(value) > 1e-6)
+                    both = false;
+                if (frame > 0)
+                    maxDelta = Math.max(maxDelta, Math.abs(value - wave.sample(frame - 1, ch)));
+            }
+            if (both) {
+                zero++;
+                if (zero >= 24)
+                    first ??= frame - zero + 1;
+                maxZero = Math.max(maxZero, zero);
+            }
+            else
+                zero = 0;
+        }
+        previousEnd = range.end;
+    }
+    for (let frame = 0; frame < wave.frames; frame++)
+        for (let ch = 0; ch < 2; ch++)
+            if (!Number.isFinite(wave.sample(frame, ch)))
+                nonfinite ??= frame;
+    return {
+        firstGap: first, maxZero, nonfinite, maxDelta
+    };
+}
+function calibrateState(aFile, bFile, outFile) {
+    const a = stateLoad(aFile), b = stateLoad(bFile);
+    if (a.route.hash !== b.route.hash)
+        throw Error('Negative routes differ');
+    if (!a.endpoint.run_id || !b.endpoint.run_id || a.endpoint.run_id === b.endpoint.run_id || a.endpoint.process_id === b.endpoint.process_id)
+        throw Error('Negative captures lack independent endpoint receipts');
+    if (JSON.stringify(a.route.tuple) !== JSON.stringify(b.route.tuple))
+        throw Error('Negative endpoint routes are not stable');
+    const values = Object.fromEntries(keys.map(key => [key, []]));
+    for (const input of [a, b]) {
+        const timing = stateTiming(input);
+        if (timing.classification !== 'clean' || stateValidateRanges(input).length)
+            throw Error('Negative state is not complete');
+        const continuity = stateContinuity(input.capture, input.ranges);
+        if (continuity.nonfinite !== null || continuity.firstGap !== null)
+            throw Error('Negative PCM continuity is not clean');
+        let windows = 0;
+        stateWindows(input, (_range, _start, _count, metrics) => {
+            windows++;
+            keys.forEach(key => values[key].push(metrics[key]));
+        });
+        if (!windows)
+            throw Error('Negative state has no audio windows');
+    }
+    const stats = Object.fromEntries(keys.map(key => {
+        const value = values[key].sort((x, y) => x - y);
+        return [key, {
+                median: value[Math.floor(value.length / 2)], p999: value[Math.floor(value.length * .999)], max: value.at(-1)
+            }
+        ];
+    }));
+    const timingA = stateTiming(a), timingB = stateTiming(b);
+    const continuityA = stateContinuity(a.capture, a.ranges), continuityB = stateContinuity(b.capture, b.ranges);
+    const thresholds = {
+        ...stateThresholds(stats), adjacentDelta: Math.max(continuityA.maxDelta, continuityB.maxDelta) * 1.25, callbackGapMs: Math.max(timingA.maxGapMs, timingB.maxGapMs) * 1.5, playbackGapMs: Math.max(timingA.maxPlaybackGapMs, timingB.maxPlaybackGapMs) * 1.5
+    };
+    if (!Object.values(stats).every(stat => Object.values(stat).every(Number.isFinite)) || !Object.values(thresholds).every(value => Number.isFinite(value) && value > 0))
+        throw Error('Negative calibration statistics are invalid');
+    const output = {
+        schema: 3, rate: RATE, windowFrames: WINDOW,
+        baseline: {
+            aSha256: a.files.reference.sha256, bSha256: b.files.reference.sha256
+        },
+        routehash: a.route.hash, stats,
+        thresholds,
+        timing: {
+            a: timingA, b: timingB
+        },
+        provenance: {
+            detectorSha256: sha(__filename),
+            a: {
+                stateSha256: a.stateSha256, capture: a.files.capture, reference: a.files.reference, packets: a.files.packets, callbacks: a.files.callbacks, endpoint_receipt: a.files.endpoint_receipt, runId: a.endpoint.run_id, processId: a.endpoint.process_id
+            },
+            b: {
+                stateSha256: b.stateSha256, capture: b.files.capture, reference: b.files.reference, packets: b.files.packets, callbacks: b.files.callbacks, endpoint_receipt: b.files.endpoint_receipt, runId: b.endpoint.run_id, processId: b.endpoint.process_id
+            }
+        }
+    };
+    fs.writeFileSync(outFile, JSON.stringify(output, null, 2) + '\n');
+    console.log(JSON.stringify({
+        classification: 'calibrated', calibration: outFile, routehash: output.routehash
+    }));
+}
+function scanState(stateFile, calibrationFile, outFile) {
+    const input = stateLoad(stateFile), cal = JSON.parse(fs.readFileSync(calibrationFile, 'utf8'));
+    if (cal.schema !== 3 || cal.rate !== RATE || cal.windowFrames !== WINDOW)
+        throw Error('Unsupported state calibration');
+    if (cal.provenance?.detectorSha256 !== sha(__filename))
+        throw Error('Calibration detector revision mismatch');
+    if (cal.routehash !== input.route.hash)
+        throw Error('Calibration route mismatch');
+    if (!cal.thresholds || !keys.every(key => Number.isFinite(cal.thresholds[key]) && cal.thresholds[key] > 0) || !['adjacentDelta', 'callbackGapMs', 'playbackGapMs'].every(key => Number.isFinite(cal.thresholds[key]) && cal.thresholds[key] > 0))
+        throw Error('Calibration thresholds are invalid');
+    const timing = stateTiming(input, cal.thresholds), problems = stateValidateRanges(input), stateFault = problems.some(problem => problem.endsWith('_intentional_state') || problem.endsWith('_intentional_pcm')), coverageRanges = input.ranges.map(range => ({
+        start: range.start, end: range.end, kind: range.kind
+    }));
+    let first = null, candidates = 0, maxScore = 0;
+    const candidateFrames = [];
+    const noAudio = !input.ranges.some(range => range.kind === 'audio');
+    const classified = problems.length || timing.classification === 'incomplete' || noAudio;
+    if (!classified)
+        stateWindows(input, (_range, start, count, metrics) => {
+            const score = featureScore(metrics, cal.thresholds);
+            maxScore = Math.max(maxScore, score);
+            if (score > 1) {
+                candidates++;
+                candidateFrames.push(start);
+                first ??= {
+                    classification: 'pcm_transient', frame: start, frames: count, score, metrics
+                };
+            }
+        });
+    const continuity = stateContinuity(input.capture, input.ranges);
+    if (continuity.nonfinite !== null)
+        first = {
+            classification: 'capture_fault', frame: continuity.nonfinite, reason: 'nonfinite_sample'
+        };
+    else if (continuity.firstGap !== null)
+        first = {
+            classification: 'dropout', frame: continuity.firstGap, maxZeroFrames: continuity.maxZero
+        };
+    if (timing.classification === 'capture_fault' || stateFault)
+        first = {
+            classification: 'capture_fault', ...(stateFault ? {
+                problems
+            }
+                : timing)
+        };
+    else if (timing.classification === 'timing_glitch' && !first)
+        first = {
+            classification: 'timing_glitch', ...timing
+        };
+    const unclassified = coverageRanges.filter(range => range.kind === 'unclassified').length + (problems.length ? 1 : 0) + (noAudio ? 1 : 0), complete = !unclassified && timing.classification !== 'incomplete';
+    const classification = timing.classification === 'capture_fault' || stateFault ? 'capture_fault' : !complete ? 'incomplete' : first?.classification || 'clean';
+    const output = {
+        schema: 1, classification, first: classification === 'incomplete' ? {
+            classification: 'incomplete', problems
+        }
+            : first, captureFrames: input.capture.frames, inputSha256: input.files.capture.sha256, calibrationSha256: sha(calibrationFile), detectorSha256: sha(__filename), packetSha256: input.files.packets.sha256, callbackSha256: input.files.callbacks.sha256, endpointReceiptSha256: input.files.endpoint_receipt.sha256, referenceSha256: input.files.reference.sha256, coverage: {
+            total_windows: 0, audio_windows: 0, intentional_windows: 0, unclassified_windows: unclassified, complete, ranges: coverageRanges
+        },
+        residual: {
+            maxScore, candidates, candidateFrames
+        },
+        continuity, timing
+    };
+    for (const range of input.ranges) {
+        if (range.kind === 'audio')
+            output.coverage.audio_windows++;
+        else if (range.kind === 'intentional')
+            output.coverage.intentional_windows++;
+    }
+    output.coverage.total_windows = output.coverage.audio_windows + output.coverage.intentional_windows;
+    fs.writeFileSync(outFile, JSON.stringify(output, null, 2) + '\n');
+    console.log(JSON.stringify({
+        classification, frame: output.first?.frame, complete
+    }));
+}
 function compare(captureManifestFile,replayFile,scanFile,outFile) {
   const { compareEvidence } = require('./audio-anomaly-comparison.cjs');
   const output=compareEvidence({captureManifestPath:captureManifestFile,replayPath:replayFile,scanPath:scanFile});
@@ -419,10 +920,12 @@ function compare(captureManifestFile,replayFile,scanFile,outFile) {
 module.exports={RATE,wav,localOffset};
 if(require.main===module){
   const [mode,...args]=process.argv.slice(2);
-  if(mode==='calibrate'&&(args.length===4||args.length===5))calibrate(...args);
+  if(mode==='calibrate-state'&&args.length===3)calibrateState(...args);
+  else if(mode==='scan-state'&&args.length===3)scanState(...args);
+  else if(mode==='calibrate'&&(args.length===4||args.length===5))calibrate(...args);
   else if(mode==='scan'&&args.length===7)scan(...args);
   else if(mode==='compare'&&args.length===4)compare(...args);
   else if(mode==='inject'&&args.length===5)injectFile(args[0],args[1],Number(args[2]),args[3],Number(args[4]));
   else if(mode==='clip'&&args.length===7)controlClip(args[0],args[1],Number(args[2]),Number(args[3]),Number(args[4]),args[5],Number(args[6]));
-  else {console.error('Usage: node detect.cjs calibrate clean-a.wav clean-b.wav calibration.json offline-manifest.json [validation-clean.wav] | scan capture.wav clean.wav calibration.json packets.csv callbacks.csv result.json offline-manifest.json | compare capture-manifest.json replay.json scan-result.json|- result.json | inject input.wav output.wav frame type amplitude | clip input.wav output.wav startFrame frameCount controlFrame type amplitude');process.exitCode=2;}
+  else {console.error('Usage: node detect.cjs calibrate-state negative-a-state.json negative-b-state.json calibration.json | scan-state state.json calibration.json result.json | calibrate clean-a.wav clean-b.wav calibration.json offline-manifest.json [validation-clean.wav] | scan capture.wav clean.wav calibration.json packets.csv callbacks.csv result.json offline-manifest.json | compare capture-manifest.json replay.json scan-result.json|- result.json | inject input.wav output.wav frame type amplitude | clip input.wav output.wav startFrame frameCount controlFrame type amplitude');process.exitCode=2;}
 }
