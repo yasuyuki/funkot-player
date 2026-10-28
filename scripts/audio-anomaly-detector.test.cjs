@@ -97,6 +97,29 @@ function fixture(t, ranges) {
         root, frames, reference, capture, packets, callbacks, aState: state('a-state.json', a, endpointA), bState: state('b-state.json', b, endpointB), targetState: state('target-state.json', capture, endpoint), calibration: path.join(root, 'calibration.json'), result: path.join(root, 'result.json')
     };
 }
+function addOrigin(input, stateFile, captureFile, name) {
+    const rawCapture = path.join(input.root, `raw-capture-${name}.wav`), rawPackets = path.join(input.root, `raw-packets-${name}.csv`), rawCallbacks = path.join(input.root, `raw-callbacks-${name}.csv`), origin = path.join(input.root, `origin-${name}`, 'origin.json');
+    const capture = fs.readFileSync(captureFile), raw = Buffer.alloc(capture.length + 96 * 8);
+    capture.copy(raw);
+    raw.writeUInt32LE(raw.length - 8, 4);
+    raw.writeUInt32LE(raw.length - 44, 40);
+    write(rawCapture, raw);
+    write(rawPackets, fs.readFileSync(input.packets));
+    write(rawCallbacks, fs.readFileSync(input.callbacks));
+    fs.mkdirSync(path.dirname(origin), {
+        recursive: true
+    });
+    json(origin, {
+        raw_capture: { file: `../raw-capture-${name}.wav`, sha256: sha(rawCapture) },
+        raw_packets: { file: `../raw-packets-${name}.csv`, sha256: sha(rawPackets) },
+        raw_callbacks: { file: `../raw-callbacks-${name}.csv`, sha256: sha(rawCallbacks) },
+        start_frame: 0, end_frame: input.frames
+    });
+    const state = JSON.parse(fs.readFileSync(stateFile));
+    state.origin = { file: path.relative(input.root, origin), sha256: sha(origin) };
+    json(stateFile, state);
+    return { origin, rawCapture, rawCallbacks };
+}
 function calibrate(input) {
     execFileSync(process.execPath, [detector, 'calibrate-state', input.aState, input.bState, input.calibration], {
         stdio: 'pipe'
@@ -237,12 +260,12 @@ test('missing callback coverage rejects clean output and rate mismatch rejects',
     write(input.reference, bytes);
     assert.throws(() => scan(input));
 });
-test('playback QPC, not callback QPC, maps normal state coverage', t => {
+test('predicted playback QPC jitter does not reject healthy audio calibration', t => {
     const input = fixture(t);
     const rows = fs.readFileSync(input.callbacks, 'utf8').trim().split(/\r?\n/);
     for (let index = 1; index < rows.length; index++) {
         const fields = rows[index].split(',');
-        fields[1] = String(900000 + index * 100000);
+        fields[2] = String((index - 1) * 20000 + [0, 0, 833, -625, 1042, 0][index]);
         rows[index] = fields.join(',');
     }
     write(input.callbacks, `${rows.join('\n')}\n`);
@@ -253,6 +276,91 @@ test('playback QPC, not callback QPC, maps normal state coverage', t => {
     }
     calibrate(input);
     assert.equal(scan(input).classification, 'clean');
+    const shifted = rows.map((row, index) => {
+        if (!index) return row;
+        const fields = row.split(',');
+        fields[2] = String(Number(fields[2]) + 900000);
+        return fields.join(',');
+    });
+    write(input.callbacks, `${shifted.join('\n')}\n`);
+    const state = JSON.parse(fs.readFileSync(input.targetState));
+    state.callbacks.sha256 = sha(input.callbacks);
+    json(input.targetState, state);
+    assert.equal(scan(input).classification, 'incomplete');
+});
+test('audio ranges require complete healthy callback and engine accounting', t => {
+    const missing = fixture(t);
+    let rows = fs.readFileSync(missing.callbacks, 'utf8').trim().split(/\r?\n/);
+    rows.splice(3, 1);
+    write(missing.callbacks, `${rows.join('\n')}\n`);
+    for (const file of [missing.aState, missing.bState]) {
+        const state = JSON.parse(fs.readFileSync(file));
+        state.callbacks.sha256 = sha(missing.callbacks);
+        json(file, state);
+    }
+    assert.throws(() => calibrate(missing));
+    const zero = fixture(t);
+    rows = fs.readFileSync(zero.callbacks, 'utf8').trim().split(/\r?\n/);
+    rows[2] = '2,20000,20000,0,96,96,0,0,0,0';
+    write(zero.callbacks, `${rows.join('\n')}\n`);
+    for (const file of [zero.aState, zero.bState]) {
+        const state = JSON.parse(fs.readFileSync(file));
+        state.callbacks.sha256 = sha(zero.callbacks);
+        json(file, state);
+    }
+    assert.throws(() => calibrate(zero));
+    const mismatch = fixture(t);
+    rows = fs.readFileSync(mismatch.callbacks, 'utf8').trim().split(/\r?\n/);
+    rows[2] = '2,20000,20000,96,96,191,0,0,0,0';
+    rows[3] = '3,40000,40000,96,191,287,0,0,0,0';
+    rows[4] = '4,60000,60000,96,287,383,0,0,0,0';
+    rows[5] = '5,80000,80000,96,383,479,0,0,0,0';
+    write(mismatch.callbacks, `${rows.join('\n')}\n`);
+    for (const file of [mismatch.aState, mismatch.bState]) {
+        const state = JSON.parse(fs.readFileSync(file));
+        state.callbacks.sha256 = sha(mismatch.callbacks);
+        json(file, state);
+    }
+    assert.throws(() => calibrate(mismatch));
+    const discontinuous = fixture(t);
+    calibrate(discontinuous);
+    rows = fs.readFileSync(discontinuous.callbacks, 'utf8').trim().split(/\r?\n/);
+    rows[3] = '3,40000,40000,96,10000,10096,0,0,0,0';
+    write(discontinuous.callbacks, `${rows.join('\n')}\n`);
+    const discontinuousState = JSON.parse(fs.readFileSync(discontinuous.targetState));
+    discontinuousState.callbacks.sha256 = sha(discontinuous.callbacks);
+    json(discontinuous.targetState, discontinuousState);
+    assert.equal(scan(discontinuous).classification, 'capture_fault');
+});
+test('origin descriptors bind the raw crop and calibration provenance', t => {
+    const input = fixture(t), origin = addOrigin(input, input.aState, path.join(input.root, 'a.wav'), 'a');
+    addOrigin(input, input.bState, path.join(input.root, 'b.wav'), 'b');
+    const targetOrigin = addOrigin(input, input.targetState, input.capture, 'target');
+    calibrate(input);
+    const calibration = JSON.parse(fs.readFileSync(input.calibration));
+    assert.equal(calibration.provenance.a.origin.sha256, sha(origin.origin));
+    assert.equal(scan(input).classification, 'clean');
+    const raw = fs.readFileSync(targetOrigin.rawCapture);
+    raw[44] ^= 1;
+    write(targetOrigin.rawCapture, raw);
+    assert.throws(() => scan(input));
+    const bounds = fixture(t), boundsOrigin = addOrigin(bounds, bounds.aState, path.join(bounds.root, 'a.wav'), 'a');
+    addOrigin(bounds, bounds.bState, path.join(bounds.root, 'b.wav'), 'b');
+    const badBounds = JSON.parse(fs.readFileSync(boundsOrigin.origin));
+    badBounds.end_frame = bounds.frames + 97;
+    json(boundsOrigin.origin, badBounds);
+    const boundsState = JSON.parse(fs.readFileSync(bounds.aState));
+    boundsState.origin.sha256 = sha(boundsOrigin.origin);
+    json(bounds.aState, boundsState);
+    assert.throws(() => calibrate(bounds));
+    const callbacks = fixture(t), callbackOrigin = addOrigin(callbacks, callbacks.targetState, callbacks.capture, 'target');
+    calibrate(callbacks);
+    const altered = fs.readFileSync(callbacks.callbacks, 'utf8').replace('2,20000,20000,96,96,192,0,0,0,0', '2,20000,777777,96,96,192,0,0,0,0');
+    write(callbacks.callbacks, altered);
+    const state = JSON.parse(fs.readFileSync(callbacks.targetState));
+    state.callbacks.sha256 = sha(callbacks.callbacks);
+    json(callbacks.targetState, state);
+    assert.throws(() => scan(callbacks));
 });
 test('oversized and nonzero intentional masks are capture faults', t => {
     const oversized = [{
@@ -294,6 +402,28 @@ test('a gain or DC change is rejected instead of normalized away', t => {
     state.capture.sha256 = sha(input.capture);
     json(input.targetState, state);
     assert.throws(() => scan(input));
+});
+test('a local control cannot move its first residual to an untouched window', t => {
+    const input = fixture(t);
+    for (const file of [input.aState, input.bState]) {
+        const state = JSON.parse(fs.readFileSync(file));
+        const capture = path.join(input.root, state.capture.file);
+        write(capture, fs.readFileSync(input.reference));
+        state.capture.sha256 = sha(capture);
+        json(file, state);
+    }
+    calibrate(input);
+    assert.equal(scan(input).classification, 'clean');
+    for (const frame of [96, 200])
+        for (const shape of ['step', 'impulse', 'broadband8']) {
+            execFileSync(process.execPath, [detector, 'inject', input.reference, input.capture, String(frame), shape, '0.00005'], { stdio: 'pipe' });
+            const state = JSON.parse(fs.readFileSync(input.targetState));
+            state.capture.sha256 = sha(input.capture);
+            json(input.targetState, state);
+            const result = scan(input);
+            assert.equal(result.classification, 'pcm_transient');
+            assert.equal(result.first.frame, Math.floor(frame / 96) * 96);
+        }
 });
 test('all-intentional negatives and missing calibration thresholds are rejected', t => {
     const input = fixture(t);

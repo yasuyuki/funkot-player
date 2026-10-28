@@ -526,12 +526,31 @@ function stateZero(wave, start, end) {
                 return false;
     return true;
 }
+function stateOrigin(originFile, capture, callbacksFile) {
+    const origin = JSON.parse(fs.readFileSync(originFile, 'utf8'));
+    const files = Object.fromEntries(['raw_capture', 'raw_packets', 'raw_callbacks'].map(name => [name, stateFile(path.dirname(originFile), origin[name], `origin ${name}`)]));
+    const rawCapture = wav(files.raw_capture.file), start = origin.start_frame, end = origin.end_frame;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > rawCapture.frames || end - start !== capture.frames)
+        throw Error('Invalid origin crop bounds');
+    const rawPcm = rawCapture.bytes.subarray(rawCapture.data + start * 8, rawCapture.data + end * 8);
+    const croppedPcm = capture.bytes.subarray(capture.data, capture.data + capture.frames * 8);
+    if (!rawPcm.equals(croppedPcm))
+        throw Error('Origin capture does not bind cropped PCM');
+    const cropped = stateCsv(callbacksFile), raw = stateCsv(files.raw_callbacks.file);
+    const unchanged = JSON.stringify(cropped.header) === JSON.stringify(raw.header) && raw.rows.some((_, startRow) => cropped.rows.every((row, index) => JSON.stringify(row) === JSON.stringify(raw.rows[startRow + index])));
+    if (!unchanged)
+        throw Error('Origin callbacks do not bind cropped rows');
+    return files;
+}
 function stateLoad(inputFile) {
     const base = path.dirname(inputFile), state = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
     if (state.schema !== 1 || !Array.isArray(state.ranges) || typeof state.routehash !== 'string' || !state.routehash)
         throw Error('Invalid state schema');
     const files = Object.fromEntries(['capture', 'reference', 'packets', 'callbacks', 'endpoint_receipt'].map(name => [name, stateFile(base, state[name], name)]));
+    if (state.origin !== undefined)
+        files.origin = stateFile(base, state.origin, 'origin');
     const capture = wav(files.capture.file), reference = wav(files.reference.file), packets = statePackets(files.packets.file, capture.frames), callbacks = stateCallbacks(files.callbacks.file);
+    const origin = files.origin ? stateOrigin(files.origin.file, capture, files.callbacks.file) : null;
     if (reference.frames < 1)
         throw Error('Empty state reference');
     const endpoint = JSON.parse(fs.readFileSync(files.endpoint_receipt.file, 'utf8'));
@@ -560,7 +579,7 @@ function stateLoad(inputFile) {
     if (cursor !== capture.frames)
         issues.push('partition_end');
     return {
-        state, stateSha256: sha(inputFile), files, capture, reference, packets, callbacks, endpoint, route, ranges, issues
+        state, stateSha256: sha(inputFile), files, capture, reference, packets, callbacks, origin, endpoint, route, ranges, issues
     };
 }
 function stateTiming(input, thresholds) {
@@ -593,6 +612,8 @@ function stateTiming(input, thresholds) {
             });
         if (index) {
             const previous = rows[index - 1], gap = (row.callback_qpc_100ns - previous.callback_qpc_100ns) / 10000, playback = (row.playback_qpc_100ns - previous.playback_qpc_100ns) / 10000;
+            if (previous.engine_end !== null && row.engine_start !== null && previous.engine_end !== row.engine_start)
+                faults.push({ code: 'engine_frame_gap', sequence: row.sequence });
             maxGap = Math.max(maxGap, gap);
             maxPlaybackGap = Math.max(maxPlaybackGap, playback);
             if (thresholds && (gap > thresholds.callbackGapMs || playback < 0 || playback > thresholds.playbackGapMs))
@@ -613,6 +634,10 @@ function stateValidateRanges(input) {
             start, end: start + row.output_frames
         };
     };
+    const qpcAtFrame = frame => {
+        const packet = input.packets.rows.find(row => frame >= row.file_frame && frame <= row.file_frame + row.frames);
+        return packet ? packet.qpc_100ns + (frame - packet.file_frame) * 1e7 / RATE : null;
+    };
     for (const [index, range] of input.ranges.entries()) {
         if (range.kind === 'unclassified')
             continue;
@@ -630,6 +655,15 @@ function stateValidateRanges(input) {
         const selected = rows.filter(row => row.sequence >= range.first_sequence && row.sequence <= range.last_sequence);
         if (!Number.isSafeInteger(range.first_sequence) || !Number.isSafeInteger(range.last_sequence) || !selected.length || selected[0].sequence !== range.first_sequence || selected.at(-1).sequence !== range.last_sequence) {
             problems.push(`range_${index}_callbacks`);
+            continue;
+        }
+        if (range.kind === 'audio') {
+            const expected = range.last_sequence - range.first_sequence + 1, outputFrames = selected.reduce((total, row) => total + row.output_frames, 0);
+            if (!input.callbacks.currentSchema || selected.length !== expected || selected.some((row, offset) => row.sequence !== range.first_sequence + offset || row.output_frames <= 0 || row.paused !== 0 || row.audition !== 0 || row.render_lock_miss !== 0 || row.trace_dropped !== 0 || row.engine_start === null || row.engine_end === null || row.engine_end - row.engine_start !== row.output_frames) || outputFrames < range.end - range.start)
+                problems.push(`range_${index}_audio_state`);
+            const startQpc = qpcAtFrame(range.start), endQpc = qpcAtFrame(range.end), final = selected.at(-1);
+            if (startQpc === null || endQpc === null || selected[0].playback_qpc_100ns > startQpc || final.playback_qpc_100ns + final.output_frames * 1e7 / RATE < endQpc)
+                problems.push(`range_${index}_callback_bracket`);
             continue;
         }
         const overlapping = rows.filter(row => {
@@ -727,7 +761,7 @@ function stateWindows(input, visit, validateFit = true) {
             if (!Number.isFinite(fitResult.gain) || !Number.isFinite(fitResult.dc) || (validateFit && (Math.abs(fitResult.gain - 1) > 0.05 || Math.abs(fitResult.dc) > 0.05)))
                 throw Error(`Gain/DC mismatch at ${range.start}`);
             for (let start = range.start; start < range.end; start += WINDOW)
-                visit(range, start, Math.min(WINDOW, range.end - start), stateMetrics(input.capture, input.reference, range, start, Math.min(WINDOW, range.end - start), fitResult), fitResult);
+                visit(range, start, Math.min(WINDOW, range.end - start), stateMetrics(input.capture, input.reference, range, start, Math.min(WINDOW, range.end - start), { gain: 1, dc: 0 }), fitResult);
         }
 }
 function stateThresholds(stats) {
@@ -824,10 +858,10 @@ function calibrateState(aFile, bFile, outFile) {
         provenance: {
             detectorSha256: sha(__filename),
             a: {
-                stateSha256: a.stateSha256, capture: a.files.capture, reference: a.files.reference, packets: a.files.packets, callbacks: a.files.callbacks, endpoint_receipt: a.files.endpoint_receipt, runId: a.endpoint.run_id, processId: a.endpoint.process_id
+                stateSha256: a.stateSha256, capture: a.files.capture, reference: a.files.reference, packets: a.files.packets, callbacks: a.files.callbacks, endpoint_receipt: a.files.endpoint_receipt, origin: a.files.origin, runId: a.endpoint.run_id, processId: a.endpoint.process_id
             },
             b: {
-                stateSha256: b.stateSha256, capture: b.files.capture, reference: b.files.reference, packets: b.files.packets, callbacks: b.files.callbacks, endpoint_receipt: b.files.endpoint_receipt, runId: b.endpoint.run_id, processId: b.endpoint.process_id
+                stateSha256: b.stateSha256, capture: b.files.capture, reference: b.files.reference, packets: b.files.packets, callbacks: b.files.callbacks, endpoint_receipt: b.files.endpoint_receipt, origin: b.files.origin, runId: b.endpoint.run_id, processId: b.endpoint.process_id
             }
         }
     };

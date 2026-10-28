@@ -199,6 +199,11 @@ offline injected controls. The state descriptors bind the PCM, replay, endpoint,
 packet and callback files. Every recorded frame needs an audio comparison or a
 verified intentional-silence state. See `scripts/audio-anomaly-detector.test.cjs`
 for a runnable fixture. Unknown states and incomplete coverage stay incomplete.
+Audio coverage uses callback sequence and frame counts. Predicted playback QPC
+brackets the range; it does not define exact boundaries between callbacks.
+Residuals compare aligned PCM directly without fitting away gain or DC changes.
+An optional hashed `origin` binds a cropped negative to its raw PCM slice and
+unchanged callback rows.
 
 ## Playlist occurrence proof
 
