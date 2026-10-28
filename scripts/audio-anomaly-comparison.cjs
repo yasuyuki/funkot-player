@@ -309,10 +309,9 @@ function navigationOperations(rows, engineRate, findings, requestLabels = new Ma
       acceptedCount++;
       if (['next', 'transition_to_next'].includes(String(event.action).toLowerCase())) groups.set(id, { accepted: event });
     }
-    else if (groups.has(id)) {
-      if (groups.get(id)[kind]) record(findings, 'incomplete', 'navigation_trace_duplicate', { id, kind });
-      else groups.get(id)[kind] = event;
-    }
+    else if (!groups.has(id) || !['plan_applied', 'transition_started', 'fade_completed'].includes(kind)) record(findings, 'incomplete', 'navigation_trace_stale', { id, kind });
+    else if (groups.get(id)[kind]) record(findings, 'incomplete', 'navigation_trace_duplicate', { id, kind });
+    else groups.get(id)[kind] = event;
   }
   const navigation = [];
   for (const [id, group] of groups) {
@@ -322,11 +321,20 @@ function navigationOperations(rows, engineRate, findings, requestLabels = new Ma
     if (plan.generation !== accepted.generation) record(findings, 'incomplete', 'plan_generation_unmatched', { id });
     for (const event of [accepted, applied, transition, fade]) integer(event.render_frame, 'navigation render frame');
     const operation = { id, label: `next-${navigation.length + 1}`, ...(requestLabels.has(id) ? { requestLabel: requestLabels.get(id) } : {}), source_generation: field(accepted, 'source_generation'), target_source_generation: field(accepted, 'target_source_generation'), active_index: field(accepted, 'current_index'), target_index: field(accepted, 'target_index'), active_preview: field(accepted, 'active_preview'), active_head_only: field(accepted, 'active_head_only'), target_preview: field(accepted, 'target_preview'), target_head_only: field(accepted, 'target_head_only'), request_engine_frame: field(accepted, 'render_frame'), request_active_playhead_frame: field(accepted, 'active_playhead'), plan_generation: field(plan, 'generation'), plan_engine_frame: field(applied, 'render_frame'), plan_start_frame: field(plan, 'start'), entry_frame: field(plan, 'entry'), transition_engine_frame: field(transition, 'render_frame'), fade_end_engine_frame: field(fade, 'render_frame'), engine_rate: engineRate, reason: field(plan, 'reason'), simple: field(plan, 'simple') };
-    const operationEvents = [applied, transition, fade];
-    const productionFields = ['source_generation', 'target_source_generation', 'current_index', 'target_index'];
-    if (operationEvents.some(event => productionFields.some(name => name in event))) for (const event of operationEvents) for (const name of productionFields) {
+    const phaseFields = [
+      [applied, ['target_index', 'target_source_generation']],
+      [transition, ['current_index', 'source_generation', 'target_index', 'target_source_generation']],
+      [fade, ['current_index', 'source_generation', 'target_index', 'target_source_generation']]
+    ];
+    const phaseValues = {
+      target_index: accepted.target_index,
+      target_source_generation: accepted.target_source_generation,
+      current_index: accepted.target_index,
+      source_generation: accepted.target_source_generation
+    };
+    for (const [event, names] of phaseFields) for (const name of names) {
       if (!(name in event)) record(findings, 'incomplete', 'navigation_source_observation_missing', { id, name });
-      else if (event[name] !== accepted[name]) record(findings, 'incomplete', 'navigation_source_observation_changed', { id, name });
+      else if (event[name] !== phaseValues[name]) record(findings, 'incomplete', 'navigation_source_observation_changed', { id, name });
     }
     if (operation.plan_engine_frame > operation.transition_engine_frame) record(findings, 'incomplete', 'plan_after_transition', { id });
     navigation.push(operation);
@@ -372,7 +380,10 @@ function wavInfo(fileName, name) {
   for (let offset = 12; offset + 8 <= bytes.length;) {
     const id = bytes.toString('ascii', offset, offset + 4), size = bytes.readUInt32LE(offset + 4);
     if (offset + 8 + size > bytes.length) fail(`${name} has a truncated chunk`);
-    if (id === 'fmt ' && size >= 16) { format = bytes.readUInt16LE(offset + 8); channels = bytes.readUInt16LE(offset + 10); rate = bytes.readUInt32LE(offset + 12); bits = bytes.readUInt16LE(offset + 22); }
+    if (id === 'fmt ' && size >= 16) {
+      format = bytes.readUInt16LE(offset + 8); channels = bytes.readUInt16LE(offset + 10); rate = bytes.readUInt32LE(offset + 12); bits = bytes.readUInt16LE(offset + 22);
+      if (format === 0xfffe && size >= 40 && bytes.subarray(offset + 32, offset + 48).equals(Buffer.from('0300000000001000800000aa00389b71', 'hex'))) format = 3;
+    }
     if (id === 'data') dataSize = size;
     offset += 8 + size + size % 2;
   }

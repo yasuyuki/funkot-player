@@ -81,8 +81,8 @@ function fixture(t) {
   const trace = [
     { kind: 'requested', request_id: 1, label: 'next-1', action: 'transition_to_next' },
     { kind: 'accepted', generation: 7, action: 'next', render_frame: 441, active_playhead: 220, current_index: 0, source_generation: 9, target_index: 1, target_source_generation: 10, active_preview: false, active_head_only: false, target_preview: false, target_head_only: false },
-    { kind: 'plan_applied', generation: 7, source_generation: 9, target_source_generation: 10, current_index: 0, target_index: 1, render_frame: 442, plan: { generation: 7, start: 430, entry: 12, simple: false, reason: 'manual' } },
-    { kind: 'transition_started', generation: 7, source_generation: 9, target_source_generation: 10, current_index: 0, target_index: 1, render_frame: 500 }, { kind: 'fade_completed', generation: 7, source_generation: 9, target_source_generation: 10, current_index: 0, target_index: 1, render_frame: 600 },
+    { kind: 'plan_applied', generation: 7, target_source_generation: 10, target_index: 1, render_frame: 442, plan: { generation: 7, start: 430, entry: 12, simple: false, reason: 'manual' } },
+    { kind: 'transition_started', generation: 7, source_generation: 10, target_source_generation: 10, current_index: 1, target_index: 1, render_frame: 500 }, { kind: 'fade_completed', generation: 7, source_generation: 10, target_source_generation: 10, current_index: 1, target_index: 1, render_frame: 600 },
     { kind: 'capture_end', callback_records_dropped: 0, trace_dropped: 0, last_callback_sequence: 2, last_playback_qpc_100ns: 100000, last_output_frames: 480, last_engine_frame: 2000 }
   ];
   write(path.join(root, 'capture', 'trace.json'), `${trace.map(JSON.stringify).join('\n')}\n`);
@@ -152,6 +152,46 @@ test('transition timing relative to the accepted request must still match', t =>
 test('a plan from a different accepted generation is incomplete', t => {
   const input = fixture(t);
   input.replayTrace.navigation_trace.find(row => row.kind === 'plan_applied').plan.generation++;
+  saveReplayTrace(input);
+  assert.equal(run(input).classification, 'incomplete');
+});
+
+test('actual producer navigation phases remain comparable', t => {
+  const input = fixture(t);
+  assert.equal(run(input).classification, 'comparable');
+});
+
+test('a plan without its target pair is incomplete', t => {
+  const input = fixture(t);
+  delete input.replayTrace.navigation_trace.find(row => row.kind === 'plan_applied').target_index;
+  saveReplayTrace(input);
+  assert.equal(run(input).classification, 'incomplete');
+});
+
+test('a stale phase target is incomplete', t => {
+  const input = fixture(t);
+  input.replayTrace.navigation_trace.find(row => row.kind === 'plan_applied').target_index = 0;
+  saveReplayTrace(input);
+  assert.equal(run(input).classification, 'incomplete');
+});
+
+test('a stale phase generation is incomplete', t => {
+  const input = fixture(t);
+  input.replayTrace.navigation_trace.find(row => row.kind === 'plan_applied').generation = 6;
+  saveReplayTrace(input);
+  assert.equal(run(input).classification, 'incomplete');
+});
+
+test('a transition that retains the old current index is incomplete', t => {
+  const input = fixture(t);
+  input.replayTrace.navigation_trace.find(row => row.kind === 'transition_started').current_index = 0;
+  saveReplayTrace(input);
+  assert.equal(run(input).classification, 'incomplete');
+});
+
+test('a phase source change is incomplete', t => {
+  const input = fixture(t);
+  input.replayTrace.navigation_trace.find(row => row.kind === 'fade_completed').source_generation = 9;
   saveReplayTrace(input);
   assert.equal(run(input).classification, 'incomplete');
 });
@@ -288,6 +328,24 @@ test('zero replay navigation is incomplete', t => {
 test('the trace sidecar is the only replay navigation measurement', t => {
   const input = fixture(t); input.replay.navigation_trace = []; save(input);
   assert.equal(run(input).classification, 'comparable');
+});
+
+test('WASAPI extensible IEEE float is the same PCM format', t => {
+  const input = fixture(t), source = fs.readFileSync(path.join(input.root, 'capture', 'capture.wav'));
+  const bytes = Buffer.alloc(source.length + 24), file = path.join(input.root, 'replay', 'extensible.wav');
+  source.copy(bytes, 0, 0, 36); source.copy(bytes, 60, 36);
+  bytes.writeUInt32LE(bytes.length - 8, 4); bytes.writeUInt32LE(40, 16); bytes.writeUInt16LE(0xfffe, 20);
+  bytes.writeUInt16LE(22, 36); bytes.writeUInt16LE(32, 38); bytes.writeUInt32LE(3, 40);
+  Buffer.from('0300000000001000800000aa00389b71', 'hex').copy(bytes, 44);
+  write(file, bytes);
+  input.replayTrace.audio.file = file; saveReplayTrace(input);
+  const scan = JSON.parse(fs.readFileSync(input.scanFile)); scan.referenceSha256 = sha(file); writeJson(input.scanFile, scan);
+  assert.equal(run(input).soundQuality, 'no_anomaly_detected');
+  bytes[59] ^= 1; write(file, bytes);
+  scan.referenceSha256 = sha(file); writeJson(input.scanFile, scan);
+  const invalid = run(input);
+  assert.equal(invalid.soundQuality, 'incomplete');
+  assert.ok(invalid.soundQualityFindings.some(finding => finding.code === 'same_condition_pcm_scope'));
 });
 
 test('trace executable fingerprint must bind the replay executable bytes', t => {
