@@ -526,7 +526,7 @@ function stateZero(wave, start, end) {
                 return false;
     return true;
 }
-function stateOrigin(originFile, capture, callbacksFile) {
+function stateOrigin(originFile, capture, packetsFile, callbacksFile) {
     const origin = JSON.parse(fs.readFileSync(originFile, 'utf8'));
     const files = Object.fromEntries(['raw_capture', 'raw_packets', 'raw_callbacks'].map(name => [name, stateFile(path.dirname(originFile), origin[name], `origin ${name}`)]));
     const rawCapture = wav(files.raw_capture.file), start = origin.start_frame, end = origin.end_frame;
@@ -536,6 +536,13 @@ function stateOrigin(originFile, capture, callbacksFile) {
     const croppedPcm = capture.bytes.subarray(capture.data, capture.data + capture.frames * 8);
     if (!rawPcm.equals(croppedPcm))
         throw Error('Origin capture does not bind cropped PCM');
+    const rawPackets = statePackets(files.raw_packets.file, rawCapture.frames), croppedPackets = statePackets(packetsFile, capture.frames);
+    const expectedPackets = rawPackets.rows.filter(row => row.file_frame < end && row.file_frame + row.frames > start).map(row => {
+        const first = Math.max(start, row.file_frame), last = Math.min(end, row.file_frame + row.frames);
+        return { file_frame: first - start, qpc_100ns: row.qpc_100ns + Math.round((first - row.file_frame) * 1e7 / RATE), frames: last - first, flags: row.flags };
+    });
+    if (rawPackets.fault !== null || croppedPackets.fault !== null || JSON.stringify(croppedPackets.rows) !== JSON.stringify(expectedPackets))
+        throw Error('Origin packets do not bind cropped timestamps and frames');
     const cropped = stateCsv(callbacksFile), raw = stateCsv(files.raw_callbacks.file);
     const unchanged = JSON.stringify(cropped.header) === JSON.stringify(raw.header) && raw.rows.some((_, startRow) => cropped.rows.every((row, index) => JSON.stringify(row) === JSON.stringify(raw.rows[startRow + index])));
     if (!unchanged)
@@ -550,7 +557,7 @@ function stateLoad(inputFile) {
     if (state.origin !== undefined)
         files.origin = stateFile(base, state.origin, 'origin');
     const capture = wav(files.capture.file), reference = wav(files.reference.file), packets = statePackets(files.packets.file, capture.frames), callbacks = stateCallbacks(files.callbacks.file);
-    const origin = files.origin ? stateOrigin(files.origin.file, capture, files.callbacks.file) : null;
+    const origin = files.origin ? stateOrigin(files.origin.file, capture, files.packets.file, files.callbacks.file) : null;
     if (reference.frames < 1)
         throw Error('Empty state reference');
     const endpoint = JSON.parse(fs.readFileSync(files.endpoint_receipt.file, 'utf8'));

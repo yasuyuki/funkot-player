@@ -202,8 +202,8 @@ for a runnable fixture. Unknown states and incomplete coverage stay incomplete.
 Audio coverage uses callback sequence and frame counts. Predicted playback QPC
 brackets the range; it does not define exact boundaries between callbacks.
 Residuals compare aligned PCM directly without fitting away gain or DC changes.
-An optional hashed `origin` binds a cropped negative to its raw PCM slice and
-unchanged callback rows.
+An optional hashed `origin` binds a cropped negative to its raw PCM slice,
+derived packet timestamps and unchanged callback rows.
 
 ## Playlist occurrence proof
 

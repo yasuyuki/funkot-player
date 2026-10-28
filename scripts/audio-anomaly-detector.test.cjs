@@ -104,7 +104,7 @@ function addOrigin(input, stateFile, captureFile, name) {
     raw.writeUInt32LE(raw.length - 8, 4);
     raw.writeUInt32LE(raw.length - 44, 40);
     write(rawCapture, raw);
-    write(rawPackets, fs.readFileSync(input.packets));
+    write(rawPackets, fs.readFileSync(input.packets, 'utf8') + `${input.frames},100000,96,0\n`);
     write(rawCallbacks, fs.readFileSync(input.callbacks));
     fs.mkdirSync(path.dirname(origin), {
         recursive: true
@@ -361,6 +361,14 @@ test('origin descriptors bind the raw crop and calibration provenance', t => {
     state.callbacks.sha256 = sha(callbacks.callbacks);
     json(callbacks.targetState, state);
     assert.throws(() => scan(callbacks));
+    const packets = fixture(t);
+    addOrigin(packets, packets.targetState, packets.capture, 'target');
+    calibrate(packets);
+    write(packets.packets, fs.readFileSync(packets.packets, 'utf8').replace('96,20000,96,0', '96,20001,96,0'));
+    const packetState = JSON.parse(fs.readFileSync(packets.targetState));
+    packetState.packets.sha256 = sha(packets.packets);
+    json(packets.targetState, packetState);
+    assert.throws(() => scan(packets));
 });
 test('oversized and nonzero intentional masks are capture faults', t => {
     const oversized = [{
