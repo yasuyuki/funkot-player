@@ -77,6 +77,7 @@ $originalContext = $env:WORKSPACE_LIFECYCLE_CONTEXT
 $originalCargoHome = $env:CARGO_HOME
 $originalCore = $env:FUNKOT_CORE_REPO
 $originalCandidate = $env:FUNKOT_CORE_CANDIDATE_SHA
+$originalTauriConfig = $env:TAURI_CONFIG
 $originalLocation = Get-Location
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('funkot-native-test-' + [Guid]::NewGuid().ToString('N'))
 try {
@@ -113,9 +114,13 @@ try {
     Invoke-CheckedOutput git @('-C', $repo, 'commit', '-qm', 'fixture') | Out-Null
     $buildArgs = @{ Repo = $repo; Python = $OwnerPython; Destination = $script:dest }
     Assert-Rejected { Invoke-WindowsBuild @buildArgs -BuildOnly -Launch } 'BuildOnly launch conflict' 'Conflicting'
+    $env:TAURI_CONFIG = '{"identifier":"test.build.original"}'
     $first = Invoke-WindowsBuild @buildArgs -BuildOnly
     Assert-True ($script:stops -eq 0 -and -not (Test-Path -LiteralPath $script:dest)) 'BuildOnly touched deployment'
     Assert-True ([bool]($first.receipt -and $first.generation)) 'BuildOnly did not return exact identity'
+    $env:TAURI_CONFIG = '{"identifier":"test.build.changed"}'
+    Assert-Rejected { Invoke-WindowsBuild @buildArgs -DeployOnly -Receipt $first.receipt } 'Changed Tauri configuration accepted' 'inputs changed'
+    $env:TAURI_CONFIG = '{"identifier":"test.build.original"}'
     $script:activeArtifact = Join-Path $first.output 'release\funkot-player.exe'
     $script:raceAttempt = $true
     Invoke-WindowsBuild @buildArgs -DeployOnly -Receipt $first.receipt -Launch | Out-Null
@@ -165,6 +170,7 @@ try {
     $env:CARGO_HOME = $originalCargoHome
     $env:FUNKOT_CORE_REPO = $originalCore
     $env:FUNKOT_CORE_CANDIDATE_SHA = $originalCandidate
+    $env:TAURI_CONFIG = $originalTauriConfig
     Set-Location -LiteralPath $originalLocation
     $resolvedTemp = [IO.Path]::GetFullPath($temp)
     $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
