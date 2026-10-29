@@ -131,7 +131,9 @@ test('replay does not pass inherited compiler overrides to Cargo', t => {
     for (const observed of [observedMetadata, observedBuild]) {
       assert.ok(observed, 'replay reached Cargo');
       for (const key of overrides) assert.equal(observed[key], undefined, `${key} reached Cargo`);
-      assert.ok(observed.PATH, 'the tool search path remains available');
+      const pathKey = Object.keys(process.env).find(key => key.toUpperCase() === 'PATH');
+      assert.ok(pathKey && process.env[pathKey], 'the tool search path is configured');
+      assert.equal(observed[pathKey], process.env[pathKey], 'the tool search path remains available');
     }
   } finally {
     Module._load = oldLoad;
