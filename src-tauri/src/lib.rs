@@ -17,6 +17,8 @@ mod playlist_service;
 mod engine_observation;
 mod playback_diagnostics;
 mod navigation_capture;
+#[cfg(all(target_os = "windows", any(test, feature = "verified-capture")))]
+mod verified_capture_control;
 mod playback_recovery;
 mod playback_state;
 #[cfg(test)]
@@ -2943,7 +2945,7 @@ fn open_output_stream(
                 let Ok(mut state) = render.try_lock() else {
                     record_capture(None, None, paused.load(Ordering::Relaxed), false, true, 0);
                     diagnostics.record_render_lock_miss((out.len() / 2) as u64);
-                    out.fill(0.0);
+                    navigation_capture::silence_device_output(out);
                     return;
                 };
                 // Snapshot once: a control arriving during this buffer takes
@@ -2952,7 +2954,7 @@ fn open_output_stream(
                 if requested_pause && transport_fade.is_silent() {
                     let frame = state.engine.render_frame();
                     record_capture(Some(frame), Some(frame), true, state.audition.is_some(), false, state.engine.navigation_trace_dropped() as u64);
-                    out.fill(0.0);
+                    navigation_capture::silence_device_output(out);
                     state.stall.reset_silence();
                     set_phase(Phase::Paused);
                     return;
@@ -2963,7 +2965,7 @@ fn open_output_stream(
                 // Stamp `audition` at send time from this buffer's engine choice.
                 let audition = state.audition.is_some();
                 let engine_start = state.engine.render_frame();
-                let (events, in_transition, render_diagnostics) = {
+                let (events, in_transition, render_diagnostics, rendered_silence) = {
                     let engine = match state.audition.as_mut() {
                         Some(aud) => aud,
                         None => &mut state.engine,
@@ -2972,6 +2974,7 @@ fn open_output_stream(
                     // engine. Its events and playhead still account for every
                     // rendered frame through the normal path below.
                     let frames = transport_fade.render(out, requested_pause, |out| engine.render(out));
+                    let rendered_silence = navigation_capture::finalize_rendered_output(capture.as_ref(), out);
                     // Only the main engine advances the playhead `player_state`
                     // reports as `position_secs` — see `MAIN_FRAMES`'s doc
                     // comment for why this must not run in the audition branch.
@@ -3022,7 +3025,7 @@ fn open_output_stream(
                     // waiting for an end edge that will never come.
                     let in_transition = engine.transition_frames_into().is_some();
                     let render_diagnostics = (!audition).then(|| engine.render_diagnostics());
-                    (events, in_transition, render_diagnostics)
+                    (events, in_transition, render_diagnostics, rendered_silence)
                 };
                 if let Some(render_diagnostics) = render_diagnostics {
                     core_diagnostics.observe(render_diagnostics, || MAIN_FRAMES.load(Ordering::Relaxed), &diagnostics);
@@ -3036,7 +3039,7 @@ fn open_output_stream(
                 }
                 // Bit-exact silence is the one signal a host gets that the
                 // engine had nothing prepared for this buffer; see `StallWatch`.
-                let silent = out.iter().all(|s| *s == 0.0);
+                let silent = rendered_silence;
                 let total_frames = (out.len() / 2) as u64;
                 let phase = if !audition && state.engine.is_finished() {
                     paused.store(true, Ordering::Relaxed);
@@ -9443,6 +9446,9 @@ pub fn run() {
     let builder = tauri::Builder::default().manage(AppState::default());
     builder
         .setup(|app| {
+            #[cfg(all(target_os = "windows", feature = "verified-capture"))]
+            let capture_control = verified_capture_control::prepare(app.handle())
+                .map_err(std::io::Error::other)?;
             // Optional Windows endpoint: failure must never affect launch or audio.
             #[cfg(target_os = "windows")]
             current_track_http::start(current_track_http_snapshot);
@@ -9493,6 +9499,10 @@ pub fn run() {
             #[cfg(all(debug_assertions, not(target_os = "android")))]
             if let Some(w) = app.get_webview_window("main") {
                 w.open_devtools();
+            }
+            #[cfg(all(target_os = "windows", feature = "verified-capture"))]
+            if let Some(control) = capture_control {
+                verified_capture_control::start(handle, control).map_err(std::io::Error::other)?;
             }
             Ok(())
         })

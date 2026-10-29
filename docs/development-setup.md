@@ -169,7 +169,15 @@ runs at the same active playhead and by timing relative to request acceptance;
 their generation numbers and output-frame origins can differ. A pause request
 renders the existing transport envelope before the Engine freezes.
 
-Run `node scripts/audio-anomaly-detector.cjs compare capture.json replay.json - result.json`.
+For a fresh, silent capture and replay in one process, run
+`node scripts/audio-anomaly-detector.cjs compare-live --help`. The command
+builds an isolated player and verifies the process-loopback recorder from the
+pinned [pwshDoom source](https://github.com/jasonulbright/pwshDoom/tree/68719ae9ebe1446a13ac09eb2481c8f91f859960)
+(GPL-2.0-or-later) and official PowerShell release. Its `comparison.json` can compare
+the navigation plan, but silent output cannot establish sound quality.
+
+The separate `compare` command reads capture and replay manifests. Without the
+same-process capture witness it cannot accept a fresh-producer comparison.
 The two manifests describe actual source, executable, input and recording files.
 The runnable fixture in `scripts/audio-anomaly-comparison.test.cjs` demonstrates
 their format. The capture manifest also binds hashed endpoint, calibration and

@@ -7,8 +7,12 @@ const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
 const detector = path.join(__dirname, 'audio-anomaly-detector.cjs');
-const { compareEvidence } = require('./audio-anomaly-comparison.cjs');
+const { compareEvidence: compareProduction } = require('./audio-anomaly-comparison.cjs');
+const { analyzeEvidence: compareEvidence } = require('./audio-anomaly-analysis.cjs');
+const { freshReplay } = require('./verified-replay.cjs');
+const { superviseFreshCapture } = require('./verified-capture.cjs');
 const sha = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const coreRevision = 'a'.repeat(40);
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value); };
 const writeJson = (file, value) => write(file, `${JSON.stringify(value, null, 2)}\n`);
 
@@ -71,13 +75,13 @@ function fixture(t) {
   writeJson(sourceReceipt, { schema: 1, mode: 'fixed_input', run_id: 'capture-run', before: { input_sha256: inputHash, revision: 'fixed-revision' }, after: { input_sha256: inputHash, revision: 'fixed-revision' }, source_edits: 0, ordered_input_hashes: inputHashes });
   const capture = {
     schema: 1,
-    identities: { source: { manifest: 'capture/source.json' }, core: { file: 'capture/core.bin' }, binary: { file: 'capture/binary.bin' }, input: { manifest: 'capture/input.json' } }, core_git: 'synthetic-core-revision',
+    identities: { source: { manifest: 'capture/source.json' }, core: { file: 'capture/core.bin' }, binary: { file: 'capture/binary.bin' }, input: { manifest: 'capture/input.json' } }, core_git: coreRevision,
     trace: { file: 'capture/trace.json' }, header: { file: 'capture/header.json' }, audio: { pcm: { file: 'capture/capture.wav' }, packets: { file: 'capture/packets.csv' }, callbacks: { file: 'capture/callbacks.csv' }, capture_rate: 48000 },
     endpoint_receipt: endpoint, calibration: { file: 'capture/calibration.json', sha256: sha(calibration), receipt: { file: 'capture/calibration-receipt.json', sha256: sha(calibrationReceipt) } }, source_receipt: { file: 'capture/source-receipt.json', sha256: sha(sourceReceipt) }
   };
   const markers = [];
-  const replay = { schema: 1, identities: { source: { manifest: 'replay/source.json' }, core: { file: 'replay/core.bin' }, input: { manifest: 'replay/input.json' } }, trace: { file: 'replay/trace.json' }, replay_executable: { file: 'replay/binary.bin' }, driver_source: { file: 'replay/driver.rs' }, core_git: 'synthetic-core-revision' };
-  writeJson(path.join(root, 'capture', 'header.json'), { run_id: 'capture-run', process_id: 42, options: { output_sample_rate: 48000, cache_dir: 'capture-only', loop_playlist: true }, input: { content_hashes: inputHashes } });
+  const replay = { schema: 1, identities: { source: { manifest: 'replay/source.json' }, core: { file: 'replay/core.bin' }, input: { manifest: 'replay/input.json' } }, trace: { file: 'replay/trace.json' }, replay_executable: { file: 'replay/binary.bin' }, driver_source: { file: 'replay/driver.rs' }, core_git: coreRevision };
+  writeJson(path.join(root, 'capture', 'header.json'), { run_id: 'capture-run', process_id: 42, core_git: coreRevision, options: { output_sample_rate: 48000, cache_dir: 'capture-only', loop_playlist: true }, input: { content_hashes: inputHashes } });
   const trace = [
     { kind: 'requested', request_id: 1, label: 'next-1', action: 'transition_to_next' },
     { kind: 'accepted', generation: 7, action: 'next', render_frame: 441, active_playhead: 220, current_index: 0, source_generation: 9, target_index: 1, target_source_generation: 10, active_preview: false, active_head_only: false, target_preview: false, target_head_only: false },
@@ -86,7 +90,7 @@ function fixture(t) {
     { kind: 'capture_end', callback_records_dropped: 0, trace_dropped: 0, last_callback_sequence: 2, last_playback_qpc_100ns: 100000, last_output_frames: 480, last_engine_frame: 2000 }
   ];
   write(path.join(root, 'capture', 'trace.json'), `${trace.map(JSON.stringify).join('\n')}\n`);
-  const replayTrace = { navigation_trace: trace.slice(1, -1), navigation_trace_dropped: 0, options: { output_sample_rate: 48000 }, engine_options: { output_sample_rate: 48000, cache_dir: 'replay-only', loop_playlist: false }, input: { content_hashes: inputHashes }, core_source_sha256: sha(path.join(root, 'replay', 'core.bin')), executable_sha256: sha(path.join(root, 'replay', 'binary.bin')), driver_source_sha256: sha(path.join(root, 'replay', 'driver.rs')), runtime: { core_revision: 'synthetic-core-revision' }, audio: { file: 'capture/capture.wav', sample_rate: 48000, engine_start_frame: 0 } };
+  const replayTrace = { navigation_trace: trace.slice(1, -1), navigation_trace_dropped: 0, options: { output_sample_rate: 48000 }, engine_options: { output_sample_rate: 48000, cache_dir: 'replay-only', loop_playlist: false }, input: { content_hashes: inputHashes }, core_source_sha256: sha(path.join(root, 'replay', 'core.bin')), executable_sha256: sha(path.join(root, 'replay', 'binary.bin')), driver_source_sha256: sha(path.join(root, 'replay', 'driver.rs')), runtime: { core_revision: coreRevision }, audio: { file: 'capture/capture.wav', sample_rate: 48000, engine_start_frame: 0 } };
   writeJson(path.join(root, 'replay', 'trace.json'), replayTrace);
   const captureFile = path.join(root, 'capture.json'), replayFile = path.join(root, 'replay.json'), scanFile = path.join(root, 'scan.json');
   writeJson(captureFile, capture); writeJson(replayFile, replay);
@@ -94,14 +98,292 @@ function fixture(t) {
   return { root, capture, captureFile, replay, replayFile, replayTrace, replayTraceFile: path.join(root, 'replay', 'trace.json'), scanFile, markers };
 }
 
-function run(input, scan = input.scanFile) {
+function runReal(input, scan = input.scanFile) {
   const output = path.join(input.root, `result-${Math.random()}.json`);
   execFileSync(process.execPath, [detector, 'compare', input.captureFile, input.replayFile, scan, output], { stdio: 'pipe' });
   return JSON.parse(fs.readFileSync(output, 'utf8'));
 }
+function run(input, scan = input.scanFile) { return compare(input, scan); }
 function compare(input, scan = input.scanFile) { return compareEvidence({ captureManifestPath: input.captureFile, replayPath: input.replayFile, scanPath: scan }); }
 function save(input) { writeJson(input.captureFile, input.capture); writeJson(input.replayFile, input.replay); }
 function saveReplayTrace(input) { writeJson(input.replayTraceFile, input.replayTrace); }
+
+function reverseInputManifests(input) {
+  for (const side of ['capture', 'replay']) {
+    const file = path.join(input.root, side, 'input.json');
+    const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+    manifest.files.reverse();
+    writeJson(file, manifest);
+  }
+}
+
+test('callback coverage uses the playback rate when recorder rate differs', t => {
+  const input = fixture(t);
+  const wavFile = path.join(input.root, 'capture', 'capture.wav');
+  const wav = fs.readFileSync(wavFile);
+  wav.writeUInt32LE(44100, 24); wav.writeUInt32LE(44100 * 8, 28);
+  fs.writeFileSync(wavFile, wav);
+  write(path.join(input.root, 'capture', 'packets.csv'), 'file_frame,qpc_100ns,frames\n0,0,49000\n49000,205000,1000\n');
+  input.capture.audio.capture_rate = 44100;
+  save(input);
+  const result = compare(input, '-');
+  assert.equal(result.findings.some(item => item.code === 'evidence_unreadable'), false);
+  assert.equal(result.findings.some(item => item.code === 'final_callback_not_covered'), false);
+});
+
+test('final callback can end inside the last recorded packet', t => {
+  const input = fixture(t);
+  write(path.join(input.root, 'capture', 'packets.csv'), 'file_frame,qpc_100ns,frames\n0,0,49000\n49000,150000,1000\n');
+  const result = compare(input, '-');
+  assert.equal(result.findings.some(item => item.code === 'evidence_unreadable'), false);
+  assert.equal(result.findings.some(item => item.code === 'final_callback_not_covered'), false);
+});
+
+test('final callback beyond the last recorded packet stays incomplete', t => {
+  const input = fixture(t);
+  write(path.join(input.root, 'capture', 'packets.csv'), 'file_frame,qpc_100ns,frames\n0,0,49000\n49000,150000,1000\n');
+  const callbacks = path.join(input.root, 'capture', 'callbacks.csv');
+  write(callbacks, fs.readFileSync(callbacks, 'utf8').replace('2,100000,100000', '2,400000,400000'));
+  const traceFile = path.join(input.root, 'capture', 'trace.json');
+  const trace = fs.readFileSync(traceFile, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+  trace.at(-1).last_playback_qpc_100ns = 400000;
+  write(traceFile, trace.map(JSON.stringify).join('\n') + '\n');
+  const result = compare(input, '-');
+  assert.equal(result.findings.some(item => item.code === 'evidence_unreadable'), false);
+  assert.equal(result.findings.some(item => item.code === 'final_callback_not_covered'), true);
+});
+
+test('input manifest preserves the observed runtime order', t => {
+  const input = fixture(t);
+  reverseInputManifests(input);
+  const headerFile = path.join(input.root, 'capture', 'header.json');
+  const header = JSON.parse(fs.readFileSync(headerFile, 'utf8'));
+  header.input.content_hashes.reverse();
+  writeJson(headerFile, header);
+  const receiptFile = path.join(input.root, 'capture', 'source-receipt.json');
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  receipt.ordered_input_hashes.reverse();
+  writeJson(receiptFile, receipt);
+  input.capture.source_receipt.sha256 = sha(receiptFile);
+  input.replayTrace.input.content_hashes.reverse();
+  save(input); saveReplayTrace(input);
+  assert.equal(compare(input).classification, 'comparable');
+});
+
+test('input manifest order cannot be replaced by filename order', t => {
+  const input = fixture(t);
+  reverseInputManifests(input);
+  assert.notEqual(compare(input).classification, 'comparable');
+});
+
+test('capture and replay cannot use opposite input orders', t => {
+  const input = fixture(t);
+  const replayManifestFile = path.join(input.root, 'replay', 'input.json');
+  const replayManifest = JSON.parse(fs.readFileSync(replayManifestFile, 'utf8'));
+  replayManifest.files.reverse();
+  writeJson(replayManifestFile, replayManifest);
+  input.replayTrace.input.content_hashes.reverse();
+  saveReplayTrace(input);
+  const result = compare(input);
+  assert.equal(result.classification, 'condition_mismatch');
+  assert.ok(result.findings.some(finding => finding.code === 'input_order'));
+});
+
+test('silent render cannot yield an audio-quality verdict', t => {
+  const input = fixture(t), file = path.join(input.root, 'capture', 'header.json');
+  assert.equal(compare(input).soundQuality, 'no_anomaly_detected');
+  const header = JSON.parse(fs.readFileSync(file, 'utf8'));
+  header.silent_render = true;
+  writeJson(file, header);
+  const result = compare(input);
+  assert.equal(result.classification, 'comparable');
+  assert.equal(result.soundQuality, 'incomplete');
+  assert.ok(result.soundQualityFindings.some(finding => finding.code === 'silent_render'));
+  header.silent_render = 'false';
+  writeJson(file, header);
+  assert.equal(compare(input).classification, 'incomplete');
+});
+
+test('a missing silent render mode cannot establish a verified capture', t => {
+  const input = fixture(t), file = path.join(input.root, 'capture', 'header.json');
+  const pin = fs.readFileSync(path.join(__dirname, '..', 'funkot-core.commit'), 'utf8').trim();
+  input.capture.core_git = pin;
+  writeJson(input.captureFile, input.capture);
+  const header = JSON.parse(fs.readFileSync(file, 'utf8'));
+  header.core_git = pin;
+  delete header.silent_render;
+  writeJson(file, header);
+  writeJson(input.replayFile, { schema: 2, work_directory: 'fresh' });
+  const result = runReal(input);
+  assert.equal(result.classification, 'incomplete');
+  assert.match(result.findings[0].detail, /silent render mode/);
+  assert.equal(result.soundQuality, 'incomplete');
+});
+
+test('a forged capture witness cannot start a verified replay', t => {
+  const input = fixture(t), headerFile = path.join(input.root, 'capture', 'header.json');
+  const pin = fs.readFileSync(path.join(__dirname, '..', 'funkot-core.commit'), 'utf8').trim();
+  input.capture.core_git = pin;
+  writeJson(input.captureFile, input.capture);
+  const header = JSON.parse(fs.readFileSync(headerFile, 'utf8'));
+  header.core_git = pin;
+  header.silent_render = true;
+  writeJson(headerFile, header);
+  writeJson(input.replayFile, { schema: 2, work_directory: 'fresh' });
+  assert.throws(() => freshReplay(input.captureFile, input.replayFile, {}), /witness.*not issued/);
+  const result = runReal(input);
+  assert.equal(result.classification, 'incomplete');
+  assert.equal(result.soundQuality, 'incomplete');
+  assert.equal(fs.existsSync(path.join(input.root, 'fresh')), false);
+});
+
+test('a plain object cannot supply trusted endpoint evidence', t => {
+  const input = fixture(t);
+  const result = compareEvidence({ captureManifestPath: input.captureFile, replayPath: input.replayFile, scanPath: input.scanFile, captureWitness: {} });
+  assert.equal(result.classification, 'incomplete');
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+});
+
+test('synthetic supervised capture uses the in-memory endpoint observation', async t => {
+  const input = fixture(t), captureDirectory = path.join(input.root, 'live');
+  const pin = fs.readFileSync(path.join(__dirname, '..', 'funkot-core.commit'), 'utf8').trim();
+  const template = path.join(input.root, 'capture', 'header.json');
+  const header = JSON.parse(fs.readFileSync(template, 'utf8'));
+  header.core_git = pin;
+  writeJson(template, header);
+  input.capture.core_git = pin;
+  input.replay.core_git = pin;
+  input.replayTrace.runtime.core_revision = pin;
+  save(input); saveReplayTrace(input);
+  fs.mkdirSync(captureDirectory);
+  const child = path.join(input.root, 'capture-child.cjs');
+  write(child, `
+const fs=require('node:fs'),path=require('node:path');
+const root=process.env.FUNKOT_NAVIGATION_CAPTURE_DIR;
+const header=JSON.parse(fs.readFileSync(process.env.FIXTURE_HEADER,'utf8'));
+header.schema_version=1;header.process_id=process.pid;header.silent_render=true;
+fs.writeFileSync(path.join(root,'navigation-header.json'),JSON.stringify(header)+'\\n');
+const stream={endpoint_id:'loopback-a',rate:48000,channels:2,sample_format:'f32'};
+fs.writeFileSync(path.join(root,'output-stream.jsonl'),JSON.stringify({schema:1,run_id:header.run_id,process_id:process.pid,endpoint_id:stream.endpoint_id,stream})+'\\n');
+const trace=fs.readFileSync(process.env.FIXTURE_TRACE,'utf8').trim().split(/\\r?\\n/).map(JSON.parse).filter(row=>row.kind!=='capture_end');
+fs.writeFileSync(path.join(root,'navigation.jsonl'),trace.map(JSON.stringify).join('\\n')+'\\n');
+fs.copyFileSync(process.env.FIXTURE_CALLBACKS,path.join(root,'callbacks.csv'));
+const timer=setInterval(()=>{if(!fs.existsSync(path.join(root,'STOP')))return;fs.writeFileSync(path.join(root,'navigation-complete.json'),JSON.stringify({complete:true}));if(fs.existsSync(path.join(root,'QUIT'))){clearInterval(timer);process.exit(0);}},5);
+`);
+  const result = await superviseFreshCapture({
+    build: () => ({ command: process.execPath, args: [child] }), captureDirectory,
+    childEnv: { FIXTURE_HEADER: path.join(input.root, 'capture', 'header.json'), FIXTURE_TRACE: path.join(input.root, 'capture', 'trace.json'), FIXTURE_CALLBACKS: path.join(input.root, 'capture', 'callbacks.csv') },
+    guardFiles: [child, path.join(input.root, 'capture', 'input.json'), path.join(input.root, 'capture', 'input.bin'), path.join(input.root, 'capture', 'input2.bin')],
+    trustedObserver: { observe: async ({ processId, stream }) => ({ ...stream, process_id: processId, session_id: 'session-a' }) },
+    control: { waitForOperation: async () => ({ operation_complete: true, recorder_complete: true }), requestGracefulQuit: async () => write(path.join(captureDirectory, 'QUIT'), 'quit') },
+    deadlineMs: 5000
+  });
+  input.capture.header.file = path.join(captureDirectory, 'navigation-header.json');
+  input.capture.trace.file = path.join(captureDirectory, 'navigation.jsonl');
+  input.capture.audio.callbacks.file = path.join(captureDirectory, 'callbacks.csv');
+  input.capture.identities.binary.file = process.execPath;
+  input.capture.endpoint_receipt = { file: 'nonexistent.json', sha256: '0'.repeat(64) };
+  save(input);
+  const comparison = compareEvidence({ captureManifestPath: input.captureFile, replayPath: input.replayFile, scanPath: '-', captureWitness: result.captureWitness });
+  assert.equal(comparison.classification, 'incomplete', JSON.stringify(comparison.findings));
+  assert.ok(comparison.findings.some(finding => finding.code === 'capture_recorder_unverified'));
+  assert.ok(comparison.findings.some(finding => finding.code === 'capture_build_unverified'));
+  assert.equal(comparison.soundQuality, 'incomplete');
+  const recipeFile = path.join(input.root, 'recipe.json');
+  writeJson(recipeFile, { schema: 2, work_directory: 'fresh' });
+  assert.throws(() => freshReplay(input.captureFile, recipeFile, result.captureWitness), /player build is unverified/);
+});
+
+for (const [name, value] of [['missing', undefined], ['empty', ''], ['malformed', 'abc']]) {
+  test(`all ${name} core revisions cannot yield a clean comparison`, t => {
+    const input = fixture(t);
+    input.capture.core_git = value; input.replay.core_git = value;
+    input.replayTrace.runtime.core_revision = value;
+    const file = path.join(input.root, 'capture', 'header.json');
+    const header = JSON.parse(fs.readFileSync(file, 'utf8')); header.core_git = value;
+    writeJson(file, header); save(input); saveReplayTrace(input);
+    const result = compare(input);
+    assert.equal(result.classification, 'incomplete');
+    assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+  });
+}
+test('capture header revision must match the declared and replay revisions', t => {
+  const input = fixture(t), file = path.join(input.root, 'capture', 'header.json');
+  const header = JSON.parse(fs.readFileSync(file, 'utf8')); header.core_git = 'b'.repeat(40);
+  writeJson(file, header);
+  const result = compare(input);
+  assert.equal(result.classification, 'condition_mismatch');
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+});
+
+test('a missing replay runtime revision cannot yield a clean comparison', t => {
+  const input = fixture(t);
+  delete input.replayTrace.runtime.core_revision;
+  saveReplayTrace(input);
+  const result = compare(input);
+  assert.equal(result.classification, 'incomplete');
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+});
+
+test('an old replay executable cannot acquire provenance from edited metadata', t => {
+  const input = fixture(t), executable = path.join(input.root, 'replay', 'binary.bin');
+  write(executable, 'old executable');
+  input.replayTrace.executable_sha256 = sha(executable);
+  saveReplayTrace(input);
+  const result = runReal(input);
+  assert.equal(result.classification, 'incomplete');
+  assert.ok(result.findings.some(finding => finding.code === 'replay_producer_unverified'));
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+});
+
+test('replay metadata cannot claim a different executable revision', t => {
+  const input = fixture(t), executable = path.join(input.root, 'replay', 'binary.bin');
+  write(executable, `binary:FUNKOT_REPLAY_CORE_REVISION:${'b'.repeat(40)}:END`);
+  input.replayTrace.executable_sha256 = sha(executable);
+  saveReplayTrace(input);
+  const result = runReal(input);
+  assert.equal(result.classification, 'incomplete');
+  assert.ok(result.findings.some(finding => finding.code === 'replay_producer_unverified'));
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+});
+
+test('appending a revision marker to an old executable cannot establish provenance', t => {
+  const input = fixture(t), executable = path.join(input.root, 'replay', 'binary.bin');
+  write(executable, `old executable:FUNKOT_REPLAY_CORE_REVISION:${coreRevision}:END`);
+  input.replayTrace.executable_sha256 = sha(executable);
+  saveReplayTrace(input);
+  const result = runReal(input);
+  assert.notEqual(result.classification, 'comparable');
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+  const direct = compareProduction({ captureManifestPath: input.captureFile, replayPath: input.replayFile, scanPath: input.scanFile });
+  assert.equal(direct.classification, 'incomplete');
+});
+
+test('a replay recipe cannot declare its own executable or trace', t => {
+  const input = fixture(t);
+  writeJson(input.replayFile, { schema: 2, work_directory: 'fresh', replay_executable: input.replay.replay_executable, trace: input.replay.trace });
+  const result = runReal(input);
+  assert.equal(result.classification, 'incomplete');
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+  assert.equal(fs.existsSync(path.join(input.root, 'fresh')), false);
+});
+
+test('a saved replay stays incomplete even when all declared values match', t => {
+  const input = fixture(t);
+  const result = runReal(input);
+  assert.equal(result.classification, 'incomplete');
+  assert.ok(result.findings.some(finding => finding.code === 'replay_producer_unverified'));
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+});
+
+test('a non-string capture revision cannot yield a clean comparison', t => {
+  const input = fixture(t);
+  input.capture.core_git = 123;
+  save(input);
+  const result = compare(input);
+  assert.equal(result.classification, 'incomplete');
+  assert.notEqual(result.soundQuality, 'no_anomaly_detected');
+});
 
 test('an empty endpoint object cannot establish a clean comparison', t => {
   const input = fixture(t);

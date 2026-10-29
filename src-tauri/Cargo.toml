@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 # DO NOT REMOVE.
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+verified-capture = []
 
 [dependencies]
 # `devtools` is the inspector API. We only *open* it in debug desktop
