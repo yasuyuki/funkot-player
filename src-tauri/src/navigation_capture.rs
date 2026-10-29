@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ pub(crate) struct CaptureSink {
     sender: mpsc::SyncSender<CaptureRecord>,
     dropped: Arc<AtomicU64>,
     gate: Option<Arc<AtomicBool>>,
+    silent_render: bool,
     run_id: Arc<str>,
 }
 
@@ -59,6 +61,8 @@ struct StartAuthorization {
     stream: StartStream,
     session: StartSession,
     user_sound_signal: bool,
+    #[serde(default)]
+    silent_render_signal: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +111,10 @@ impl CaptureSink {
             .is_some_and(|gate| !gate.load(Ordering::Acquire))
     }
 
+    pub(crate) fn silent_render(&self) -> bool {
+        self.silent_render
+    }
+
     pub(crate) fn open_output_stream(&self, endpoint_id: String, rate: u32) -> io::Result<()> {
         let Some(gate) = &self.gate else { return Ok(()); };
         if endpoint_id.trim().is_empty() {
@@ -133,11 +141,26 @@ impl CaptureSink {
 
 pub(crate) fn gate_output(capture: Option<&CaptureSink>, output: &mut [f32]) -> bool {
     if capture.is_some_and(CaptureSink::blocks_audio) {
-        output.fill(0.0);
+        silence_device_output(output);
         true
     } else {
         false
     }
+}
+
+pub(crate) fn silence_device_output(output: &mut [f32]) {
+    output.fill(0.0);
+}
+
+/// Apply the callback's final device-buffer policy after the engine has run.
+/// Returns whether the engine itself rendered silence, even when capture mode
+/// replaces the device buffer with silence.
+pub(crate) fn finalize_rendered_output(capture: Option<&CaptureSink>, output: &mut [f32]) -> bool {
+    let rendered_silence = output.iter().all(|sample| *sample == 0.0);
+    if capture.is_some_and(CaptureSink::silent_render) {
+        silence_device_output(output);
+    }
+    rendered_silence
 }
 
 pub(crate) fn start(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf]) -> io::Result<Option<CaptureSink>> {
@@ -146,6 +169,7 @@ pub(crate) fn start(engine: &mut Engine, options: &EngineOptions, inputs: &[Path
         Some(value) if value == "1" => true,
         Some(_) => return Err(io::Error::other("FUNKOT_NAVIGATION_REQUIRE_START_SIGNAL must be 1")),
     };
+    let silent_render = silent_render_mode(std::env::var_os("FUNKOT_NAVIGATION_SILENT_RENDER").as_deref(), require_start)?;
     let directory = std::env::var_os("FUNKOT_NAVIGATION_CAPTURE_DIR");
     if require_start && directory.as_ref().is_none_or(|value| value.is_empty()) {
         return Err(io::Error::other("FUNKOT_NAVIGATION_CAPTURE_DIR must name an existing directory"));
@@ -157,12 +181,21 @@ pub(crate) fn start(engine: &mut Engine, options: &EngineOptions, inputs: &[Path
     if require_start && !Path::new(&directory).is_dir() {
         return Err(io::Error::other("FUNKOT_NAVIGATION_CAPTURE_DIR must name an existing directory"));
     }
-    let sink = start_in(engine, options, inputs, Path::new(&directory), require_start)?;
+    let sink = start_in(engine, options, inputs, Path::new(&directory), require_start, silent_render)?;
     CAPTURE.set(sink.clone()).map_err(|_| io::Error::other("navigation capture already started"))?;
     Ok(Some(sink))
 }
 
-fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], directory: &Path, require_start: bool) -> io::Result<CaptureSink> {
+fn silent_render_mode(value: Option<&OsStr>, require_start: bool) -> io::Result<bool> {
+    match value {
+        None => Ok(false),
+        Some(value) if value == "1" && require_start => Ok(true),
+        Some(value) if value == "1" => Err(io::Error::other("FUNKOT_NAVIGATION_SILENT_RENDER=1 requires FUNKOT_NAVIGATION_REQUIRE_START_SIGNAL=1")),
+        Some(_) => Err(io::Error::other("FUNKOT_NAVIGATION_SILENT_RENDER must be 1")),
+    }
+}
+
+fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], directory: &Path, require_start: bool, silent_render: bool) -> io::Result<CaptureSink> {
     let stop = directory.join("STOP");
     let completion = directory.join("navigation-complete.json");
     if stop.exists() { return Err(io::Error::other("navigation capture STOP already exists")); }
@@ -183,6 +216,7 @@ fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], di
         "core_git": env!("FUNKOT_CORE_GIT"),
         "options": options,
         "input": {"content_hashes": content_hashes},
+        "silent_render": silent_render,
         "clock": "wasapi_qpc_100ns",
         "engine_frame_domain": "emitted_output_frames_including_engine_silence",
         "transport": "transport_fade"
@@ -261,11 +295,11 @@ fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], di
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) if stop.exists() => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        authorize_start(&capture_directory, writer_gate.as_ref(), expected_stream.as_ref());
+                        authorize_start(&capture_directory, writer_gate.as_ref(), expected_stream.as_ref(), silent_render);
                         continue;
                     }
                 };
-                authorize_start(&capture_directory, writer_gate.as_ref(), expected_stream.as_ref());
+                authorize_start(&capture_directory, writer_gate.as_ref(), expected_stream.as_ref(), silent_render);
                 drain_trace(&trace_rx, &mut navigation)?;
                 let start = callback.engine_start.map(|value| value.to_string()).unwrap_or_default();
                 let end = callback.engine_end.map(|value| value.to_string()).unwrap_or_default();
@@ -294,7 +328,7 @@ fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], di
         })();
         if let Err(error) = result { log::error!("navigation capture incomplete: {error}"); }
     })?;
-    Ok(CaptureSink { sender, dropped, gate, run_id })
+    Ok(CaptureSink { sender, dropped, gate, silent_render, run_id })
 }
 
 fn current_run_id() -> String {
@@ -310,24 +344,24 @@ fn clear_start(directory: &Path) -> io::Result<()> {
     }
 }
 
-fn authorize_start(directory: &Path, gate: Option<&Arc<AtomicBool>>, expected: Option<&StreamMetadata>) {
+fn authorize_start(directory: &Path, gate: Option<&Arc<AtomicBool>>, expected: Option<&StreamMetadata>, silent_render: bool) {
     let (Some(gate), Some(stream)) = (gate, expected) else { return; };
     if gate.load(Ordering::Acquire) { return; }
     let authorization = std::fs::read(directory.join("START.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StartAuthorization>(&bytes).ok());
-    if authorization.as_ref().is_some_and(|value| authorization_matches(value, stream)) {
+    if authorization.as_ref().is_some_and(|value| authorization_matches(value, stream, silent_render)) {
         gate.store(true, Ordering::Release);
     }
 }
 
-fn authorization_matches(value: &StartAuthorization, stream: &StreamMetadata) -> bool {
+fn authorization_matches(value: &StartAuthorization, stream: &StreamMetadata, silent_render: bool) -> bool {
     value.schema == 1
         && nonblank(&value.run_id)
         && nonblank(&value.stream.endpoint_id)
         && nonblank(&value.session.endpoint_id)
         && nonblank(&value.session.session_id)
-        && value.user_sound_signal
+        && if silent_render { value.silent_render_signal == Some(true) } else { value.user_sound_signal }
         && value.run_id == stream.run_id
         && value.process_id == stream.process_id
         && value.stream.endpoint_id == stream.endpoint_id
@@ -384,6 +418,7 @@ mod tests {
                 sample_format: stream.sample_format.into(),
             },
             user_sound_signal: true,
+            silent_render_signal: None,
         }
     }
 
@@ -405,11 +440,16 @@ mod tests {
     }
 
     fn sink_with_gate(authorized: bool) -> CaptureSink {
+        sink_with_mode(authorized, false)
+    }
+
+    fn sink_with_mode(authorized: bool, silent_render: bool) -> CaptureSink {
         let (sender, _receiver) = mpsc::sync_channel(1);
         CaptureSink {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
             gate: Some(Arc::new(AtomicBool::new(authorized))),
+            silent_render,
             run_id: "run-1".into(),
         }
     }
@@ -421,6 +461,7 @@ mod tests {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
             gate: None,
+            silent_render: false,
             run_id: "run-1".into(),
         };
         let record = CallbackRecord { sequence: 1, callback_qpc_100ns: 1, playback_qpc_100ns: 2,
@@ -447,7 +488,7 @@ mod tests {
             intro_bars: 0, outro_bars: 0, gain_linear: 1.0, preview: false, head_only: false,
         };
         let mut engine = Engine::from_prepared(options.clone(), vec![track]).unwrap();
-        let sink = start_in(&mut engine, &options, &[input], directory.path(), false).unwrap();
+        let sink = start_in(&mut engine, &options, &[input], directory.path(), false, false).unwrap();
         sink.send(CaptureRecord::Requested { id: 1 });
         let mut pcm = [0.0; 128];
         assert_eq!(engine.render(&mut pcm), 64);
@@ -464,6 +505,7 @@ mod tests {
         }
         let header: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.path().join("navigation-header.json")).unwrap()).unwrap();
         assert_eq!(header["input"]["content_hashes"][0], format!("{:x}", Sha256::digest(b"diagnostic input bytes")));
+        assert_eq!(header["silent_render"], false);
         let navigation = std::fs::read_to_string(directory.path().join("navigation.jsonl")).unwrap();
         let rows: Vec<serde_json::Value> = navigation.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(rows[0]["kind"], "requested");
@@ -473,37 +515,86 @@ mod tests {
     }
 
     #[test]
+    fn silent_render_is_explicit_in_the_capture_header() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = EngineOptions { cache_dir: directory.path().join("cache"), ..EngineOptions::default() };
+        let track = funkot_core::engine::PreparedTrack {
+            path: PathBuf::from("silent-header.wav"), playlist_index: 0, samples: Arc::new(vec![0.25; 256]), frames: 128,
+            first_downbeat_out: 0, outro_start_out: 128, outro_end_anchored_out: 128,
+            intro_bars: 0, outro_bars: 0, gain_linear: 1.0, preview: false, head_only: false,
+        };
+        let mut engine = Engine::from_prepared(options.clone(), vec![track]).unwrap();
+        let sink = start_in(&mut engine, &options, &[], directory.path(), true, true).unwrap();
+        let header: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.path().join("navigation-header.json")).unwrap()).unwrap();
+        assert_eq!(header["silent_render"], true);
+        std::fs::write(directory.path().join("STOP"), b"stop").unwrap();
+        drop(sink);
+        drop(engine);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !directory.path().join("navigation-complete.json").exists() {
+            assert!(std::time::Instant::now() < deadline, "capture writer failed to finish");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
     fn authorization_requires_a_current_matching_user_signal() {
         let stream = stream();
         let valid = authorization(&stream);
-        assert!(authorization_matches(&valid, &stream));
+        assert!(authorization_matches(&valid, &stream, false));
 
         let mut invalid = authorization(&stream);
         invalid.run_id.clear();
-        assert!(!authorization_matches(&invalid, &stream));
+        assert!(!authorization_matches(&invalid, &stream, false));
         let mut invalid = authorization(&stream);
         invalid.process_id += 1;
-        assert!(!authorization_matches(&invalid, &stream));
+        assert!(!authorization_matches(&invalid, &stream, false));
         let mut invalid = authorization(&stream);
         invalid.stream.endpoint_id = "other".into();
-        assert!(!authorization_matches(&invalid, &stream));
+        assert!(!authorization_matches(&invalid, &stream, false));
         let mut invalid = authorization(&stream);
         invalid.stream.sample_format = "i16".into();
-        assert!(!authorization_matches(&invalid, &stream));
+        assert!(!authorization_matches(&invalid, &stream, false));
         let mut invalid = authorization(&stream);
         invalid.session.session_id.clear();
-        assert!(!authorization_matches(&invalid, &stream));
+        assert!(!authorization_matches(&invalid, &stream, false));
         let mut invalid = authorization(&stream);
         invalid.user_sound_signal = false;
-        assert!(!authorization_matches(&invalid, &stream));
+        assert!(!authorization_matches(&invalid, &stream, false));
 
         let directory = tempfile::tempdir().unwrap();
         let gate = Arc::new(AtomicBool::new(false));
-        authorize_start(directory.path(), Some(&gate), Some(&stream));
+        authorize_start(directory.path(), Some(&gate), Some(&stream), false);
         assert!(!gate.load(Ordering::Acquire));
         std::fs::write(directory.path().join("START.json"), b"not json").unwrap();
-        authorize_start(directory.path(), Some(&gate), Some(&stream));
+        authorize_start(directory.path(), Some(&gate), Some(&stream), false);
         assert!(!gate.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn silent_render_requires_its_own_matching_start_signal() {
+        let stream = stream();
+        let mut authorization = authorization(&stream);
+        authorization.user_sound_signal = false;
+        authorization.silent_render_signal = Some(true);
+        assert!(authorization_matches(&authorization, &stream, true));
+        assert!(!authorization_matches(&authorization, &stream, false));
+
+        authorization.silent_render_signal = None;
+        assert!(!authorization_matches(&authorization, &stream, true));
+        authorization.silent_render_signal = Some(false);
+        assert!(!authorization_matches(&authorization, &stream, true));
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("START.json"), serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "run_id": &stream.run_id, "process_id": stream.process_id,
+            "stream": {"endpoint_id": &stream.endpoint_id, "rate": stream.rate, "channels": stream.channels, "sample_format": stream.sample_format},
+            "session": {"process_id": stream.process_id, "endpoint_id": format!("wasapi:{}", stream.endpoint_id), "session_id": "silent-session", "rate": stream.rate, "channels": stream.channels, "sample_format": stream.sample_format},
+            "user_sound_signal": false, "silent_render_signal": true,
+        })).unwrap()).unwrap();
+        let gate = Arc::new(AtomicBool::new(false));
+        authorize_start(directory.path(), Some(&gate), Some(&stream), true);
+        assert!(gate.load(Ordering::Acquire));
     }
 
     #[test]
@@ -529,6 +620,44 @@ mod tests {
     }
 
     #[test]
+    fn callback_output_policy_mutes_silent_render_after_the_engine_advances() {
+        let sink = sink_with_mode(true, true);
+        let mut output = [0.0; 8];
+        let options = EngineOptions::default();
+        let track = funkot_core::engine::PreparedTrack {
+            path: PathBuf::from("silent-render-test.wav"), playlist_index: 0, samples: Arc::new(vec![0.25; 16]), frames: 8,
+            first_downbeat_out: 0, outro_start_out: 8, outro_end_anchored_out: 8,
+            intro_bars: 0, outro_bars: 0, gain_linear: 1.0, preview: false, head_only: false,
+        };
+        let mut engine = Engine::from_prepared(options, vec![track]).unwrap();
+        let before = engine.render_frame();
+        assert!(!gate_output(Some(&sink), &mut output));
+        assert_eq!(engine.render(&mut output), 4);
+        assert!(output.iter().any(|sample| *sample != 0.0));
+        assert!(!finalize_rendered_output(Some(&sink), &mut output));
+        assert_eq!(output, [0.0; 8]);
+        assert!(engine.render_frame() > before);
+    }
+
+    #[test]
+    fn callback_output_policy_keeps_normal_rendered_audio() {
+        let sink = sink_with_mode(true, false);
+        let mut output = [0.25, -0.25, 0.5, -0.5];
+        assert!(!finalize_rendered_output(Some(&sink), &mut output));
+        assert_eq!(output, [0.25, -0.25, 0.5, -0.5]);
+        silence_device_output(&mut output);
+        assert_eq!(output, [0.0; 4]);
+    }
+
+    #[test]
+    fn silent_render_requires_the_existing_start_authorization() {
+        assert!(!silent_render_mode(None, false).unwrap());
+        assert!(silent_render_mode(Some(OsStr::new("1")), false).is_err());
+        assert!(silent_render_mode(Some(OsStr::new("0")), true).is_err());
+        assert!(silent_render_mode(Some(OsStr::new("1")), true).unwrap());
+    }
+
+    #[test]
     fn reopened_stream_requires_a_new_start_file() {
         let directory = tempfile::tempdir().unwrap();
         let stream = stream();
@@ -540,11 +669,11 @@ mod tests {
             "session": {"process_id": start.session.process_id, "endpoint_id": start.session.endpoint_id, "session_id": start.session.session_id, "rate": start.session.rate, "channels": start.session.channels, "sample_format": start.session.sample_format},
             "user_sound_signal": start.user_sound_signal,
         })).unwrap()).unwrap();
-        authorize_start(directory.path(), Some(&gate), Some(&stream));
+        authorize_start(directory.path(), Some(&gate), Some(&stream), false);
         assert!(gate.load(Ordering::Acquire));
         gate.store(false, Ordering::Release);
         clear_start(directory.path()).unwrap();
-        authorize_start(directory.path(), Some(&gate), Some(&stream));
+        authorize_start(directory.path(), Some(&gate), Some(&stream), false);
         assert!(!gate.load(Ordering::Acquire));
         std::fs::write(directory.path().join("START.json"), serde_json::to_vec(&serde_json::json!({
             "schema": 1, "run_id": &stream.run_id, "process_id": stream.process_id,
@@ -552,7 +681,7 @@ mod tests {
             "session": {"process_id": stream.process_id, "endpoint_id": format!("wasapi:{}", stream.endpoint_id), "session_id": "new-session", "rate": stream.rate, "channels": stream.channels, "sample_format": stream.sample_format},
             "user_sound_signal": true,
         })).unwrap()).unwrap();
-        authorize_start(directory.path(), Some(&gate), Some(&stream));
+        authorize_start(directory.path(), Some(&gate), Some(&stream), false);
         assert!(gate.load(Ordering::Acquire));
     }
 
@@ -566,7 +695,7 @@ mod tests {
             intro_bars: 0, outro_bars: 0, gain_linear: 1.0, preview: false, head_only: false,
         };
         let mut engine = Engine::from_prepared(options.clone(), vec![track]).unwrap();
-        let sink = start_in(&mut engine, &options, &[], directory.path(), true).unwrap();
+        let sink = start_in(&mut engine, &options, &[], directory.path(), true, false).unwrap();
         let header: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.path().join("navigation-header.json")).unwrap()).unwrap();
         let stream = StreamMetadata {
             run_id: header["run_id"].as_str().unwrap().into(),

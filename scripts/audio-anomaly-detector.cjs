@@ -961,12 +961,14 @@ function compare(captureManifestFile,replayFile,scanFile,outFile) {
 module.exports={RATE,wav,localOffset};
 if(require.main===module){
   const [mode,...args]=process.argv.slice(2);
-  if(mode==='calibrate-state'&&args.length===3)calibrateState(...args);
+  if(mode==='compare-live'&&args.length===1&&args[0]==='--help')console.log('compare-live recipe.json: recipe schema 1 requires work_directory (an empty directory outside the checkouts), input_manifest (JSON files array of two {file,sha256} entries in one directory containing no other files), and deadline_ms (positive integer). Paths are relative to the recipe. Optional recorder_source_directory and powershell_archive use local copies; otherwise the pinned public releases are downloaded and verified. The isolated silent player starts, requests Next and exits automatically. Results are written to work_directory/comparison.json. Silent output cannot prove sound quality.');
+  else if(mode==='compare-live'&&args.length===1)require('./verified-live-comparison.cjs').compareLive(args[0]).then(result => console.log(JSON.stringify({classification:result.classification,soundQuality:result.soundQuality,comparable:result.comparable}))).catch(error => {console.error(error.message);process.exitCode=1;});
+  else if(mode==='calibrate-state'&&args.length===3)calibrateState(...args);
   else if(mode==='scan-state'&&args.length===3)scanState(...args);
   else if(mode==='calibrate'&&(args.length===4||args.length===5))calibrate(...args);
   else if(mode==='scan'&&args.length===7)scan(...args);
   else if(mode==='compare'&&args.length===4)compare(...args);
   else if(mode==='inject'&&args.length===5)injectFile(args[0],args[1],Number(args[2]),args[3],Number(args[4]));
   else if(mode==='clip'&&args.length===7)controlClip(args[0],args[1],Number(args[2]),Number(args[3]),Number(args[4]),args[5],Number(args[6]));
-  else {console.error('Usage: node detect.cjs calibrate-state negative-a-state.json negative-b-state.json calibration.json | scan-state state.json calibration.json result.json | calibrate clean-a.wav clean-b.wav calibration.json offline-manifest.json [validation-clean.wav] | scan capture.wav clean.wav calibration.json packets.csv callbacks.csv result.json offline-manifest.json | compare capture-manifest.json replay.json scan-result.json|- result.json | inject input.wav output.wav frame type amplitude | clip input.wav output.wav startFrame frameCount controlFrame type amplitude');process.exitCode=2;}
+  else {console.error('Usage: node detect.cjs compare-live recipe.json | calibrate-state negative-a-state.json negative-b-state.json calibration.json | scan-state state.json calibration.json result.json | calibrate clean-a.wav clean-b.wav calibration.json offline-manifest.json [validation-clean.wav] | scan capture.wav clean.wav calibration.json packets.csv callbacks.csv result.json offline-manifest.json | compare capture-manifest.json replay.json scan-result.json|- result.json | inject input.wav output.wav frame type amplitude | clip input.wav output.wav startFrame frameCount controlFrame type amplitude');process.exitCode=2;}
 }
