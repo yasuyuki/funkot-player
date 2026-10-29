@@ -84,7 +84,7 @@ function Get-BuildInputs {
     }
     $flags = [ordered]@{}
     Get-ChildItem Env: | Where-Object {
-        $_.Name -match '^(CARGO_(BUILD|PROFILE|TARGET|ENCODED_RUSTFLAGS)|RUSTFLAGS|RUSTUP_TOOLCHAIN|CC$|CXX$|LIBCLANG_PATH$|INCLUDE$|LIB$|LIBPATH$|VCToolsVersion$|WindowsSDKVersion$)'
+        $_.Name -match '^(CARGO_(BUILD|PROFILE|TARGET|ENCODED_RUSTFLAGS)|RUSTFLAGS|RUSTUP_TOOLCHAIN|TAURI_CONFIG$|CC$|CXX$|LIBCLANG_PATH$|INCLUDE$|LIB$|LIBPATH$|VCToolsVersion$|WindowsSDKVersion$)'
     } | Sort-Object Name | ForEach-Object { $flags[$_.Name] = $_.Value }
     $flags.Remove('CARGO_TARGET_DIR')
     return [ordered]@{
