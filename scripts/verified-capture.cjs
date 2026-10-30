@@ -96,10 +96,10 @@ function singleJsonLine(file, name) {
   try { return JSON.parse(lines[0]); } catch (error) { fail(`${name} is unreadable: ${error.message}`); }
 }
 
-function headerAndStream(root, childPid) {
+function headerAndStream(root, childPid, expectedSilentRender = true) {
   const headerFile = captureFile(root, 'navigation-header.json');
   const header = json(headerFile, 'navigation header');
-  if (header.schema_version !== 1 || header.silent_render !== true) fail('navigation header does not declare silent render');
+  if (header.schema_version !== 1 || typeof header.silent_render !== 'boolean' || header.silent_render !== expectedSilentRender) fail('navigation header does not declare the expected render mode');
   const runId = text(header.run_id, 'navigation header.run_id');
   if (positive(header.process_id, 'navigation header.process_id') !== childPid) fail('navigation header process does not match child');
   const outputFile = captureFile(root, 'output-stream.jsonl');
@@ -431,6 +431,7 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
       !Number.isSafeInteger(soundAuthorization.max_wall_ms) || soundAuthorization.max_wall_ms < deadlineMs || typeof soundAuthorization.stop_file !== 'string' || !soundAuthorization.stop_file)) {
     fail('audible cycle requires explicit bounded sound authorization');
   }
+  const audible = Boolean(soundAuthorization);
   const deadline = Date.now() + positive(deadlineMs, 'deadlineMs');
   const root = captureRoot(captureDirectory, cyclePlanPath);
   const observer = observerApi(trustedObserver);
@@ -449,7 +450,7 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
   let child;
   try {
     child = spawn(built.command, built.args, {
-      cwd: root, env: requiredEnvironment(childEnv, root, automation, Boolean(soundAuthorization)), stdio: ['ignore', 'ignore', errorLog], windowsHide: true
+      cwd: root, env: requiredEnvironment(childEnv, root, automation, audible), stdio: ['ignore', 'ignore', errorLog], windowsHide: true
     });
   } finally { fs.closeSync(errorLog); }
   const childFailure = { error: null };
@@ -457,11 +458,11 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
   let recorderState;
   try {
     if (!child.pid) fail('capture child has no process id');
-    const observedHeader = await waitFor(() => headerAndStream(root, child.pid), child, deadline, signal, childFailure);
+    const observedHeader = await waitFor(() => headerAndStream(root, child.pid, !audible), child, deadline, signal, childFailure);
     rejectRootEndpointJson(root);
     const observed = { ...observedHeader, childPid: child.pid };
     const before = await waitForObserver(observer, observed, child, deadline, signal, childFailure);
-    if (soundAuthorization && (before.endpoint_id !== soundAuthorization.endpoint_id || observed.header.silent_render !== false)) fail('authorized sound endpoint or mode does not match', 'condition_mismatch', 'sound_authorization_mismatch');
+    if (audible && (before.endpoint_id !== soundAuthorization.endpoint_id || observed.header.silent_render !== false)) fail('authorized sound endpoint or mode does not match', 'condition_mismatch', 'sound_authorization_mismatch');
     if (finiteCycle && observed.stream.rate !== 48000) fail('finite cycle requires the calibrated 48 kHz stream', 'condition_mismatch', 'capture_stream_mismatch');
     const evidence = evidenceSnapshot([observed.headerFile, observed.outputFile]);
     if (!unchanged(guarded)) fail('built executable or guarded capture input changed before authorization', 'condition_mismatch', 'capture_input_changed');
@@ -477,7 +478,7 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
     fs.writeFileSync(start, JSON.stringify({
       schema: 1, run_id: observed.runId, process_id: child.pid,
       stream: observed.stream, session: before,
-      user_sound_signal: Boolean(soundAuthorization), silent_render_signal: !soundAuthorization
+      user_sound_signal: audible, silent_render_signal: !audible
     }), { encoding: 'utf8', flag: 'wx' });
     if (!finiteCycle && typeof trustedControl.performOperation === 'function') {
       await controlStep(trustedControl, 'performOperation', observed, child, deadline, signal, childFailure);

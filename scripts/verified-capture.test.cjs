@@ -27,7 +27,11 @@ if(mode==='tree-stall') { const c=require('node:child_process').spawn(process.ex
 fs.writeFileSync(path.join(root,'child-env.json'), JSON.stringify({webviewFolder:process.env.WEBVIEW2_USER_DATA_FOLDER, webviewArgs:process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, automationInput:process.env.FUNKOT_NAVIGATION_AUTOMATION_INPUT_DIR}));
 const stream={endpoint_id:'endpoint',rate:48000,channels:2,sample_format:'f32'};
 if(mode==='early') process.exit(0);
-fs.writeFileSync(path.join(root,'navigation-header.json'),JSON.stringify({schema_version:1,run_id:'run',process_id:process.pid,silent_render:true,options:{output_sample_rate:48000}})+'\\n');
+const header={schema_version:1,run_id:'run',process_id:process.pid,silent_render:true,options:{output_sample_rate:48000}};
+if(mode==='header-audible') header.silent_render=false;
+if(mode==='header-missing') delete header.silent_render;
+if(mode==='header-nonboolean') header.silent_render='false';
+fs.writeFileSync(path.join(root,'navigation-header.json'),JSON.stringify(header)+'\\n');
 fs.writeFileSync(path.join(root,'output-stream.jsonl'),JSON.stringify({schema:1,run_id:'run',process_id:process.pid,endpoint_id:'endpoint',stream})+'\\n');
 let completed=false;
 const trace=()=>[ {kind:'requested',request_id:7,label:'next-7',action:'transition_to_next'}, {kind:'accepted',generation:7,action:'transition_to_next',source_generation:9,target_source_generation:10,current_index:0,target_index:1,active_preview:false,active_head_only:false,target_preview:false,target_head_only:false,render_frame:440,active_playhead:220}, {kind:'plan_applied',generation:7,target_source_generation:10,target_index:1,render_frame:442,plan:{generation:7,start:430,entry:12,simple:false,reason:'manual'}}, {kind:'transition_started',generation:7,source_generation:10,target_source_generation:10,current_index:1,target_index:1,render_frame:500}, {kind:'fade_completed',generation:7,source_generation:10,target_source_generation:10,current_index:1,target_index:1,render_frame:600} ];
@@ -106,6 +110,14 @@ test('supervisor binds a fresh silent child to header stream and endpoint receip
   assert.ok(Object.isFrozen(witness));
   assert.throws(() => readCaptureWitness({}), /was not issued/);
 });
+
+for (const mode of ['header-audible', 'header-missing', 'header-nonboolean']) {
+  test(`supervisor rejects ${mode} without sound authorization before START`, async t => {
+    const input = fixture(t, mode);
+    await assert.rejects(supervise(input), /does not declare the expected render mode/);
+    assert.equal(fs.existsSync(path.join(input.capture, 'START.json')), false);
+  });
+}
 
 test('capture isolates WebView data from inherited and caller overrides', async t => {
   const input = fixture(t);
