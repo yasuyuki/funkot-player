@@ -185,7 +185,13 @@ test('supervisor bounds a hung observer by the capture deadline', async t => {
     build: () => ({ command: process.execPath, args: [input.child] }), captureDirectory: input.capture,
     childEnv: { TEST_MODE: input.mode, GUARD: input.guard }, guardFiles: [input.guard],
     trustedObserver: { observe: async () => new Promise(() => {}) }, control: control('valid', input.capture), deadlineMs: 200
-  }), /trusted observer exceeded the capture deadline|did not close before deadline/);
+  }), /trusted observer exceeded the capture deadline|trusted observer did not observe the capture before deadline|did not close before deadline/);
+  assert.equal(fs.existsSync(path.join(input.capture, 'START.json')), false);
+  const header = path.join(input.capture, 'navigation-header.json');
+  if (fs.existsSync(header)) {
+    const { process_id: childPid } = JSON.parse(fs.readFileSync(header, 'utf8'));
+    assert.throws(() => process.kill(childPid, 0), error => error.code === 'ESRCH');
+  }
 });
 
 test('supervisor rejects a changed guarded input', async t => {
