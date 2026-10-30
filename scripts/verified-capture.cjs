@@ -7,10 +7,10 @@ const { verifyPlayerBuild } = require('./verified-player-build.cjs');
 const captureWitnesses = new WeakMap();
 
 class CaptureVerificationError extends Error {
-  constructor(message) { super(message); this.name = 'CaptureVerificationError'; }
+  constructor(message, classification, code) { super(message); this.name = 'CaptureVerificationError'; this.classification = classification; this.code = code; }
 }
 
-const fail = message => { throw new CaptureVerificationError(message); };
+const fail = (message, classification = 'capture_fault', code = 'capture_verification_failed') => { throw new CaptureVerificationError(message, classification, code); };
 const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
@@ -257,9 +257,14 @@ function completionAbsent(root) {
   }
 }
 
-function captureRoot(directory) {
+function captureRoot(directory, cyclePlanPath) {
   const root = realDirectory(directory, 'capture directory');
-  if (fs.readdirSync(root).length !== 0) fail('capture directory must be empty and freshly owned');
+  const names = fs.readdirSync(root);
+  if (cyclePlanPath) {
+    if (names.length !== 1 || names[0] !== 'cycle-plan.json' || regularFile(cyclePlanPath, 'cycle plan') !== fs.realpathSync(path.join(root, names[0]))) {
+      fail('finite capture directory must contain only its owned cycle plan');
+    }
+  } else if (names.length !== 0) fail('capture directory must be empty and freshly owned');
   return root;
 }
 
@@ -316,7 +321,7 @@ function issueWitness(value, buildWitness) {
 
 function readCaptureWitness(handle) {
   if (!handle || typeof handle !== 'object' || !captureWitnesses.has(handle)) {
-    fail('capture witness handle was not issued by this process');
+    fail('capture witness handle was not issued by this process', 'incomplete', 'capture_witness_unverified');
   }
   const entry = captureWitnesses.get(handle);
   if (entry.buildWitness) verifyPlayerBuild(entry.buildWitness);
@@ -324,10 +329,11 @@ function readCaptureWitness(handle) {
   return entry.witness;
 }
 
-function requiredEnvironment(extra, root, automation) {
+function requiredEnvironment(extra, root, automation, audible) {
   object(extra, 'childEnv');
   const reserved = ['FUNKOT_NAVIGATION_CAPTURE_DIR', 'FUNKOT_NAVIGATION_REQUIRE_START_SIGNAL', 'FUNKOT_NAVIGATION_SILENT_RENDER',
-    'FUNKOT_NAVIGATION_AUTOMATION_INPUT_DIR', 'FUNKOT_NAVIGATION_AUTOMATION_APP_ID', 'FUNKOT_NAVIGATION_AUTOMATION_TIMEOUT_MS'];
+    'FUNKOT_NAVIGATION_AUTOMATION_INPUT_DIR', 'FUNKOT_NAVIGATION_AUTOMATION_APP_ID', 'FUNKOT_NAVIGATION_AUTOMATION_TIMEOUT_MS',
+    'FUNKOT_NAVIGATION_AUTOMATION_CYCLE_PLAN', 'FUNKOT_NAVIGATION_AUTOMATION_AUDIBLE'];
   const inherited = { ...process.env };
   for (const key of Object.keys(extra)) {
     if (reserved.includes(key.toUpperCase()) || key.toUpperCase().startsWith('WEBVIEW2_')) fail(`childEnv must not override ${key}`);
@@ -340,12 +346,13 @@ function requiredEnvironment(extra, root, automation) {
     ...extra,
     FUNKOT_NAVIGATION_CAPTURE_DIR: root,
     FUNKOT_NAVIGATION_REQUIRE_START_SIGNAL: '1',
-    FUNKOT_NAVIGATION_SILENT_RENDER: '1',
+    ...(audible ? { FUNKOT_NAVIGATION_AUTOMATION_AUDIBLE: '1' } : { FUNKOT_NAVIGATION_SILENT_RENDER: '1' }),
     WEBVIEW2_USER_DATA_FOLDER: path.join(root, 'webview-profile'),
     ...(automation ? {
       FUNKOT_NAVIGATION_AUTOMATION_INPUT_DIR: automation.inputDirectory,
       FUNKOT_NAVIGATION_AUTOMATION_APP_ID: automation.identifier,
-      FUNKOT_NAVIGATION_AUTOMATION_TIMEOUT_MS: String(automation.timeoutMs)
+      FUNKOT_NAVIGATION_AUTOMATION_TIMEOUT_MS: String(automation.timeoutMs),
+      ...(automation.cyclePlanPath ? { FUNKOT_NAVIGATION_AUTOMATION_CYCLE_PLAN: automation.cyclePlanPath } : {})
     } : {})
   };
 }
@@ -416,12 +423,20 @@ async function waitForCompletionWhileLive(child, root, deadline, signal, childFa
  * This cannot defend the trusted observer itself from a malicious concurrent
  * process running with the same OS identity; that is an integration boundary.
  */
-async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, guardFiles, trustedObserver, control, recorder: recorderOptions, autoInputDirectory, deadlineMs, signal }) {
+async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, guardFiles, trustedObserver, control, recorder: recorderOptions, autoInputDirectory, deadlineMs, signal, captureKind = 'single_next', cyclePlanPath, soundAuthorization }) {
+  if (!['single_next', 'finite_cycle'].includes(captureKind)) fail('unsupported capture kind');
+  const finiteCycle = captureKind === 'finite_cycle';
+  if (finiteCycle !== Boolean(cyclePlanPath)) fail('finite capture requires its cycle plan');
+  if (soundAuthorization && (!finiteCycle || !Number.isFinite(soundAuthorization.volume_percent) || soundAuthorization.volume_percent < 0 || soundAuthorization.volume_percent > 100 ||
+      !Number.isSafeInteger(soundAuthorization.max_wall_ms) || soundAuthorization.max_wall_ms < deadlineMs || typeof soundAuthorization.stop_file !== 'string' || !soundAuthorization.stop_file)) {
+    fail('audible cycle requires explicit bounded sound authorization');
+  }
   const deadline = Date.now() + positive(deadlineMs, 'deadlineMs');
-  const root = captureRoot(captureDirectory);
+  const root = captureRoot(captureDirectory, cyclePlanPath);
   const observer = observerApi(trustedObserver);
   const built = buildChild(build);
   const buildProof = built.buildWitness ? verifyPlayerBuild(built.buildWitness) : null;
+  if (finiteCycle && (!buildProof || !autoInputDirectory)) fail('finite cycle requires an isolated verified player build');
   const trustedControl = controlApi(control, Boolean(buildProof));
   if (buildProof && !recorderOptions) fail('verified capture requires an owned recorder');
   if (!buildProof && recorderOptions) fail('owned recorder requires a verified player build');
@@ -429,10 +444,14 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
   const same = (left, right) => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
   if (buildProof && (!same(built.command, buildProof.binary.file) || built.args.length !== 0)) fail('capture executable does not match the verified player build');
   const guarded = snapshot([...guardFiles, built.command]);
-  const automation = autoInputDirectory ? { inputDirectory: realDirectory(autoInputDirectory, 'automated input directory'), identifier: buildProof.identifier, timeoutMs: Math.max(1, deadline - Date.now()) } : null;
-  const child = spawn(built.command, built.args, {
-    cwd: root, env: requiredEnvironment(childEnv, root, automation), stdio: 'ignore', windowsHide: false
-  });
+  const automation = autoInputDirectory ? { inputDirectory: realDirectory(autoInputDirectory, 'automated input directory'), identifier: buildProof.identifier, timeoutMs: Math.max(1, deadline - Date.now()), cyclePlanPath } : null;
+  const errorLog = fs.openSync(path.join(root, 'player-stderr.log'), 'wx');
+  let child;
+  try {
+    child = spawn(built.command, built.args, {
+      cwd: root, env: requiredEnvironment(childEnv, root, automation, Boolean(soundAuthorization)), stdio: ['ignore', 'ignore', errorLog], windowsHide: true
+    });
+  } finally { fs.closeSync(errorLog); }
   const childFailure = { error: null };
   child.once('error', error => { childFailure.error = error; });
   let recorderState;
@@ -442,11 +461,13 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
     rejectRootEndpointJson(root);
     const observed = { ...observedHeader, childPid: child.pid };
     const before = await waitForObserver(observer, observed, child, deadline, signal, childFailure);
+    if (soundAuthorization && (before.endpoint_id !== soundAuthorization.endpoint_id || observed.header.silent_render !== false)) fail('authorized sound endpoint or mode does not match', 'condition_mismatch', 'sound_authorization_mismatch');
+    if (finiteCycle && observed.stream.rate !== 48000) fail('finite cycle requires the calibrated 48 kHz stream', 'condition_mismatch', 'capture_stream_mismatch');
     const evidence = evidenceSnapshot([observed.headerFile, observed.outputFile]);
-    if (!unchanged(guarded)) fail('built executable or guarded capture input changed before authorization');
+    if (!unchanged(guarded)) fail('built executable or guarded capture input changed before authorization', 'condition_mismatch', 'capture_input_changed');
     if (buildProof) {
       recorderState = await require('./verified-recorder.cjs').startRecorder({
-        root, sourceDirectory: recorderOptions.sourceDirectory, powershellArchive: recorderOptions.powershellArchive,
+        ...recorderOptions, root,
         playerPid: child.pid, deadline, signal
       });
       liveChild(child, childFailure, 'capture child exited while recorder became ready');
@@ -456,19 +477,22 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
     fs.writeFileSync(start, JSON.stringify({
       schema: 1, run_id: observed.runId, process_id: child.pid,
       stream: observed.stream, session: before,
-      user_sound_signal: false, silent_render_signal: true
+      user_sound_signal: Boolean(soundAuthorization), silent_render_signal: !soundAuthorization
     }), { encoding: 'utf8', flag: 'wx' });
-    if (typeof trustedControl.performOperation === 'function') {
+    if (!finiteCycle && typeof trustedControl.performOperation === 'function') {
       await controlStep(trustedControl, 'performOperation', observed, child, deadline, signal, childFailure);
     }
     const { waitForVerifiedNavigation } = require('./verified-navigation-control.cjs');
-    const navigation = await waitForVerifiedNavigation({ captureDirectory: root, child, deadline, signal });
+    const navigation = finiteCycle
+      ? await require('./verified-cycle-control.cjs').waitForVerifiedCycle({ captureDirectory: root, cyclePlanPath, child, deadline, signal })
+      : await waitForVerifiedNavigation({ captureDirectory: root, child, deadline, signal });
     const operation = buildProof
       ? { navigation, operation_complete: true, recorder_complete: false }
       : { navigation, ...operationReceipt(await controlStep(trustedControl, 'waitForOperation', observed, child, deadline, signal, childFailure)) };
     completionAbsent(root);
     writeExclusiveControlFile(root, 'STOP', 'stop');
     await waitForCompletionWhileLive(child, root, deadline, signal, childFailure);
+    if (finiteCycle) require('./verified-cycle-control.cjs').validateCycleCallbacks(require('./audio-anomaly-analysis.cjs').callbackCsv(captureFile(root, 'callbacks.csv')));
     let recorder;
     if (recorderState) {
       recorder = await require('./verified-recorder.cjs').finishRecorder(recorderState, deadline, signal, captureFile(root, 'callbacks.csv'));
@@ -477,16 +501,17 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
     }
     rejectRootEndpointJson(root);
     const after = await waitForObserver(observer, observed, child, deadline, signal, childFailure);
-    if (after.session_id !== before.session_id) fail('trusted observer session changed during capture');
+    if (after.session_id !== before.session_id) fail('trusted observer session changed during capture', 'condition_mismatch', 'capture_session_changed');
     const receipt = { schema: 1, run_id: observed.runId, process_id: child.pid, stream: observed.stream, session: { before, after } };
     await controlStep(trustedControl, 'requestGracefulQuit', observed, child, deadline, signal, childFailure);
     await waitForSuccessfulExit(child, root, deadline, signal, childFailure);
     rejectRootEndpointJson(root);
-    if (!unchanged(evidence)) fail('capture header or stream evidence changed during capture');
-    if (!unchanged(guarded)) fail('built executable or guarded capture input changed during capture');
+    if (!unchanged(evidence)) fail('capture header or stream evidence changed during capture', 'condition_mismatch', 'capture_metadata_changed');
+    if (!unchanged(guarded)) fail('built executable or guarded capture input changed during capture', 'condition_mismatch', 'capture_input_changed');
     if (built.buildWitness) verifyPlayerBuild(built.buildWitness);
     if (recorder) require('./verified-recorder.cjs').verifyRecorderEvidence(recorder);
     const outputs = outputEvidence(root);
+    if (finiteCycle) outputs.cycle_json = { realpath: navigation.file, sha256: navigation.sha256 };
     const executable = { realpath: built.command, sha256: guarded.at(-1).sha256 };
     const header = { realpath: observed.headerFile, sha256: digest(observed.headerFile), value: observed.header };
     const guardEvidence = guardedEvidence(guarded);
@@ -512,11 +537,14 @@ async function superviseFreshCapture({ build, captureDirectory, childEnv = {}, g
       captureWitness
     };
   } catch (error) {
+    let terminationError;
+    try { terminate(child); } catch (cleanupError) { terminationError = cleanupError; }
+    if (finiteCycle && signal?.aborted) {
+      try { writeExclusiveControlFile(root, 'CANCEL', 'cancel'); } catch {}
+    }
     let recorderError;
     try { if (recorderState) await require('./verified-recorder.cjs').abortRecorder(recorderState); }
     catch (cleanupError) { recorderError = cleanupError; }
-    let terminationError;
-    try { terminate(child); } catch (cleanupError) { terminationError = cleanupError; }
     const exit = await closeBounded(child, deadline);
     if (!exit) fail(`capture supervision failed and child did not close before deadline: ${error.message}`);
     if (recorderError) fail(`capture supervision failed: ${error.message}; recorder cleanup failed: ${recorderError.message}`);

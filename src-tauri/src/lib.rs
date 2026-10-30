@@ -3008,6 +3008,15 @@ fn open_output_stream(
                     // minute at most), which is judged cheap enough for the
                     // callback.
                     let events = engine.poll_events();
+                    if !audition {
+                        if let Some(capture) = &capture {
+                            for event in &events {
+                                if let EngineEvent::TrackStarted { index, entry_frame_out, .. } = event {
+                                    capture.source_started(*index, *entry_frame_out, engine_start);
+                                }
+                            }
+                        }
+                    }
                     // Edge-detects the end of a transition from
                     // `Engine::transition_frames_into` at buffer boundaries,
                     // since the engine has no event of its own for "the overlap

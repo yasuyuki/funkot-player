@@ -60,7 +60,7 @@ setInterval(()=>{},100);
     guardFiles: [child], trustedObserver,
     control: { waitForOperation: async () => ({ operation_complete: true, recorder_complete: true }), requestGracefulQuit: async () => {} },
     deadlineMs: 1500
-  }), /trusted observer failed|did not observe|did not close before deadline/);
+  }), /trusted observer failed|did not observe|did not close before deadline|trusted observer exceeded the capture deadline/);
   assert.ok(fs.existsSync(path.join(capture, 'navigation-header.json')));
   assert.ok(fs.existsSync(path.join(capture, 'output-stream.jsonl')));
   assert.equal(fs.existsSync(path.join(capture, 'START.json')), false);

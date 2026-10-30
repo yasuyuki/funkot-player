@@ -1,12 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::Manager;
+#[path = "verified_capture_cycle.rs"]
+mod cycle;
 
 pub(super) struct Control {
     input: PathBuf,
     capture: PathBuf,
     data: PathBuf,
     deadline: Instant,
+    cycle: Option<cycle::Cycle>,
 }
 
 fn verified_identifier(actual: &str, expected: &str) -> bool {
@@ -30,8 +33,10 @@ fn regular_control(path: &Path, expected: &[u8]) -> Result<bool, String> {
 
 pub(super) fn prepare(app: &tauri::AppHandle) -> Result<Option<Control>, String> {
     let Some(input) = std::env::var_os("FUNKOT_NAVIGATION_AUTOMATION_INPUT_DIR") else { return Ok(None); };
+    let finite_audible = std::env::var_os("FUNKOT_NAVIGATION_AUTOMATION_CYCLE_PLAN").is_some()
+        && std::env::var("FUNKOT_NAVIGATION_AUTOMATION_AUDIBLE").as_deref() == Ok("1");
     if std::env::var("FUNKOT_NAVIGATION_REQUIRE_START_SIGNAL").as_deref() != Ok("1")
-        || std::env::var("FUNKOT_NAVIGATION_SILENT_RENDER").as_deref() != Ok("1") {
+        || (std::env::var("FUNKOT_NAVIGATION_SILENT_RENDER").as_deref() != Ok("1") && !finite_audible) {
         return Err("automated capture requires silent render and START authorization".into());
     }
     let expected = std::env::var("FUNKOT_NAVIGATION_AUTOMATION_APP_ID").map_err(|_| "missing automated capture identifier")?;
@@ -43,23 +48,28 @@ pub(super) fn prepare(app: &tauri::AppHandle) -> Result<Option<Control>, String>
     if entries.len() != 2 || entries.iter().any(|entry| entry.file_type().map_or(true, |kind| !kind.is_file() || kind.is_symlink())) {
         return Err("automated capture requires exactly two regular input files".into());
     }
-    for name in ["START.json", "NEXT", "STOP", "QUIT", "navigation-complete.json"] {
+    for name in ["START.json", "NEXT", "STOP", "QUIT", "CANCEL", "cycle-complete.json", "navigation-complete.json"] {
         if capture.join(name).exists() { return Err("capture control already exists".into()); }
     }
     let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    if data.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) || data.exists() {
+    if data.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
         return Err("automated capture profile is not fresh and isolated".into());
     }
+    let cycle = match std::env::var_os("FUNKOT_NAVIGATION_AUTOMATION_CYCLE_PLAN") {
+        Some(plan) => Some(cycle::prepare(Path::new(&plan), &capture, &input, &data)?),
+        None if data.exists() => return Err("automated capture profile is not fresh and isolated".into()),
+        None => None,
+    };
     let milliseconds = std::env::var("FUNKOT_NAVIGATION_AUTOMATION_TIMEOUT_MS").map_err(|_| "missing capture deadline")?
         .parse::<u64>().map_err(|_| "invalid capture deadline")?;
     if milliseconds == 0 { return Err("invalid capture deadline".into()); }
     let deadline = Instant::now().checked_add(Duration::from_millis(milliseconds)).ok_or("invalid capture deadline")?;
-    Ok(Some(Control { input, capture, data, deadline }))
+    Ok(Some(Control { input, capture, data, deadline, cycle }))
 }
 
-pub(super) fn start(app: tauri::AppHandle, control: Control) -> Result<(), String> {
+pub(super) fn start(app: tauri::AppHandle, mut control: Control) -> Result<(), String> {
     std::thread::Builder::new().name("verified-capture-control".into()).spawn(move || {
-        if let Err(error) = run(&app, &control) {
+        if let Err(error) = run(&app, &mut control) {
             eprintln!("verified capture control: {error}");
             app.exit(1);
         }
@@ -67,13 +77,14 @@ pub(super) fn start(app: tauri::AppHandle, control: Control) -> Result<(), Strin
     Ok(())
 }
 
-fn run(app: &tauri::AppHandle, control: &Control) -> Result<(), String> {
+fn run(app: &tauri::AppHandle, control: &mut Control) -> Result<(), String> {
     super::inspect_picked_music_dir(&control.input, &control.data).map_err(str::to_owned)?;
     super::store_picked_music_dir(&control.data, &control.input)?;
     let cache = control.data.join("funkot-cache");
     let input = control.input.to_str().ok_or("input path is not Unicode")?;
     let cache = cache.to_str().ok_or("cache path is not Unicode")?;
     super::start_impl(input, cache, app, &app.state::<super::AppState>(), false)?;
+    if control.cycle.is_some() { return run_cycle(app, control); }
     let mut next_sent = false;
     while Instant::now() < control.deadline {
         let next = regular_control(&control.capture.join("NEXT"), b"next")?;
@@ -91,6 +102,42 @@ fn run(app: &tauri::AppHandle, control: &Control) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(20));
     }
     Err("automated capture deadline expired".into())
+}
+
+fn run_cycle(app: &tauri::AppHandle, control: &mut Control) -> Result<(), String> {
+    let mut completed = false;
+    while Instant::now() < control.deadline {
+        if regular_control(&control.capture.join("NEXT"), b"next")? { return Err("finite cycle does not accept manual NEXT".into()); }
+        if regular_control(&control.capture.join("CANCEL"), b"cancel")? {
+            super::navigation_capture::close_cycle_output().map_err(|e| e.to_string())?;
+            if !completed {
+                cycle::write_json(&control.capture.join("cycle-complete.json"), &control.cycle.as_ref().unwrap().receipt(true))?;
+            }
+            app.exit(0);
+            return Ok(());
+        }
+        if regular_control(&control.capture.join("QUIT"), b"quit")? {
+            if !completed || !control.capture.join("navigation-complete.json").is_file() { return Err("QUIT preceded completed cycle capture".into()); }
+            app.exit(0);
+            return Ok(());
+        }
+        if !completed && control.capture.join("START.json").is_file() {
+            if let Some(service) = super::playlist_service::existing() {
+                let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
+                owner.reconcile();
+                if owner.store_status() != "ready" { return Err("cycle playback progress could not be persisted".into()); }
+                let cycle = control.cycle.as_mut().unwrap();
+                let details = owner.details(&cycle.playlist_id, true).map_err(|e| e.message)?;
+                if cycle.observe(&details, &control.data)? {
+                    super::navigation_capture::close_cycle_output().map_err(|e| e.to_string())?;
+                    cycle::write_json(&control.capture.join("cycle-complete.json"), &cycle.receipt(false))?;
+                    completed = true;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err("automated finite cycle deadline expired".into())
 }
 
 #[cfg(test)]

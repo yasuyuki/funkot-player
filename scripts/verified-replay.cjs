@@ -4,6 +4,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { readCaptureWitness } = require('./verified-capture.cjs');
 const { cleanEnvironment } = require('./verified-player-build.cjs');
+const { callbackCsv } = require('./audio-anomaly-analysis.cjs');
 
 const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -54,6 +55,29 @@ function validateProducerRevision(raw, pin) {
   if (value !== pin) throw new Error('fresh replay core revision does not match the player pin');
 }
 
+function replayExtent(navigation, callbacks) {
+  const accepted = navigation.filter(row => row.kind === 'accepted');
+  const footer = navigation.at(-1), last = callbacks.at(-1);
+  const frame = value => Number.isSafeInteger(value) && value >= 0;
+  if (accepted.length !== 1 || accepted[0].action !== 'transition_to_next' ||
+      !frame(accepted[0].active_playhead) || !frame(accepted[0].render_frame)) {
+    throw new Error('verified replay requires one accepted next request');
+  }
+  if (navigation.filter(row => row.kind === 'capture_end').length !== 1 || footer?.kind !== 'capture_end' || !last ||
+      !frame(footer.last_engine_frame) || footer.last_engine_frame !== last.engine_end ||
+      footer.last_callback_sequence !== last.sequence || footer.last_output_frames !== last.output_frames ||
+      footer.last_playback_qpc_100ns !== last.playback_qpc_100ns ||
+      callbacks.some((row, index) => index && row.sequence !== callbacks[index - 1].sequence + 1)) {
+    throw new Error('verified replay requires the observed final callback');
+  }
+  const request = accepted[0];
+  const end = request.active_playhead + (footer.last_engine_frame - request.render_frame);
+  if (footer.last_engine_frame <= request.render_frame || !frame(end) || end <= request.active_playhead) {
+    throw new Error('verified replay capture endpoint is invalid');
+  }
+  return { requestFrame: request.active_playhead, endFrame: end };
+}
+
 function freshReplay(capturePath, recipePath, captureWitness, deadline) {
   timeoutOptions(deadline);
   const player = fs.realpathSync(path.resolve(__dirname, '..'));
@@ -96,8 +120,8 @@ function freshReplay(capturePath, recipePath, captureWitness, deadline) {
   if (inputsData.files.some((entry, index) => entry.sha256 !== inputHashes[index]) || JSON.stringify(header.input?.content_hashes) !== JSON.stringify(inputHashes)) throw new Error('capture input hashes do not match actual inputs');
   const guarded = file => witness.guardFiles.some(guard => samePath(real(file), guard.realpath) && guard.beforeSha256 === guard.afterSha256 && digest(file) === guard.afterSha256);
   if (![inputsManifest, ...inputs].every(guarded)) throw new Error('capture inputs were not guarded by the observed process');
-  const accepted = fs.readFileSync(tracePath, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse).filter(row => row.kind === 'accepted');
-  if (accepted.length !== 1 || !Number.isSafeInteger(accepted[0].active_playhead) || accepted[0].action !== 'transition_to_next') throw new Error('verified replay requires one accepted next request');
+  const navigation = fs.readFileSync(tracePath, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  const extent = replayExtent(navigation, callbackCsv(callbacksPath));
   const guardedInputs = [headerPath, tracePath, inputsManifest, engine, driver, ...inputs, callbacksPath, captureBinary, capturePath, sourceManifest, ...playerSources.map(name => path.join(player, name))];
   const before = guardedInputs.map(digest);
   if (!fs.existsSync(workRoot)) fs.mkdirSync(workRoot, { mode: 0o700 });
@@ -120,11 +144,15 @@ function freshReplay(capturePath, recipePath, captureWitness, deadline) {
   const executable = path.join(env.CARGO_TARGET_DIR, 'release', 'examples', `manual_nav_acceptance${process.platform === 'win32' ? '.exe' : ''}`);
   const binaryHash = digest(executable);
   const output = path.join(work, 'replay');
-  run(executable, [...inputs, '--cache-dir', path.join(work, 'cache'), '--output', output, '--at-frame', String(accepted[0].active_playhead), '--sample-rate', String(header.options.output_sample_rate), '--engine-options', headerCopy], { env, cwd: work }, deadline);
+  run(executable, [...inputs, '--cache-dir', path.join(work, 'cache'), '--output', output, '--at-frame', String(extent.requestFrame), '--full-until-frame', String(extent.endFrame), '--sample-rate', String(header.options.output_sample_rate), '--engine-options', headerCopy], { env, cwd: work }, deadline);
   const rawPath = output + '.json', wavPath = output + '.wav';
   const rawBytes = fs.readFileSync(rawPath);
   const raw = JSON.parse(rawBytes.toString('utf8'));
   validateProducerRevision(raw, pin);
+  if (raw.output_wav?.wav_frame_zero_render_frame !== 0 || raw.positions?.request_frame !== extent.requestFrame ||
+      raw.positions?.capture_end_limit_frame !== extent.endFrame || raw.positions?.rendered_end_frame !== extent.endFrame) {
+    throw new Error('fresh replay does not cover the observed capture endpoint');
+  }
   if (raw.executable_sha256 !== binaryHash || raw.core_source_sha256 !== before[3] || raw.driver_source_sha256 !== before[4] || JSON.stringify(raw.input?.content_hashes) !== JSON.stringify(inputHashes) || path.resolve(raw.audio?.file || '') !== wavPath || raw.outcome !== null || raw.navigation_trace_dropped !== 0) throw new Error('fresh replay producer evidence does not match its build or inputs');
   if (digest(executable) !== binaryHash || digest(headerCopy) !== before[0] || !clean() || !guardsMatch() || guardedInputs.some((file, index) => digest(file) !== before[index])) throw new Error('verified replay inputs changed during execution');
   readCaptureWitness(captureWitness);
@@ -138,4 +166,4 @@ function freshReplay(capturePath, recipePath, captureWitness, deadline) {
   return { replay, raw, work, rawHash, wavPath, wavHash };
 }
 
-module.exports = { freshReplay, validateCaptureSources, validateProducerRevision };
+module.exports = { freshReplay, validateCaptureSources, validateProducerRevision, replayExtent };

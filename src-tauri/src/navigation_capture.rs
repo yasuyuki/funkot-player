@@ -32,11 +32,14 @@ pub(crate) struct CaptureSink {
     gate: Option<Arc<AtomicBool>>,
     silent_render: bool,
     run_id: Arc<str>,
+    finite_cycle: bool,
+    closed: Arc<AtomicBool>,
 }
 
 enum CaptureRecord {
     Callback(CallbackRecord),
     Requested { id: u64 },
+    SourceStarted { index: usize, entry_frame: u64, engine_frame: u64 },
     StreamOpened {
         stream: StreamMetadata,
         complete: mpsc::SyncSender<io::Result<()>>,
@@ -94,7 +97,18 @@ pub(crate) fn request_next() {
     }
 }
 
+pub(crate) fn close_cycle_output() -> io::Result<()> {
+    let capture = CAPTURE.get().filter(|capture| capture.finite_cycle)
+        .ok_or_else(|| io::Error::other("finite cycle capture is not active"))?;
+    capture.closed.store(true, Ordering::Release);
+    if let Some(gate) = &capture.gate { gate.store(false, Ordering::Release); }
+    Ok(())
+}
+
 impl CaptureSink {
+    pub(crate) fn source_started(&self, index: usize, entry_frame: u64, engine_frame: u64) {
+        if self.finite_cycle { self.send(CaptureRecord::SourceStarted { index, entry_frame, engine_frame }); }
+    }
     pub(crate) fn record(&self, record: CallbackRecord) {
         self.send(CaptureRecord::Callback(record));
     }
@@ -106,7 +120,7 @@ impl CaptureSink {
     }
 
     pub(crate) fn blocks_audio(&self) -> bool {
-        self.gate
+        self.closed.load(Ordering::Acquire) || self.gate
             .as_ref()
             .is_some_and(|gate| !gate.load(Ordering::Acquire))
     }
@@ -157,7 +171,7 @@ pub(crate) fn silence_device_output(output: &mut [f32]) {
 /// replaces the device buffer with silence.
 pub(crate) fn finalize_rendered_output(capture: Option<&CaptureSink>, output: &mut [f32]) -> bool {
     let rendered_silence = output.iter().all(|sample| *sample == 0.0);
-    if capture.is_some_and(CaptureSink::silent_render) {
+    if capture.is_some_and(|capture| capture.silent_render() || capture.closed.load(Ordering::Acquire)) {
         silence_device_output(output);
     }
     rendered_silence
@@ -232,6 +246,9 @@ fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], di
     let writer_dropped = Arc::clone(&dropped);
     let gate = require_start.then(|| Arc::new(AtomicBool::new(false)));
     let writer_gate = gate.as_ref().map(Arc::clone);
+    let finite_cycle = std::env::var_os("FUNKOT_NAVIGATION_AUTOMATION_CYCLE_PLAN").is_some();
+    let closed = Arc::new(AtomicBool::new(false));
+    let writer_closed = Arc::clone(&closed);
     let capture_directory = directory.to_owned();
     std::thread::Builder::new().name("navigation-capture".into()).spawn(move || {
         let result = (|| -> io::Result<()> {
@@ -245,6 +262,14 @@ fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], di
                         serde_json::to_writer(&mut navigation, &serde_json::json!({
                             "kind": "requested", "request_id": id, "label": format!("next-{id}"),
                             "action": "transition_to_next"
+                        }))?;
+                        writeln!(navigation)?;
+                        navigation.flush()?;
+                        continue;
+                    }
+                    Ok(CaptureRecord::SourceStarted { index, entry_frame, engine_frame }) => {
+                        serde_json::to_writer(&mut navigation, &serde_json::json!({
+                            "kind": "cycle_source_started", "index": index, "entry_frame": entry_frame, "engine_frame": engine_frame
                         }))?;
                         writeln!(navigation)?;
                         navigation.flush()?;
@@ -295,11 +320,11 @@ fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], di
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) if stop.exists() => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        authorize_start(&capture_directory, writer_gate.as_ref(), expected_stream.as_ref(), silent_render);
+                        if !writer_closed.load(Ordering::Acquire) { authorize_start(&capture_directory, writer_gate.as_ref(), expected_stream.as_ref(), silent_render); }
                         continue;
                     }
                 };
-                authorize_start(&capture_directory, writer_gate.as_ref(), expected_stream.as_ref(), silent_render);
+                if !writer_closed.load(Ordering::Acquire) { authorize_start(&capture_directory, writer_gate.as_ref(), expected_stream.as_ref(), silent_render); }
                 drain_trace(&trace_rx, &mut navigation)?;
                 let start = callback.engine_start.map(|value| value.to_string()).unwrap_or_default();
                 let end = callback.engine_end.map(|value| value.to_string()).unwrap_or_default();
@@ -328,7 +353,7 @@ fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], di
         })();
         if let Err(error) = result { log::error!("navigation capture incomplete: {error}"); }
     })?;
-    Ok(CaptureSink { sender, dropped, gate, silent_render, run_id })
+    Ok(CaptureSink { sender, dropped, gate, silent_render, run_id, finite_cycle, closed })
 }
 
 fn current_run_id() -> String {
@@ -451,6 +476,8 @@ mod tests {
             gate: Some(Arc::new(AtomicBool::new(authorized))),
             silent_render,
             run_id: "run-1".into(),
+            finite_cycle: false,
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -463,6 +490,8 @@ mod tests {
             gate: None,
             silent_render: false,
             run_id: "run-1".into(),
+            finite_cycle: false,
+            closed: Arc::new(AtomicBool::new(false)),
         };
         let record = CallbackRecord { sequence: 1, callback_qpc_100ns: 1, playback_qpc_100ns: 2,
             output_frames: 192, engine_start: Some(0), engine_end: Some(192), paused: false,
@@ -474,6 +503,17 @@ mod tests {
         drop(receiver);
         sink.record(record);
         assert_eq!(sink.dropped.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_closed_cycle_cannot_reopen_or_leak_an_inflight_buffer() {
+        let sink = sink_with_mode(true, false);
+        sink.closed.store(true, Ordering::Release);
+        sink.gate.as_ref().unwrap().store(true, Ordering::Release);
+        assert!(sink.blocks_audio());
+        let mut buffer = [0.25, -0.5];
+        assert!(!finalize_rendered_output(Some(&sink), &mut buffer));
+        assert_eq!(buffer, [0.0, 0.0]);
     }
 
     #[test]

@@ -189,7 +189,7 @@ test('supervisor bounds a hung observer by the capture deadline', async t => {
 });
 
 test('supervisor rejects a changed guarded input', async t => {
-  await assert.rejects(supervise(fixture(t, 'mutate')), /guarded capture input changed during capture/);
+  await assert.rejects(supervise(fixture(t, 'mutate')), error => error.classification === 'condition_mismatch' && error.code === 'capture_input_changed' && /guarded capture input changed during capture/.test(error.message));
 });
 
 test('supervisor rejects a header replaced after observation', async t => {

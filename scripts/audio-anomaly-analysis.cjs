@@ -686,4 +686,4 @@ function analyzeEvidence({ captureManifestPath, replayPath, scanPath, observed, 
   }
 }
 
-module.exports = { analyzeEvidence, callbackCsv, callbackCsvContent, jsonLines, navigationOperations, requestedLabels };
+module.exports = { analyzeEvidence, callbackCsv, callbackCsvContent, jsonLines, navigationOperations, requestedLabels, calibrationReceipt };

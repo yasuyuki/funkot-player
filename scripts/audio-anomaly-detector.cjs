@@ -526,6 +526,54 @@ function stateZero(wave, start, end) {
                 return false;
     return true;
 }
+function stateAdd(left, right, name) {
+    const value = left + right;
+    if (!Number.isSafeInteger(value))
+        throw Error(`Unsafe ${name}`);
+    return value;
+}
+function stateCallbackAlignment(base, state, files, capture, reference, callbacks) {
+    if (state.callback_alignment === undefined)
+        return null;
+    files.callback_alignment = stateFile(base, state.callback_alignment, 'callback alignment');
+    const alignment = JSON.parse(fs.readFileSync(files.callback_alignment.file, 'utf8'));
+    if (alignment?.schema !== 1 || !Number.isSafeInteger(alignment.origin_frame) || !Array.isArray(alignment.anchors) || !alignment.anchors.length)
+        throw Error('Invalid callback alignment');
+    for (const name of ['capture', 'reference', 'packets', 'callbacks'])
+        if (alignment[`${name}_sha256`] !== files[name].sha256)
+            throw Error(`Callback alignment does not bind ${name}`);
+    let cursor = 0;
+    const intervals = callbacks.rows.map((row, index) => {
+        const start = cursor;
+        cursor = stateAdd(cursor, row.output_frames, `callback ${index} output end`);
+        return {
+            row, start, end: cursor, captureStart: stateAdd(alignment.origin_frame, start, `callback ${index} capture start`), captureEnd: stateAdd(alignment.origin_frame, cursor, `callback ${index} capture end`)
+        };
+    });
+    if (reference.frames !== cursor)
+        throw Error('Callback alignment reference does not cover callback output');
+    const bySequence = new Map(intervals.map(interval => [interval.row.sequence, interval]));
+    for (const [index, anchor] of alignment.anchors.entries()) {
+        if (!anchor || !['sequence', 'capture_frame', 'output_frame', 'frames'].every(name => Number.isSafeInteger(anchor[name])))
+            throw Error(`Invalid callback alignment anchor ${index}`);
+        const interval = bySequence.get(anchor.sequence);
+        if (!interval || anchor.output_frame !== interval.start || anchor.frames !== interval.row.output_frames || anchor.capture_frame !== interval.captureStart || anchor.frames <= 0 || anchor.capture_frame < 0 || stateAdd(anchor.capture_frame, anchor.frames, `anchor ${index} capture end`) > capture.frames || anchor.output_frame < 0 || stateAdd(anchor.output_frame, anchor.frames, `anchor ${index} reference end`) > reference.frames)
+            throw Error(`Callback alignment anchor ${index} does not bind callback output`);
+        let nonzero = false;
+        for (let frame = 0; frame < anchor.frames; frame++)
+            for (let channel = 0; channel < 2; channel++) {
+                const raw = capture.sample(anchor.capture_frame + frame, channel), expected = reference.sample(anchor.output_frame + frame, channel);
+                if (raw !== expected)
+                    throw Error(`Callback alignment anchor ${index} PCM mismatch`);
+                nonzero ||= raw !== 0;
+            }
+        if (!nonzero)
+            throw Error(`Callback alignment anchor ${index} is silent`);
+    }
+    return {
+        file: files.callback_alignment, origin: alignment.origin_frame, outputFrames: cursor, intervals, bySequence
+    };
+}
 function stateOrigin(originFile, capture, packetsFile, callbacksFile) {
     const origin = JSON.parse(fs.readFileSync(originFile, 'utf8'));
     const files = Object.fromEntries(['raw_capture', 'raw_packets', 'raw_callbacks'].map(name => [name, stateFile(path.dirname(originFile), origin[name], `origin ${name}`)]));
@@ -558,6 +606,11 @@ function stateLoad(inputFile) {
         files.origin = stateFile(base, state.origin, 'origin');
     const capture = wav(files.capture.file), reference = wav(files.reference.file), packets = statePackets(files.packets.file, capture.frames), callbacks = stateCallbacks(files.callbacks.file);
     const origin = files.origin ? stateOrigin(files.origin.file, capture, files.packets.file, files.callbacks.file) : null;
+    const alignment = stateCallbackAlignment(base, state, files, capture, reference, callbacks);
+    if (alignment && state.engine_end_frame !== undefined && !Number.isSafeInteger(state.engine_end_frame))
+        throw Error('Invalid engine end frame');
+    if (alignment && state.engine_start_frame !== undefined && (!Number.isSafeInteger(state.engine_start_frame) || state.engine_start_frame < 0))
+        throw Error('Invalid engine start frame');
     if (reference.frames < 1)
         throw Error('Empty state reference');
     const endpoint = JSON.parse(fs.readFileSync(files.endpoint_receipt.file, 'utf8'));
@@ -577,7 +630,7 @@ function stateLoad(inputFile) {
             range.kind = 'unclassified';
             issues.push(`range_${index}_reference`);
         }
-        if (range.kind === 'intentional' && !['paused', 'diagnostic_gate', 'capture_preroll', 'capture_postroll'].includes(range.reason)) {
+        if (range.kind === 'intentional' && !['paused', 'diagnostic_gate', 'capture_preroll', 'capture_postroll', 'engine_end_padding', 'engine_wait'].includes(range.reason)) {
             range.kind = 'unclassified';
             issues.push(`range_${index}_reason`);
         }
@@ -586,7 +639,7 @@ function stateLoad(inputFile) {
     if (cursor !== capture.frames)
         issues.push('partition_end');
     return {
-        state, stateSha256: sha(inputFile), files, capture, reference, packets, callbacks, origin, endpoint, route, ranges, issues
+        state, stateSha256: sha(inputFile), files, capture, reference, packets, callbacks, origin, alignment, endpoint, route, ranges, issues
     };
 }
 function stateTiming(input, thresholds) {
@@ -633,7 +686,79 @@ function stateTiming(input, thresholds) {
         classification: faults.length ? 'capture_fault' : incomplete.length ? 'incomplete' : glitches.length ? 'timing_glitch' : 'clean', faults, incomplete, glitches, maxGapMs: maxGap, maxPlaybackGapMs: maxPlaybackGap, packets: packets.length, callbacks: rows.length
     };
 }
+function stateValidateAlignedRanges(input) {
+    const problems = [...input.issues], rows = input.callbacks.rows, alignment = input.alignment;
+    const interval = row => alignment.bySequence.get(row.sequence);
+    const selectedRows = range => rows.filter(row => row.sequence >= range.first_sequence && row.sequence <= range.last_sequence);
+    const selectedValid = (range, selected, index) => {
+        if (!Number.isSafeInteger(range.first_sequence) || !Number.isSafeInteger(range.last_sequence) || !selected.length || selected[0].sequence !== range.first_sequence || selected.at(-1).sequence !== range.last_sequence) {
+            problems.push(`range_${index}_callbacks`);
+            return false;
+        }
+        return true;
+    };
+    const healthy = row => input.callbacks.currentSchema && row.output_frames > 0 && row.audition === 0 && row.render_lock_miss === 0 && row.trace_dropped === 0;
+    const healthyEngine = row => healthy(row) && row.engine_start !== null && row.engine_end !== null && row.engine_end >= row.engine_start;
+    for (const [index, range] of input.ranges.entries()) {
+        if (range.kind === 'unclassified')
+            continue;
+        const preroll = range.kind === 'intentional' && range.reason === 'capture_preroll';
+        const postroll = range.kind === 'intentional' && range.reason === 'capture_postroll';
+        if (preroll || postroll) {
+            if (!stateZero(input.capture, range.start, range.end))
+                problems.push(`range_${index}_intentional_pcm`);
+            if (preroll && range.end !== alignment.origin)
+                problems.push(`range_${index}_preroll`);
+            if (postroll && (range.start !== stateAdd(alignment.origin, alignment.outputFrames, 'callback alignment stream end') || input.state.output_closed !== true))
+                problems.push(`range_${index}_postroll`);
+            continue;
+        }
+        const selected = selectedRows(range);
+        if (!selectedValid(range, selected, index))
+            continue;
+        const spans = selected.map(interval);
+        if (spans.some(value => !value)) {
+            problems.push(`range_${index}_callbacks`);
+            continue;
+        }
+        const fullStart = spans[0].captureStart, fullEnd = spans.at(-1).captureEnd;
+        if (range.kind === 'audio') {
+            if (!Number.isSafeInteger(range.reference_start) || range.reference_start !== stateAdd(range.start, -alignment.origin, `range ${index} reference start`))
+                problems.push(`range_${index}_reference_alignment`);
+            const transportFade = range.reason === 'transport_fade';
+            const endFrame = input.state.engine_end_frame;
+            let expectedEnd = fullEnd;
+            for (const [offset, row] of selected.entries()) {
+                const delta = row.engine_end - row.engine_start, last = offset + 1 === selected.length;
+                const partial = !transportFade && last && delta > 0 && delta < row.output_frames && Number.isSafeInteger(endFrame) && row.engine_end === endFrame;
+                if (!healthyEngine(row) || (transportFade ? row.paused !== 1 || delta <= 0 || delta > RATE * 0.010 : row.paused !== 0 || (!partial && delta !== row.output_frames)))
+                    problems.push(`range_${index}_audio_state`);
+                if (partial)
+                    expectedEnd = stateAdd(spans[offset].captureStart, delta, `range ${index} audio end`);
+            }
+            if (range.start !== fullStart || range.end !== expectedEnd)
+                problems.push(`range_${index}_callback_span`);
+            continue;
+        }
+        if (range.reason === 'engine_end_padding') {
+            const row = selected[0], span = spans[0], previous = input.ranges[index - 1], delta = row.engine_end - row.engine_start;
+            if (selected.length !== 1 || !healthyEngine(row) || row.paused !== 0 || !Number.isSafeInteger(input.state.engine_end_frame) || row.engine_end !== input.state.engine_end_frame || delta <= 0 || delta >= row.output_frames || range.start !== stateAdd(span.captureStart, delta, `range ${index} padding start`) || range.end !== span.captureEnd || !previous || previous.kind !== 'audio' || previous.end !== range.start || previous.last_sequence !== row.sequence)
+                problems.push(`range_${index}_intentional_state`);
+        }
+        else if (range.reason === 'engine_wait') {
+            if (range.start !== Math.max(0, fullStart) || range.end !== Math.min(input.capture.frames, fullEnd) || selected.some(row => !healthyEngine(row) || ![0, 1].includes(row.paused) || row.engine_end > input.state.engine_start_frame) || !Number.isSafeInteger(input.state.engine_start_frame))
+                problems.push(`range_${index}_intentional_state`);
+        }
+        else if (range.start !== Math.max(0, fullStart) || range.end !== Math.min(input.capture.frames, fullEnd) || selected.some(row => !healthy(row) || row.paused !== 1 || (row.engine_start === null) !== (row.engine_end === null) || (row.engine_start !== null && row.engine_start !== row.engine_end)))
+            problems.push(`range_${index}_intentional_state`);
+        if (!stateZero(input.capture, range.start, range.end))
+            problems.push(`range_${index}_intentional_pcm`);
+    }
+    return problems;
+}
 function stateValidateRanges(input) {
+    if (input.alignment)
+        return stateValidateAlignedRanges(input);
     const problems = [...input.issues], rows = input.callbacks.rows, first = rows[0], last = rows.at(-1);
     const interval = row => {
         const start = stateFrameAtQpc(input.packets.rows, row.playback_qpc_100ns);
@@ -698,6 +823,53 @@ function stateValidateRanges(input) {
             problems.push(`range_${index}_intentional_pcm`);
     }
     return problems;
+}
+function stateEffectiveTiming(input, timing, problems) {
+    if (!input.alignment)
+        return {
+            timing, effective: timing, ignored: []
+        };
+    const validIntentional = input.ranges.filter((range, index) => range.kind === 'intentional' && !problems.some(problem => problem.startsWith(`range_${index}_`))).map(range => ({
+        start: range.start, end: range.end
+    })).sort((left, right) => left.start - right.start);
+    const covered = (start, end) => {
+        start = Math.max(0, start);
+        end = Math.min(input.capture.frames, end);
+        if (end <= start)
+            return true;
+        let cursor = start;
+        for (const range of validIntentional) {
+            if (range.end <= cursor)
+                continue;
+            if (range.start > cursor)
+                return false;
+            cursor = Math.max(cursor, range.end);
+            if (cursor >= end)
+                return true;
+        }
+        return false;
+    };
+    const uncaptured = [], ignored = timing.glitches.filter(glitch => {
+        if (glitch.code !== 'callback_timing')
+            return false;
+        const index = input.callbacks.rows.findIndex(row => row.sequence === glitch.sequence);
+        if (index < 1)
+            return false;
+        const previous = input.alignment.intervals[index - 1], current = input.alignment.intervals[index];
+        const outside = span => span.captureEnd <= 0 || span.captureStart >= input.capture.frames;
+        if (outside(previous) && outside(current)) {
+            uncaptured.push(glitch);
+            return false;
+        }
+        return covered(previous.captureStart, previous.captureEnd) && covered(current.captureStart, current.captureEnd);
+    });
+    const glitches = timing.glitches.filter(glitch => !ignored.includes(glitch) && !uncaptured.includes(glitch));
+    const effective = {
+        ...timing, glitches, classification: timing.faults.length ? 'capture_fault' : timing.incomplete.length ? 'incomplete' : glitches.length ? 'timing_glitch' : 'clean'
+    };
+    return {
+        timing, effective, ignored, uncaptured
+    };
 }
 function stateFit(target, reference, range) {
     let sx = 0, sy = 0, sxx = 0, sxy = 0, n = 0;
@@ -887,7 +1059,7 @@ function scanState(stateFile, calibrationFile, outFile) {
         throw Error('Calibration route mismatch');
     if (!cal.thresholds || !keys.every(key => Number.isFinite(cal.thresholds[key]) && cal.thresholds[key] > 0) || !['adjacentDelta', 'callbackGapMs', 'playbackGapMs'].every(key => Number.isFinite(cal.thresholds[key]) && cal.thresholds[key] > 0))
         throw Error('Calibration thresholds are invalid');
-    const timing = stateTiming(input, cal.thresholds), problems = stateValidateRanges(input), stateFault = problems.some(problem => problem.endsWith('_intentional_state') || problem.endsWith('_intentional_pcm')), coverageRanges = input.ranges.map(range => ({
+    const rawTiming = stateTiming(input, cal.thresholds), problems = stateValidateRanges(input), timingScope = stateEffectiveTiming(input, rawTiming, problems), timing = timingScope.effective, stateFault = problems.some(problem => problem.endsWith('_intentional_state') || problem.endsWith('_intentional_pcm')), coverageRanges = input.ranges.map(range => ({
         start: range.start, end: range.end, kind: range.kind
     }));
     let first = null, candidates = 0, maxScore = 0;
@@ -938,7 +1110,15 @@ function scanState(stateFile, calibrationFile, outFile) {
         residual: {
             maxScore, candidates, candidateFrames
         },
-        continuity, timing
+        continuity, timing: timingScope.timing,
+        ...(input.alignment ? {
+            ignoredIntentionalTiming: {
+                count: timingScope.ignored.length, glitches: timingScope.ignored
+            },
+            ignoredUncapturedTiming: {
+                count: timingScope.uncaptured.length, glitches: timingScope.uncaptured
+            }
+        } : {})
     };
     for (const range of input.ranges) {
         if (range.kind === 'audio')

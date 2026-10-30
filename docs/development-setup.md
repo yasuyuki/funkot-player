@@ -176,6 +176,47 @@ pinned [pwshDoom source](https://github.com/jasonulbright/pwshDoom/tree/68719ae9
 (GPL-2.0-or-later) and official PowerShell release. Its `comparison.json` can compare
 the navigation plan, but silent output cannot establish sound quality.
 
+For finite natural-end A → B180 → A cycles on Windows, run
+`node scripts/verified-live-comparison.cjs cycles recipe.json`. The recipe is:
+
+```json
+{
+  "schema": 1,
+  "mode": "silent",
+  "max_cycles": 2,
+  "deadline_ms": 1980000,
+  "retain_clean_cycles": 1,
+  "work_directory": "../cycle-output",
+  "input_manifest": "../fixed-inputs.json",
+  "calibration_file": "../calibration/calibration.json",
+  "stop_file": "../stop-cycles"
+}
+```
+
+Choose the cycle count, overall deadline and clean-data retention for the run.
+Paths resolve from the recipe. The work directory must exist, be empty and be
+outside both source checkouts. The input manifest has two `files` entries with
+`file` and whole-file `sha256`: A first, B180 second. Their directory must contain
+only those two regular files. The last A is a distinct playlist occurrence.
+Calibration uses the receipt and controls described below. Optional
+`recorder_source_directory` and `powershell_archive` reuse the pinned recorder
+downloads; altered bytes are rejected.
+
+The runner builds once, prepares the recorder once, and reuses its profile cache
+and one engine reference across cycles. It writes each result and retained
+summary before pruning clean raw cycles. An anomaly, capture fault, condition
+mismatch, missing provenance or storage failure stops the run and retains that
+cycle. Create `stop_file` or abort the `runLiveCycles` API signal to cancel;
+partial capture remains incomplete. Silent mode checks zero device PCM and
+natural playlist completion; it cannot accept sound quality.
+
+Audible mode additionally requires a current authorization for `endpoint_id`,
+`volume_percent`, `max_wall_ms` and the same `stop_file`, under
+`sound_authorization`. The runner verifies the endpoint and time bound and does
+not change the OS volume. A saved recipe does not grant authorization for a later
+audible run. Only a complete calibrated comparison with the live process witness
+can issue a fresh finite-cycle sound-quality result.
+
 The separate `compare` command reads capture and replay manifests. Without the
 same-process capture witness it cannot accept a fresh-producer comparison.
 The two manifests describe actual source, executable, input and recording files.

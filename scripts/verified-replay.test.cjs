@@ -6,7 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const Module = require('node:module');
 const childProcess = require('node:child_process');
-const { freshReplay, validateCaptureSources, validateProducerRevision } = require('./verified-replay.cjs');
+const { freshReplay, validateCaptureSources, validateProducerRevision, replayExtent } = require('./verified-replay.cjs');
 
 const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
@@ -71,6 +71,24 @@ test('producer revision distinguishes absent evidence from a valid mismatch', ()
   assert.doesNotThrow(() => validateProducerRevision({ runtime: { core_revision: pin } }, pin));
 });
 
+test('full replay endpoint follows emitted engine frames across a pause', () => {
+  const accepted = { kind: 'accepted', action: 'transition_to_next', active_playhead: 591724, render_frame: 587040 };
+  const callbacks = [
+    { sequence: 1, engine_end: 587520, output_frames: 480, playback_qpc_100ns: 100000 },
+    { sequence: 2, engine_end: 587520, output_frames: 480, playback_qpc_100ns: 200000 },
+    { sequence: 3, engine_end: 2688480, output_frames: 480, playback_qpc_100ns: 300000 }
+  ];
+  const footer = { kind: 'capture_end', last_callback_sequence: 3, last_engine_frame: 2688480,
+    last_output_frames: 480, last_playback_qpc_100ns: 300000 };
+  assert.deepEqual(replayExtent([accepted, footer], callbacks), { requestFrame: 591724, endFrame: 2693164 });
+  assert.throws(() => replayExtent([accepted], callbacks), /final callback/);
+  assert.throws(() => replayExtent([accepted, { ...footer, last_engine_frame: 2688479 }], callbacks), /final callback/);
+  assert.throws(() => replayExtent([accepted, footer], [callbacks[0], callbacks[2]]), /final callback/);
+  assert.throws(() => replayExtent([accepted, accepted, footer], callbacks), /one accepted/);
+  assert.throws(() => replayExtent([{ ...accepted, render_frame: 2688480 }, footer], callbacks), /endpoint/);
+  assert.throws(() => replayExtent([{ ...accepted, active_playhead: Number.MAX_SAFE_INTEGER }, footer], callbacks), /endpoint/);
+});
+
 test('replay does not pass inherited compiler overrides to Cargo', t => {
   const root = fs.mkdtempSync(path.join(__dirname, '.verified-replay-env-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -94,8 +112,11 @@ test('replay does not pass inherited compiler overrides to Cargo', t => {
   const inputs = [write(path.join(root, 'input-a'), 'a'), write(path.join(root, 'input-b'), 'b')];
   const input = write(path.join(root, 'input.json'), JSON.stringify({ files: inputs.map(file => ({ file, sha256: digest(file) })) }));
   const header = write(path.join(root, 'header.json'), JSON.stringify({ core_git: pin, silent_render: false, process_id: 123, input: { content_hashes: inputs.map(digest) } }));
-  const trace = write(path.join(root, 'navigation.jsonl'), JSON.stringify({ kind: 'accepted', action: 'transition_to_next', active_playhead: 1 }) + '\n');
-  const callbacks = write(path.join(root, 'callbacks.csv'), 'fixture\n');
+  const trace = write(path.join(root, 'navigation.jsonl'), [
+    { kind: 'accepted', action: 'transition_to_next', active_playhead: 1, render_frame: 0 },
+    { kind: 'capture_end', last_callback_sequence: 1, last_engine_frame: 480, last_output_frames: 480, last_playback_qpc_100ns: 100000 }
+  ].map(JSON.stringify).join('\n') + '\n');
+  const callbacks = write(path.join(root, 'callbacks.csv'), 'sequence,callback_qpc_100ns,playback_qpc_100ns,output_frames,engine_start,engine_end,paused,audition,render_lock_miss,trace_dropped\n1,100000,100000,480,0,480,0,0,0,0\n');
   const source = write(path.join(root, 'sources.json'), JSON.stringify({ files: [...coreFiles, ...playerFiles].map(file => ({ file, sha256: digest(file) })) }));
   const binary = fs.realpathSync(process.execPath);
   const capture = write(path.join(root, 'capture.json'), JSON.stringify({ core_git: pin, header: { file: header }, trace: { file: trace }, audio: { callbacks: { file: callbacks } }, identities: { binary: { file: binary }, source: { manifest: source }, input: { manifest: input } } }));
@@ -114,6 +135,7 @@ test('replay does not pass inherited compiler overrides to Cargo', t => {
     for (const key of overrides) process.env[key] = 'injected-value';
     Module._load = function(request, parent, isMain) {
       if (request === './verified-capture.cjs' && parent?.filename === path.join(scripts, 'verified-replay.cjs')) return { readCaptureWitness: () => witness };
+      if (request === './audio-anomaly-analysis.cjs' && parent?.filename === path.join(scripts, 'verified-replay.cjs')) return require('./audio-anomaly-analysis.cjs');
       if (request === 'node:child_process' && parent?.filename === path.join(scripts, 'verified-replay.cjs')) return { ...childProcess, spawnSync: (command, args, options) => {
         if (command === 'cargo' && args[0] === 'metadata') {
           observedMetadata = options.env;

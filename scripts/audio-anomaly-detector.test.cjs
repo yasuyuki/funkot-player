@@ -97,6 +97,76 @@ function fixture(t, ranges) {
         root, frames, reference, capture, packets, callbacks, aState: state('a-state.json', a, endpointA), bState: state('b-state.json', b, endpointB), targetState: state('target-state.json', capture, endpoint), calibration: path.join(root, 'calibration.json'), result: path.join(root, 'result.json')
     };
 }
+function replaceWaveFrames(file, start, end, value = 0) {
+    const bytes = fs.readFileSync(file);
+    for (let frame = start; frame < end; frame++)
+        for (let channel = 0; channel < 2; channel++)
+            bytes.writeFloatLE(value, 44 + (frame * 2 + channel) * 4);
+    write(file, bytes);
+}
+function updateAlignment(input, stateFile, anchors = [1, 4]) {
+    const state = JSON.parse(fs.readFileSync(stateFile));
+    const alignmentFile = path.join(input.root, `alignment-${path.basename(stateFile)}`);
+    const rows = fs.readFileSync(input.callbacks, 'utf8').trim().split(/\r?\n/).slice(1).map(line => line.split(','));
+    let outputFrame = 0;
+    const intervals = new Map(rows.map(row => {
+        const interval = { output_frame: outputFrame, frames: Number(row[3]) };
+        outputFrame += interval.frames;
+        return [Number(row[0]), interval];
+    }));
+    const alignment = {
+        schema: 1,
+        origin_frame: 0,
+        capture_sha256: state.capture.sha256,
+        reference_sha256: state.reference.sha256,
+        packets_sha256: state.packets.sha256,
+        callbacks_sha256: state.callbacks.sha256,
+        anchors: anchors.map(sequence => ({
+            sequence,
+            capture_frame: intervals.get(sequence).output_frame,
+            output_frame: intervals.get(sequence).output_frame,
+            frames: intervals.get(sequence).frames
+        }))
+    };
+    json(alignmentFile, alignment);
+    state.callback_alignment = { file: path.basename(alignmentFile), sha256: sha(alignmentFile) };
+    json(stateFile, state);
+    return alignmentFile;
+}
+function alignedFixture(t) {
+    const ranges = [{
+            start: 0, end: 192, kind: 'audio', reference_start: 0, first_sequence: 1, last_sequence: 2
+        },
+        {
+            start: 192, end: 288, kind: 'intentional', first_sequence: 3, last_sequence: 3, reason: 'diagnostic_gate'
+        },
+        {
+            start: 288, end: 480, kind: 'audio', reference_start: 288, first_sequence: 4, last_sequence: 5
+        }
+    ];
+    const input = fixture(t, ranges);
+    for (const file of [input.reference, input.capture, path.join(input.root, 'a.wav'), path.join(input.root, 'b.wav')])
+        replaceWaveFrames(file, 192, 288);
+    for (const file of [input.capture, path.join(input.root, 'a.wav'), path.join(input.root, 'b.wav')])
+        write(file, fs.readFileSync(input.reference));
+    write(input.callbacks, 'sequence,callback_qpc_100ns,playback_qpc_100ns,output_frames,engine_start,engine_end,paused,audition,render_lock_miss,trace_dropped\n1,0,1000,96,0,96,0,0,0,0\n2,20000,23000,96,96,192,0,0,0,0\n3,40000,39000,96,192,192,1,0,0,0\n4,60000,65000,96,192,288,0,0,0,0\n5,80000,79000,96,288,384,0,0,0,0\n');
+    for (const stateFile of [input.aState, input.bState, input.targetState]) {
+        const state = JSON.parse(fs.readFileSync(stateFile));
+        state.capture.sha256 = sha(path.join(input.root, state.capture.file));
+        state.reference.sha256 = sha(input.reference);
+        state.callbacks.sha256 = sha(input.callbacks);
+        json(stateFile, state);
+        updateAlignment(input, stateFile);
+    }
+    return input;
+}
+function rewriteAlignment(input, stateFile, change) {
+    const state = JSON.parse(fs.readFileSync(stateFile)), file = path.join(input.root, state.callback_alignment.file), alignment = JSON.parse(fs.readFileSync(file));
+    change(alignment, state);
+    json(file, alignment);
+    state.callback_alignment.sha256 = sha(file);
+    json(stateFile, state);
+}
 function addOrigin(input, stateFile, captureFile, name) {
     const rawCapture = path.join(input.root, `raw-capture-${name}.wav`), rawPackets = path.join(input.root, `raw-packets-${name}.csv`), rawCallbacks = path.join(input.root, `raw-callbacks-${name}.csv`), origin = path.join(input.root, `origin-${name}`, 'origin.json');
     const capture = fs.readFileSync(captureFile), raw = Buffer.alloc(capture.length + 96 * 8);
@@ -287,6 +357,232 @@ test('predicted playback QPC jitter does not reject healthy audio calibration', 
     state.callbacks.sha256 = sha(input.callbacks);
     json(input.targetState, state);
     assert.equal(scan(input).classification, 'incomplete');
+});
+test('counter-aligned callback state accepts exact PCM through jittered playback QPC', t => {
+    const input = alignedFixture(t);
+    calibrate(input);
+    const result = scan(input);
+    assert.equal(result.classification, 'clean', JSON.stringify(result));
+    assert.equal(result.coverage.complete, true);
+});
+test('counter-aligned callback state rejects false bindings and shifted source coordinates', t => {
+    const hash = alignedFixture(t);
+    calibrate(hash);
+    rewriteAlignment(hash, hash.targetState, alignment => {
+        alignment.capture_sha256 = '0'.repeat(64);
+    });
+    assert.throws(() => scan(hash));
+    const anchor = alignedFixture(t);
+    calibrate(anchor);
+    rewriteAlignment(anchor, anchor.targetState, alignment => {
+        alignment.anchors[0].output_frame++;
+    });
+    assert.throws(() => scan(anchor));
+    const origin = alignedFixture(t);
+    calibrate(origin);
+    rewriteAlignment(origin, origin.targetState, alignment => {
+        alignment.origin_frame++;
+    });
+    assert.throws(() => scan(origin));
+    const reference = alignedFixture(t);
+    calibrate(reference);
+    const referenceState = JSON.parse(fs.readFileSync(reference.targetState));
+    referenceState.ranges[0].reference_start++;
+    json(reference.targetState, referenceState);
+    assert.equal(scan(reference).classification, 'incomplete');
+});
+test('counter-aligned callback state rejects gaps, moving pauses, and nonzero intentional PCM', t => {
+    const gap = alignedFixture(t);
+    calibrate(gap);
+    const rows = fs.readFileSync(gap.callbacks, 'utf8').trim().split(/\r?\n/);
+    rows[3] = rows[3].replace('3,40000', '4,40000');
+    write(gap.callbacks, `${rows.join('\n')}\n`);
+    const gapState = JSON.parse(fs.readFileSync(gap.targetState));
+    gapState.callbacks.sha256 = sha(gap.callbacks);
+    json(gap.targetState, gapState);
+    rewriteAlignment(gap, gap.targetState, alignment => {
+        alignment.callbacks_sha256 = sha(gap.callbacks);
+    });
+    assert.equal(scan(gap).classification, 'capture_fault');
+    const paused = alignedFixture(t);
+    calibrate(paused);
+    const pausedRows = fs.readFileSync(paused.callbacks, 'utf8').trim().split(/\r?\n/);
+    pausedRows[1] = pausedRows[1].replace(',0,0,0,0', ',1,0,0,0');
+    write(paused.callbacks, `${pausedRows.join('\n')}\n`);
+    const pausedState = JSON.parse(fs.readFileSync(paused.targetState));
+    pausedState.callbacks.sha256 = sha(paused.callbacks);
+    json(paused.targetState, pausedState);
+    rewriteAlignment(paused, paused.targetState, alignment => {
+        alignment.callbacks_sha256 = sha(paused.callbacks);
+    });
+    assert.equal(scan(paused).classification, 'incomplete');
+    const nonzero = alignedFixture(t);
+    calibrate(nonzero);
+    replaceWaveFrames(nonzero.reference, 200, 201, 0.1);
+    replaceWaveFrames(nonzero.capture, 200, 201, 0.1);
+    const nonzeroState = JSON.parse(fs.readFileSync(nonzero.targetState));
+    nonzeroState.capture.sha256 = sha(nonzero.capture);
+    nonzeroState.reference.sha256 = sha(nonzero.reference);
+    json(nonzero.targetState, nonzeroState);
+    rewriteAlignment(nonzero, nonzero.targetState, alignment => {
+        alignment.capture_sha256 = sha(nonzero.capture);
+        alignment.reference_sha256 = sha(nonzero.reference);
+    });
+    assert.equal(scan(nonzero).classification, 'capture_fault');
+});
+test('a recording may start inside a proven gate callback without clipping any source audio', t => {
+    const input = fixture(t);
+    calibrate(input);
+    const source = fs.readFileSync(input.reference);
+    const reference = Buffer.alloc(44 + 576 * 8), capture = Buffer.alloc(44 + 480 * 8);
+    for (const buffer of [reference, capture]) {
+        source.copy(buffer, 0, 0, 44);
+        buffer.writeUInt32LE(buffer.length - 8, 4);
+        buffer.writeUInt32LE(buffer.length - 44, 40);
+    }
+    source.copy(reference, 44 + 144 * 8, 44, 44 + 432 * 8);
+    source.copy(capture, 44 + 48 * 8, 44, 44 + 432 * 8);
+    write(input.reference, reference);
+    write(input.capture, capture);
+    const header = fs.readFileSync(input.callbacks, 'utf8').split('\n')[0];
+    const callbacks = ['1,0,0,48,,,1,0,0,0', '2,210000,210000,48,,,1,0,0,0', '3,220000,220000,48,,,1,0,0,0'];
+    for (let index = 0; index < 5; index++) {
+        const start = index * 96, frames = index === 4 ? 48 : 96, qpc = 230000 + index * 20000;
+        callbacks.push(`${index + 4},${qpc},${qpc},${frames},${start},${start + frames},0,0,0,0`);
+    }
+    write(input.callbacks, header + '\n' + callbacks.join('\n') + '\n');
+    const state = JSON.parse(fs.readFileSync(input.targetState));
+    state.capture.sha256 = sha(input.capture);
+    state.reference.sha256 = sha(input.reference);
+    state.callbacks.sha256 = sha(input.callbacks);
+    state.ranges = [
+        { start: 0, end: 48, kind: 'intentional', reason: 'diagnostic_gate', first_sequence: 1, last_sequence: 3 },
+        { start: 48, end: 480, kind: 'audio', reference_start: 144, first_sequence: 4, last_sequence: 8 }
+    ];
+    json(input.targetState, state);
+    updateAlignment(input, input.targetState, [4]);
+    rewriteAlignment(input, input.targetState, alignment => {
+        alignment.origin_frame = -96;
+        alignment.anchors[0].capture_frame = 48;
+    });
+    const result = scan(input);
+    assert.equal(result.classification, 'clean');
+    assert.equal(result.timing.classification, 'timing_glitch');
+    assert.equal(result.ignoredUncapturedTiming.count, 1);
+    rewriteAlignment(input, input.targetState, (_alignment, value) => { value.ranges[0].end--; });
+    assert.notEqual(scan(input).classification, 'clean');
+});
+
+test('counter-aligned postroll requires the closed output receipt', t => {
+    const input = alignedFixture(t);
+    calibrate(input);
+    const expanded = Buffer.alloc(fs.readFileSync(input.capture).length + 96 * 8);
+    fs.readFileSync(input.capture).copy(expanded);
+    expanded.writeUInt32LE(expanded.length - 8, 4);
+    expanded.writeUInt32LE(expanded.length - 44, 40);
+    write(input.capture, expanded);
+    write(input.packets, `${fs.readFileSync(input.packets, 'utf8')}480,100000,96,0\n`);
+    const state = JSON.parse(fs.readFileSync(input.targetState));
+    state.capture.sha256 = sha(input.capture);
+    state.packets.sha256 = sha(input.packets);
+    state.ranges.push({ start: 480, end: 576, kind: 'intentional', reason: 'capture_postroll' });
+    json(input.targetState, state);
+    rewriteAlignment(input, input.targetState, alignment => {
+        alignment.capture_sha256 = sha(input.capture);
+        alignment.packets_sha256 = sha(input.packets);
+    });
+    assert.equal(scan(input).classification, 'incomplete');
+    const closed = JSON.parse(fs.readFileSync(input.targetState));
+    closed.output_closed = true;
+    json(input.targetState, closed);
+    assert.equal(scan(input).classification, 'clean');
+});
+test('counter-aligned engine wait is zero PCM before the recorded source start', t => {
+    const input = alignedFixture(t);
+    const ranges = [{
+            start: 0, end: 96, kind: 'intentional', first_sequence: 1, last_sequence: 1, reason: 'engine_wait'
+        },
+        {
+            start: 96, end: 192, kind: 'audio', reference_start: 96, first_sequence: 2, last_sequence: 2
+        },
+        {
+            start: 192, end: 288, kind: 'intentional', first_sequence: 3, last_sequence: 3, reason: 'diagnostic_gate'
+        },
+        {
+            start: 288, end: 480, kind: 'audio', reference_start: 288, first_sequence: 4, last_sequence: 5
+        }
+    ];
+    for (const file of [input.reference, input.capture, path.join(input.root, 'a.wav'), path.join(input.root, 'b.wav')])
+        replaceWaveFrames(file, 0, 96);
+    for (const stateFile of [input.aState, input.bState, input.targetState]) {
+        const state = JSON.parse(fs.readFileSync(stateFile));
+        state.capture.sha256 = sha(path.join(input.root, state.capture.file));
+        state.reference.sha256 = sha(input.reference);
+        state.ranges = ranges;
+        state.engine_start_frame = 96;
+        json(stateFile, state);
+        updateAlignment(input, stateFile, [2, 4]);
+    }
+    calibrate(input);
+    assert.equal(scan(input).classification, 'clean');
+    const invalid = JSON.parse(fs.readFileSync(input.targetState));
+    invalid.engine_start_frame = 95;
+    json(input.targetState, invalid);
+    assert.equal(scan(input).classification, 'capture_fault');
+});
+test('counter-aligned timing ignores only gaps wholly inside validated intentional PCM', t => {
+    const gated = alignedFixture(t);
+    const gatedRows = fs.readFileSync(gated.callbacks, 'utf8').trim().split(/\r?\n/);
+    gatedRows[4] = '4,60000,300000,96,192,192,1,0,0,0';
+    gatedRows[5] = '5,80000,320000,96,192,288,0,0,0,0';
+    write(gated.callbacks, `${gatedRows.join('\n')}\n`);
+    for (const file of [gated.reference, gated.capture, path.join(gated.root, 'a.wav'), path.join(gated.root, 'b.wav')])
+        replaceWaveFrames(file, 192, 384);
+    const gatedRanges = [{
+            start: 0, end: 192, kind: 'audio', reference_start: 0, first_sequence: 1, last_sequence: 2
+        },
+        {
+            start: 192, end: 384, kind: 'intentional', first_sequence: 3, last_sequence: 4, reason: 'diagnostic_gate'
+        },
+        {
+            start: 384, end: 480, kind: 'audio', reference_start: 384, first_sequence: 5, last_sequence: 5
+        }
+    ];
+    for (const stateFile of [gated.aState, gated.bState, gated.targetState]) {
+        const state = JSON.parse(fs.readFileSync(stateFile));
+        state.capture.sha256 = sha(path.join(gated.root, state.capture.file));
+        state.reference.sha256 = sha(gated.reference);
+        state.callbacks.sha256 = sha(gated.callbacks);
+        state.ranges = gatedRanges;
+        json(stateFile, state);
+        updateAlignment(gated, stateFile, [1, 5]);
+    }
+    calibrate(gated);
+    const targetRows = fs.readFileSync(gated.callbacks, 'utf8').trim().split(/\r?\n/);
+    targetRows[4] = '4,60000,1000000,96,192,192,1,0,0,0';
+    targetRows[5] = '5,80000,1020000,96,192,288,0,0,0,0';
+    write(gated.callbacks, `${targetRows.join('\n')}\n`);
+    const gatedState = JSON.parse(fs.readFileSync(gated.targetState));
+    gatedState.callbacks.sha256 = sha(gated.callbacks);
+    json(gated.targetState, gatedState);
+    updateAlignment(gated, gated.targetState, [1, 5]);
+    const ignored = scan(gated);
+    assert.equal(ignored.classification, 'clean', JSON.stringify(ignored));
+    assert.equal(ignored.timing.glitches.length, 1);
+    assert.equal(ignored.ignoredIntentionalTiming.count, 1);
+    const audible = alignedFixture(t);
+    calibrate(audible);
+    const audibleRows = fs.readFileSync(audible.callbacks, 'utf8').trim().split(/\r?\n/);
+    audibleRows[2] = '2,20000,500000,96,96,192,0,0,0,0';
+    audibleRows[3] = '3,40000,520000,96,192,192,1,0,0,0';
+    write(audible.callbacks, `${audibleRows.join('\n')}\n`);
+    const audibleState = JSON.parse(fs.readFileSync(audible.targetState));
+    audibleState.callbacks.sha256 = sha(audible.callbacks);
+    json(audible.targetState, audibleState);
+    updateAlignment(audible, audible.targetState);
+    const reported = scan(audible);
+    assert.equal(reported.classification, 'timing_glitch', JSON.stringify(reported));
+    assert.equal(reported.ignoredIntentionalTiming.count, 0);
 });
 test('audio ranges require complete healthy callback and engine accounting', t => {
     const missing = fixture(t);
