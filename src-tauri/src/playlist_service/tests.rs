@@ -574,6 +574,200 @@ fn failed_source_save_aborts_real_engine_fence_and_keeps_prepared_next() {
 }
 
 #[test]
+fn source_switch_persist_failure_aborts_the_real_fence_without_retargeting_future() {
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav");
+    let b = fixture.file("b.wav");
+    let playing = fixture.install("playing", vec![Fixture::track(&a), Fixture::track(&b)]);
+    let other = fixture.install("other", vec![]);
+    fixture.command("select-playing", Action::Select { id: Some(playing) }).unwrap();
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let first = source.next().unwrap();
+    let second = source.next().unwrap();
+    let player = playback(&[first.clone(), second.clone()], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+
+    let file = fixture.data.path().join("playback-state.json");
+    let bytes = fs::read(&file).unwrap();
+    let durable = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+    let (queue_before, current_before, epoch_before, claims_before) = {
+        let owner = fixture.service.lock().unwrap();
+        (
+            queue::pending_snapshot(&fixture.queue),
+            owner.catalog.current.clone(),
+            owner.epoch,
+            owner.claims.iter().map(|(index, claim)| (
+                *index,
+                claim.source.clone(),
+                claim.entry.clone(),
+                claim.live,
+                claim.cancelled,
+            )).collect::<Vec<_>>(),
+        )
+    };
+    let request = fixture.request("switch-other", Action::Select { id: Some(other.clone()) });
+
+    crate::playback_state::set_fail_persist_stage(2);
+    let failure = match command_with(&fixture.service, request.clone(), Some(&player)) {
+        Ok(_) => panic!("injected durable-save failure accepted the source switch"),
+        Err(error) => error,
+    };
+    assert_eq!(failure.code, "persist_failed");
+    assert_eq!(fs::read(&file).unwrap(), bytes);
+    assert_eq!(crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap(), durable);
+    {
+        let owner = fixture.service.lock().unwrap();
+        assert_eq!(queue::pending_snapshot(&fixture.queue), queue_before);
+        assert_eq!(owner.catalog.current, current_before);
+        assert_eq!(owner.epoch, epoch_before);
+        assert_eq!(owner.claims.iter().map(|(index, claim)| (
+            *index,
+            claim.source.clone(),
+            claim.entry.clone(),
+            claim.live,
+            claim.cancelled,
+        )).collect::<Vec<_>>(), claims_before);
+    }
+    {
+        let mut render = player.render.lock().unwrap();
+        assert_eq!(render.engine.source_generation(), 0);
+        assert_eq!(render.engine.next_track_path(), Some(b.as_path()));
+        let token = render.engine.begin_future_update().expect("failed save aborts its fence");
+        render.engine.abort_future_update(token);
+    }
+
+    command_with(&fixture.service, request, Some(&player)).unwrap();
+    let owner = fixture.service.lock().unwrap();
+    assert_eq!(owner.active(), Some(other.as_str()));
+    assert_eq!(owner.epoch, epoch_before + 1);
+    assert!(owner.claims[&second.0].cancelled);
+}
+
+#[test]
+fn interrupted_source_switch() {
+    let Ok(stage) = std::env::var("FUNKOT_SOURCE_SWITCH_CRASH_STAGE") else {
+        return;
+    };
+    let data = PathBuf::from(std::env::var_os("FUNKOT_SOURCE_SWITCH_DATA").unwrap());
+    let cache = PathBuf::from(std::env::var_os("FUNKOT_SOURCE_SWITCH_CACHE").unwrap());
+    let other = std::env::var("FUNKOT_SOURCE_SWITCH_TARGET").unwrap();
+    let queue = queue::new_shared_queue();
+    let service = Arc::new(Mutex::new(Service::new(&data, &cache, queue.clone())));
+    let normal = HostSource::new(queue, queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
+    let mut source = configure(&service, normal);
+    let current = source.next().expect("recover the saved current occurrence");
+    let player = playback(&[current], 4096);
+    service.lock().unwrap().reconcile_with(Some(&player));
+    let request = Request {
+        request_id: "child-source-switch".into(),
+        target: service.lock().unwrap().target(),
+        action: Action::Select { id: Some(other) },
+    };
+    crate::playback_state::set_crash_stage(stage.parse().unwrap());
+    command_with(&service, request, Some(&player)).unwrap();
+    panic!("the parent must terminate this child at the requested source-switch cut");
+}
+
+#[test]
+fn source_switch_crash_cuts_recover_the_durable_current_without_silent_consumption() {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+
+    for stage in [0, 4] {
+        let fixture = Fixture::new();
+        let a = fixture.file("crash-a.wav");
+        let b = fixture.file("crash-b.wav");
+        let playing = fixture.install("playing", vec![Fixture::track(&a), Fixture::track(&b)]);
+        let other = fixture.install("other", vec![]);
+        fixture.command("select-playing", Action::Select { id: Some(playing.clone()) }).unwrap();
+        let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+        let current = source.next().unwrap();
+        let player = playback(&[current.clone()], 4096);
+        fixture.service.lock().unwrap().reconcile_with(Some(&player));
+        let before = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+        let current_occurrence = before.catalog.current.clone().expect("saved current occurrence");
+
+        let Fixture { data, cache, queue, service } = fixture;
+        drop(player);
+        drop(source);
+        drop(service);
+        let stores = crate::playback_state::process_spawn_guard();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "playlist_service::tests::interrupted_source_switch",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("FUNKOT_SOURCE_SWITCH_CRASH_STAGE", stage.to_string())
+            .env("FUNKOT_SOURCE_SWITCH_DATA", data.path())
+            .env("FUNKOT_SOURCE_SWITCH_CACHE", cache.path())
+            .env("FUNKOT_SOURCE_SWITCH_TARGET", &other)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let expected = format!("playback-cut:{stage}");
+        loop {
+            let mut line = String::new();
+            assert_ne!(output.read_line(&mut line).unwrap(), 0, "child did not reach {expected}");
+            if line.contains(&expected) {
+                break;
+            }
+        }
+        drop(stores);
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+
+        let durable = crate::playback_state::PlaybackStore::open(data.path()).snapshot().unwrap();
+        if stage == 0 {
+            assert_eq!(durable.catalog.active_id, Some(playing.clone()));
+            assert_eq!(durable.catalog.current, Some(current_occurrence.clone()));
+            assert_eq!(durable.catalog.remaining(&playing).unwrap(), before.catalog.remaining(&playing).unwrap());
+            assert_eq!(durable.queue, before.queue);
+            assert_eq!(durable.session, before.session);
+        } else {
+            assert_eq!(durable.catalog.active_id, Some(other.clone()));
+            assert_eq!(durable.catalog.current, Some(current_occurrence.clone()));
+            assert_eq!(durable.queue, before.queue);
+            assert_eq!(durable.session, before.session);
+        }
+
+        let recovered = Arc::new(Mutex::new(Service::new(data.path(), cache.path(), queue)));
+        {
+            let owner = recovered.lock().unwrap();
+            assert_eq!(owner.catalog.current, None);
+            assert_eq!(owner.restored, Some(current_occurrence.clone()));
+            assert!(owner.receipts.is_empty());
+        }
+        {
+            let owner = recovered.lock().unwrap();
+            assert_eq!(owner.lookup(&current_occurrence.track_ref), Ok(current_occurrence.track_ref.preferred_path.clone()));
+        }
+        let normal = HostSource::new(queue::new_shared_queue(), queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
+        let mut restored = configure(&recovered, normal);
+        let restored_claim = restored.next().unwrap_or_else(|| panic!("saved current did not recover at crash stage {stage}"));
+        {
+            let owner = recovered.lock().unwrap();
+            let claim = &owner.claims[&restored_claim.0];
+            assert!(claim.restoring);
+            assert_eq!(claim.source, current_occurrence.playlist_id);
+            assert_eq!(claim.run, current_occurrence.run_id);
+            assert_eq!(claim.entry, current_occurrence.entry_id);
+            assert_eq!(owner.catalog.current, Some(current_occurrence.clone()));
+        }
+        let restored_player = playback(&[restored_claim], 4096);
+        recovered.lock().unwrap().reconcile_with(Some(&restored_player));
+        let owner = recovered.lock().unwrap();
+        assert_eq!(owner.catalog.current, Some(current_occurrence.clone()));
+        let playlist = current_occurrence.playlist_id.as_ref().expect("playlist current");
+        let entry = current_occurrence.entry_id.as_ref().expect("playlist entry");
+        assert!(owner.catalog.run(playlist).unwrap().consumed.contains(entry));
+    }
+}
+
+#[test]
 fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
     let fixture = Fixture::new();
     let paths: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| fixture.file(n)).collect();
