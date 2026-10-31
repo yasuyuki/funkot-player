@@ -6,6 +6,36 @@ use std::sync::{Arc, Mutex};
 
 struct Fixture { data: tempfile::TempDir, cache: tempfile::TempDir, queue: SharedQueue, service: Shared }
 
+fn isolated_source_fixture(name: &str) -> bool {
+    use std::io::{BufRead, Read, Write};
+    use std::process::{Command, Stdio};
+    if std::env::var("FUNKOT_ISOLATED_SOURCE_FIXTURE").ok().as_deref() == Some(name) {
+        println!("source-fixture-exec");
+        std::io::stdout().flush().unwrap();
+        return false;
+    }
+    let stores = crate::playback_state::process_spawn_guard();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env("FUNKOT_ISOLATED_SOURCE_FIXTURE", name)
+        .stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
+    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut captured = String::new();
+    loop {
+        let mut line = String::new();
+        assert_ne!(output.read_line(&mut line).unwrap(), 0, "source fixture did not confirm exec: {name}");
+        captured.push_str(&line);
+        if line.contains("source-fixture-exec") { break; }
+    }
+    drop(stores);
+    output.read_to_string(&mut captured).unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success() && captured.contains("running 1 test")
+        && captured.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "isolated source fixture failed: {name}\n{captured}");
+    true
+}
+
 struct SessionRestore(store::Session);
 
 impl Drop for SessionRestore {
@@ -82,6 +112,7 @@ impl Fixture {
 
 #[test]
 fn conflict_resolution_hydrates_the_live_queue_after_its_single_durable_commit() {
+    if isolated_source_fixture("playlist_service::tests::conflict_resolution_hydrates_the_live_queue_after_its_single_durable_commit") { return; }
     let data = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     let queue = queue::new_shared_queue();
@@ -116,6 +147,7 @@ fn conflict_resolution_hydrates_the_live_queue_after_its_single_durable_commit()
 
 #[test]
 fn moved_identity_resolves_but_changed_content_is_skipped_once_without_fallback() {
+    if isolated_source_fixture("playlist_service::tests::moved_identity_resolves_but_changed_content_is_skipped_once_without_fallback") { return; }
     let fixture = Fixture::new();
     let original = fixture.file("original.wav");
     let reference = Fixture::track(&original);
@@ -146,6 +178,7 @@ fn moved_identity_resolves_but_changed_content_is_skipped_once_without_fallback(
 
 #[test]
 fn starting_distinct_duplicate_occurrences_preserves_definition() {
+    if isolated_source_fixture("playlist_service::tests::starting_distinct_duplicate_occurrences_preserves_definition") { return; }
     let fixture = Fixture::new();
     let path = fixture.file("same.wav");
     let id = fixture.install("duplicates", vec![Fixture::track(&path), Fixture::track(&path)]);
@@ -165,6 +198,7 @@ fn starting_distinct_duplicate_occurrences_preserves_definition() {
 
 #[test]
 fn request_receipt_replays_only_the_identical_source_and_revision_command() {
+    if isolated_source_fixture("playlist_service::tests::request_receipt_replays_only_the_identical_source_and_revision_command") { return; }
     let fixture = Fixture::new();
     let created = fixture.command("create", Action::Create { name: "set".into() }).unwrap().created_id.unwrap();
     let target = fixture.service.lock().unwrap().target();
@@ -179,6 +213,7 @@ fn request_receipt_replays_only_the_identical_source_and_revision_command() {
 
 #[test]
 fn source_switch_waits_for_initial_engine_control_handle() {
+    if isolated_source_fixture("playlist_service::tests::source_switch_waits_for_initial_engine_control_handle") { return; }
     let fixture = Fixture::new();
     let normal_a = fixture.file("normal-a.wav");
     queue::replace_pending(&fixture.queue, vec![QueueItem::manual(normal_a)]);
@@ -196,6 +231,7 @@ fn source_switch_waits_for_initial_engine_control_handle() {
 
 #[test]
 fn stale_save_aborts_without_publishing_candidate_or_altering_claims() {
+    if isolated_source_fixture("playlist_service::tests::stale_save_aborts_without_publishing_candidate_or_altering_claims") { return; }
     let fixture = Fixture::new();
     let path = fixture.file("claim.wav");
     let id = fixture.install("before", vec![Fixture::track(&path)]);
@@ -217,6 +253,7 @@ fn stale_save_aborts_without_publishing_candidate_or_altering_claims() {
 
 #[test]
 fn removed_current_is_not_restored_by_a_new_service() {
+    if isolated_source_fixture("playlist_service::tests::removed_current_is_not_restored_by_a_new_service") { return; }
     let fixture = Fixture::new();
     let path = fixture.file("current.wav");
     let id = fixture.install("set", vec![Fixture::track(&path)]);
@@ -236,6 +273,7 @@ fn removed_current_is_not_restored_by_a_new_service() {
 
 #[test]
 fn delayed_started_event_consumes_its_occurrence_without_rolling_current_backward() {
+    if isolated_source_fixture("playlist_service::tests::delayed_started_event_consumes_its_occurrence_without_rolling_current_backward") { return; }
     let fixture = Fixture::new();
     let first_path = fixture.file("first.wav");
     let second_path = fixture.file("second.wav");
@@ -254,6 +292,7 @@ fn delayed_started_event_consumes_its_occurrence_without_rolling_current_backwar
 
 #[test]
 fn preparing_and_finished_empty_engine_do_not_consume_playlist_occurrences() {
+    if isolated_source_fixture("playlist_service::tests::preparing_and_finished_empty_engine_do_not_consume_playlist_occurrences") { return; }
     let fixture = Fixture::new();
     let a = fixture.file("a.wav");
     let b = fixture.file("b.wav");
@@ -287,6 +326,7 @@ fn preparing_and_finished_empty_engine_do_not_consume_playlist_occurrences() {
 
 #[test]
 fn real_engine_events_for_all_prepared_occurrences_are_consumed_by_index() {
+    if isolated_source_fixture("playlist_service::tests::real_engine_events_for_all_prepared_occurrences_are_consumed_by_index") { return; }
     let _globals = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new();
@@ -344,6 +384,7 @@ fn real_engine_events_for_all_prepared_occurrences_are_consumed_by_index() {
 
 #[test]
 fn real_engine_snapshot_keeps_old_audible_current_and_rejects_cancelled_future_event() {
+    if isolated_source_fixture("playlist_service::tests::real_engine_snapshot_keeps_old_audible_current_and_rejects_cancelled_future_event") { return; }
     let fixture = Fixture::new();
     let a = fixture.file("a.wav");
     let b = fixture.file("b.wav");
@@ -372,6 +413,7 @@ fn real_engine_snapshot_keeps_old_audible_current_and_rejects_cancelled_future_e
 
 #[test]
 fn restarted_run_rejects_delayed_old_start_and_old_engine_snapshot() {
+    if isolated_source_fixture("playlist_service::tests::restarted_run_rejects_delayed_old_start_and_old_engine_snapshot") { return; }
     let fixture = Fixture::new();
     let a = fixture.file("a.wav");
     let b = fixture.file("b.wav");
@@ -396,6 +438,7 @@ fn restarted_run_rejects_delayed_old_start_and_old_engine_snapshot() {
 
 #[test]
 fn lagging_started_event_keeps_snapshot_current_and_consumes_once() {
+    if isolated_source_fixture("playlist_service::tests::lagging_started_event_keeps_snapshot_current_and_consumes_once") { return; }
     let fixture = Fixture::new();
     let paths = ["older.wav", "newer.wav", "unplayed.wav"].map(|name| fixture.file(name));
     let id = fixture.install("set", paths.iter().map(|path| Fixture::track(path)).collect());
@@ -428,6 +471,7 @@ fn lagging_started_event_keeps_snapshot_current_and_consumes_once() {
 
 #[test]
 fn rejected_save_keeps_lagging_start_progress_in_memory() {
+    if isolated_source_fixture("playlist_service::tests::rejected_save_keeps_lagging_start_progress_in_memory") { return; }
     let fixture = Fixture::new();
     let paths = ["older.wav", "newer.wav", "unplayed.wav"].map(|name| fixture.file(name));
     let id = fixture.install("set", paths.iter().map(|path| Fixture::track(path)).collect());
@@ -448,6 +492,7 @@ fn rejected_save_keeps_lagging_start_progress_in_memory() {
 
 #[test]
 fn failures_require_a_reason_and_a_matching_live_run_claim() {
+    if isolated_source_fixture("playlist_service::tests::failures_require_a_reason_and_a_matching_live_run_claim") { return; }
     let fixture = Fixture::new();
     let a = fixture.file("a.wav");
     let b = fixture.file("b.wav");
@@ -573,6 +618,7 @@ fn wait_for_live_future_claim(
 
 #[test]
 fn removing_a_local_normal_claim_during_admission_returns_only_the_next_occurrence() {
+    if isolated_source_fixture("playlist_service::tests::removing_a_local_normal_claim_during_admission_returns_only_the_next_occurrence") { return; }
     let _globals = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock().unwrap_or_else(|error| error.into_inner());
     let previous_session = crate::SESSION.lock().unwrap_or_else(|error| error.into_inner()).clone();
@@ -631,6 +677,7 @@ fn removing_a_local_normal_claim_during_admission_returns_only_the_next_occurren
 
 #[test]
 fn moving_a_local_normal_claim_during_admission_returns_the_new_head_in_durable_order() {
+    if isolated_source_fixture("playlist_service::tests::moving_a_local_normal_claim_during_admission_returns_the_new_head_in_durable_order") { return; }
     let _globals = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock().unwrap_or_else(|error| error.into_inner());
     let previous_session = crate::SESSION.lock().unwrap_or_else(|error| error.into_inner()).clone();
@@ -687,6 +734,7 @@ fn moving_a_local_normal_claim_during_admission_returns_the_new_head_in_durable_
 
 #[test]
 fn moving_a_local_playlist_claim_during_admission_never_returns_the_old_entry() {
+    if isolated_source_fixture("playlist_service::tests::moving_a_local_playlist_claim_during_admission_never_returns_the_old_entry") { return; }
     let _globals = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock().unwrap_or_else(|error| error.into_inner());
     let fixture = Fixture::new();
@@ -717,6 +765,11 @@ fn moving_a_local_playlist_claim_during_admission_never_returns_the_old_entry() 
         source.next()
     });
     claimed_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let prepared_before = crate::NEXT_PREPARED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let status = fixture.service.lock().unwrap().details(&id, false).unwrap().rows
+        .into_iter().find(|row| row.entry_id == a_entry).unwrap().status;
+    crate::NEXT_PREPARED.store(prepared_before, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(status, "preparing", "admission is pending even if an older next was prepared");
 
     let request = fixture.request("move-local-playlist-a", Action::Move {
         id: id.clone(), entry_id: a_entry.clone(), to: 1, scope: "remaining".into(),
@@ -747,6 +800,7 @@ fn moving_a_local_playlist_claim_during_admission_never_returns_the_old_entry() 
 
 #[test]
 fn moving_a_registered_normal_future_retires_its_persisted_reservation() {
+    if isolated_source_fixture("playlist_service::tests::moving_a_registered_normal_future_retires_its_persisted_reservation") { return; }
     let _globals = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock().unwrap_or_else(|error| error.into_inner());
     let previous_session = crate::SESSION.lock().unwrap_or_else(|error| error.into_inner()).clone();
@@ -851,6 +905,7 @@ fn moving_a_registered_normal_future_retires_its_persisted_reservation() {
 
 #[test]
 fn failed_source_save_aborts_real_engine_fence_and_keeps_prepared_next() {
+    if isolated_source_fixture("playlist_service::tests::failed_source_save_aborts_real_engine_fence_and_keeps_prepared_next") { return; }
     let fixture = Fixture::new();
     let a = fixture.file("a.wav"); let b = fixture.file("b.wav");
     let id = fixture.install("playing", vec![Fixture::track(&a), Fixture::track(&b)]);
@@ -875,6 +930,7 @@ fn failed_source_save_aborts_real_engine_fence_and_keeps_prepared_next() {
 
 #[test]
 fn source_switch_persist_failure_aborts_the_real_fence_without_retargeting_future() {
+    if isolated_source_fixture("playlist_service::tests::source_switch_persist_failure_aborts_the_real_fence_without_retargeting_future") { return; }
     let fixture = Fixture::new();
     let a = fixture.file("a.wav");
     let b = fixture.file("b.wav");
@@ -970,6 +1026,7 @@ fn interrupted_source_switch() {
 
 #[test]
 fn source_switch_crash_cuts_recover_the_durable_current_without_silent_consumption() {
+    if isolated_source_fixture("playlist_service::tests::source_switch_crash_cuts_recover_the_durable_current_without_silent_consumption") { return; }
     use std::io::BufRead;
     use std::process::{Command, Stdio};
 
@@ -1069,6 +1126,7 @@ fn source_switch_crash_cuts_recover_the_durable_current_without_silent_consumpti
 
 #[test]
 fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
+    if isolated_source_fixture("playlist_service::tests::real_source_switch_cancels_all_future_claims_and_retains_normal_order") { return; }
     let fixture = Fixture::new();
     let paths: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| fixture.file(n)).collect();
     let items = vec![QueueItem::manual(paths[0].clone()), QueueItem::automatic(paths[1].clone()), QueueItem::manual(paths[2].clone())];
@@ -1109,6 +1167,7 @@ fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
 
 #[test]
 fn source_fences_reject_an_engine_current_the_service_has_not_observed() {
+    if isolated_source_fixture("playlist_service::tests::source_fences_reject_an_engine_current_the_service_has_not_observed") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1158,6 +1217,7 @@ fn source_fences_reject_an_engine_current_the_service_has_not_observed() {
 
 #[test]
 fn failed_removal_of_a_prepared_item_keeps_the_whole_future_until_a_save_succeeds() {
+    if isolated_source_fixture("playlist_service::tests::failed_removal_of_a_prepared_item_keeps_the_whole_future_until_a_save_succeeds") { return; }
     let fixture = Fixture::new();
     let items: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| QueueItem::manual(fixture.file(n))).collect();
     queue::replace_pending(&fixture.queue, items.clone());
@@ -1201,6 +1261,7 @@ fn failed_removal_of_a_prepared_item_keeps_the_whole_future_until_a_save_succeed
 
 #[test]
 fn removing_unprepared_row_during_transition_does_not_require_a_source_fence() {
+    if isolated_source_fixture("playlist_service::tests::removing_unprepared_row_during_transition_does_not_require_a_source_fence") { return; }
     let fixture = Fixture::new();
     let paths: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| fixture.file(n)).collect();
     let id = fixture.install("set", paths.iter().map(|p|Fixture::track(p)).collect());
@@ -1225,6 +1286,7 @@ fn removing_unprepared_row_during_transition_does_not_require_a_source_fence() {
 
 #[test]
 fn paused_transition_rejects_source_switch_with_actionable_reason() {
+    if isolated_source_fixture("playlist_service::tests::paused_transition_rejects_source_switch_with_actionable_reason") { return; }
     let fixture = Fixture::new();
     let a = fixture.file("a.wav"); let b = fixture.file("b.wav");
     let id = fixture.install("playing", vec![Fixture::track(&a), Fixture::track(&b)]);
@@ -1251,6 +1313,7 @@ fn paused_transition_rejects_source_switch_with_actionable_reason() {
 
 #[test]
 fn append_after_terminal_service_restart_clears_ended_without_starting_playback() {
+    if isolated_source_fixture("playlist_service::tests::append_after_terminal_service_restart_clears_ended_without_starting_playback") { return; }
     let fixture = Fixture::new();
     let a = fixture.file("a.wav"); let b = fixture.file("b.wav");
     let normal = vec![QueueItem::manual(fixture.file("normal.wav"))];
@@ -1310,6 +1373,7 @@ fn append_after_terminal_service_restart_clears_ended_without_starting_playback(
 
 #[test]
 fn ended_restart_is_saved_without_resuming_engine_or_destroying_definition() {
+    if isolated_source_fixture("playlist_service::tests::ended_restart_is_saved_without_resuming_engine_or_destroying_definition") { return; }
     let fixture = Fixture::new(); let a = fixture.file("a.wav");
     let id = fixture.install("set", vec![Fixture::track(&a)]);
     fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
@@ -1343,6 +1407,7 @@ fn ended_restart_is_saved_without_resuming_engine_or_destroying_definition() {
 
 #[test]
 fn restart_replays_normal_current_before_selected_playlist_without_queue_duplication() {
+    if isolated_source_fixture("playlist_service::tests::restart_replays_normal_current_before_selected_playlist_without_queue_duplication") { return; }
     let fixture = Fixture::new(); let normal = fixture.file("normal.wav"); let playlist = fixture.file("playlist.wav");
     let id = fixture.install("set", vec![Fixture::track(&playlist)]);
     {
@@ -1378,6 +1443,7 @@ fn restart_replays_normal_current_before_selected_playlist_without_queue_duplica
 
 #[test]
 fn undoing_current_membership_restores_its_restart_identity_without_requeueing() {
+    if isolated_source_fixture("playlist_service::tests::undoing_current_membership_restores_its_restart_identity_without_requeueing") { return; }
     let fixture = Fixture::new(); let path = fixture.file("current.wav");
     let id = fixture.install("set", vec![Fixture::track(&path)]);
     fixture.command("select", Action::Select { id: Some(id.clone()) }).unwrap();
@@ -1395,6 +1461,7 @@ fn undoing_current_membership_restores_its_restart_identity_without_requeueing()
 
 #[test]
 fn reconcile_does_not_contend_with_held_render_mutex() {
+    if isolated_source_fixture("playlist_service::tests::reconcile_does_not_contend_with_held_render_mutex") { return; }
     use std::sync::mpsc;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
@@ -1437,6 +1504,7 @@ fn reconcile_does_not_contend_with_held_render_mutex() {
 
 #[test]
 fn waking_finite_tail_keeps_a_current_restore_that_has_not_started_yet() {
+    if isolated_source_fixture("playlist_service::tests::waking_finite_tail_keeps_a_current_restore_that_has_not_started_yet") { return; }
     let fixture = Fixture::new(); let path = fixture.file("restore.wav");
     let id = fixture.install("set", vec![]);
     {
@@ -1468,6 +1536,7 @@ fn waking_finite_tail_keeps_a_current_restore_that_has_not_started_yet() {
 
 #[test]
 fn final_source_skips_cached_non_funkot_before_returning_playlist_candidate() {
+    if isolated_source_fixture("playlist_service::tests::final_source_skips_cached_non_funkot_before_returning_playlist_candidate") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1498,6 +1567,7 @@ fn final_source_skips_cached_non_funkot_before_returning_playlist_candidate() {
 
 #[test]
 fn folder_preparation_allows_queue_edits_and_does_not_play_a_deleted_reservation() {
+    if isolated_source_fixture("playlist_service::tests::folder_preparation_allows_queue_edits_and_does_not_play_a_deleted_reservation") { return; }
     let fixture = Fixture::new();
     let first = fixture.file("first.wav");
     let second = fixture.file("second.wav");
@@ -1533,6 +1603,7 @@ fn folder_preparation_allows_queue_edits_and_does_not_play_a_deleted_reservation
 
 #[test]
 fn deleting_a_reserved_automatic_item_retires_its_restart_claim() {
+    if isolated_source_fixture("playlist_service::tests::deleting_a_reserved_automatic_item_retires_its_restart_claim") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock().unwrap_or_else(|e| e.into_inner());
     let previous_session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1565,6 +1636,7 @@ fn deleting_a_reserved_automatic_item_retires_its_restart_claim() {
 
 #[test]
 fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
+    if isolated_source_fixture("playlist_service::tests::uncached_non_funkot_first_candidate_is_analysed_before_source_returns") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1682,6 +1754,7 @@ fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
 
 #[test]
 fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
+    if isolated_source_fixture("playlist_service::tests::disabling_admission_replaces_ready_future_and_reuses_pending_occurrences") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1788,6 +1861,7 @@ fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
 
 #[test]
 fn off_revokes_prepared_automatic_non_funkot_when_switching_from_on() {
+    if isolated_source_fixture("playlist_service::tests::off_revokes_prepared_automatic_non_funkot_when_switching_from_on") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1833,6 +1907,7 @@ fn off_revokes_prepared_automatic_non_funkot_when_switching_from_on() {
 
 #[test]
 fn off_reapplies_cleanup_when_admission_atomic_is_already_false() {
+    if isolated_source_fixture("playlist_service::tests::off_reapplies_cleanup_when_admission_atomic_is_already_false") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1879,6 +1954,7 @@ fn off_reapplies_cleanup_when_admission_atomic_is_already_false() {
 
 #[test]
 fn disabling_admission_persists_filtered_normal_resume_for_startup() {
+    if isolated_source_fixture("playlist_service::tests::disabling_admission_persists_filtered_normal_resume_for_startup") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1906,6 +1982,7 @@ fn disabling_admission_persists_filtered_normal_resume_for_startup() {
 
 #[test]
 fn idle_off_hydrates_persisted_normal_before_filtering() {
+    if isolated_source_fixture("playlist_service::tests::idle_off_hydrates_persisted_normal_before_filtering") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1943,6 +2020,7 @@ fn idle_off_hydrates_persisted_normal_before_filtering() {
 
 #[test]
 fn idle_off_merges_live_enqueue_with_persisted_normal() {
+    if isolated_source_fixture("playlist_service::tests::idle_off_merges_live_enqueue_with_persisted_normal") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1982,6 +2060,7 @@ fn idle_off_merges_live_enqueue_with_persisted_normal() {
 
 #[test]
 fn disabling_admission_hashes_a_cached_manual_index_miss() {
+    if isolated_source_fixture("playlist_service::tests::disabling_admission_hashes_a_cached_manual_index_miss") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2004,6 +2083,7 @@ fn disabling_admission_hashes_a_cached_manual_index_miss() {
 
 #[test]
 fn disabling_admission_keeps_missing_and_same_fingerprint_replacement() {
+    if isolated_source_fixture("playlist_service::tests::disabling_admission_keeps_missing_and_same_fingerprint_replacement") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2056,6 +2136,7 @@ fn disabling_admission_keeps_missing_and_same_fingerprint_replacement() {
 
 #[test]
 fn disabling_admission_fences_engine_before_a_blocked_normal_source_releases() {
+    if isolated_source_fixture("playlist_service::tests::disabling_admission_fences_engine_before_a_blocked_normal_source_releases") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2120,6 +2201,7 @@ fn disabling_admission_fences_engine_before_a_blocked_normal_source_releases() {
 
 #[test]
 fn final_admission_blocks_decodable_track_when_cache_write_is_unavailable() {
+    if isolated_source_fixture("playlist_service::tests::final_admission_blocks_decodable_track_when_cache_write_is_unavailable") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2162,6 +2244,7 @@ fn final_admission_blocks_decodable_track_when_cache_write_is_unavailable() {
 
 #[test]
 fn admission_settings_save_failure_keeps_existing_future() {
+    if isolated_source_fixture("playlist_service::tests::admission_settings_save_failure_keeps_existing_future") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2222,6 +2305,7 @@ fn admission_settings_save_failure_keeps_existing_future() {
 
 #[test]
 fn admission_session_save_failure_keeps_existing_future() {
+    if isolated_source_fixture("playlist_service::tests::admission_session_save_failure_keeps_existing_future") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2281,6 +2365,7 @@ fn admission_session_save_failure_keeps_existing_future() {
 
 #[test]
 fn unavailable_playlist_admission_retries_after_cache_recovers() {
+    if isolated_source_fixture("playlist_service::tests::unavailable_playlist_admission_retries_after_cache_recovers") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2316,6 +2401,7 @@ fn unavailable_playlist_admission_retries_after_cache_recovers() {
 
 #[test]
 fn restored_normal_current_is_offered_once_before_any_start_observation() {
+    if isolated_source_fixture("playlist_service::tests::restored_normal_current_is_offered_once_before_any_start_observation") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock().unwrap_or_else(|e| e.into_inner());
     let previous_session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2354,6 +2440,7 @@ fn restored_normal_current_is_offered_once_before_any_start_observation() {
 
 #[test]
 fn restore_transfer_uses_latest_successful_edits_and_publishes_after_commit() {
+    if isolated_source_fixture("playlist_service::tests::restore_transfer_uses_latest_successful_edits_and_publishes_after_commit") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
         .lock().unwrap_or_else(|e| e.into_inner());
     let previous_session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
