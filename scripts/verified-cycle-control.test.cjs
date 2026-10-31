@@ -4,20 +4,102 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { inspectVerifiedCycle, validateCycleCallbacks, waitForVerifiedCycle, preparedStartupMismatch } = require('./verified-cycle-control.cjs');
+const { inspectVerifiedCycle, validateCycleCallbacks, waitForVerifiedCycle, validateFirstLiveReplay } = require('./verified-cycle-control.cjs');
 
 const callbackHeader = 'sequence,callback_qpc_100ns,playback_qpc_100ns,output_frames,engine_start,engine_end,paused,audition,render_lock_miss,trace_dropped\n';
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
-test('an observed preview upgrade cannot pass a full-prepared startup reference', () => {
-  assert.equal(preparedStartupMismatch([{ kind: 'cycle_source_started', index: 0 }, { kind: 'capture_end' }]), null);
-  const observed = { kind: 'cycle_preview_upgrade', count: 1, playlist_index: 0, playhead: 1440, preview_frames: 960000, main_callback_frame: 1920 };
-  for (const event of [observed, { kind: 'cycle_preview_upgrade' }]) {
-    const result = preparedStartupMismatch([{ kind: 'cycle_source_started', index: 0 }, event, { kind: 'capture_end' }]);
-    assert.equal(result.classification, 'condition_mismatch');
-    assert.equal(result.soundQuality, 'incomplete');
-    assert.equal(result.code, 'cycle_preview_upgrade_unmodeled');
+function firstLive() {
+  const evidence = { playlist_index: 0, build_revision: Array(20).fill(17), decoded_input_sha256: Array(32).fill(1),
+    preview_prepared_sha256: Array(32).fill(2), full_prepared_sha256: Array(32).fill(3) };
+  return {
+    core: '11'.repeat(20),
+    navigation: [
+      { kind: 'cycle_source_started', index: 0, engine_frame: 0 },
+      { kind: 'cycle_first_live_preparation', mode: 'preview_full', ready_engine_frame: 0, callback_sequence: 2,
+        queued_upgrade_at_render_frame: null, recipe: { recorded: true }, evidence },
+      { kind: 'cycle_preview_upgrade', count: 1, playlist_index: 0, render_frame: 13, callback_sequence: 2,
+        preview_frames: 20, playhead: 13, evidence: structuredClone(evidence) },
+    ],
+    callbacks: [
+      { sequence: 1, paused: 0, engine_start: 0, engine_end: 10 },
+      { sequence: 2, paused: 0, engine_start: 10, engine_end: 20 },
+    ],
+  };
+}
+
+test('recorded first-live adoption uses the engine frame inside its actual callback', () => {
+  const input = firstLive();
+  assert.deepEqual(validateFirstLiveReplay(input.navigation, input.callbacks, input.core).schedule,
+    { ready_at_render_frame: 0, upgrade_at_render_frame: 13, upgrade_adoption: 'Active' });
+  const delayed = firstLive();
+  delayed.navigation[0].engine_frame = 10;
+  delayed.navigation[1].ready_engine_frame = 13;
+  delayed.navigation[2].render_frame = 17;
+  delayed.navigation[2].playhead = 4;
+  assert.deepEqual(validateFirstLiveReplay(delayed.navigation, delayed.callbacks, delayed.core).schedule,
+    { ready_at_render_frame: 13, upgrade_at_render_frame: 17, upgrade_adoption: 'Active' });
+  input.navigation[1].mode = 'single';
+  input.navigation[1].callback_sequence = 1;
+  input.navigation.pop();
+  assert.equal(validateFirstLiveReplay(input.navigation, input.callbacks, input.core).schedule.upgrade_at_render_frame, null);
+});
+
+test('a queued full buffer is distinguished from an active preview fade at the same frame', () => {
+  const input = firstLive();
+  input.navigation[1].queued_upgrade_at_render_frame = 0;
+  input.navigation[1].callback_sequence = 1;
+  input.navigation.pop();
+  assert.deepEqual(validateFirstLiveReplay(input.navigation, input.callbacks, input.core).schedule,
+    { ready_at_render_frame: 0, upgrade_at_render_frame: 0, upgrade_adoption: 'Queued' });
+  for (const frame of [1, -1, 0.5]) {
+    input.navigation[1].queued_upgrade_at_render_frame = frame;
+    assert.throws(() => validateFirstLiveReplay(input.navigation, input.callbacks, input.core), { classification: 'condition_mismatch' });
   }
+});
+
+test('legacy, missing and duplicate first-live observations cannot become comparable', () => {
+  const input = firstLive();
+  assert.throws(() => validateFirstLiveReplay([input.navigation[0]], input.callbacks, input.core), { classification: 'incomplete' });
+  for (const navigation of [input.navigation.slice(0, 2), [...input.navigation, input.navigation[1]], [...input.navigation, input.navigation[2]]]) {
+    assert.throws(() => validateFirstLiveReplay(navigation, input.callbacks, input.core), { classification: 'condition_mismatch' });
+  }
+});
+
+test('foreign sources, producers and content cannot replace observed first-live evidence', () => {
+  const changes = [
+    value => { value.navigation[1].evidence.playlist_index = 1; },
+    value => { value.navigation[1].evidence.build_revision = Array(20).fill(0); },
+    value => { value.navigation[1].evidence.build_revision[0] = 18; value.navigation[2].evidence.build_revision[0] = 18; },
+    value => { value.navigation[1].recipe = null; },
+    value => { value.navigation[2].evidence.decoded_input_sha256[0] = 2; },
+    value => { value.navigation[2].evidence.preview_prepared_sha256[0] = 4; },
+    value => { value.navigation[2].evidence.full_prepared_sha256[0] = 4; },
+    value => { value.navigation[2].playlist_index = 2; },
+    value => { value.navigation[2].playhead = 21; },
+  ];
+  for (const change of changes) {
+    const input = firstLive(); change(input);
+    assert.throws(() => validateFirstLiveReplay(input.navigation, input.callbacks, input.core), { classification: 'condition_mismatch' });
+  }
+});
+
+test('adoption at another callback or an ambiguous engine boundary is rejected', () => {
+  for (const frame of [9, 21, -1, 13.5]) {
+    const input = firstLive(); input.navigation[2].render_frame = frame;
+    assert.throws(() => validateFirstLiveReplay(input.navigation, input.callbacks, input.core), { classification: 'condition_mismatch' });
+  }
+  const input = firstLive();
+  input.callbacks.push({ sequence: 3, paused: 0, engine_start: 12, engine_end: 14 });
+  assert.throws(() => validateFirstLiveReplay(input.navigation, input.callbacks, input.core), { classification: 'condition_mismatch' });
+});
+
+test('an upgrade adopted by poll_events at callback end keeps its explicitly observed callback', () => {
+  const input = firstLive();
+  input.navigation[2].render_frame = 20;
+  assert.equal(validateFirstLiveReplay(input.navigation, input.callbacks, input.core).schedule.upgrade_at_render_frame, 20);
+  input.navigation[2].callback_sequence = undefined;
+  assert.throws(() => validateFirstLiveReplay(input.navigation, input.callbacks, input.core), { classification: 'condition_mismatch' });
 });
 
 function fixture(t) {

@@ -2916,6 +2916,7 @@ fn open_output_stream(
     }
     let mut transport_fade = transport_fade::TransportFade::new(sample_rate);
     let mut core_diagnostics = playback_diagnostics::CoreDiagnosticsPublisher::new(&diagnostics);
+    let mut first_live_preparation_captured = false;
     let stream = device
         .build_output_stream(
             config,
@@ -3039,7 +3040,15 @@ fn open_output_stream(
                 if let Some(render_diagnostics) = render_diagnostics {
                     if let Some(snapshot) = core_diagnostics.observe(render_diagnostics, || MAIN_FRAMES.load(Ordering::Relaxed), &diagnostics) {
                         if let Some(capture) = &capture {
-                            capture.preview_upgrade(snapshot);
+                            capture.preview_upgrade(snapshot, sequence);
+                        }
+                    }
+                }
+                if !audition && !first_live_preparation_captured {
+                    if let Some(capture) = &capture {
+                        if let Some(observation) = state.engine.first_live_replay_observation() {
+                            capture.first_live_preparation(observation, sequence);
+                            first_live_preparation_captured = true;
                         }
                     }
                 }

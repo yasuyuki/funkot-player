@@ -946,7 +946,7 @@ function stateWindows(input, visit, validateFit = true) {
 function stateThresholds(stats) {
     return Object.fromEntries(keys.map(key => [key, Math.max(stats[key].max * 1.25, 1e-12)]));
 }
-function stateContinuity(wave, ranges) {
+function stateContinuity(wave, ranges, reference) {
     let first = null, maxZero = 0, nonfinite = null, maxDelta = 0, zero = 0, previousEnd = null;
     for (const range of ranges) {
         if (range.kind !== 'audio') {
@@ -957,17 +957,19 @@ function stateContinuity(wave, ranges) {
         if (previousEnd !== range.start)
             zero = 0;
         for (let frame = range.start; frame < range.end; frame++) {
-            let both = true;
+            let both = true, expectedZero = true;
             for (let ch = 0; ch < 2; ch++) {
                 const value = wave.sample(frame, ch);
                 if (!Number.isFinite(value))
                     nonfinite ??= frame;
                 if (Math.abs(value) > 1e-6)
                     both = false;
+                if (reference.sample(range.reference_start + frame - range.start, ch) !== 0)
+                    expectedZero = false;
                 if (frame > 0)
                     maxDelta = Math.max(maxDelta, Math.abs(value - wave.sample(frame - 1, ch)));
             }
-            if (both) {
+            if (both && (!expectedZero || zero > 0)) {
                 zero++;
                 if (zero >= 24)
                     first ??= frame - zero + 1;
@@ -999,7 +1001,7 @@ function calibrateState(aFile, bFile, outFile) {
         const timing = stateTiming(input);
         if (timing.classification !== 'clean' || stateValidateRanges(input).length)
             throw Error('Negative state is not complete');
-        const continuity = stateContinuity(input.capture, input.ranges);
+        const continuity = stateContinuity(input.capture, input.ranges, input.reference);
         if (continuity.nonfinite !== null || continuity.firstGap !== null)
             throw Error('Negative PCM continuity is not clean');
         let windows = 0;
@@ -1018,7 +1020,7 @@ function calibrateState(aFile, bFile, outFile) {
         ];
     }));
     const timingA = stateTiming(a), timingB = stateTiming(b);
-    const continuityA = stateContinuity(a.capture, a.ranges), continuityB = stateContinuity(b.capture, b.ranges);
+    const continuityA = stateContinuity(a.capture, a.ranges, a.reference), continuityB = stateContinuity(b.capture, b.ranges, b.reference);
     const thresholds = {
         ...stateThresholds(stats), adjacentDelta: Math.max(continuityA.maxDelta, continuityB.maxDelta) * 1.25, callbackGapMs: Math.max(timingA.maxGapMs, timingB.maxGapMs) * 1.5, playbackGapMs: Math.max(timingA.maxPlaybackGapMs, timingB.maxPlaybackGapMs) * 1.5
     };
@@ -1078,7 +1080,7 @@ function scanState(stateFile, calibrationFile, outFile) {
                 };
             }
         });
-    const continuity = stateContinuity(input.capture, input.ranges);
+    const continuity = stateContinuity(input.capture, input.ranges, input.reference);
     if (continuity.nonfinite !== null)
         first = {
             classification: 'capture_fault', frame: continuity.nonfinite, reason: 'nonfinite_sample'

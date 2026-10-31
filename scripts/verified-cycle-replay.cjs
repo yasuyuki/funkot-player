@@ -6,7 +6,7 @@ const { verifyPlayerBuild, cleanEnvironment, frontendConfigPath } = require('./v
 const { readCaptureWitness } = require('./verified-capture.cjs');
 const { wav } = require('./audio-anomaly-detector.cjs');
 const { callbackCsv, jsonLines } = require('./audio-anomaly-analysis.cjs');
-const { validateCycleCallbacks, preparedStartupMismatch } = require('./verified-cycle-control.cjs');
+const { validateCycleCallbacks, validateFirstLiveReplay } = require('./verified-cycle-control.cjs');
 
 const references = new WeakMap();
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -40,6 +40,9 @@ function prepareCycleReference({ build, inputManifest, workDirectory, header, ca
     throw new Error('finite cycle first-source frame origin is unverified');
   }
   if (canonical(header) !== canonical(capture.header.value)) throw new Error('cycle reference header does not match the observed process');
+  const callbacksFile = capture.outputs.callbacks_csv.realpath;
+  if (hash(callbacksFile) !== capture.outputs.callbacks_csv.sha256) throw new Error('finite cycle callback evidence changed');
+  const firstLive = validateFirstLiveReplay(navigation, validateCycleCallbacks(callbackCsv(callbacksFile)), proof.coreRevision);
   const player = proof.guardedInputs.playerSource.directory, core = proof.guardedInputs.coreDirectory;
   if (header.core_git !== proof.coreRevision || header.options?.output_sample_rate !== 48000) throw new Error('cycle reference conditions do not match the verified build');
   const work = path.join(fs.realpathSync(workDirectory), 'cycle-reference');
@@ -51,8 +54,10 @@ function prepareCycleReference({ build, inputManifest, workDirectory, header, ca
   const driver = path.join(player, 'src-tauri/examples/diagnostic_cycle_reference.rs');
   const engine = path.join(core, 'funkot-core/src/engine.rs');
   const guarded = [descriptor(inputManifest), ...inputFiles, descriptor(driver), descriptor(engine)];
+  const capturedTrace = [descriptor(capture.outputs.navigation_jsonl.realpath), descriptor(callbacksFile)];
   const headerFile = path.join(work, 'header.json');
-  fs.writeFileSync(headerFile, JSON.stringify({ ...header, cycle_origin: origins[0] }) + '\n', { flag: 'wx' });
+  fs.writeFileSync(headerFile, JSON.stringify({ ...header, cycle_origin: origins[0], first_live: firstLive,
+    cycle_trace: { callbacks: callbacksFile, navigation: capture.outputs.navigation_jsonl.realpath } }) + '\n', { flag: 'wx' });
   const env = { ...cleanEnvironment(), CARGO_TARGET_DIR: proof.guardedInputs.cargo.target,
     CARGO_BUILD_BUILD_DIR: proof.guardedInputs.cargo.build,
     TAURI_CONFIG: JSON.stringify({ identifier: proof.identifier, build: { frontendDist: frontendConfigPath(player, proof.guardedInputs.frontend.directory) } }) };
@@ -65,21 +70,16 @@ function prepareCycleReference({ build, inputManifest, workDirectory, header, ca
   run(executable, [inputManifest, headerFile, path.join(work, 'cache'), output], env, work, deadline);
   const metadataFile = output + '.json', metadata = read(metadataFile), waveFile = output + '.wav';
   const pcm = wav(waveFile);
-  if (!Array.isArray(metadata.verified_initial_entries) || metadata.verified_initial_entries.length < 1 ||
-      metadata.verified_initial_entries.some((entry, index) => !Number.isSafeInteger(entry.entry_frame) || !Number.isSafeInteger(entry.source_frame_offset) ||
-        entry.source_frame_offset < 0 || entry.entry_frame - origins[0].entry_frame !== entry.source_frame_offset ||
-        entry.frames !== pcm.frames - origins[0].engine_frame - entry.source_frame_offset || entry.frames <= 0 ||
-        (index === 0 ? entry.source_frame_offset !== 0 : entry.rendered_pcm_sha256 !== crypto.createHash('sha256').update(fs.readFileSync(waveFile).subarray(44 + (origins[0].engine_frame + entry.source_frame_offset) * 8)).digest('hex')))) {
-    throw new Error('cycle reference initial entries lack a matching real-engine render');
-  }
-  if (metadata.outcome !== null || metadata.runtime?.core_revision !== proof.coreRevision || metadata.executable_sha256 !== binary.sha256 ||
+  if (metadata.startup_model !== 'first_live_engine_v1' || metadata.historical_candidate !== false ||
+      metadata.outcome !== null || canonical(metadata.first_live) !== canonical(firstLive) ||
+      metadata.runtime?.core_revision !== proof.coreRevision || metadata.executable_sha256 !== binary.sha256 ||
       metadata.driver_source_sha256 !== hash(driver) || metadata.core_source_sha256 !== hash(engine) ||
       metadata.transport_source_sha256 !== hash(path.join(player, 'src-tauri/src/transport_fade.rs')) ||
       canonical(metadata.input_hashes) !== canonical(inputFiles.map(item => item.sha256)) || canonical(metadata.occurrences) !== '[0,1,0]' ||
       canonical(metadata.cycle_origin) !== canonical(origins[0]) || metadata.output?.engine_frame_zero !== 0 || metadata.output.frames !== pcm.frames || metadata.output.sha256 !== hash(waveFile) || options(metadata.engine_options) !== options(header.options)) {
     throw new Error('cycle reference producer does not match the build or fixed inputs');
   }
-  assertFiles(guarded);
+  assertFiles([...guarded, ...capturedTrace]);
   verifyPlayerBuild(build.buildWitness);
   const handle = Object.freeze({});
   references.set(handle, { buildWitness: build.buildWitness, proof, metadata, header: JSON.parse(JSON.stringify(header)), inputFiles,
@@ -123,12 +123,11 @@ function comparableWitness(captured, reference) {
     throw new Error('finite cycle source observations are incomplete');
   }
   const initial = navigation.filter(row => row.kind === 'cycle_source_started' && row.index === 0);
-  if (initial.length !== 1 || !stored.metadata.verified_initial_entries.some(entry => entry.entry_frame === initial[0].entry_frame) || !Number.isSafeInteger(initial[0].engine_frame) || initial[0].engine_frame < 0) {
+  if (initial.length !== 1 || !Number.isSafeInteger(initial[0].entry_frame) || initial[0].entry_frame < 0 ||
+      !Number.isSafeInteger(initial[0].engine_frame) || initial[0].engine_frame < 0) {
     return { classification: 'condition_mismatch', soundQuality: 'incomplete', code: 'cycle_initial_origin_changed' };
   }
-  const entry = stored.metadata.verified_initial_entries.find(entry => entry.entry_frame === initial[0].entry_frame);
-  try { validateCycleCallbacks(callbacks, { engineEnd: entry.frames + initial[0].engine_frame }); }
-  catch (error) { return { classification: 'capture_fault', soundQuality: 'incomplete', code: 'cycle_engine_extent_changed', detail: error.message }; }
+  const firstLive = validateFirstLiveReplay(navigation, callbacks, stored.proof.coreRevision);
   const footer = navigation.at(-1), last = callbacks.at(-1);
   if (navigation.filter(row => row.kind === 'capture_end').length !== 1 || footer.kind !== 'capture_end' ||
       footer.last_callback_sequence !== last.sequence || footer.last_engine_frame !== last.engine_end ||
@@ -137,16 +136,17 @@ function comparableWitness(captured, reference) {
     return { classification: footer?.trace_dropped || footer?.callback_records_dropped ? 'capture_fault' : 'incomplete',
       soundQuality: 'incomplete', code: 'cycle_final_evidence_incomplete' };
   }
-  return { stored, witness, receipt, navigation };
+  return { stored, witness, receipt, navigation, firstLive };
 }
 
 function compareCycle({ captured, reference, calibrationFile, workDirectory, deadline }) {
   try {
     const checked = comparableWitness(captured, reference);
     if (checked.classification) return checked;
-    const { stored, witness, receipt, navigation } = checked;
+    const { stored, witness, receipt } = checked;
     const capture = wav(witness.recorder.pcm.file);
     if (witness.header.value.silent_render === true) {
+      require('./verified-cycle-state.cjs').composeCycle({ witness, reference: stored, workDirectory, deadline, firstLive: checked.firstLive });
       for (let frame = 0; frame < capture.frames; frame++) for (let channel = 0; channel < 2; channel++) {
         if (capture.sample(frame, channel) !== 0) return { classification: 'capture_fault', soundQuality: 'incomplete', first: { frame, reason: 'silent_cycle_nonzero_pcm' } };
       }
@@ -156,15 +156,14 @@ function compareCycle({ captured, reference, calibrationFile, workDirectory, dea
         frameCounts: { audio: 0, intentional: capture.frames, capture_fault: 0, unclassified: 0 },
         reference: { sha256: hash(stored.waveFile), frames: stored.metadata.output.frames }, pcmSha256: witness.recorder.pcm.sha256 };
     }
-    const startupMismatch = preparedStartupMismatch(navigation);
-    if (startupMismatch) return startupMismatch;
-    const diagnostic = require('./verified-cycle-state.cjs').scanCycle({ witness, reference: stored, calibrationFile, workDirectory, deadline });
+    const diagnostic = require('./verified-cycle-state.cjs').scanCycle({ witness, reference: stored, calibrationFile, workDirectory, deadline, firstLive: checked.firstLive });
     const final = comparableWitness(captured, reference);
     if (final.classification) return final;
     return { ...diagnostic, guaranteeClass: 'fresh_finite_cycle', comparable: !['incomplete', 'condition_mismatch', 'capture_fault'].includes(diagnostic.classification),
       soundQuality: diagnostic.classification === 'clean' ? 'no_anomaly_detected' : ['pcm_transient', 'dropout', 'timing_glitch'].includes(diagnostic.classification) ? 'anomaly_detected' : 'incomplete' };
   } catch (error) {
-    return { classification: 'incomplete', soundQuality: 'incomplete', code: 'cycle_provenance_unverified', detail: error.message };
+    return { classification: ['condition_mismatch', 'incomplete'].includes(error.classification) ? error.classification : 'incomplete',
+      soundQuality: 'incomplete', code: error.code || 'cycle_provenance_unverified', detail: error.message };
   }
 }
 

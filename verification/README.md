@@ -97,8 +97,13 @@ For device click diagnosis, `playback diagnostics` logs render-lock misses and
 their silent frame count, realtime preview-wait frames, and active preview-to-full
 upgrade positions. The existing audio thread logs changes; the callback only
 updates counters and publishes changed records. Upgrade `main_callback_frame`
-is observed at the callback boundary, not an exact event timestamp. These
-measurements do not prove audible output quality and are outside the Kani model.
+is observed at the callback boundary. Finite captures separately record the
+core's adopted `render_frame`, playhead and preparation evidence; replay uses
+those engine positions and the actual preview/full recipe. These measurements
+do not prove audible output quality and are outside the Kani model.
+Replay compares the engine's preparation and preview-wait zeros as PCM. Only
+unrendered transport padding is excluded; a transient during a wait is still
+subject to the calibrated residual check.
 
 The same runner checks sensitivity in isolated temporary copies. It changes
 `Observation::Passive => None` to `Observation::Passive => Some(Cause::Started)`

@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
 
 const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -63,11 +64,62 @@ async function waitForVerifiedCycle({ captureDirectory, cyclePlanPath, child, de
   throw new Error('finite cycle natural end timed out');
 }
 
-function preparedStartupMismatch(navigation) {
-  return navigation.some(event => event.kind === 'cycle_preview_upgrade')
-    ? { classification: 'condition_mismatch', soundQuality: 'incomplete', code: 'cycle_preview_upgrade_unmodeled',
-      detail: 'prepared cycle reference does not model an observed preview upgrade' }
-    : null;
+function validateFirstLiveReplay(navigation, callbacks, coreRevision) {
+  const reject = (detail, classification = 'condition_mismatch') => {
+    throw Object.assign(new Error(detail), { classification, code: 'cycle_first_live_unverified' });
+  };
+  const preparations = navigation.filter(row => row.kind === 'cycle_first_live_preparation');
+  if (!preparations.length) reject('finite cycle lacks recorded first-live preparation', 'incomplete');
+  if (preparations.length !== 1) reject('finite cycle has duplicate first-live preparation');
+  const preparation = preparations[0];
+  const revision = preparation.evidence?.build_revision;
+  if (!/^[0-9a-f]{40}$/.test(coreRevision) || !Array.isArray(revision) || revision.length !== 20 ||
+      revision.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255) ||
+      Buffer.from(revision).toString('hex') !== coreRevision || preparation.evidence.playlist_index !== 0 ||
+      !preparation.recipe || typeof preparation.recipe !== 'object' || Array.isArray(preparation.recipe) ||
+      !['preview_full', 'single'].includes(preparation.mode) ||
+      !Number.isSafeInteger(preparation.ready_engine_frame) || preparation.ready_engine_frame < 0) {
+    reject('finite cycle preparation does not match its verified producer');
+  }
+  const containing = frame => callbacks.filter(row => row.paused === 0 && row.engine_start !== null &&
+    row.engine_start <= frame && frame < row.engine_end);
+  const ready = containing(preparation.ready_engine_frame);
+  const sources = navigation.filter(row => row.kind === 'cycle_source_started' && row.index === 0);
+  if (ready.length !== 1 || sources.length !== 1 || sources[0].engine_frame !== ready[0].engine_start) {
+    reject('first-live ready frame lacks one source callback');
+  }
+  const queued = preparation.queued_upgrade_at_render_frame ?? null;
+  if (queued !== null && (preparation.mode !== 'preview_full' || queued !== preparation.ready_engine_frame ||
+      preparation.callback_sequence !== ready[0].sequence)) {
+    reject('queued first-live upgrade does not match actual readiness');
+  }
+  const upgrades = navigation.filter(row => row.kind === 'cycle_preview_upgrade');
+  if (upgrades.length !== (preparation.mode === 'preview_full' && queued === null ? 1 : 0)) {
+    reject('first-live upgrade is missing or duplicated');
+  }
+  const upgrade = upgrades[0];
+  if (upgrade) {
+    const adopted = callbacks.filter(row => row.sequence === upgrade.callback_sequence && row.paused === 0 &&
+      row.engine_start !== null && row.engine_start <= upgrade.render_frame && upgrade.render_frame <= row.engine_end);
+    const overlapping = callbacks.filter(row => row.engine_start !== null &&
+      row.engine_start < upgrade.render_frame && upgrade.render_frame < row.engine_end);
+    if (!Number.isSafeInteger(upgrade.render_frame) || upgrade.render_frame < preparation.ready_engine_frame ||
+        upgrade.count !== 1 || upgrade.playlist_index !== 0 ||
+        !Number.isSafeInteger(upgrade.preview_frames) || upgrade.preview_frames <= 0 ||
+        !Number.isSafeInteger(upgrade.playhead) || upgrade.playhead < 0 || upgrade.playhead > upgrade.preview_frames ||
+        !isDeepStrictEqual(upgrade.evidence, preparation.evidence) ||
+        adopted.length !== 1 || overlapping.length > 1 ||
+        preparation.callback_sequence !== upgrade.callback_sequence) {
+      reject('first-live adoption does not match one actual callback and preparation');
+    }
+  } else if (preparation.callback_sequence !== ready[0].sequence) {
+    reject('first-live preparation does not match its actual callback');
+  }
+  return { preparation, upgrade: upgrade ?? null, schedule: {
+    ready_at_render_frame: preparation.ready_engine_frame,
+    upgrade_at_render_frame: queued ?? upgrade?.render_frame ?? null,
+    upgrade_adoption: queued !== null ? 'Queued' : upgrade ? 'Active' : null,
+  } };
 }
 
-module.exports = { inspectVerifiedCycle, waitForVerifiedCycle, validateCycleCallbacks, preparedStartupMismatch };
+module.exports = { inspectVerifiedCycle, waitForVerifiedCycle, validateCycleCallbacks, validateFirstLiveReplay };

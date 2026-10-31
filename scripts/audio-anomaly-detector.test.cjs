@@ -530,6 +530,28 @@ test('counter-aligned engine wait is zero PCM before the recorded source start',
     json(input.targetState, invalid);
     assert.equal(scan(input).classification, 'capture_fault');
 });
+test('engine-rendered wait zeros remain compared PCM and expose a transient inside the wait', t => {
+    const input = alignedFixture(t);
+    for (const file of [input.reference, input.capture, path.join(input.root, 'a.wav'), path.join(input.root, 'b.wav')])
+        replaceWaveFrames(file, 0, 96);
+    for (const stateFile of [input.aState, input.bState, input.targetState]) {
+        const state = JSON.parse(fs.readFileSync(stateFile));
+        state.capture.sha256 = sha(path.join(input.root, state.capture.file));
+        state.reference.sha256 = sha(input.reference);
+        json(stateFile, state);
+        updateAlignment(input, stateFile, [2, 4]);
+    }
+    assert.doesNotThrow(() => calibrate(input));
+    assert.equal(scan(input).classification, 'clean');
+    replaceWaveFrames(input.capture, 48, 49, 0.01);
+    const changed = JSON.parse(fs.readFileSync(input.targetState));
+    changed.capture.sha256 = sha(input.capture);
+    json(input.targetState, changed);
+    updateAlignment(input, input.targetState, [2, 4]);
+    const result = scan(input);
+    assert.equal(result.classification, 'pcm_transient');
+    assert.equal(result.first.frame, 0);
+});
 test('counter-aligned timing ignores only gaps wholly inside validated intentional PCM', t => {
     const gated = alignedFixture(t);
     const gatedRows = fs.readFileSync(gated.callbacks, 'utf8').trim().split(/\r?\n/);

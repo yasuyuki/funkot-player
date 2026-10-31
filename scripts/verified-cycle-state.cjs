@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { isDeepStrictEqual } = require('node:util');
 const { callbackCsv, calibrationReceipt } = require('./audio-anomaly-analysis.cjs');
 const { wav, RATE } = require('./audio-anomaly-detector.cjs');
 const { cleanEnvironment } = require('./verified-player-build.cjs');
@@ -122,23 +123,32 @@ function mergeRanges(ranges) {
   return result;
 }
 
-function scanCycle({ witness, reference, calibrationFile, workDirectory, deadline }) {
-  const findings = [];
-  const receiptFile = path.join(path.dirname(calibrationFile), 'calibration-receipt.json');
-  calibrationReceipt(path.dirname(calibrationFile), { ...descriptor(calibrationFile), receipt: descriptor(receiptFile) }, { route: witness.endpointReceipt.stream }, findings);
-  if (findings.length) return { classification: 'condition_mismatch', soundQuality: 'incomplete', findings };
+function composeCycle({ witness, reference, workDirectory, deadline, firstLive }) {
   const trace = witness.outputs.navigation_jsonl.realpath, callbacksFile = witness.outputs.callbacks_csv.realpath;
   const composedPrefix = path.join(workDirectory, 'expected-callback-output');
   execute(reference.executable, ['--compose', reference.waveFile, reference.metadataFile, callbacksFile, trace, composedPrefix], deadline);
   const composition = read(composedPrefix + '.json');
-  const expectedFile = composedPrefix + '.wav', captureFile = witness.recorder.pcm.file;
-  if (composition.outcome !== null || composition.runtime?.core_revision !== reference.proof.coreRevision ||
+  const expectedFile = composedPrefix + '.wav';
+  if (composition.startup_model !== 'first_live_engine_v1' || composition.historical_candidate !== false ||
+      !composition.first_live || firstLive && !isDeepStrictEqual(composition.first_live, firstLive) ||
+      composition.outcome !== null || composition.runtime?.core_revision !== reference.proof.coreRevision ||
       composition.callbacks_sha256 !== hash(callbacksFile) || composition.trace_sha256 !== hash(trace) ||
       composition.reference_sha256 !== hash(reference.waveFile) || composition.output?.sha256 !== hash(expectedFile) ||
       composition.driver_source_sha256 !== reference.metadata.driver_source_sha256 ||
       composition.transport_source_sha256 !== reference.metadata.transport_source_sha256) {
     throw new Error('cycle expected output does not match its observed inputs');
   }
+  return { composition, expectedFile };
+}
+
+function scanCycle({ witness, reference, calibrationFile, workDirectory, deadline, firstLive }) {
+  const findings = [];
+  const receiptFile = path.join(path.dirname(calibrationFile), 'calibration-receipt.json');
+  calibrationReceipt(path.dirname(calibrationFile), { ...descriptor(calibrationFile), receipt: descriptor(receiptFile) }, { route: witness.endpointReceipt.stream }, findings);
+  if (findings.length) return { classification: 'condition_mismatch', soundQuality: 'incomplete', findings };
+  const { composition, expectedFile } = composeCycle({ witness, reference, workDirectory, deadline, firstLive });
+  const callbacksFile = witness.outputs.callbacks_csv.realpath;
+  const captureFile = witness.recorder.pcm.file;
   const target = wav(captureFile), expected = wav(expectedFile), callbackRows = callbackCsv(callbacksFile);
   let cursor = 0;
   const rows = callbackRows.map(row => { const value = { ...row, output_start: cursor }; cursor += row.output_frames; return value; });
@@ -176,4 +186,4 @@ function scanCycle({ witness, reference, calibrationFile, workDirectory, deadlin
     scan: descriptor(scanFile), state: descriptor(stateFile), callbackOrigin: origin, captureFrames: target.frames, coverage: scan.coverage };
 }
 
-module.exports = { alignCycleSources, scanCycle };
+module.exports = { alignCycleSources, composeCycle, scanCycle };

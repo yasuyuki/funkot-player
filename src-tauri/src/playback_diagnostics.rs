@@ -18,6 +18,12 @@ pub(crate) struct PreviewUpgradeSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CapturedPreviewUpgrade {
+    pub snapshot: PreviewUpgradeSnapshot,
+    pub adoption: PreviewUpgrade,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DiagnosticsSnapshot {
     pub render_lock_misses: u64,
     pub render_lock_missed_frames: u64,
@@ -117,7 +123,7 @@ impl CoreDiagnosticsPublisher {
         Self { preview_wait_frames, preview_upgrades }
     }
 
-    pub(crate) fn observe(&mut self, diagnostics: RenderDiagnostics, main_callback_frame: impl FnOnce() -> u64, target: &PlaybackDiagnostics) -> Option<PreviewUpgradeSnapshot> {
+    pub(crate) fn observe(&mut self, diagnostics: RenderDiagnostics, main_callback_frame: impl FnOnce() -> u64, target: &PlaybackDiagnostics) -> Option<CapturedPreviewUpgrade> {
         if diagnostics.preview_wait_frames != self.preview_wait_frames {
             self.preview_wait_frames = diagnostics.preview_wait_frames;
             target.publish_preview_wait_frames(diagnostics.preview_wait_frames);
@@ -133,7 +139,7 @@ impl CoreDiagnosticsPublisher {
                     main_callback_frame: main_callback_frame(),
                 };
                 target.publish_upgrade(snapshot);
-                return Some(snapshot);
+                return Some(CapturedPreviewUpgrade { snapshot, adoption: upgrade });
             }
         }
         None
@@ -147,7 +153,7 @@ mod tests {
     use super::*;
 
     fn upgrade(index: usize) -> PreviewUpgrade {
-        PreviewUpgrade { playlist_index: index, playhead: 12, preview_frames: 34 }
+        PreviewUpgrade { playlist_index: index, playhead: 12, preview_frames: 34, render_frame: 7, evidence: None }
     }
 
     #[test]
@@ -159,14 +165,14 @@ mod tests {
             main_frame_samples.set(main_frame_samples.get() + 1);
             50
         }, &target);
-        assert_eq!(observed, Some(PreviewUpgradeSnapshot {
-            count: 1, playlist_index: usize::MAX, playhead: 12, preview_frames: 34,
-            main_callback_frame: 50,
+        assert_eq!(observed, Some(CapturedPreviewUpgrade {
+            snapshot: PreviewUpgradeSnapshot { count: 1, playlist_index: usize::MAX, playhead: 12, preview_frames: 34,
+                main_callback_frame: 50 }, adoption: upgrade(usize::MAX),
         }));
         assert_eq!(main_frame_samples.get(), 1);
         let first = target.read().unwrap();
         assert_eq!(first.preview_wait_frames, 4);
-        assert_eq!(first.upgrade, observed);
+        assert_eq!(first.upgrade, observed.map(|value| value.snapshot));
         assert_eq!(publisher.observe(RenderDiagnostics { preview_wait_frames: 9, preview_upgrades: 1, last_preview_upgrade: Some(upgrade(3)) }, || panic!("unchanged upgrade must not sample main frame"), &target), None);
         let second = target.read().unwrap();
         assert_eq!(second.preview_wait_frames, 9);

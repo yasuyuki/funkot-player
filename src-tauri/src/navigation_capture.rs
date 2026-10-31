@@ -8,8 +8,8 @@ use std::time::SystemTime;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::playback_diagnostics::PreviewUpgradeSnapshot;
-use funkot_core::engine::{Engine, NavigationTrace};
+use crate::playback_diagnostics::CapturedPreviewUpgrade;
+use funkot_core::engine::{Engine, FirstLiveReplayObservation, NavigationTrace};
 use funkot_core::EngineOptions;
 
 #[derive(Clone, Copy, Debug)]
@@ -41,7 +41,8 @@ enum CaptureRecord {
     Callback(CallbackRecord),
     Requested { id: u64 },
     SourceStarted { index: usize, entry_frame: u64, engine_frame: u64 },
-    PreviewUpgrade(PreviewUpgradeSnapshot),
+    PreviewUpgrade(CapturedPreviewUpgrade, u64),
+    FirstLivePreparation(FirstLiveReplayObservation, u64),
     StreamOpened {
         stream: StreamMetadata,
         complete: mpsc::SyncSender<io::Result<()>>,
@@ -111,8 +112,11 @@ impl CaptureSink {
     pub(crate) fn source_started(&self, index: usize, entry_frame: u64, engine_frame: u64) {
         if self.finite_cycle { self.send(CaptureRecord::SourceStarted { index, entry_frame, engine_frame }); }
     }
-    pub(crate) fn preview_upgrade(&self, snapshot: PreviewUpgradeSnapshot) {
-        if self.finite_cycle { self.send(CaptureRecord::PreviewUpgrade(snapshot)); }
+    pub(crate) fn preview_upgrade(&self, snapshot: CapturedPreviewUpgrade, callback_sequence: u64) {
+        if self.finite_cycle { self.send(CaptureRecord::PreviewUpgrade(snapshot, callback_sequence)); }
+    }
+    pub(crate) fn first_live_preparation(&self, observation: FirstLiveReplayObservation, callback_sequence: u64) {
+        if self.finite_cycle { self.send(CaptureRecord::FirstLivePreparation(observation, callback_sequence)); }
     }
     pub(crate) fn record(&self, record: CallbackRecord) {
         self.send(CaptureRecord::Callback(record));
@@ -280,8 +284,12 @@ fn start_in(engine: &mut Engine, options: &EngineOptions, inputs: &[PathBuf], di
                         navigation.flush()?;
                         continue;
                     }
-                    Ok(CaptureRecord::PreviewUpgrade(snapshot)) => {
-                        write_preview_upgrade(&mut navigation, snapshot)?;
+                    Ok(CaptureRecord::PreviewUpgrade(snapshot, sequence)) => {
+                        write_preview_upgrade(&mut navigation, snapshot, sequence)?;
+                        continue;
+                    }
+                    Ok(CaptureRecord::FirstLivePreparation(observation, sequence)) => {
+                        write_first_live_preparation(&mut navigation, &observation, sequence)?;
                         continue;
                     }
                     Ok(CaptureRecord::StreamOpened { stream, complete }) => {
@@ -428,12 +436,27 @@ fn drain_trace(receiver: &mpsc::Receiver<NavigationTrace>, writer: &mut impl Wri
     Ok(())
 }
 
-fn write_preview_upgrade(writer: &mut impl Write, snapshot: PreviewUpgradeSnapshot) -> io::Result<()> {
+fn write_preview_upgrade(writer: &mut impl Write, observed: CapturedPreviewUpgrade, callback_sequence: u64) -> io::Result<()> {
+    let snapshot = observed.snapshot;
     serde_json::to_writer(&mut *writer, &serde_json::json!({
         "kind": "cycle_preview_upgrade", "count": snapshot.count,
         "playlist_index": snapshot.playlist_index, "playhead": snapshot.playhead,
         "preview_frames": snapshot.preview_frames,
         "main_callback_frame": snapshot.main_callback_frame,
+        "render_frame": observed.adoption.render_frame, "callback_sequence": callback_sequence,
+        "evidence": observed.adoption.evidence,
+    }))?;
+    writeln!(writer)?;
+    writer.flush()
+}
+
+fn write_first_live_preparation(writer: &mut impl Write, observed: &FirstLiveReplayObservation, callback_sequence: u64) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, &serde_json::json!({
+        "kind": "cycle_first_live_preparation", "callback_sequence": callback_sequence,
+        "mode": if observed.recipe.has_preview() { "preview_full" } else { "single" },
+        "ready_engine_frame": observed.ready_at_render_frame,
+        "queued_upgrade_at_render_frame": observed.queued_upgrade_at_render_frame,
+        "recipe": &*observed.recipe, "evidence": observed.evidence,
     }))?;
     writeln!(writer)?;
     writer.flush()
@@ -484,27 +507,32 @@ mod tests {
         }
     }
 
-    fn preview_upgrade() -> PreviewUpgradeSnapshot {
-        PreviewUpgradeSnapshot {
+    fn preview_upgrade() -> CapturedPreviewUpgrade {
+        CapturedPreviewUpgrade { snapshot: crate::playback_diagnostics::PreviewUpgradeSnapshot {
             count: 7, playlist_index: 3, playhead: 11, preview_frames: 13,
             main_callback_frame: 17,
-        }
+        }, adoption: funkot_core::engine::PreviewUpgrade { playlist_index: 3, playhead: 11,
+            preview_frames: 13, render_frame: 7, evidence: None } }
     }
 
     #[test]
     fn preview_upgrade_writer_keeps_the_observed_snapshot_fields() {
-        let snapshot = preview_upgrade();
+        let observed = preview_upgrade();
+        let snapshot = observed.snapshot;
         let mut output = Vec::new();
-        write_preview_upgrade(&mut output, snapshot).unwrap();
+        write_preview_upgrade(&mut output, observed, 2).unwrap();
         let row: serde_json::Value = serde_json::from_slice(&output).unwrap();
         let fields = row.as_object().unwrap();
-        assert_eq!(fields.len(), 6);
+        assert_eq!(fields.len(), 9);
         assert_eq!(row["kind"], "cycle_preview_upgrade");
         assert_eq!(row["count"], snapshot.count);
         assert_eq!(row["playlist_index"], snapshot.playlist_index);
         assert_eq!(row["playhead"], snapshot.playhead);
         assert_eq!(row["preview_frames"], snapshot.preview_frames);
         assert_eq!(row["main_callback_frame"], snapshot.main_callback_frame);
+        assert_eq!(row["render_frame"], 7);
+        assert_eq!(row["callback_sequence"], 2);
+        assert_eq!(row["evidence"], serde_json::Value::Null);
     }
 
     fn sink_with_gate(authorized: bool) -> CaptureSink {
@@ -537,12 +565,12 @@ mod tests {
             closed: Arc::new(AtomicBool::new(false)),
         };
         let snapshot = preview_upgrade();
-        sink.preview_upgrade(snapshot);
-        sink.preview_upgrade(snapshot);
+        sink.preview_upgrade(snapshot, 2);
+        sink.preview_upgrade(snapshot, 2);
         assert_eq!(sink.dropped.load(Ordering::Relaxed), 1);
-        assert!(matches!(receiver.try_recv().unwrap(), CaptureRecord::PreviewUpgrade(value) if value == snapshot));
+        assert!(matches!(receiver.try_recv().unwrap(), CaptureRecord::PreviewUpgrade(value, 2) if value == snapshot));
         drop(receiver);
-        sink.preview_upgrade(snapshot);
+        sink.preview_upgrade(snapshot, 2);
         assert_eq!(sink.dropped.load(Ordering::Relaxed), 2);
     }
 
@@ -559,8 +587,8 @@ mod tests {
             closed: Arc::new(AtomicBool::new(false)),
         };
         let snapshot = preview_upgrade();
-        sink.preview_upgrade(snapshot);
-        assert!(matches!(receiver.try_recv(), Ok(CaptureRecord::PreviewUpgrade(value)) if value == snapshot));
+        sink.preview_upgrade(snapshot, 2);
+        assert!(matches!(receiver.try_recv(), Ok(CaptureRecord::PreviewUpgrade(value, 2)) if value == snapshot));
 
         let (sender, receiver) = mpsc::sync_channel(1);
         let sink = CaptureSink {
@@ -572,7 +600,7 @@ mod tests {
             finite_cycle: false,
             closed: Arc::new(AtomicBool::new(false)),
         };
-        sink.preview_upgrade(snapshot);
+        sink.preview_upgrade(snapshot, 2);
         assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
         assert_eq!(sink.dropped.load(Ordering::Relaxed), 0);
     }
