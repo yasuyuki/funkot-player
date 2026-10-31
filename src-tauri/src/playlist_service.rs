@@ -559,7 +559,7 @@ impl TrackSource for ManagedSource {
                     if claim.restoring && owner.restored.as_ref() != restore.as_ref() { return None; }
                     if claim.restoring { owner.restored = None; }
                     let blocked_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-                        if owner.catalog.active_id.as_deref() != Some(id) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
+                        if (!claim.restoring && owner.catalog.active_id.as_deref() != Some(id)) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
                         if rejected { owner.admission_blocked.insert((id.clone(), entry.clone())); }
                         else { unavailable_this_call.insert((id.clone(), entry.clone())); }
                         owner.availability.insert(entry.clone(), ("unplayable".into(), if rejected { "non_funkot" } else { "admission_unavailable" }.into()));
@@ -591,7 +591,7 @@ impl TrackSource for ManagedSource {
             let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
             if owner.epoch != self.epoch { return None; }
             if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-                if owner.catalog.active_id.as_deref() != Some(id)
+                if (!claim.restoring && owner.catalog.active_id.as_deref() != Some(id))
                     || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
                     || !owner.catalog.definition(id).is_ok_and(|definition| {
                         definition.entries.iter().any(|candidate| candidate.entry_id == *entry)
