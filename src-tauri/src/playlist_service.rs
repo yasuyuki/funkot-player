@@ -710,7 +710,7 @@ pub fn reconfigure_admission(
         }
             let previous_catalog = owner.catalog.clone();
         let mut next_catalog = previous_catalog.clone();
-        next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: previous_catalog.normal.as_ref().and_then(|resume| resume.folder_pos) });
+        owner.capture_normal(&mut next_catalog, Some(normal.clone()));
             let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
         let catalog_snapshot = next_catalog.clone();
         let session = owner.disk.update(|state| {
