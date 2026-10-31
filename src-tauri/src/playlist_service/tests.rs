@@ -2471,6 +2471,142 @@ fn failed_startup_restore_then_select_preserves_the_durable_normal_tail() {
 }
 
 #[test]
+fn failed_startup_restore_then_deselect_publishes_unchanged_canonical_tail() {
+    if isolated_source_fixture("playlist_service::tests::failed_startup_restore_then_deselect_publishes_unchanged_canonical_tail") { return; }
+
+    let fixture = Fixture::new();
+    let tail = QueueItem::manual(fixture.file("unchanged-canonical-tail.wav"));
+    let playlist = fixture.install("startup-active", vec![]);
+    fixture.command("select-startup-active", Action::Select { id: Some(playlist.clone()) }).unwrap();
+    {
+        let mut owner = fixture.service.lock().unwrap();
+        owner.catalog.normal = Some(NormalResume { items: vec![tail.clone()], folder_pos: None });
+        owner.disk.persist(&owner.catalog).unwrap();
+    }
+
+    let live_queue = queue::new_shared_queue();
+    let service = Arc::new(Mutex::new(Service::new(
+        fixture.data.path(),
+        fixture.cache.path(),
+        live_queue.clone(),
+    )));
+    crate::playback_state::set_fail_persist_stage(2);
+    let restore_error = match service.lock().unwrap().restore_saved_queue() {
+        Ok(_) => panic!("injected startup persistence failure unexpectedly restored the queue"),
+        Err(error) => error,
+    };
+    assert_eq!(restore_error.code, "persist_failed");
+    assert!(queue::pending_snapshot(&live_queue).is_empty());
+
+    let request = Request {
+        request_id: "deselect-after-failed-preload".into(),
+        target: service.lock().unwrap().target(),
+        action: Action::Select { id: None },
+    };
+    command_with(&service, request, None).unwrap();
+
+    let durable = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+    assert_eq!(durable.queue, vec![tail.clone()]);
+    assert_eq!(queue::pending_snapshot(&live_queue), vec![tail],
+        "an accepted source change must publish an unchanged canonical normal tail");
+}
+
+#[test]
+fn failed_startup_restore_then_idle_off_retires_session_reservation_before_rehydration() {
+    if isolated_source_fixture("playlist_service::tests::failed_startup_restore_then_idle_off_retires_session_reservation_before_rehydration") { return; }
+
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock().unwrap_or_else(|error| error.into_inner());
+    let previous_allow = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let previous_session = crate::SESSION.lock().unwrap_or_else(|error| error.into_inner()).clone();
+    let _restore_session = SessionRestore(previous_session);
+
+    let fixture = Fixture::new();
+    let rejected = fixture.file("startup-session-non-funkot.wav");
+    fixture.store_analysis(&rejected, false);
+    let accepted = fixture.file("startup-session-tail.wav");
+    let reserved = QueueItem::manual(rejected);
+    let tail = QueueItem::manual(accepted);
+    fixture.service.lock().unwrap().disk.update(|state| {
+        state.queue = vec![tail.clone()];
+        state.session = store::Session { in_flight: vec![reserved.clone()], paused: false };
+        Ok(())
+    }).unwrap();
+
+    let live_queue = queue::new_shared_queue();
+    let service = Arc::new(Mutex::new(Service::new(
+        fixture.data.path(),
+        fixture.cache.path(),
+        live_queue.clone(),
+    )));
+    crate::playback_state::set_fail_persist_stage(2);
+    let restore_error = match service.lock().unwrap().restore_saved_queue() {
+        Ok(_) => panic!("injected startup persistence failure unexpectedly restored the queue"),
+        Err(error) => error,
+    };
+    assert_eq!(restore_error.code, "persist_failed");
+    assert!(queue::pending_snapshot(&live_queue).is_empty());
+
+    reconfigure_admission(&service, false, None, |_| Ok(())).unwrap();
+    let after_off = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+    assert_eq!(after_off.queue, vec![tail.clone()],
+        "OFF filters the actual admitted non-Funkot occurrence from canonical pending work");
+
+    service.lock().unwrap().restore_saved_queue().unwrap();
+    let durable_reservation = after_off.session.in_flight.into_iter()
+        .find(|item| item.entry_id == reserved.entry_id);
+    let restored_reservation = queue::pending_snapshot(&live_queue).into_iter()
+        .find(|item| item.entry_id == reserved.entry_id);
+    assert_eq!(
+        (durable_reservation, restored_reservation),
+        (None, None),
+        "OFF must retire the exact session reservation and restore must not reintroduce it",
+    );
+    crate::ALLOW_NON_FUNKOT.store(previous_allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn failed_startup_restore_then_queue_move_keeps_the_committed_order_after_restart() {
+    if isolated_source_fixture("playlist_service::tests::failed_startup_restore_then_queue_move_keeps_the_committed_order_after_restart") { return; }
+
+    let fixture = Fixture::new();
+    let a = QueueItem::manual(fixture.file("startup-move-a.wav"));
+    let b = QueueItem::manual(fixture.file("startup-move-b.wav"));
+    fixture.service.lock().unwrap().disk.update(|state| {
+        state.queue = vec![b.clone()];
+        state.session = store::Session { in_flight: vec![a.clone()], paused: false };
+        Ok(())
+    }).unwrap();
+
+    let live_queue = queue::new_shared_queue();
+    let service = Arc::new(Mutex::new(Service::new(
+        fixture.data.path(),
+        fixture.cache.path(),
+        live_queue.clone(),
+    )));
+    crate::playback_state::set_fail_persist_stage(2);
+    let restore_error = match service.lock().unwrap().restore_saved_queue() {
+        Ok(_) => panic!("injected startup persistence failure unexpectedly restored the queue"),
+        Err(error) => error,
+    };
+    assert_eq!(restore_error.code, "persist_failed");
+    assert!(queue::pending_snapshot(&live_queue).is_empty());
+
+    let request = Request {
+        request_id: "move-a-after-failed-preload".into(),
+        target: service.lock().unwrap().target(),
+        action: Action::QueueMove { from: 0, to: 1, expect: a.clone() },
+    };
+    command_with(&service, request, None).unwrap();
+    let after_move = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+    assert_eq!(after_move.queue, vec![b.clone(), a.clone()]);
+
+    service.lock().unwrap().restore_saved_queue().unwrap();
+    assert_eq!(queue::pending_snapshot(&live_queue), vec![b, a],
+        "restart preserves the accepted offline queue order instead of prefixing an old reservation");
+}
+
+#[test]
 fn restored_normal_current_is_offered_once_before_any_start_observation() {
     if isolated_source_fixture("playlist_service::tests::restored_normal_current_is_offered_once_before_any_start_observation") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
