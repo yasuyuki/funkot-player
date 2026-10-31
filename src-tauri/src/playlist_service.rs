@@ -2,6 +2,8 @@
 //! service -> INDEX -> SAVE -> SESSION -> queue -> render. Persistence never
 //! holds render; the core future fence makes its commit reversible until save.
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::sync::atomic::Ordering;
@@ -88,6 +90,19 @@ pub struct RestoredPlayback {
     pub session: store::Session,
     pub settings: store::Settings,
     pub folder_pos: Option<usize>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOCAL_CLAIM_BEFORE_ADMISSION: RefCell<Option<Box<dyn FnOnce(&QueueItem) + Send>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn on_local_claim_before_admission_once(hook: impl FnOnce(&QueueItem) + Send + 'static) {
+    LOCAL_CLAIM_BEFORE_ADMISSION.with(|slot| {
+        assert!(slot.borrow().is_none(), "local-claim admission hook is already installed");
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
 }
 
 struct NormalSource {
@@ -547,6 +562,10 @@ impl TrackSource for ManagedSource {
                 let restore = claim.restoring.then(|| owner.restored.clone()).flatten();
                 (claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone(), restore)
             };
+            #[cfg(test)]
+            if let Some(hook) = LOCAL_CLAIM_BEFORE_ADMISSION.with(|slot| slot.borrow_mut().take()) {
+                hook(&claim.item);
+            }
             let allow_non_funkot = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
             let admission = crate::admit_playback_path(&claim.item.path, &cache, &data, allow_non_funkot);
             log::info!("playback admission: {} allow_non_funkot={} result={:?}",
