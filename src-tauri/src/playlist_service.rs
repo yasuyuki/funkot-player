@@ -63,7 +63,7 @@ pub struct Request { pub request_id: String, pub target: SourceTarget, pub actio
 pub struct CommandResult { pub created_id: Option<String>, pub undo_id: Option<String>, pub added: usize, pub rejected: usize, pub skipped: usize }
 
 #[derive(Clone)]
-struct Claim { source: Option<String>, run: u64, entry: Option<String>, track: TrackRef, item: QueueItem, live: bool, cancelled: bool, restoring: bool }
+struct Claim { source: Option<String>, run: u64, entry: Option<String>, track: TrackRef, item: QueueItem, live: bool, cancelled: bool, restoring: bool, admitted: bool }
 impl Claim {
     fn progress(&self, index: usize) -> Option<crate::playlist_progress::Claim<&str>> {
         Some(crate::playlist_progress::Claim {
@@ -164,7 +164,7 @@ impl Service {
             let status = if run.failures.contains_key(&entry.entry_id) { if reason.as_deref() == Some("missing") { "missing" } else { "unplayable" } }
                 else if claim.is_some_and(|(index, _)| Some(*index) == self.current_index) { "current" }
                 else if run.consumed.contains(&entry.entry_id) { "played" }
-                else if let Some((index, _)) = claim { if self.future_claims().first().is_some_and(|(i, _)| *i == *index)
+                else if let Some((index, claim)) = claim { if claim.admitted && self.future_claims().first().is_some_and(|(i, _)| *i == *index)
                     && crate::NEXT_PREPARED.load(Ordering::Relaxed) { "prepared" } else { "preparing" } }
                 else if let Some((state, _)) = self.availability.get(&entry.entry_id) { state.as_str() } else { "pending" };
             EntryView { entry_id: entry.entry_id, path: claim.map(|(_, c)| c.item.path.clone()).unwrap_or(entry.track.preferred_path).to_string_lossy().into(),
@@ -175,6 +175,19 @@ impl Service {
     }
     fn future_claims(&self) -> Vec<(usize, &Claim)> {
         self.claims.iter().filter(|(i,c)| c.live && !c.cancelled && Some(**i) != self.current_index).map(|(i,c)| (*i,c)).collect()
+    }
+    fn normal_future_items(&self) -> Vec<QueueItem> {
+        let mut items: Vec<_> = self.future_claims().into_iter()
+            .filter(|(_, claim)| claim.source.is_none())
+            .map(|(_, claim)| claim.item.clone()).collect();
+        if let Some(reserved) = queue::reserved_item(&self.queue) {
+            let is_current = self.current_index.and_then(|index| self.claims.get(&index))
+                .is_some_and(|claim| claim.source.is_none() && claim.item.entry_id == reserved.entry_id);
+            if !is_current && !items.iter().any(|item| item.entry_id == reserved.entry_id) {
+                items.push(reserved);
+            }
+        }
+        items
     }
     pub fn normal_items(&self) -> Vec<QueueItem> {
         queue::pending_snapshot(&self.queue)
@@ -436,7 +449,7 @@ impl TrackSource for ManagedSource {
                 let mut source = source.lock().unwrap_or_else(|e| e.into_inner());
                 (source.epoch == self.epoch).then(|| source.source.next()).flatten()
             });
-            let (claim, cache, data, queue, restore) = {
+            let (index, claim, cache, data, queue, restore) = {
                 let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                 if owner.epoch != self.epoch {
                     return None;
@@ -475,6 +488,7 @@ impl TrackSource for ManagedSource {
                         live: true,
                         cancelled: false,
                         restoring: true,
+                        admitted: false,
                     })
                 } else {
                     None
@@ -519,6 +533,7 @@ impl TrackSource for ManagedSource {
                                 live: true,
                                 cancelled: false,
                                 restoring: false,
+                                admitted: false,
                             });
                             break;
                         }
@@ -552,6 +567,7 @@ impl TrackSource for ManagedSource {
                             live: true,
                             cancelled: false,
                             restoring: false,
+                            admitted: false,
                         })
                     }
                 };
@@ -560,7 +576,10 @@ impl TrackSource for ManagedSource {
                     return None;
                 };
                 let restore = claim.restoring.then(|| owner.restored.clone()).flatten();
-                (claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone(), restore)
+                let index = owner.next_index;
+                owner.next_index += 1;
+                owner.claims.insert(index, claim.clone());
+                (index, claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone(), restore)
             };
             #[cfg(test)]
             if let Some(hook) = LOCAL_CLAIM_BEFORE_ADMISSION.with(|slot| slot.borrow_mut().take()) {
@@ -574,6 +593,7 @@ impl TrackSource for ManagedSource {
                 let rejected = admission == crate::PlaybackAdmission::Rejected;
                 let blocked_normal = {
                     let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
+                    owner.claims.remove(&index);
                     if owner.epoch != self.epoch { return None; }
                     if claim.restoring && owner.restored.as_ref() != restore.as_ref() { return None; }
                     if claim.restoring { owner.restored = None; }
@@ -608,21 +628,25 @@ impl TrackSource for ManagedSource {
                 continue;
             }
             let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
-            if owner.epoch != self.epoch { return None; }
-            if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-                if (!claim.restoring && owner.catalog.active_id.as_deref() != Some(id))
-                    || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
-                    || !owner.catalog.definition(id).is_ok_and(|definition| {
+            let live = owner.claims.get(&index).is_some_and(|selected| selected.live && !selected.cancelled);
+            let source_matches = match (&claim.source, &claim.entry) {
+                (Some(id), Some(entry)) => (claim.restoring || owner.catalog.active_id.as_deref() == Some(id))
+                    && owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
+                    && owner.catalog.definition(id).is_ok_and(|definition| {
                         definition.entries.iter().any(|candidate| candidate.entry_id == *entry)
-                    }) { return None; }
+                    }),
+                (None, None) => true,
+                _ => false,
+            };
+            if owner.epoch != self.epoch || !live || !source_matches
+                || (claim.restoring && owner.restored.as_ref() != restore.as_ref()) {
+                owner.claims.remove(&index);
+                return None;
             }
-            if claim.restoring && owner.restored.as_ref() != restore.as_ref() { return None; }
             if claim.restoring { owner.restored = None; }
             if let Some(entry) = &claim.entry { owner.availability.remove(entry); }
-            let index = owner.next_index;
-            owner.next_index += 1;
             let path = claim.item.path.clone();
-            owner.claims.insert(index, claim);
+            owner.claims.get_mut(&index).unwrap().admitted = true;
             owner.save_progress();
             return Some((index, path));
         }
@@ -732,17 +756,7 @@ pub fn reconfigure_admission(
     // after the core fence so a waiting loader cannot admit the old future.
     let normal_source = owner.normal_source.clone();
     let mut normal_source_guard = normal_source.as_ref().map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
-    let future = owner.future_claims();
-    let normal_claims: Vec<_> = future.iter().filter(|(_, claim)| claim.source.is_none())
-        .map(|(_, claim)| claim.item.clone()).collect();
-    let mut revoked_normal = normal_claims.clone();
-    if let Some(reserved) = queue::reserved_item(&owner.queue) {
-        let is_current = owner.current_index.and_then(|index| owner.claims.get(&index))
-            .is_some_and(|claim| claim.source.is_none() && claim.item.entry_id == reserved.entry_id);
-        if !is_current && !revoked_normal.iter().any(|claim| claim.entry_id == reserved.entry_id) {
-            revoked_normal.push(reserved);
-        }
-    }
+    let revoked_normal = owner.normal_future_items();
     let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut normal = owner.normal_items();
     preserve_claims(&mut normal, &revoked_normal);
@@ -946,7 +960,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         }
     }
     let future = owner.future_claims();
-    let normal_claims: Vec<_> = future.iter().filter(|(_, c)| c.source.is_none()).map(|(_, c)| c.item.clone()).collect();
+    let normal_claims = owner.normal_future_items();
     // Preserve the established manual-priority deadline. A committed automatic
     // next track stays first; adding manual work still succeeds behind it.
     if normal_append && !normal_claims.is_empty() {
@@ -965,8 +979,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         let actual: Vec<_> = future.iter().filter(|(_,c)|c.source.as_deref() == Some(id)).filter_map(|(_,c)|c.entry.as_deref()).collect();
         expected.get(..actual.len()) != Some(actual.as_slice())
     } else {
-        let actual: Vec<_> = future.iter().filter(|(_,c)|c.source.is_none()).map(|(_,c)|c.item.clone()).collect();
-        normal.get(..actual.len()) != Some(actual.as_slice())
+        normal.get(..normal_claims.len()) != Some(normal_claims.as_slice())
     };
     // Startup publishes the source before the audio control handle. A change
     // affecting already claimed work must wait for that handle's fence.
@@ -1006,15 +1019,15 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     owner.capture_normal(&mut next, Some(normal.clone()));
     if force_source && !append_action && owner.current_index.is_none() { next.current = None; }
     let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let mut updated_session = None;
-    if let Some(item) = &removed_normal {
+    let updated_session = if (replace && !normal_claims.is_empty()) || removed_normal.is_some() {
         let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
-        if session.in_flight.iter().any(|entry| entry.entry_id == item.entry_id) {
-            let mut updated = session.clone();
-            store::retire_revoked(&mut updated.in_flight, item);
-            updated_session = Some(updated);
-        }
-    }
+        let mut updated = session.clone();
+        updated.in_flight.retain(|item| {
+            !(replace && normal_claims.iter().any(|claim| claim.entry_id == item.entry_id))
+                && !removed_normal.as_ref().is_some_and(|removed| removed.entry_id == item.entry_id)
+        });
+        Some(updated)
+    } else { None };
     let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
     let catalog_snapshot = next.clone();
     let saved = owner.disk.update(|state| {
