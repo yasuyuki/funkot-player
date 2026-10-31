@@ -2689,6 +2689,82 @@ fn failed_startup_restore_then_idle_off_retains_saved_current_before_play() {
 }
 
 #[test]
+fn online_idle_off_before_first_loader_next_retains_playlist_current() {
+    if isolated_source_fixture("playlist_service::tests::online_idle_off_before_first_loader_next_retains_playlist_current") { return; }
+
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock().unwrap_or_else(|error| error.into_inner());
+    let previous_allow = crate::ALLOW_NON_FUNKOT.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let previous_session = crate::SESSION.lock().unwrap_or_else(|error| error.into_inner()).clone();
+    let _restore_session = SessionRestore(previous_session);
+
+    let fixture = Fixture::new();
+    let current_path = fixture.file("online-saved-playlist-current.wav");
+    let tail = QueueItem::manual(fixture.file("online-saved-playlist-tail.wav"));
+    let id = fixture.install("online-current", vec![Fixture::track(&current_path)]);
+    fixture.command("select-online-current", Action::Select { id: Some(id.clone()) }).unwrap();
+    let saved_current = {
+        let owner = fixture.service.lock().unwrap();
+        let run_id = owner.catalog.run(&id).unwrap().run_id;
+        let entry = owner.catalog.definition(&id).unwrap().entries[0].clone();
+        CurrentOccurrence {
+            playlist_id: Some(id),
+            run_id,
+            entry_id: Some(entry.entry_id),
+            track_ref: entry.track,
+            origin: PlaybackOrigin::Playlist,
+            queue_origin: None,
+            queue_item: None,
+        }
+    };
+    fixture.service.lock().unwrap().disk.update(|state| {
+        state.catalog.current = Some(saved_current.clone());
+        state.queue = vec![tail];
+        state.session = store::Session::new();
+        Ok(())
+    }).unwrap();
+
+    let live_queue = queue::new_shared_queue();
+    let service = Arc::new(Mutex::new(Service::new(
+        fixture.data.path(),
+        fixture.cache.path(),
+        live_queue.clone(),
+    )));
+    service.lock().unwrap().restore_saved_queue().unwrap();
+    assert_eq!(service.lock().unwrap().restored, Some(saved_current.clone()));
+
+    // This is the window after the core control is published but before its
+    // loader performs the first ManagedSource::next call.
+    let _source = configure(&service, HostSource::new(
+        live_queue,
+        queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },
+    ));
+    {
+        let owner = service.lock().unwrap();
+        assert!(owner.normal_source.is_some());
+        assert!(owner.claims.is_empty());
+        assert!(owner.current_index.is_none());
+    }
+    let player = playback(&[], 64);
+    reconfigure_admission(&service, false, Some(&player), |_| Ok(())).unwrap();
+
+    let durable_current = crate::playback_state::PlaybackStore::open(fixture.data.path())
+        .snapshot().unwrap().catalog.current;
+    drop(service);
+    let reopened = Service::new(
+        fixture.data.path(),
+        fixture.cache.path(),
+        queue::new_shared_queue(),
+    );
+    crate::ALLOW_NON_FUNKOT.store(previous_allow, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        (durable_current, reopened.restored),
+        (Some(saved_current.clone()), Some(saved_current)),
+        "online OFF before the first loader reservation must retain the saved playlist current",
+    );
+}
+
+#[test]
 fn restored_normal_current_is_offered_once_before_any_start_observation() {
     if isolated_source_fixture("playlist_service::tests::restored_normal_current_is_offered_once_before_any_start_observation") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
