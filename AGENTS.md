@@ -27,3 +27,5 @@ and [docs/ui-design.md](docs/ui-design.md) before implementation and for rendere
 The skill defines the lightweight exception for changes with no layout or hierarchy impact.
 When a change touches `src-tauri/src/engine_observation.rs`, a publish of that observation, or `verification/engine_snapshot`, including a condition-only edit or a rename, use [.claude/skills/verify-engine-snapshot/SKILL.md](.claude/skills/verify-engine-snapshot/SKILL.md).
 When a change touches `src-tauri/src/playback_recovery.rs`, its call sites in `playback_state.rs`, `verification/playback_recovery.rs`, `verification/check.py`, or `.claude/skills/verify-playback-recovery/`, use [.claude/skills/verify-playback-recovery/SKILL.md](.claude/skills/verify-playback-recovery/SKILL.md).
+
+When a change touches source-switch or startup transaction ordering in `src-tauri/src/playlist_service.rs`, queue/session publication, or `verification/source_switch`, use [verification/source_switch/SKILL.md](verification/source_switch/SKILL.md).

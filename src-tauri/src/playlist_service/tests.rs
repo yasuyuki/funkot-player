@@ -2403,8 +2403,8 @@ fn unavailable_playlist_admission_retries_after_cache_recovers() {
 fn failed_startup_restore_then_select_preserves_the_durable_normal_tail() {
     if isolated_source_fixture("playlist_service::tests::failed_startup_restore_then_select_preserves_the_durable_normal_tail") { return; }
 
-    // Legacy snapshots may retain a normal current as the in-flight
-    // reservation. That intentional repeat has a distinct occurrence ID.
+    // Legacy snapshots may retain the same current in the reservation list.
+    // The pending tail deliberately repeats its path with a distinct ID.
     for has_legacy_current_reservation in [true, false] {
         let fixture = Fixture::new();
         let current_path = fixture.file(if has_legacy_current_reservation {
@@ -2493,6 +2493,7 @@ fn failed_startup_restore_then_select_preserves_the_durable_normal_tail() {
         );
     }
 }
+
 #[test]
 fn failed_startup_restore_then_deselect_publishes_unchanged_canonical_tail() {
     if isolated_source_fixture("playlist_service::tests::failed_startup_restore_then_deselect_publishes_unchanged_canonical_tail") { return; }
