@@ -2607,6 +2607,88 @@ fn failed_startup_restore_then_queue_move_keeps_the_committed_order_after_restar
 }
 
 #[test]
+fn failed_startup_restore_then_idle_off_retains_saved_current_before_play() {
+    if isolated_source_fixture("playlist_service::tests::failed_startup_restore_then_idle_off_retains_saved_current_before_play") { return; }
+
+    let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
+        .lock().unwrap_or_else(|error| error.into_inner());
+    let previous_allow = crate::ALLOW_NON_FUNKOT.load(std::sync::atomic::Ordering::Relaxed);
+    let mut observed = Vec::new();
+    let mut expected = Vec::new();
+
+    for kind in ["normal", "playlist"] {
+        crate::ALLOW_NON_FUNKOT.store(true, std::sync::atomic::Ordering::Relaxed);
+        let fixture = Fixture::new();
+        let current_path = fixture.file(&format!("saved-{kind}-current.wav"));
+        let tail = QueueItem::manual(fixture.file(&format!("saved-{kind}-tail.wav")));
+        let saved_current = if kind == "normal" {
+            let item = QueueItem::manual(current_path.clone());
+            CurrentOccurrence {
+                playlist_id: None,
+                run_id: 0,
+                entry_id: None,
+                track_ref: Fixture::track(&current_path),
+                origin: PlaybackOrigin::Normal,
+                queue_origin: Some(item.origin),
+                queue_item: Some(item),
+            }
+        } else {
+            let id = fixture.install("saved-playlist-current", vec![Fixture::track(&current_path)]);
+            fixture.command("select-saved-playlist-current", Action::Select { id: Some(id.clone()) }).unwrap();
+            let owner = fixture.service.lock().unwrap();
+            let run_id = owner.catalog.run(&id).unwrap().run_id;
+            let entry = owner.catalog.definition(&id).unwrap().entries[0].clone();
+            CurrentOccurrence {
+                playlist_id: Some(id),
+                run_id,
+                entry_id: Some(entry.entry_id),
+                track_ref: entry.track,
+                origin: PlaybackOrigin::Playlist,
+                queue_origin: None,
+                queue_item: None,
+            }
+        };
+        fixture.service.lock().unwrap().disk.update(|state| {
+            state.catalog.current = Some(saved_current.clone());
+            state.queue = vec![tail];
+            state.session = store::Session::new();
+            Ok(())
+        }).unwrap();
+
+        let live_queue = queue::new_shared_queue();
+        let service = Arc::new(Mutex::new(Service::new(
+            fixture.data.path(),
+            fixture.cache.path(),
+            live_queue,
+        )));
+        assert_eq!(service.lock().unwrap().restored, Some(saved_current.clone()),
+            "startup takes the saved current into Service::restored before preload");
+        crate::playback_state::set_fail_persist_stage(2);
+        let restore_error = match service.lock().unwrap().restore_saved_queue() {
+            Ok(_) => panic!("injected startup persistence failure unexpectedly restored the queue"),
+            Err(error) => error,
+        };
+        assert_eq!(restore_error.code, "persist_failed");
+
+        reconfigure_admission(&service, false, None, |_| Ok(())).unwrap();
+        let durable_current = crate::playback_state::PlaybackStore::open(fixture.data.path())
+            .snapshot().unwrap().catalog.current;
+        drop(service);
+        let reopened = Service::new(
+            fixture.data.path(),
+            fixture.cache.path(),
+            queue::new_shared_queue(),
+        );
+        observed.push((kind, durable_current, reopened.restored));
+        expected.push((kind, Some(saved_current.clone()), Some(saved_current)));
+    }
+
+    crate::ALLOW_NON_FUNKOT.store(previous_allow, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(observed, expected,
+        "offline admission must retain a saved current across a failed preload before playback starts");
+}
+
+#[test]
 fn restored_normal_current_is_offered_once_before_any_start_observation() {
     if isolated_source_fixture("playlist_service::tests::restored_normal_current_is_offered_once_before_any_start_observation") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
