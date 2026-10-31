@@ -771,7 +771,7 @@ pub fn reconfigure_admission(
     }
     let previous_catalog = owner.catalog.clone();
     let mut next_catalog = previous_catalog.clone();
-    next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: Some(crate::FOLDER_POS.load(Ordering::Relaxed)) });
+    owner.capture_normal(&mut next_catalog, Some(normal.clone()));
 
     let updated_session = if revoked_normal.is_empty() {
         None
