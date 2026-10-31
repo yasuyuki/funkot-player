@@ -713,12 +713,15 @@ pub fn reconfigure_admission(
         next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: previous_catalog.normal.as_ref().and_then(|resume| resume.folder_pos) });
             let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
         let catalog_snapshot = next_catalog.clone();
-        owner.disk.update(|state| {
+        let session = owner.disk.update(|state| {
             state.queue = queue_snapshot;
             state.catalog = catalog_snapshot;
+            state.session.in_flight.clear();
             persist_settings(&mut state.settings)
-                .map_err(|message| PlaylistError::PersistFailed { message })
+                .map_err(|message| PlaylistError::PersistFailed { message })?;
+            Ok(state.session.clone())
         }).map_err(CommandError::from)?;
+        *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = session;
         queue::restore_all(&owner.queue, normal);
         owner.catalog = next_catalog;
         owner.progress_error = false;
@@ -886,7 +889,8 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     let mut normal_source_guard = normal_source.as_ref()
         .map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
     if owner.target() != request.target { return Err(error("stale")); }
-    let mut next = owner.catalog.clone(); let mut normal = owner.normal_items_for_update()?; let old_normal = normal.clone();
+    let old_normal = owner.normal_items();
+    let mut next = owner.catalog.clone(); let mut normal = owner.normal_items_for_update()?;
     let _normal_only = owner.active().is_none() && matches!(&request.action, Action::Append { .. } | Action::QueueMove { .. } | Action::QueueRemove { .. });
     let append_action = matches!(&request.action, Action::Append { .. });
     let normal_append = owner.active().is_none() && append_action;
@@ -1020,7 +1024,8 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     owner.capture_normal(&mut next, Some(normal.clone()));
     if force_source && !append_action && owner.current_index.is_none() { next.current = None; }
     let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let updated_session = if (replace && !normal_claims.is_empty()) || removed_normal.is_some() {
+    let offline = owner.normal_source.is_none();
+    let mut updated_session = if !offline && ((replace && !normal_claims.is_empty()) || removed_normal.is_some()) {
         let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
         let mut updated = session.clone();
         updated.in_flight.retain(|item| {
@@ -1032,7 +1037,10 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
     let catalog_snapshot = next.clone();
     let saved = owner.disk.update(|state| {
-        if let Some(session) = updated_session.clone() {
+        if offline {
+            state.session.in_flight.clear();
+            updated_session = Some(state.session.clone());
+        } else if let Some(session) = updated_session.clone() {
             state.session = session;
         }
         state.queue = queue_snapshot;
