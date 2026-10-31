@@ -958,6 +958,9 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     }
     if force_source && !append_action && owner.current_index.is_none() {
         if let Some(current) = owner.restored.as_ref().filter(|c| c.origin == PlaybackOrigin::Normal) {
+            if let Some(item) = current.queue_item.as_ref() {
+                normal.retain(|candidate| candidate.entry_id != item.entry_id);
+            }
             normal.insert(0, QueueItem::with_origin(current.track_ref.preferred_path.clone(),
                 current.queue_origin.unwrap_or(QueueOrigin::Manual)));
         } else if let Some(claim) = owner.claims.values().find(|c| c.restoring && c.source.is_none() && c.live && !c.cancelled) {
