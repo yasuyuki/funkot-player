@@ -192,6 +192,22 @@ impl Service {
     pub fn normal_items(&self) -> Vec<QueueItem> {
         queue::pending_snapshot(&self.queue)
     }
+    fn normal_items_for_update(&self) -> Result<Vec<QueueItem>, CommandError> {
+        let live = self.normal_items();
+        if self.normal_source.is_some() { return Ok(live); }
+        let canonical = match self.restore_normal() {
+            Some(resume) => resume.items,
+            None => {
+                let saved = crate::playback_state::PlaybackStore::open(&self.data)
+                    .snapshot().map_err(|error| CommandError {
+                        code: "persist_failed".into(),
+                        message: format!("cannot load playback state: {error:?}"),
+                    })?;
+                store::restored_pending(&saved.session.in_flight, &saved.queue)
+            }
+        };
+        Ok(merge_normal_items(canonical, live))
+    }
     pub fn normal_view(&self) -> (Option<QueueItem>, Vec<QueueItem>, Vec<QueueItem>) {
         let reserved = self.future_claims().into_iter()
             .find(|(_, claim)| claim.source.is_none())
@@ -686,22 +702,7 @@ pub fn reconfigure_admission(
             return Err(error("busy"));
         }
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous_queue = queue::pending_snapshot(&owner.queue).into_iter().collect::<std::collections::VecDeque<_>>();
-        // The setting command can arrive before queue-tab preload. Recover the
-        // same canonical normal source as startup, then append any live items
-        // that were queued after that snapshot by exact occurrence ID.
-        let canonical = match owner.restore_normal() {
-            Some(resume) => resume.items,
-            None => {
-                let session = store::load_session(&owner.data);
-                let saved = store::load_queue(&owner.data).map_err(|error| CommandError {
-                    code: "persist_failed".into(),
-                    message: format!("cannot load queue: {error}"),
-                })?;
-                store::restored_pending(&session.in_flight, &saved)
-            }
-        };
-        let mut normal = merge_normal_items(canonical, previous_queue.iter().cloned());
+        let mut normal = owner.normal_items_for_update()?;
         if !allow_non_funkot {
             let overrides = store::load_overrides(&owner.data);
             normal.retain(|item| !gated_non_funkot_for_reconfigure(&item.path, &owner.cache, &overrides)
@@ -885,7 +886,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     let mut normal_source_guard = normal_source.as_ref()
         .map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
     if owner.target() != request.target { return Err(error("stale")); }
-    let mut next = owner.catalog.clone(); let mut normal = owner.normal_items(); let old_normal = normal.clone();
+    let mut next = owner.catalog.clone(); let mut normal = owner.normal_items_for_update()?; let old_normal = normal.clone();
     let _normal_only = owner.active().is_none() && matches!(&request.action, Action::Append { .. } | Action::QueueMove { .. } | Action::QueueRemove { .. });
     let append_action = matches!(&request.action, Action::Append { .. });
     let normal_append = owner.active().is_none() && append_action;
