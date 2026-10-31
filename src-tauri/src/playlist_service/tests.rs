@@ -2400,6 +2400,77 @@ fn unavailable_playlist_admission_retries_after_cache_recovers() {
 }
 
 #[test]
+fn failed_startup_restore_then_select_preserves_the_durable_normal_tail() {
+    if isolated_source_fixture("playlist_service::tests::failed_startup_restore_then_select_preserves_the_durable_normal_tail") { return; }
+
+    let fixture = Fixture::new();
+    let current_path = fixture.file("startup-current.wav");
+    let tail_path = fixture.file("startup-tail.wav");
+    let current = QueueItem::manual(current_path.clone());
+    let tail = QueueItem::manual(tail_path);
+    let playlist = fixture.install("after-startup-failure", vec![]);
+    let saved_current = CurrentOccurrence {
+        playlist_id: None,
+        run_id: 0,
+        entry_id: None,
+        track_ref: Fixture::track(&current_path),
+        origin: PlaybackOrigin::Normal,
+        queue_origin: Some(current.origin),
+        queue_item: Some(current.clone()),
+    };
+    fixture.service.lock().unwrap().disk.update(|state| {
+        state.catalog.current = Some(saved_current);
+        state.queue = vec![tail.clone()];
+        state.session = store::Session::new();
+        Ok(())
+    }).unwrap();
+    let state_file = fixture.data.path().join("playback-state.json");
+    let bytes_before = fs::read(&state_file).unwrap();
+    let snapshot_before = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+
+    let live_queue = queue::new_shared_queue();
+    let service = Arc::new(Mutex::new(Service::new(
+        fixture.data.path(),
+        fixture.cache.path(),
+        live_queue.clone(),
+    )));
+    assert!(queue::pending_snapshot(&live_queue).is_empty(),
+        "the startup service begins before the queue-tab preload hydrates live work");
+
+    crate::playback_state::set_fail_persist_stage(2);
+    let restore_error = match service.lock().unwrap().restore_saved_queue() {
+        Ok(_) => panic!("injected startup persistence failure unexpectedly restored the queue"),
+        Err(error) => error,
+    };
+    assert_eq!(restore_error.code, "persist_failed");
+    assert_eq!(fs::read(&state_file).unwrap(), bytes_before);
+    assert_eq!(crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap(), snapshot_before);
+    assert!(queue::pending_snapshot(&live_queue).is_empty(),
+        "a failed preload leaves the live queue empty");
+
+    let request = Request {
+        request_id: "select-after-failed-preload".into(),
+        target: service.lock().unwrap().target(),
+        action: Action::Select { id: Some(playlist) },
+    };
+    command_with(&service, request, None).unwrap();
+
+    let durable = crate::playback_state::PlaybackStore::open(fixture.data.path()).snapshot().unwrap();
+    assert!(durable.queue.iter().any(|item| item.path == current.path),
+        "the command requeues a normal current occurrence");
+    assert_eq!(
+        durable.queue.iter().find(|item| item.entry_id == tail.entry_id),
+        Some(&tail),
+        "the command retains the exact queued tail after failed startup normalization",
+    );
+    assert_eq!(
+        queue::pending_snapshot(&live_queue).iter().find(|item| item.entry_id == tail.entry_id),
+        Some(&tail),
+        "the exact durable tail is rehydrated into the live queue",
+    );
+}
+
+#[test]
 fn restored_normal_current_is_offered_once_before_any_start_observation() {
     if isolated_source_fixture("playlist_service::tests::restored_normal_current_is_offered_once_before_any_start_observation") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
