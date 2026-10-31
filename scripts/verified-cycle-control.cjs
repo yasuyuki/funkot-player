@@ -63,4 +63,11 @@ async function waitForVerifiedCycle({ captureDirectory, cyclePlanPath, child, de
   throw new Error('finite cycle natural end timed out');
 }
 
-module.exports = { inspectVerifiedCycle, waitForVerifiedCycle, validateCycleCallbacks };
+function preparedStartupMismatch(navigation) {
+  return navigation.some(event => event.kind === 'cycle_preview_upgrade')
+    ? { classification: 'condition_mismatch', soundQuality: 'incomplete', code: 'cycle_preview_upgrade_unmodeled',
+      detail: 'prepared cycle reference does not model an observed preview upgrade' }
+    : null;
+}
+
+module.exports = { inspectVerifiedCycle, waitForVerifiedCycle, validateCycleCallbacks, preparedStartupMismatch };

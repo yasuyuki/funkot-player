@@ -3037,7 +3037,11 @@ fn open_output_stream(
                     (events, in_transition, render_diagnostics, rendered_silence)
                 };
                 if let Some(render_diagnostics) = render_diagnostics {
-                    core_diagnostics.observe(render_diagnostics, || MAIN_FRAMES.load(Ordering::Relaxed), &diagnostics);
+                    if let Some(snapshot) = core_diagnostics.observe(render_diagnostics, || MAIN_FRAMES.load(Ordering::Relaxed), &diagnostics) {
+                        if let Some(capture) = &capture {
+                            capture.preview_upgrade(snapshot);
+                        }
+                    }
                 }
                 record_capture(Some(engine_start), Some(state.engine.render_frame()), requested_pause,
                     audition, false, state.engine.navigation_trace_dropped() as u64);

@@ -6,7 +6,7 @@ const { verifyPlayerBuild, cleanEnvironment, frontendConfigPath } = require('./v
 const { readCaptureWitness } = require('./verified-capture.cjs');
 const { wav } = require('./audio-anomaly-detector.cjs');
 const { callbackCsv, jsonLines } = require('./audio-anomaly-analysis.cjs');
-const { validateCycleCallbacks } = require('./verified-cycle-control.cjs');
+const { validateCycleCallbacks, preparedStartupMismatch } = require('./verified-cycle-control.cjs');
 
 const references = new WeakMap();
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -137,14 +137,14 @@ function comparableWitness(captured, reference) {
     return { classification: footer?.trace_dropped || footer?.callback_records_dropped ? 'capture_fault' : 'incomplete',
       soundQuality: 'incomplete', code: 'cycle_final_evidence_incomplete' };
   }
-  return { stored, witness, receipt };
+  return { stored, witness, receipt, navigation };
 }
 
 function compareCycle({ captured, reference, calibrationFile, workDirectory, deadline }) {
   try {
     const checked = comparableWitness(captured, reference);
     if (checked.classification) return checked;
-    const { stored, witness, receipt } = checked;
+    const { stored, witness, receipt, navigation } = checked;
     const capture = wav(witness.recorder.pcm.file);
     if (witness.header.value.silent_render === true) {
       for (let frame = 0; frame < capture.frames; frame++) for (let channel = 0; channel < 2; channel++) {
@@ -156,6 +156,8 @@ function compareCycle({ captured, reference, calibrationFile, workDirectory, dea
         frameCounts: { audio: 0, intentional: capture.frames, capture_fault: 0, unclassified: 0 },
         reference: { sha256: hash(stored.waveFile), frames: stored.metadata.output.frames }, pcmSha256: witness.recorder.pcm.sha256 };
     }
+    const startupMismatch = preparedStartupMismatch(navigation);
+    if (startupMismatch) return startupMismatch;
     const diagnostic = require('./verified-cycle-state.cjs').scanCycle({ witness, reference: stored, calibrationFile, workDirectory, deadline });
     const final = comparableWitness(captured, reference);
     if (final.classification) return final;

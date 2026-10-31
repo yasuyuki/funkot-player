@@ -68,13 +68,13 @@ impl PlaybackDiagnostics {
         )
     }
 
-    fn publish_upgrade(&self, count: u64, upgrade: PreviewUpgrade, main_callback_frame: u64) {
+    fn publish_upgrade(&self, snapshot: PreviewUpgradeSnapshot) {
         self.upgrade_sequence.fetch_add(1, Ordering::SeqCst);
-        self.upgrade_count.store(count, Ordering::SeqCst);
-        self.upgrade_index.store(upgrade.playlist_index, Ordering::SeqCst);
-        self.upgrade_playhead.store(upgrade.playhead, Ordering::SeqCst);
-        self.upgrade_preview_frames.store(upgrade.preview_frames, Ordering::SeqCst);
-        self.upgrade_main_callback_frame.store(main_callback_frame, Ordering::SeqCst);
+        self.upgrade_count.store(snapshot.count, Ordering::SeqCst);
+        self.upgrade_index.store(snapshot.playlist_index, Ordering::SeqCst);
+        self.upgrade_playhead.store(snapshot.playhead, Ordering::SeqCst);
+        self.upgrade_preview_frames.store(snapshot.preview_frames, Ordering::SeqCst);
+        self.upgrade_main_callback_frame.store(snapshot.main_callback_frame, Ordering::SeqCst);
         self.upgrade_sequence.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -117,7 +117,7 @@ impl CoreDiagnosticsPublisher {
         Self { preview_wait_frames, preview_upgrades }
     }
 
-    pub(crate) fn observe(&mut self, diagnostics: RenderDiagnostics, main_callback_frame: impl FnOnce() -> u64, target: &PlaybackDiagnostics) {
+    pub(crate) fn observe(&mut self, diagnostics: RenderDiagnostics, main_callback_frame: impl FnOnce() -> u64, target: &PlaybackDiagnostics) -> Option<PreviewUpgradeSnapshot> {
         if diagnostics.preview_wait_frames != self.preview_wait_frames {
             self.preview_wait_frames = diagnostics.preview_wait_frames;
             target.publish_preview_wait_frames(diagnostics.preview_wait_frames);
@@ -125,14 +125,25 @@ impl CoreDiagnosticsPublisher {
         if diagnostics.preview_upgrades != self.preview_upgrades {
             self.preview_upgrades = diagnostics.preview_upgrades;
             if let Some(upgrade) = diagnostics.last_preview_upgrade {
-                target.publish_upgrade(diagnostics.preview_upgrades, upgrade, main_callback_frame());
+                let snapshot = PreviewUpgradeSnapshot {
+                    count: diagnostics.preview_upgrades,
+                    playlist_index: upgrade.playlist_index,
+                    playhead: upgrade.playhead,
+                    preview_frames: upgrade.preview_frames,
+                    main_callback_frame: main_callback_frame(),
+                };
+                target.publish_upgrade(snapshot);
+                return Some(snapshot);
             }
         }
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     fn upgrade(index: usize) -> PreviewUpgrade {
@@ -143,17 +154,26 @@ mod tests {
     fn publishes_upgrade_only_when_count_changes() {
         let target = PlaybackDiagnostics::new();
         let mut publisher = CoreDiagnosticsPublisher::new(&target);
-        publisher.observe(RenderDiagnostics { preview_wait_frames: 4, preview_upgrades: 1, last_preview_upgrade: Some(upgrade(usize::MAX)) }, || 50, &target);
+        let main_frame_samples = Cell::new(0);
+        let observed = publisher.observe(RenderDiagnostics { preview_wait_frames: 4, preview_upgrades: 1, last_preview_upgrade: Some(upgrade(usize::MAX)) }, || {
+            main_frame_samples.set(main_frame_samples.get() + 1);
+            50
+        }, &target);
+        assert_eq!(observed, Some(PreviewUpgradeSnapshot {
+            count: 1, playlist_index: usize::MAX, playhead: 12, preview_frames: 34,
+            main_callback_frame: 50,
+        }));
+        assert_eq!(main_frame_samples.get(), 1);
         let first = target.read().unwrap();
         assert_eq!(first.preview_wait_frames, 4);
-        assert_eq!(first.upgrade.unwrap().main_callback_frame, 50);
-        publisher.observe(RenderDiagnostics { preview_wait_frames: 9, preview_upgrades: 1, last_preview_upgrade: Some(upgrade(3)) }, || panic!("unchanged upgrade must not sample main frame"), &target);
+        assert_eq!(first.upgrade, observed);
+        assert_eq!(publisher.observe(RenderDiagnostics { preview_wait_frames: 9, preview_upgrades: 1, last_preview_upgrade: Some(upgrade(3)) }, || panic!("unchanged upgrade must not sample main frame"), &target), None);
         let second = target.read().unwrap();
         assert_eq!(second.preview_wait_frames, 9);
         assert_eq!(second.upgrade.unwrap().main_callback_frame, 50);
         assert_eq!(second.upgrade.unwrap().playlist_index, usize::MAX);
         let mut reopened = CoreDiagnosticsPublisher::new(&target);
-        reopened.observe(RenderDiagnostics { preview_wait_frames: 9, preview_upgrades: 1, last_preview_upgrade: Some(upgrade(usize::MAX)) }, || panic!("reopen must not republish an old upgrade"), &target);
+        assert_eq!(reopened.observe(RenderDiagnostics { preview_wait_frames: 9, preview_upgrades: 1, last_preview_upgrade: Some(upgrade(usize::MAX)) }, || panic!("reopen must not republish an old upgrade"), &target), None);
         assert_eq!(target.read(), Some(second));
     }
 
@@ -163,9 +183,15 @@ mod tests {
         target.upgrade_sequence.fetch_add(1, Ordering::SeqCst);
         assert_eq!(target.read(), None);
         target.upgrade_sequence.fetch_add(1, Ordering::SeqCst);
-        target.publish_upgrade(1, upgrade(usize::MAX), 9);
+        target.publish_upgrade(PreviewUpgradeSnapshot {
+            count: 1, playlist_index: usize::MAX, playhead: 12, preview_frames: 34,
+            main_callback_frame: 9,
+        });
         assert_eq!(target.read().unwrap().upgrade.unwrap().playlist_index, usize::MAX);
-        assert_eq!(target.read_after_before(|| target.publish_upgrade(2, upgrade(7), 10)), None);
+        assert_eq!(target.read_after_before(|| target.publish_upgrade(PreviewUpgradeSnapshot {
+            count: 2, playlist_index: 7, playhead: 12, preview_frames: 34,
+            main_callback_frame: 10,
+        })), None);
         assert_eq!(target.read().unwrap().upgrade.unwrap().count, 2);
     }
 

@@ -4,10 +4,21 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { inspectVerifiedCycle, validateCycleCallbacks, waitForVerifiedCycle } = require('./verified-cycle-control.cjs');
+const { inspectVerifiedCycle, validateCycleCallbacks, waitForVerifiedCycle, preparedStartupMismatch } = require('./verified-cycle-control.cjs');
 
 const callbackHeader = 'sequence,callback_qpc_100ns,playback_qpc_100ns,output_frames,engine_start,engine_end,paused,audition,render_lock_miss,trace_dropped\n';
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+test('an observed preview upgrade cannot pass a full-prepared startup reference', () => {
+  assert.equal(preparedStartupMismatch([{ kind: 'cycle_source_started', index: 0 }, { kind: 'capture_end' }]), null);
+  const observed = { kind: 'cycle_preview_upgrade', count: 1, playlist_index: 0, playhead: 1440, preview_frames: 960000, main_callback_frame: 1920 };
+  for (const event of [observed, { kind: 'cycle_preview_upgrade' }]) {
+    const result = preparedStartupMismatch([{ kind: 'cycle_source_started', index: 0 }, event, { kind: 'capture_end' }]);
+    assert.equal(result.classification, 'condition_mismatch');
+    assert.equal(result.soundQuality, 'incomplete');
+    assert.equal(result.code, 'cycle_preview_upgrade_unmodeled');
+  }
+});
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verified-cycle-control-'));
