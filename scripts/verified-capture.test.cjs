@@ -223,10 +223,9 @@ test('supervisor rejects an early child exit', async t => {
 
 test('supervisor rejects a child that never completes after STOP', async t => {
   const input = fixture(t, 'no-completion');
-  await assert.rejects(superviseFreshCapture({
-    build: () => ({ command: process.execPath, args: [input.child] }), captureDirectory: input.capture,
-    childEnv: { TEST_MODE: input.mode, GUARD: input.guard }, guardFiles: [input.guard], trustedObserver: observer(), control: control('valid', input.capture), deadlineMs: 400
-  }), /capture supervision timed out|did not close before deadline/);
+  await assert.rejects(supervise(input), /capture supervision timed out|did not close before deadline/);
+  assert.equal(fs.existsSync(path.join(input.capture, 'STOP')), true);
+  assert.equal(fs.existsSync(path.join(input.capture, 'navigation-complete.json')), false);
 });
 
 test('supervisor rejects an aborted capture', async t => {
