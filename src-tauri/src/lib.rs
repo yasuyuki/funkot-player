@@ -166,6 +166,23 @@ static AUDITIONING: AtomicBool = AtomicBool::new(false);
 /// is still false — pause transport must stay rejected in that window too.
 static AUDITION_PREPARING: AtomicBool = AtomicBool::new(false);
 
+/// Held for the whole of `audition_transition`, `resume_autodj` and every
+/// pause-transport change. The shared `paused` flag and the single
+/// `AUDITION_PREPARING` flag cannot describe two of these in flight: a request
+/// that finishes first would clear or unmute another request's prepare.
+/// verification/audition models this lock.
+static AUDITION_LOCK: Mutex<()> = Mutex::new(());
+
+/// Refuse instead of waiting: a second audition press or pause while another
+/// one is in flight is the listener's retry, not queued work.
+fn try_audition_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    match AUDITION_LOCK.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => Err("audition in progress".into()),
+    }
+}
+
 /// Volatile audition session (no persistence). `pair` survives `resume_autodj`
 /// so 「もう一度聴く」 can re-run after returning to the main engine.
 /// `parked_*` snapshot [`NOW`] across an audition so resume restores the
@@ -1719,6 +1736,33 @@ mod flip_paused_tests {
         assert!(ensure_pause_allowed(false, true).is_err());
         assert!(ensure_pause_allowed(true, true).is_err());
         assert!(ensure_pause_allowed(false, false).is_ok());
+    }
+
+    #[test]
+    fn failed_audition_prepare_restores_the_listeners_pause() {
+        for before in [true, false] {
+            let paused = AtomicBool::new(before);
+            let built = prepare_audition(
+                &paused,
+                || {
+                    assert!(paused.load(Ordering::Relaxed), "queue muted while preparing");
+                    Err::<(), _>("prepare audition tracks: unreadable".to_string())
+                },
+                |_| Ok(()),
+            );
+            assert!(built.is_err());
+            assert_eq!(paused.load(Ordering::Relaxed), before, "failed build");
+            let installed = prepare_audition(&paused, || Ok(()), |_| Err("not playing".to_string()));
+            assert!(installed.is_err());
+            assert_eq!(paused.load(Ordering::Relaxed), before, "failed install");
+        }
+    }
+
+    #[test]
+    fn overlapping_audition_work_refuses_resume_and_pause() {
+        let _in_flight = AUDITION_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(resume_autodj(), Err("audition in progress".to_string()));
+        assert_eq!(toggle_pause(), Err("audition in progress".to_string()));
     }
 }
 
@@ -4200,6 +4244,7 @@ fn audition_transition(
     if !to.is_file() {
         return Err(format!("to track not found: {to_path}"));
     }
+    let _audition = try_audition_lock()?;
 
     let cold_start = PLAYBACK.get().is_none();
     if cold_start {
@@ -4222,10 +4267,7 @@ fn audition_transition(
         wait_for_playback()?;
     }
     let playback = PLAYBACK.get().ok_or("not playing")?;
-    // Mute + block pause for the whole prepare window (AUDITIONING is still
-    // false until install). Pair goes in early so the UI banner can show.
-    AUDITION_PREPARING.store(true, Ordering::Relaxed);
-    playback.paused.store(true, Ordering::Relaxed);
+    // Pair goes in early so the UI banner can show.
     {
         let mut session = AUDITION_SESSION
             .lock()
@@ -4233,38 +4275,36 @@ fn audition_transition(
         session.pair = Some((from.clone(), to.clone()));
     }
     let sample_rate = playback.sample_rate;
+    prepare_audition(
+        &playback.paused,
+        || build_audition_engine(&from, &to, Path::new(&cache_dir), sample_rate),
+        install_audition,
+    )
+}
 
-    let engine = match build_audition_engine(&from, &to, Path::new(&cache_dir), sample_rate) {
-        Ok(engine) => engine,
-        Err(e) => {
-            AUDITION_PREPARING.store(false, Ordering::Relaxed);
-            // Unmute whatever is installed — main queue, or the previous
-            // audition when 「もう一度聴く」 prepare fails.
-            playback.paused.store(false, Ordering::Relaxed);
-            return Err(e);
-        }
-    };
-    match install_audition(engine) {
-        Ok(()) => {
-            AUDITION_PREPARING.store(false, Ordering::Relaxed);
-            Ok(())
-        }
-        Err(e) => {
-            AUDITION_PREPARING.store(false, Ordering::Relaxed);
-            playback.paused.store(false, Ordering::Relaxed);
-            Err(e)
-        }
+/// Mute and block pause for the whole prepare window (AUDITIONING is still
+/// false until install), then build and install. A failed prepare restores
+/// the `paused` it found: the listener may have paused the queue, or this is
+/// 「もう一度聴く」 over a playing audition. The caller holds the audition lock.
+fn prepare_audition<E>(
+    paused: &AtomicBool,
+    build: impl FnOnce() -> Result<E, String>,
+    install: impl FnOnce(E) -> Result<(), String>,
+) -> Result<(), String> {
+    AUDITION_PREPARING.store(true, Ordering::Relaxed);
+    let before = paused.swap(true, Ordering::Relaxed);
+    let result = build().and_then(install);
+    if result.is_err() {
+        paused.store(before, Ordering::Relaxed);
     }
+    AUDITION_PREPARING.store(false, Ordering::Relaxed);
+    result
 }
 
 #[tauri::command]
 fn resume_autodj() -> Result<(), String> {
-    // Prepare still owns the session: NOW is not parked yet, and the in-flight
-    // `audition_transition` would install after we returned. Refuse until
-    // `AUDITION_PREPARING` clears.
-    if AUDITION_PREPARING.load(Ordering::Relaxed) {
-        return Err("audition still preparing".into());
-    }
+    // An in-flight `audition_transition` would install after we returned.
+    let _audition = try_audition_lock()?;
     let playback = PLAYBACK.get().ok_or("not playing")?;
     // Pause before teardown: `install_audition` leaves main unmuted, so taking
     // audition first lets main render TrackStarted into NOW; cold-start then
@@ -4307,7 +4347,7 @@ fn resume_autodj() -> Result<(), String> {
     // now would reorder them (same reasoning as `start_impl`'s doc comment).
     playback.paused.store(false, Ordering::Relaxed);
     // Unlike `install_audition`'s unmute or `audition_transition`'s
-    // prepare-time mute/failure-unmute, this is the one place a `paused`
+    // prepare-time mute/failure restore, this is the one place a `paused`
     // write here reflects the *listener's* intent: the main transport is
     // actually returning to playing, not just being muted/unmuted around a
     // volatile (never-persisted) `AUDITION_SESSION`. Mirror it into
@@ -4364,6 +4404,7 @@ fn poll_log(state: tauri::State<AppState>) -> Vec<String> {
 /// Flip the paused flag. Returns the new state.
 #[tauri::command]
 fn toggle_pause() -> Result<bool, String> {
+    let _audition = try_audition_lock()?;
     ensure_pause_allowed(
         AUDITIONING.load(Ordering::Relaxed),
         AUDITION_PREPARING.load(Ordering::Relaxed),
@@ -9257,7 +9298,8 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
     match action {
         0 | 4 | 5 => {
             // Audition transport is 〔再開〕 only — do not change shared pause.
-            if ensure_pause_allowed(
+            let audition = try_audition_lock();
+            if audition.is_ok() && ensure_pause_allowed(
                 AUDITIONING.load(Ordering::Relaxed),
                 AUDITION_PREPARING.load(Ordering::Relaxed),
             )
