@@ -11,7 +11,7 @@
   function closePicker() { open = false; queueMicrotask(() => chooseButton?.focus()); }
   let source = $derived(store.queue?.source ?? null);
   let current = $derived(store.destinationName ?? t.playlistNormal);
-  let lists = $derived((store.catalog?.lists ?? []).filter((list) => list.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
+  let lists = $derived((store.catalog?.lists ?? []).filter((list) => store.playlistName(list.id, list.name).toLocaleLowerCase().includes(query.toLocaleLowerCase())));
   async function run(action: Parameters<typeof store.doPlaylist>[0]) { if (busy) return; busy = true; const result = await store.doPlaylist(action); if (!result) toast.notify(t.playlistError(store.lastError ?? "busy")); busy = false; return result; }
   async function select(id: string | null) { const result = await run({ kind: "select", id }); if (result) closePicker(); }
   async function create() {
@@ -46,7 +46,7 @@
       <input aria-label={t.playlistSearch} bind:this={searchInput} bind:value={query} placeholder={t.playlistSearch} />
       <button type="button" class="quiet" class:active={source?.playlist_id === null} disabled={!store.canPlaylistMutate || busy} onclick={() => select(null)}>{t.playlistNormal}</button>
       {#each lists as list (list.id)}
-        <div class="list-row"><button type="button" class="quiet" class:active={source?.playlist_id === list.id} disabled={!store.canPlaylistMutate || busy} onclick={() => select(list.id)} title={list.name}><span class="list-name">{list.name}</span><small>{t.playlistCount(list.remaining, list.total)}</small></button><button type="button" class="quiet view" onclick={() => { void store.browsePlaylist(list.id); if (compact) { open = false; ui.setPlaySub("queue"); window.scrollTo(0, 0); } else closePicker(); }} aria-label={t.playlistBrowseLabel(list.name)}>{t.playlistBrowse}</button></div>
+        <div class="list-row"><button type="button" class="quiet" class:active={source?.playlist_id === list.id} disabled={!store.canPlaylistMutate || busy} onclick={() => select(list.id)} title={store.playlistName(list.id, list.name)}><span class="list-name">{store.playlistName(list.id, list.name)}</span><small>{t.playlistCount(list.remaining, list.total)}</small></button><button type="button" class="quiet view" onclick={() => { void store.browsePlaylist(list.id); if (compact) { open = false; ui.setPlaySub("queue"); window.scrollTo(0, 0); } else closePicker(); }} aria-label={t.playlistBrowseLabel(store.playlistName(list.id, list.name))}>{t.playlistBrowse}</button></div>
       {/each}
       <form onsubmit={(event) => { event.preventDefault(); void create(); }}>
         <input aria-label={t.playlistNewName} bind:value={createName} />

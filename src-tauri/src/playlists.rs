@@ -19,6 +19,7 @@ use crate::playlist_progress::{self as progress, Claim as ProgressClaim, Observa
 const FILE_NAME: &str = "playback-state.json";
 const LEGACY_FILE_NAME: &str = "playlists.json";
 pub const SCHEMA_VERSION: u32 = 1;
+pub const FAVORITES_ID: &str = "favorites";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrackRef {
@@ -113,6 +114,16 @@ pub struct RemovedEntry {
 }
 
 impl Catalog {
+    pub fn ensure_favorites(&mut self) {
+        if self.definition(FAVORITES_ID).is_ok() { return; }
+        self.definitions.insert(0, PlaylistDefinition {
+            id: FAVORITES_ID.into(), name: "Favorites".into(), revision: 0, entries: vec![],
+        });
+        self.runs.insert(FAVORITES_ID.into(), Run::default());
+    }
+    pub fn favorite(&self, hash: &str) -> Option<&Entry> {
+        self.definition(FAVORITES_ID).ok()?.entries.iter().find(|entry| entry.track.content_hash == hash)
+    }
     /// Selects the source for future claims without starting playback or
     /// changing that playlist's run.
     pub fn select(&mut self, id: Option<String>) -> Result<(), PlaylistError> {
@@ -148,10 +159,12 @@ impl Catalog {
         self.runs.insert(new_id.clone(), Run::default()); self.changed(); Ok(new_id)
     }
     pub fn rename(&mut self, id: &str, name: impl AsRef<str>) -> Result<(), PlaylistError> {
+        if id == FAVORITES_ID { return Err(invalid("favorites cannot be renamed")); }
         let name = self.valid_name(name.as_ref(), Some(id))?;
         self.definition_mut(id)?.name = name; self.definition_changed(id)?; self.changed(); Ok(())
     }
     pub fn delete(&mut self, id: &str) -> Result<(), PlaylistError> {
+        if id == FAVORITES_ID { return Err(invalid("favorites cannot be deleted")); }
         if self.active_id.as_deref() == Some(id) { return Err(PlaylistError::ActiveList); }
         let at = self.definitions.iter().position(|p| p.id == id).ok_or(PlaylistError::NotFound)?;
         self.definitions.remove(at); self.runs.remove(id);
@@ -160,7 +173,14 @@ impl Catalog {
     }
     pub fn append(&mut self, id: &str, tracks: Vec<TrackRef>) -> Result<Vec<String>, PlaylistError> {
         self.definition(id)?; let mut entries = Vec::with_capacity(tracks.len());
-        for track in tracks { entries.push(Entry { entry_id: self.allocate("entry")?, track }); }
+        let mut hashes: BTreeSet<_> = if id == FAVORITES_ID {
+            self.definition(id)?.entries.iter().map(|entry| entry.track.content_hash.clone()).collect()
+        } else { BTreeSet::new() };
+        for track in tracks {
+            if id == FAVORITES_ID && !hashes.insert(track.content_hash.clone()) { continue; }
+            entries.push(Entry { entry_id: self.allocate("entry")?, track });
+        }
+        if id == FAVORITES_ID && entries.is_empty() { return Ok(vec![]); }
         let ids = entries.iter().map(|e| e.entry_id.clone()).collect();
         self.definition_mut(id)?.entries.extend(entries); self.definition_changed(id)?; self.changed(); Ok(ids)
     }
@@ -178,7 +198,8 @@ impl Catalog {
     /// insertion point, so later edits are never replaced wholesale.
     pub fn undo_remove(&mut self, id: &str, removed: RemovedEntry) -> Result<(), PlaylistError> {
         let definition = self.definition_mut(id)?;
-        if definition.entries.iter().any(|e| e.entry_id == removed.entry.entry_id) { return Err(PlaylistError::DuplicateUndo); }
+        if definition.entries.iter().any(|e| e.entry_id == removed.entry.entry_id
+            || id == FAVORITES_ID && e.track.content_hash == removed.entry.track.content_hash) { return Err(PlaylistError::DuplicateUndo); }
         let at = removed.following_id.as_ref().and_then(|next| definition.entries.iter().position(|e| &e.entry_id == next))
             .or_else(|| removed.previous_id.as_ref().and_then(|prev| definition.entries.iter().position(|e| &e.entry_id == prev).map(|n| n + 1)))
             .unwrap_or(definition.entries.len());
@@ -269,11 +290,14 @@ impl Catalog {
         if self.schema_version != SCHEMA_VERSION { return Err(PlaylistError::InvalidInput { message: "unsupported schema".into() }); }
         let mut playlist_ids = BTreeSet::new(); let mut entry_ids = BTreeSet::new(); let mut names = BTreeSet::new();
         for definition in &self.definitions {
-            if !playlist_ids.insert(&definition.id) || !names.insert(normalized_name(&definition.name).ok_or_else(|| invalid("invalid playlist name"))?) { return Err(invalid("duplicate playlist id or name")); }
+            let name = normalized_name(&definition.name).ok_or_else(|| invalid("invalid playlist name"))?;
+            if !playlist_ids.insert(&definition.id) || definition.id != FAVORITES_ID && !names.insert(name) { return Err(invalid("duplicate playlist id or name")); }
             if self.run(&definition.id).is_err() { return Err(invalid("playlist has no run")); }
+            let mut favorite_hashes = BTreeSet::new();
             for entry in &definition.entries {
                 if entry.track.content_hash.is_empty() { return Err(invalid("playlist track has no content hash")); }
                 if !entry_ids.insert(&entry.entry_id) { return Err(invalid("duplicate entry id")); }
+                if definition.id == FAVORITES_ID && !favorite_hashes.insert(&entry.track.content_hash) { return Err(invalid("duplicate favorite track")); }
             }
         }
         if self.runs.keys().any(|id| !playlist_ids.contains(id)) || self.active_id.as_ref().is_some_and(|id| !playlist_ids.contains(id)) { return Err(invalid("orphan playlist state")); }
@@ -293,7 +317,7 @@ impl Catalog {
     fn run_mut(&mut self, id: &str) -> Result<&mut Run, PlaylistError> { self.runs.get_mut(id).ok_or(PlaylistError::NotFound) }
     fn valid_name(&self, name: &str, except: Option<&str>) -> Result<String, PlaylistError> {
         let name: String = name.trim().nfc().collect(); let key = normalized_name(&name).ok_or_else(|| invalid("playlist name must not be blank or contain control characters"))?;
-        if self.definitions.iter().any(|p| Some(p.id.as_str()) != except && normalized_name(&p.name).as_deref() == Some(&key)) { return Err(invalid("playlist name already exists")); } Ok(name)
+        if self.definitions.iter().any(|p| p.id != FAVORITES_ID && Some(p.id.as_str()) != except && normalized_name(&p.name).as_deref() == Some(&key)) { return Err(invalid("playlist name already exists")); } Ok(name)
     }
     fn unique_copy_name(&self, base: &str) -> String { let mut n = 1; loop { let candidate = if n == 1 { base.to_owned() } else { format!("{} {}", base, n) }; if self.valid_name(&candidate, None).is_ok() { return candidate; } n += 1; } }
     fn allocate(&mut self, kind: &str) -> Result<String, PlaylistError> { let n = self.next_id; self.next_id = self.next_id.checked_add(1).ok_or_else(|| invalid("id space exhausted"))?; Ok(format!("{}-{}", kind, n)) }
@@ -389,6 +413,52 @@ mod tests {
     use super::*;
     fn track(name: &str) -> TrackRef { TrackRef { content_hash: name.into(), preferred_path: PathBuf::from(format!("/{name}")), title: name.into(), artist: "artist".into() } }
     fn entries(c: &Catalog, id: &str) -> Vec<String> { c.definition(id).unwrap().entries.iter().map(|e| e.track.title.clone()).collect() }
+    #[test]
+    fn favorites_are_unique_by_track_and_do_not_change_ordinary_occurrences() {
+        let mut catalog = Catalog::default();
+        let ordinary = catalog.create("Favorites", vec![track("A"), track("A")]).unwrap();
+        catalog.ensure_favorites();
+        catalog.ensure_favorites();
+        let mut copy = track("A");
+        copy.preferred_path = PathBuf::from("/copy/A");
+        let added = catalog.append(FAVORITES_ID, vec![track("A"), copy, track("B")]).unwrap();
+        assert_eq!(added.len(), 2);
+        let revision = catalog.revision;
+        assert!(catalog.append(FAVORITES_ID, vec![track("A")]).unwrap().is_empty());
+        assert_eq!(catalog.revision, revision);
+        assert_eq!(entries(&catalog, &ordinary), vec!["A", "A"]);
+        assert_eq!(entries(&catalog, FAVORITES_ID), vec!["A", "B"]);
+        assert!(catalog.rename(FAVORITES_ID, "Other").is_err());
+        assert!(catalog.delete(FAVORITES_ID).is_err());
+        catalog.validate().unwrap();
+    }
+    #[test]
+    fn favorite_membership_survives_progress_and_undo_cannot_duplicate_a_track() {
+        let mut catalog = Catalog::default();
+        catalog.ensure_favorites();
+        let id = catalog.append(FAVORITES_ID, vec![track("A")]).unwrap().remove(0);
+        catalog.mark_started(FAVORITES_ID, 0, &id).unwrap();
+        assert!(catalog.remaining(FAVORITES_ID).unwrap().is_empty());
+        assert!(catalog.favorite("A").is_some());
+        let removed = catalog.remove(FAVORITES_ID, &id).unwrap();
+        catalog.append(FAVORITES_ID, vec![track("A")]).unwrap();
+        assert_eq!(catalog.undo_remove(FAVORITES_ID, removed), Err(PlaylistError::DuplicateUndo));
+        catalog.validate().unwrap();
+    }
+    #[test]
+    fn existing_catalog_accepts_favorites_without_replacing_saved_lists() {
+        let mut old = Catalog::default();
+        let id = old.create("Saved", vec![track("A"), track("A")]).unwrap();
+        let before = old.definition(&id).unwrap().clone();
+        let bytes = serde_json::to_vec(&old).unwrap();
+        let mut loaded: Catalog = serde_json::from_slice(&bytes).unwrap();
+        loaded.ensure_favorites();
+        assert_eq!(loaded.definition(&id).unwrap(), &before);
+        loaded.validate().unwrap();
+        let roundtrip: Catalog = serde_json::from_slice(&serde_json::to_vec(&loaded).unwrap()).unwrap();
+        roundtrip.validate().unwrap();
+        assert!(roundtrip.definition(FAVORITES_ID).unwrap().entries.is_empty());
+    }
     #[test] fn duplicate_tracks_get_distinct_occurrences_and_non_destructive_progress() {
         let mut c = Catalog::default(); let id = c.create("Set", vec![track("A"), track("B"), track("A")]).unwrap(); let ids: Vec<_> = c.definition(&id).unwrap().entries.iter().map(|e| e.entry_id.clone()).collect();
         c.mark_started(&id, 0, &ids[0]).unwrap(); assert_eq!(c.remaining(&id).unwrap().len(), 2); assert_eq!(entries(&c, &id), vec!["A", "B", "A"]);

@@ -110,6 +110,125 @@ impl Fixture {
     }
 }
 
+fn favorite_action(path: &Path, favorite: bool) -> Action {
+    Action::SetFavorite {
+        track: TrackTarget { path: path.to_string_lossy().into(), expected_hash: Some(funkot_core::cache::content_hash(path).unwrap()) },
+        favorite,
+    }
+}
+
+#[test]
+fn opening_existing_catalog_adds_favorites_in_memory_without_writing_user_data() {
+    if isolated_source_fixture("playlist_service::tests::opening_existing_catalog_adds_favorites_in_memory_without_writing_user_data") { return; }
+    let data = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mut old = Catalog::default();
+    let id = old.create("Favorites", vec![]).unwrap();
+    PlaylistStore::load(data.path()).persist(&old).unwrap();
+    let file = data.path().join("playback-state.json");
+    let bytes = fs::read(&file).unwrap();
+    let service = Service::new(data.path(), cache.path(), queue::new_shared_queue());
+    assert_eq!(service.catalog_view().lists.len(), 2);
+    assert_eq!(service.catalog.definition(&id).unwrap(), old.definition(&id).unwrap());
+    assert!(service.catalog.definition(FAVORITES_ID).unwrap().entries.is_empty());
+    assert_eq!(fs::read(&file).unwrap(), bytes);
+}
+
+#[test]
+fn favorites_save_by_hash_without_selecting_or_editing_other_lists() {
+    if isolated_source_fixture("playlist_service::tests::favorites_save_by_hash_without_selecting_or_editing_other_lists") { return; }
+    let fixture = Fixture::new();
+    assert!(fixture.service.lock().unwrap().catalog_view().lists.iter().any(|list| list.id == FAVORITES_ID && list.total == 0));
+    let a = fixture.file("favorite.wav");
+    let copy = fixture.data.path().join("copy.wav");
+    fs::copy(&a, &copy).unwrap();
+    let ordinary = fixture.install("Saved", vec![Fixture::track(&a), Fixture::track(&a)]);
+    fixture.command("select-saved", Action::Select { id: Some(ordinary.clone()) }).unwrap();
+    let definition = fixture.service.lock().unwrap().catalog.definition(&ordinary).unwrap().clone();
+    assert_eq!(fixture.command("favorite", favorite_action(&a, true)).unwrap().added, 1);
+    assert_eq!(fixture.command("favorite-copy", favorite_action(&copy, true)).unwrap().added, 0);
+    let owner = fixture.service.lock().unwrap();
+    assert_eq!(owner.active(), Some(ordinary.as_str()));
+    assert_eq!(owner.catalog.definition(&ordinary).unwrap(), &definition);
+    assert_eq!(owner.catalog_view().favorite_hashes, vec![Fixture::track(&a).content_hash]);
+    assert!(queue::pending_snapshot(&fixture.queue).is_empty());
+    drop(owner);
+    let reopened = Service::new(fixture.data.path(), fixture.cache.path(), queue::new_shared_queue());
+    assert_eq!(reopened.catalog.definition(FAVORITES_ID).unwrap().entries.len(), 1);
+    assert_eq!(reopened.catalog.definition(&ordinary).unwrap(), &definition);
+}
+
+#[test]
+fn favorite_failures_keep_membership_and_missing_tracks_can_be_unfavorited() {
+    if isolated_source_fixture("playlist_service::tests::favorite_failures_keep_membership_and_missing_tracks_can_be_unfavorited") { return; }
+    let fixture = Fixture::new();
+    let a = fixture.file("favorite.wav");
+    fixture.command("create-saved", Action::Create { name: "Saved".into() }).unwrap();
+    let file = fixture.data.path().join("playback-state.json");
+    let before = fs::read(&file).unwrap();
+    crate::playback_state::set_fail_persist_stage(2);
+    assert_eq!(fixture.command("failed-add", favorite_action(&a, true)).err().unwrap().code, "persist_failed");
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert!(fixture.service.lock().unwrap().catalog_view().favorite_hashes.is_empty());
+    fixture.command("add", favorite_action(&a, true)).unwrap();
+    let remove = favorite_action(&a, false);
+    let saved = fs::read(&file).unwrap();
+    fs::remove_file(&a).unwrap();
+    crate::playback_state::set_fail_persist_stage(2);
+    assert_eq!(fixture.command("failed-remove", remove.clone()).err().unwrap().code, "persist_failed");
+    assert_eq!(fs::read(&file).unwrap(), saved);
+    assert_eq!(fixture.service.lock().unwrap().catalog_view().favorite_hashes.len(), 1);
+    fixture.command("remove", remove).unwrap();
+    assert!(fixture.service.lock().unwrap().catalog_view().favorite_hashes.is_empty());
+    let reopened = Service::new(fixture.data.path(), fixture.cache.path(), queue::new_shared_queue());
+    assert!(reopened.catalog_view().favorite_hashes.is_empty());
+}
+
+#[test]
+fn favorite_requests_preserve_identity_freshness_and_receipt_replay() {
+    if isolated_source_fixture("playlist_service::tests::favorite_requests_preserve_identity_freshness_and_receipt_replay") { return; }
+    let fixture = Fixture::new();
+    let a = fixture.file("favorite.wav");
+    let request = fixture.request("favorite", favorite_action(&a, true));
+    let stale = fixture.request("old-target", favorite_action(&a, false));
+    assert_eq!(command_with(&fixture.service, request.clone(), None).unwrap().added, 1);
+    assert_eq!(command_with(&fixture.service, request, None).unwrap().added, 1);
+    assert_eq!(command_with(&fixture.service, stale, None).err().unwrap().code, "stale");
+    assert_eq!(fixture.service.lock().unwrap().catalog.definition(FAVORITES_ID).unwrap().entries.len(), 1);
+    let changed = Action::SetFavorite { track: TrackTarget { path: a.to_string_lossy().into(), expected_hash: Some("wrong".into()) }, favorite: true };
+    assert_eq!(fixture.command("changed-identity", changed).err().unwrap().code, "identity_changed");
+}
+
+#[test]
+fn active_favorites_use_the_existing_source_fence_and_keep_started_membership() {
+    if isolated_source_fixture("playlist_service::tests::active_favorites_use_the_existing_source_fence_and_keep_started_membership") { return; }
+    let fixture = Fixture::new();
+    let a = fixture.file("a.wav");
+    let b = fixture.file("b.wav");
+    fixture.command("favorite-a", favorite_action(&a, true)).unwrap();
+    fixture.command("favorite-b", favorite_action(&b, true)).unwrap();
+    fixture.command("select", Action::Select { id: Some(FAVORITES_ID.into()) }).unwrap();
+    let duplicate = fixture.command("append-duplicate", Action::Append { tracks: vec![TrackTarget { path: a.to_string_lossy().into(), expected_hash: None }], mode: "single".into() }).unwrap();
+    assert_eq!((duplicate.added, duplicate.skipped), (0, 1));
+    let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
+    let first = source.next().unwrap();
+    let second = source.next().unwrap();
+    let player = playback(&[first, second], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+    assert_eq!(fixture.service.lock().unwrap().catalog_view().favorite_hashes.len(), 2);
+    let request = fixture.request("remove-future", favorite_action(&b, false));
+    let before = fs::read(fixture.data.path().join("playback-state.json")).unwrap();
+    crate::playback_state::set_fail_persist_stage(2);
+    assert_eq!(command_with(&fixture.service, request.clone(), Some(&player)).err().unwrap().code, "persist_failed");
+    assert_eq!(fs::read(fixture.data.path().join("playback-state.json")).unwrap(), before);
+    assert_eq!(fixture.service.lock().unwrap().catalog_view().favorite_hashes.len(), 2);
+    command_with(&fixture.service, request, Some(&player)).unwrap();
+    let owner = fixture.service.lock().unwrap();
+    assert_eq!(owner.catalog_view().favorite_hashes, vec![Fixture::track(&a).content_hash]);
+    assert_eq!(owner.catalog.definition(FAVORITES_ID).unwrap().entries.len(), 1);
+    assert!(owner.claims.values().filter(|claim| claim.entry.is_some() && claim.item.path == b).all(|claim| claim.cancelled));
+}
+
 #[test]
 fn conflict_resolution_hydrates_the_live_queue_after_its_single_durable_commit() {
     if isolated_source_fixture("playlist_service::tests::conflict_resolution_hydrates_the_live_queue_after_its_single_durable_commit") { return; }

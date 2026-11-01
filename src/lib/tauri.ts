@@ -307,7 +307,9 @@ export interface QueueSnapshot {
 
 export interface SourceTarget { playlist_id: string | null; generation: number; revision: number; }
 export interface PlaylistSummary { id: string; name: string; revision: number; total: number; remaining: number; }
-export interface PlaylistCatalogSnapshot { revision: number; active_id: string | null; generation: number; store_status: string; lists: PlaylistSummary[]; }
+export const FAVORITES_PLAYLIST_ID = "favorites";
+
+export interface PlaylistCatalogSnapshot { revision: number; active_id: string | null; generation: number; store_status: string; lists: PlaylistSummary[]; favorite_hashes: string[]; }
 export interface PlaylistEntryView { entry_id: string; path: string; title: string; artist: string; status: "pending" | "preparing" | "prepared" | "missing" | "unplayable" | "played" | "current"; reason: string | null; }
 export interface PlaylistDetails { id: string; name: string; revision: number; run_id: number; total: number; ended: boolean; skipped: number; rows: PlaylistEntryView[]; }
 export type PlaylistAction =
@@ -317,6 +319,7 @@ export type PlaylistAction =
   | { kind: "restart"; id: string } | { kind: "remove"; id: string; entry_id: string }
   | { kind: "undo_remove"; undo_id: string } | { kind: "move"; id: string; entry_id: string; to: number; scope: "remaining" | "all" }
   | { kind: "append"; tracks: Array<{ path: string; expected_hash: string | null }>; mode: "single" | "many" | "arrivals" }
+  | { kind: "set_favorite"; track: { path: string; expected_hash: string | null }; favorite: boolean }
   | { kind: "queue_move"; from: number; to: number; expect: QueueItem }
   | { kind: "queue_remove"; index: number; expect: QueueItem };
 export interface PlaylistCommandResult { created_id: string | null; undo_id: string | null; added: number; rejected: number; skipped: number; }

@@ -25,6 +25,7 @@
   import { buildTagIndex, matchesTagFilter, type TagChoice, type TagFilter as TagFilterState } from "../lib/tag-filter";
   import TagFilter from "./TagFilter.svelte";
   import TagChips from "./TagChips.svelte";
+  import FavoriteButton from "./FavoriteButton.svelte";
 
   let t = $derived(i18n.t);
 
@@ -370,6 +371,7 @@
             <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} />
           </div>
           {#if !selectMode}
+            <FavoriteButton path={row.path} contentHash={row.content_hash} title={row.title} />
             <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
             <button
               type="button"

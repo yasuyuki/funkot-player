@@ -24,7 +24,7 @@ test("legacy queue recovery requires an explicit choice and refreshes playback s
 
   const recovery = page.getByRole("region", { name: "Choose the current queue" });
   const start = page.getByRole("button", { name: "Start", exact: true });
-  const add = page.getByRole("button", { name: /Add Pulse to/ });
+  const add = page.locator("section.library li.row").first().locator(".add");
   await expect(recovery).toBeVisible();
   await expect(start).toBeDisabled();
   await expect(add).toBeDisabled();

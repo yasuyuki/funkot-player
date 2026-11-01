@@ -5,6 +5,85 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator(".library li.row")).toHaveCount(6, { timeout: 15000 });
 });
 
+test("favorites deduplicate by content identity without changing the playback source", async ({ page }, testInfo) => {
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const first = store.libraryList[0];
+    const duplicate = { ...first, path: "/fixture/music/pulse-copy.mp3", title: "Pulse copy" };
+    store.library = new Map([...store.library, [duplicate.path, duplicate]]);
+    store.player = { ...store.player, phase: "playing", now_playing: first.path, playback_started_frames: 48000 };
+    store.catalog = { ...store.catalog, favorite_hashes: [] };
+    window.__uiFixture.setReply("player_state", store.player);
+    window.__uiFixture.setReply("playlist_catalog", store.catalog);
+    window.__uiFixture.setReply("playlist_entries_favorites", {
+      id: "favorites", name: "Favorites", revision: 2, run_id: 1, total: 1, ended: false, skipped: 0,
+      rows: [
+        { entry_id: "favorite-pulse", path: first.path, title: first.title, artist: first.artist, status: "played", reason: null },
+      ],
+    });
+  });
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
+  const library = page.locator("section.library");
+  const add = library.locator("li.row").first().getByRole("button", { name: "Add Pulse to Favorites" });
+  await expect(add).toBeEnabled();
+  await expect(page.locator(".now-card").getByRole("button", { name: "Add Pulse to Favorites" })).toBeVisible();
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    window.__uiFixture.setReply("playlist_catalog", { ...store.catalog, favorite_hashes: ["1".repeat(64)] });
+  });
+  await add.click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").length)).toBe(1);
+  expect(await page.evaluate(() => window.__uiFixture.calls.find((call) => call.command === "playlist_command").args.request.action)).toEqual({
+    kind: "set_favorite", track: { path: "/fixture/music/track-1.mp3", expected_hash: "1".repeat(64) }, favorite: true,
+  });
+  await expect(library.getByRole("button", { name: "Remove Pulse from Favorites" })).toHaveCount(1);
+  await expect(library.getByRole("button", { name: "Remove Pulse copy from Favorites" })).toHaveCount(1);
+  const capture = testInfo.outputPath(`${testInfo.project.name}-favorites.jpg`);
+  await page.screenshot({ path: capture, quality: 70, fullPage: false, animations: "disabled" });
+  await testInfo.attach("favorites", { path: capture, contentType: "image/jpeg" });
+  await page.evaluate(() => window.__uiFixture.failNext("playlist_command", { code: "persist_failed", message: "synthetic save failure" }));
+  await library.getByRole("button", { name: "Remove Pulse from Favorites" }).click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").length)).toBe(2);
+  await expect(library.getByRole("button", { name: "Remove Pulse from Favorites" })).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Could not save the playlist.");
+  expect(await page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.queue.source.playlist_id)).toBe("night");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  const queue = page.locator("section.queue");
+  const pickerHost = testInfo.project.name === "narrow" ? library : queue;
+  await pickerHost.locator(".source .choose").click();
+  await pickerHost.getByRole("button", { name: "Browse Favorites" }).click();
+  await expect(queue.getByText("Editing playlist: Favorites")).toBeVisible();
+  await expect(queue.locator(".playlist-row")).toHaveCount(1);
+  await expect(queue.getByText("Played", { exact: true })).toBeVisible();
+  const listCapture = testInfo.outputPath(`${testInfo.project.name}-favorites-list.jpg`);
+  await page.screenshot({ path: listCapture, quality: 70, fullPage: false, animations: "disabled" });
+  await testInfo.attach("favorites-list", { path: listCapture, contentType: "image/jpeg" });
+  expect(await page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.queue.source.playlist_id)).toBe("night");
+  await queue.getByRole("button", { name: "Playlist actions" }).click();
+  await expect(queue.getByRole("button", { name: "Rename", exact: true })).toHaveCount(0);
+  await expect(queue.getByRole("button", { name: "Delete", exact: true })).toHaveCount(0);
+
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    window.__uiFixture.setReply("playlist_catalog", { ...store.catalog, favorite_hashes: [] });
+    window.__uiFixture.setReply("playlist_entries_favorites", {
+      id: "favorites", name: "Favorites", revision: 3, run_id: 1, total: 0, ended: false, skipped: 0, rows: [],
+    });
+  });
+  await library.getByRole("button", { name: "Remove Pulse from Favorites" }).click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").length)).toBe(3);
+  await expect(library.getByRole("button", { name: "Add Pulse to Favorites" })).toBeVisible();
+  await expect(queue.locator(".playlist-row")).toHaveCount(0);
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.catalog = { ...store.catalog, store_status: "corrupt" };
+    store.queue = { ...store.queue, playlist_store_status: "corrupt" };
+  });
+  await expect(library.getByRole("button", { name: "Add Pulse to Favorites" })).toBeDisabled();
+});
+
 test("a delayed add keeps its clicked source target across a switch", async ({ page }) => {
   await page.evaluate(() => {
     window.__uiFixture.delayNext("playlist_command");
@@ -108,7 +187,7 @@ test("normal queue stays addable when playlist data is read-only", async ({ page
     store.queue = { ...store.queue, source: { playlist_id: "night", generation: 4, revision: 6 }, playlist_store_status: "corrupt" };
     window.__uiFixture.setReply("queue_state", store.queue);
   });
-  await expect(page.locator(".library li.row").first().getByRole("button", { name: /Add Pulse to/ })).toBeDisabled();
+  await expect(page.locator(".library li.row").first().locator(".add")).toBeDisabled();
 });
 
 test("rename dialog keeps the list it opened for when browse changes", async ({ page }, testInfo) => {

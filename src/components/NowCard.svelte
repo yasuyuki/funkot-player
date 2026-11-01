@@ -5,6 +5,7 @@
   import { ui } from "../lib/ui.svelte";
   import { i18n } from "../lib/i18n.svelte";
   import { phaseLabel as phaseText } from "../lib/messages";
+  import FavoriteButton from "./FavoriteButton.svelte";
 
   let t = $derived(i18n.t);
 
@@ -96,6 +97,9 @@
         disabled={labelBusy}
         onclick={onToggleLabel}
       >{shownFunkot ? t.funkot : t.notFunkot}</button>
+    {/if}
+    {#if nowRow}
+      <FavoriteButton path={nowRow.path} contentHash={nowRow.content_hash} title={nowRow.title} />
     {/if}
     <!-- n / total is the folder-scan position: a meter for the labelling
          pass, not for listening. Off the play screen unless labelling mode is

@@ -40,7 +40,7 @@ impl From<FutureUpdateBusy> for CommandError {
 #[derive(Clone, serde::Serialize)]
 pub struct Summary { pub id: String, pub name: String, pub revision: u64, pub total: usize, pub remaining: usize }
 #[derive(serde::Serialize)]
-pub struct CatalogView { pub revision: u64, pub active_id: Option<String>, pub generation: u64, pub store_status: String, pub lists: Vec<Summary> }
+pub struct CatalogView { pub revision: u64, pub active_id: Option<String>, pub generation: u64, pub store_status: String, pub lists: Vec<Summary>, pub favorite_hashes: Vec<String> }
 #[derive(Clone, serde::Serialize)]
 pub struct EntryView { pub entry_id: String, pub path: String, pub title: String, pub artist: String, pub status: String, pub reason: Option<String> }
 #[derive(Clone, serde::Serialize)]
@@ -55,6 +55,7 @@ pub enum Action {
     Restart { id: String }, Remove { id: String, entry_id: String }, UndoRemove { undo_id: String },
     Move { id: String, entry_id: String, to: usize, scope: String },
     Append { tracks: Vec<TrackTarget>, mode: String },
+    SetFavorite { track: TrackTarget, favorite: bool },
     QueueMove { from: usize, to: usize, expect: QueueItem }, QueueRemove { index: usize, expect: QueueItem },
 }
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -128,6 +129,7 @@ impl Service {
     fn new(data: &Path, cache: &Path, queue: SharedQueue) -> Self {
         let disk = PlaylistStore::load(data);
         let mut catalog = disk.snapshot().unwrap_or_default();
+        catalog.ensure_favorites();
         let restored = catalog.resume_after_restart();
         // When no playlist is active, the snapshot queue and session own normal
         // restoration. `catalog.normal` is only a suspended normal source for
@@ -150,6 +152,7 @@ impl Service {
     }
     pub fn catalog_view(&self) -> CatalogView {
         CatalogView { revision: self.catalog.revision, active_id: self.catalog.active_id.clone(), generation: self.catalog.generation,
+            favorite_hashes: self.catalog.definition(FAVORITES_ID).map(|list| list.entries.iter().map(|entry| entry.track.content_hash.clone()).collect()).unwrap_or_default(),
             store_status: self.store_status(), lists: self.catalog.definitions.iter().map(|d| Summary {
                 id: d.id.clone(), name: d.name.clone(), revision: d.revision, total: d.entries.len(),
                 remaining: self.catalog.remaining(&d.id).map_or(0, |r| r.len()) }).collect() }
@@ -390,6 +393,7 @@ impl Service {
             },
         )?;
         self.catalog = catalog;
+        self.catalog.ensure_favorites();
         self.restored = self.catalog.resume_after_restart();
         self.normal_source = None;
         self.claims.clear();
@@ -892,7 +896,8 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     let old_normal = owner.normal_items();
     let mut next = owner.catalog.clone(); let mut normal = owner.normal_items_for_update()?;
     let _normal_only = owner.active().is_none() && matches!(&request.action, Action::Append { .. } | Action::QueueMove { .. } | Action::QueueRemove { .. });
-    let append_action = matches!(&request.action, Action::Append { .. });
+    let append_action = matches!(&request.action, Action::Append { .. })
+        || owner.active() == Some(FAVORITES_ID) && matches!(&request.action, Action::SetFavorite { favorite: true, .. });
     let normal_append = owner.active().is_none() && append_action;
     let mut result = CommandResult::default(); let mut removed = None; let mut undo_used = None;
     let mut removed_normal = None;
@@ -920,6 +925,18 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
                 if to >= ids.len() { return Err(error("invalid_input")); } let entry = ids.remove(from); ids.insert(to, entry); next.reorder_remaining(&id, &ids)?;
             } else { return Err(error("invalid_input")); }
         }
+        Action::SetFavorite { track, favorite } => {
+            if favorite {
+                let track = owner.track_ref(&track)?;
+                result.added = next.append(FAVORITES_ID, vec![track])?.len();
+                result.skipped = usize::from(result.added == 0);
+                if result.added > 0 && owner.active() == Some(FAVORITES_ID) && owner.exhausted { force_source = true; }
+            } else {
+                let hash = track.expected_hash.as_deref().filter(|hash| !hash.is_empty()).ok_or_else(|| error("identity_unavailable"))?;
+                if let Some(entry) = next.favorite(hash).cloned() { next.remove(FAVORITES_ID, &entry.entry_id)?; }
+                else { result.skipped = 1; }
+            }
+        }
         Action::Append { tracks, mode } => {
             if !["single", "many", "arrivals"].contains(&mode.as_str()) { return Err(error("invalid_input")); }
             let mut accepted = Vec::new();
@@ -938,7 +955,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
                 }
                 result.added += 1;
             }
-            if let Some(id) = next.active_id.clone() { if !accepted.is_empty() { next.append(&id, accepted)?; } }
+            if let Some(id) = next.active_id.clone() { if !accepted.is_empty() {
+                let added = next.append(&id, accepted)?.len();
+                result.skipped += result.added - added;
+                result.added = added;
+            } }
             else if result.added > 0 { next.revision += 1; }
             if result.added > 0 && owner.exhausted { force_source = true; }
         }

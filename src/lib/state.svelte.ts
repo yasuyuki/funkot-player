@@ -47,6 +47,7 @@ import {
   listNewArrivals as listNewArrivalsCmd,
   listPlayHistory,
   listen,
+  FAVORITES_PLAYLIST_ID,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -112,6 +113,8 @@ class PlayerStore {
   player = $state<PlayerState | null>(null);
   queue = $state<QueueSnapshot | null>(null);
   catalog = $state<PlaylistCatalogSnapshot | null>(null);
+  favoriteBusy = $state<Set<string>>(new Set());
+  favoriteHashes = $derived<ReadonlySet<string>>(new Set(this.catalog?.favorite_hashes ?? []));
   browsedPlaylist = $state<import("./tauri").PlaylistDetails | null>(null);
   /// Keyed by absolute path (`TrackRow.path`), matching
   /// `PlayerState.now_playing` / `.previous` and `TransitionInfo.from` /
@@ -968,14 +971,16 @@ class PlayerStore {
     try {
       const result = await playlistCommandCmd({ request_id: this.#requestId(), target, action });
       await this.#refreshQueueNow();
+      if (action.kind === "set_favorite") await this.#refreshCatalog();
       if (action.kind === "delete" && this.browsedPlaylist?.id === action.id) this.closeBrowsedPlaylist();
-      else if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
+      else if (this.browsedPlaylist && ((action.kind === "set_favorite" && this.browsedPlaylist.id === FAVORITES_PLAYLIST_ID) || action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
         await this.browsePlaylist(this.browsedPlaylist.id);
       return result;
     } catch (e) {
       this.lastError = this.#errorCode(e);
       await this.#refreshQueueNow();
-      if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
+      if (action.kind === "set_favorite") await this.#refreshCatalog();
+      if (this.browsedPlaylist && ((action.kind === "set_favorite" && this.browsedPlaylist.id === FAVORITES_PLAYLIST_ID) || action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
         await this.browsePlaylist(this.browsedPlaylist.id);
       return null;
     }
@@ -986,9 +991,16 @@ class PlayerStore {
     const id = this.queue?.source?.playlist_id;
     if (id === undefined) return i18n.t.playlistLoading;
     if (id === null) return i18n.t.playlistNormal;
-    return (this.activePlaylist?.id === id ? this.activePlaylist.name : null)
-      ?? this.catalog?.lists.find((list) => list.id === id)?.name
-      ?? i18n.t.playlistLoading;
+    const name = (this.activePlaylist?.id === id ? this.activePlaylist.name : null)
+      ?? this.catalog?.lists.find((list) => list.id === id)?.name;
+    return name ? this.playlistName(id, name) : i18n.t.playlistLoading;
+  }
+  playlistName(id: string, name: string): string {
+    return id === FAVORITES_PLAYLIST_ID ? i18n.t.favoritesTitle : name;
+  }
+  isFavorite(contentHash: string | null): boolean { return contentHash !== null && this.favoriteHashes.has(contentHash); }
+  isFavoriteBusy(path: string, contentHash: string | null): boolean {
+    return this.favoriteBusy.has(contentHash ?? path);
   }
   get destinationLabel() { return this.destinationName; }
   get playlistStoreStatus() { return this.queue?.playlist_store_status ?? this.catalog?.store_status ?? "ready"; }
@@ -997,11 +1009,24 @@ class PlayerStore {
     const id = this.queue?.source?.playlist_id;
     return this.playbackRecovery?.kind === "ready" && (id === null || (id !== undefined && this.canPlaylistMutate && (this.activePlaylist?.id === id || !!this.catalog?.lists.some((list) => list.id === id))));
   }
+  get canFavoriteMutate() { return this.catalog !== null && this.canPlaylistMutate; }
 
   async doPlaylist(action: PlaylistAction): Promise<PlaylistCommandResult | null> {
     const anchored = ["rename", "duplicate", "delete", "move", "remove"].includes(action.kind)
       && "id" in action && action.id === this.browsedPlaylist?.id;
     return this.#command(action, anchored ? this.#browseTarget : this.#target());
+  }
+  async doSetFavorite(path: string, favorite: boolean, expectedHash: string | null): Promise<PlaylistCommandResult | null> {
+    const key = expectedHash ?? path;
+    if (this.favoriteBusy.has(key)) return null;
+    this.favoriteBusy = new Set(this.favoriteBusy).add(key);
+    try {
+      return await this.#command({ kind: "set_favorite", track: { path, expected_hash: expectedHash }, favorite });
+    } finally {
+      const next = new Set(this.favoriteBusy);
+      next.delete(key);
+      this.favoriteBusy = next;
+    }
   }
   closeBrowsedPlaylist(): void { ++this.#browseGen; this.browsedPlaylist = null; this.#browseTarget = null; }
   async browsePlaylist(id: string): Promise<void> {
