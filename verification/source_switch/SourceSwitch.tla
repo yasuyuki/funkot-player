@@ -416,7 +416,9 @@ Reply ==
 
 (* Receipt lookup precedes target freshness. A matching retry has exactly the
    original result; a changed fingerprint with the same request ID is stale.
-   These observations are finite, repeatable stutters apart from the witness. *)
+   These observations are finite, repeatable stutters apart from the witness.
+   The receipt's own fingerprint always matches and another request op never
+   does, so the two outcomes are enumerated directly instead of every input. *)
 Retry(request, matching) ==
     /\ Idle /\ s.receipts[request] # None
     /\ LET receipt == s.receipts[request]
@@ -429,8 +431,7 @@ Retry(request, matching) ==
 
 (* Target checks use equality only. Each subset selects which of active source,
    catalog generation, and catalog revision differs. +1 is a canonical unequal
-   representative, not an ordering assumption. Cached original targets remain
-   explicit inputs even after all three live target fields have changed. *)
+   representative, not an ordering assumption. *)
 TargetShapes ==
     {[active |-> IF "active" \in mismatch
                  THEN IF s.live.active = "normal" THEN "playlist" ELSE "normal"
@@ -438,9 +439,6 @@ TargetShapes ==
       generation |-> s.live.generation + IF "generation" \in mismatch THEN 1 ELSE 0,
       revision |-> s.live.revision + IF "revision" \in mismatch THEN 1 ELSE 0]
       : mismatch \in SUBSET {"active", "generation", "revision"}}
-InputTargets(request) ==
-    TargetShapes \cup IF s.receipts[request] = None THEN {}
-          ELSE {s.receipts[request].fingerprint.target}
 
 ProtectedState(state) == [state EXCEPT !.attempts = 0, !.rejected = FALSE]
 RejectStaleTarget(target) ==
@@ -448,15 +446,6 @@ RejectStaleTarget(target) ==
     /\ target # Target(s.live)
     /\ s' = [s EXCEPT !.attempts = @ + 1, !.rejected = TRUE]
     /\ requestAudit' = [target |-> target, before |-> ProtectedState(s)]
-
-Request(op, id, request, target) ==
-    IF op \in RequestOps /\ s.receipts[request] # None THEN
-        /\ Retry(request, Fingerprint(op, id, target) = s.receipts[request].fingerprint)
-        /\ requestAudit' = None
-    ELSE IF op \in RequestOps /\ target # Target(s.live) THEN
-        RejectStaleTarget(target)
-    ELSE /\ Begin(op, id, request, target)
-         /\ requestAudit' = None
 
 Crash ==
     /\ s.up /\ s.incarnation = 0
@@ -521,11 +510,11 @@ NonStartupNext ==
     (OrdinaryNext /\ requestAudit' = None)
     \/ ((\E request \in Requests: s.receipts[request] = None)
         /\ (\E target \in TargetShapes \ {Target(s.live)}: RejectStaleTarget(target)))
-    \/ (\E op \in Ops, request \in Requests:
-          \E id \in InputIds(op): IF op \in RequestOps /\ s.receipts[request] # None THEN
-              \E target \in InputTargets(request): Request(op, id, request, target)
-          ELSE /\ Begin(op, id, request, Target(s.live))
-               /\ requestAudit' = None)
+    \/ (\E request \in Requests, matching \in BOOLEAN:
+          Retry(request, matching) /\ requestAudit' = None)
+    \/ (\E op \in Ops: \E request \in (IF op \in RequestOps THEN Requests ELSE {1}):
+          \E id \in InputIds(op):
+              Begin(op, id, request, Target(s.live)) /\ requestAudit' = None)
 
 Next == (NonStartupNext /\ startupAudit' = None)
         \/ (\E start \in BOOLEAN: NormalizeStartup(start))
