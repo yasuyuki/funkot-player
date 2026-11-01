@@ -108,6 +108,75 @@ fn normal_scan_commits_baseline_and_reads_the_same_tracks_again() {
 }
 
 #[test]
+fn unresolved_file_keeps_baseline_pending_until_a_complete_retry() {
+    let fixture = Fixture::new();
+    let synthetic = fixture.music.join("synthetic.wav");
+    let unavailable = fixture.music.join("synthetic-unavailable.wav");
+    let mut moved = false;
+    let failed = {
+        let _index = INDEX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        scan_library_under_index_lock(&fixture.music, &fixture.cache, &fixture.data, |progress| {
+            if progress.phase == "hashing" && progress.done == 0 {
+                fs::rename(&synthetic, &unavailable).unwrap();
+                moved = true;
+            } else if progress.phase == "hashing" && progress.done == 1 && moved {
+                fs::rename(&unavailable, &synthetic).unwrap();
+            }
+        })
+        .unwrap()
+        .reply
+    };
+    assert_eq!(failed.rows.len(), 1);
+    assert!(failed.rows[0].content_hash.is_none());
+    assert!(!store::load_settings(&fixture.data).arrivals_baseline_done);
+
+    let retried = fixture.scan();
+    assert_eq!(retried.rows.len(), 1);
+    assert!(store::load_settings(&fixture.data).arrivals_baseline_done);
+    let synthetic_key = synthetic.to_string_lossy().into_owned();
+    assert!(store::load_hash_index(&fixture.data).index[&synthetic_key].first_seen.is_none());
+
+    let arrival = fixture.music.join("arrived.wav");
+    fs::copy(&synthetic, &arrival).unwrap();
+    let scanned = fixture.scan();
+    assert_eq!(scanned.rows.len(), 2);
+    let arrival_key = arrival.to_string_lossy().into_owned();
+    assert!(store::load_hash_index(&fixture.data).index[&arrival_key].first_seen.is_some());
+}
+
+#[test]
+fn unresolved_file_keeps_recovery_pending_until_a_complete_retry() {
+    let fixture = Fixture::new();
+    let mut settings = store::Settings::default();
+    settings.arrivals_baseline_done = true;
+    store::save_settings(&fixture.data, &settings).unwrap();
+    let synthetic = fixture.music.join("synthetic.wav");
+    let unavailable = fixture.music.join("synthetic-unavailable.wav");
+    let mut moved = false;
+    let failed = {
+        let _index = INDEX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        scan_library_under_index_lock(&fixture.music, &fixture.cache, &fixture.data, |progress| {
+            if progress.phase == "hashing" && progress.done == 0 {
+                fs::rename(&synthetic, &unavailable).unwrap();
+                moved = true;
+            } else if progress.phase == "hashing" && progress.done == 1 && moved {
+                fs::rename(&unavailable, &synthetic).unwrap();
+            }
+        })
+        .unwrap()
+        .reply
+    };
+    assert_eq!(failed.rows.len(), 1);
+    assert!(failed.rows[0].content_hash.is_none());
+    assert_eq!(store::load_hash_index(&fixture.data).provenance, store::HashIndexProvenance::Missing);
+
+    let retried = fixture.scan();
+    assert_eq!(retried.rows.len(), 1);
+    let synthetic_key = synthetic.to_string_lossy().into_owned();
+    assert!(store::load_hash_index(&fixture.data).index[&synthetic_key].first_seen.is_none());
+}
+
+#[test]
 fn legacy_conflict_keeps_sources_exact_while_scan_waits_for_real_resolution() {
     let fixture = Fixture::new();
     let queue = vec![queue::QueueItem::manual(PathBuf::from("/synthetic/queue.wav"))];

@@ -7716,7 +7716,8 @@ fn scan_library_under_index_lock(
         }
     }
 
-    let plan = store::arrivals_commit_plan(kind, complete);
+    let arrivals_complete = complete && rows.iter().all(|row| row.content_hash.is_some());
+    let plan = store::arrivals_commit_plan(kind, arrivals_complete);
     let ordering_ready = !plan.save_index || next_added_order
         .and_then(|order| store::stamp_missing_added_order(&mut hash_index, order)).is_some();
     let mut index_saved = false;
