@@ -274,7 +274,7 @@ does not introduce a fallible operation after a successful rename.
 
 The Favorites adapter correspondence was reviewed at player commit
 `71bc6c7f6741aa1e3f9604db2746fc0f390fcfdd`. The transition steps, properties,
-bounds and four expected counterexamples remain unchanged.
+bounds and three source-switch counterexamples remain unchanged.
 
 The complete reachable graph has two sources, two initial occurrence identities
 per source, one additional fresh normal identity, two transaction attempts, one
