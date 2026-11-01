@@ -32,8 +32,8 @@ changes when the banner shows, when `src/lib/transportMode.ts` changes
 `primaryMode`, or when `verification/audition` or `verification/check_audition.py`
 changes.
 
-Sync commit: `fecd729081c6957516f4e20e6de10a1e5788b5b8`. The model was last confirmed against the code at that
-commit. Run `git diff fecd729081c6957516f4e20e6de10a1e5788b5b8 -- src-tauri/src/lib.rs src/App.svelte
+Sync commit: `a6475a7bd91c06d2bee53086a6622506f2259c8d`. The model was last confirmed against the code at that
+commit. Run `git diff a6475a7bd91c06d2bee53086a6622506f2259c8d -- src-tauri/src/lib.rs src/App.svelte
 src/lib/transportMode.ts` and read every hunk that touches the names above. Move
 the sync commit forward only after you confirm that every model action and line
 comment still describes the code at the new commit.
