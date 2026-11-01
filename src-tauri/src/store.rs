@@ -703,17 +703,7 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> io::Result<()> {
         dest,
         bytes,
         |tmp, b| fs::write(tmp, b),
-        |from, to| {
-            #[cfg(windows)]
-            {
-                match fs::remove_file(to) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            fs::rename(from, to)
-        },
+        |from, to| fs::rename(from, to),
         |tmp| {
             let _ = fs::remove_file(tmp);
         },
