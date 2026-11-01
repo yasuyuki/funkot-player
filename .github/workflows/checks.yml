@@ -181,8 +181,8 @@ jobs:
           path: ${{ runner.temp }}/engine-snapshot-proof
           if-no-files-found: error
 
-  build-and-test:
-    name: Frontend and native library
+  docker-toolchain:
+    name: Docker toolchain versions
     runs-on: ubuntu-latest
     needs: core-pin
     outputs:
@@ -206,7 +206,6 @@ jobs:
           load: true
           tags: funkot-player-dev
           cache-from: type=gha,scope=player-dev
-          cache-to: type=gha,mode=max,scope=player-dev
       - name: Record the actual Docker toolchain
         id: versions
         working-directory: funkot-player
@@ -214,6 +213,29 @@ jobs:
           ./dev.sh sh -c 'printf "rust=%s\nnode=%s\nnpm=%s\n" "$(rustc --version | cut -d " " -f2)" "$(node -p process.versions.node)" "$(npm --version)"' | tee versions.txt
           grep -E '^(rust|node|npm)=' versions.txt >> "$GITHUB_OUTPUT"
           cat versions.txt >> "$GITHUB_STEP_SUMMARY"
+
+  build-and-test:
+    name: Frontend and native library
+    runs-on: ubuntu-latest
+    needs: core-pin
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - uses: actions/checkout@v7
+        with:
+          repository: yasuyuki/funkot-autodj
+          ref: ${{ needs.core-pin.outputs.sha }}
+          path: funkot-autodj-for-ui
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the normal development image
+        uses: docker/build-push-action@v7
+        with:
+          context: funkot-player
+          load: true
+          tags: funkot-player-dev
+          cache-from: type=gha,scope=player-dev
+          cache-to: type=gha,mode=max,scope=player-dev
       - name: Test frontend and release native library in the normal Docker toolchain
         working-directory: funkot-player
         run: |
@@ -226,7 +248,7 @@ jobs:
   windows-build-and-test:
     name: Windows frontend and native library
     runs-on: windows-latest
-    needs: [core-pin, build-and-test]
+    needs: [core-pin, docker-toolchain]
     defaults:
       run:
         working-directory: funkot-player
@@ -241,16 +263,20 @@ jobs:
           path: funkot-autodj-for-ui
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ needs.build-and-test.outputs.node }}
+          node-version: ${{ needs.docker-toolchain.outputs.node }}
           cache: npm
           cache-dependency-path: funkot-player/package-lock.json
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ needs.build-and-test.outputs.rust }}
+          toolchain: ${{ needs.docker-toolchain.outputs.rust }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: funkot-player/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Match Docker npm and record Windows toolchain
         shell: bash
         env:
-          DOCKER_NPM: ${{ needs.build-and-test.outputs.npm }}
+          DOCKER_NPM: ${{ needs.docker-toolchain.outputs.npm }}
         run: |
           npm install --global "npm@$DOCKER_NPM"
           { rustc --version; node --version; npm --version; } | tee -a "$GITHUB_STEP_SUMMARY"
