@@ -151,8 +151,6 @@ def prepare_mountpoints(intent_path: Path, record: dict, repo: Path) -> None:
         if saved is not None:
             intended = record.setdefault("host_mountpoint_delete_intents", {}).get(key)
             if intended:
-                # Finish the prior incarnation, including a durable quarantine,
-                # before replacing its journal entry with a new inode.
                 cleanup_mountpoints(intent_path, record, {key})
             if not path.exists() and not path.is_symlink():
                 if not intended:
@@ -193,10 +191,6 @@ def prepare_mountpoints(intent_path: Path, record: dict, repo: Path) -> None:
 
 
 def cleanup_mountpoints(intent_path: Path, record: dict, keys: set[str] | None = None) -> None:
-    # Validate the full fixed set before any removal, so one replacement holds
-    # every remaining mountpoint.  Safety assumes the task owner lease and the
-    # cooperating build container are the only writers to these paths; this is
-    # not a claim of safety against an arbitrary writer racing after validation.
     for key, entry in record.get("host_mountpoints", {}).items():
         if keys is not None and key not in keys: continue
         path = Path(entry["path"]); tombstone = entry.get("tombstone")
@@ -473,8 +467,6 @@ def lifecycle_register(context: dict, record: dict) -> None:
 
 
 def prepare(context: dict) -> dict:
-    # Refuse before registration, root creation, or Docker volume creation when
-    # the advertised public reclamation API is not installed.
     reclamation_api()
     repo = Path(context["repo"])
     current = active_intent(context)
@@ -496,7 +488,6 @@ def prepare(context: dict) -> dict:
                                            "daemon_id": daemon, "endpoint": endpoint},
             "mounts": output_mounts(repo, root),
         }
-        # Durable product creation intent is deliberately before lifecycle register.
         atomic_json(intent_path, record)
     receipt = Path(record["receipt"])
     root = Path(record["output"])
@@ -638,8 +629,6 @@ def file_sha256(path: Path, before: os.stat_result) -> str:
                 digest.update(chunk)
             return digest.hexdigest()
     finally:
-        # fdopen closes the descriptor on normal paths; close is harmless only
-        # when opening itself failed, which is handled before entering try.
         pass
 
 
@@ -747,7 +736,6 @@ def persist_completion(receipt: Path, record: dict, result_ref: str, state: str)
 
 
 def volume_has_containers(name: str) -> bool:
-    # Docker lists every container, running or stopped, that references volume.
     return bool(docker("ps", "-a", "--filter", "volume=" + name, "--format", "{{.ID}}").strip())
 
 
@@ -765,7 +753,6 @@ def reclaim(receipt: Path, generation: str, result_ref: str) -> None:
     if record and (record.get("generation") != generation or record.get("owner") != OWNER
                    or record.get("output") != str(root)):
         die("receipt generation or owner mismatch")
-    # Journal the exact callback and deletion intent before either deletion.
     if record.get("hold") is True:
         die("receipt is held")
     if record.get("completion_result_ref") not in (None, result_ref):

@@ -175,9 +175,6 @@ pub(crate) fn silence_device_output(output: &mut [f32]) {
     output.fill(0.0);
 }
 
-/// Apply the callback's final device-buffer policy after the engine has run.
-/// Returns whether the engine itself rendered silence, even when capture mode
-/// replaces the device buffer with silence.
 pub(crate) fn finalize_rendered_output(capture: Option<&CaptureSink>, output: &mut [f32]) -> bool {
     let rendered_silence = output.iter().all(|sample| *sample == 0.0);
     if capture.is_some_and(|capture| capture.silent_render() || capture.closed.load(Ordering::Acquire)) {

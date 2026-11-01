@@ -1,16 +1,6 @@
-//! Callback-local pause/play envelope. No allocation, synchronization or I/O.
-//!
-//! Fade the real waveform instead of truncating it or extending its last sample
-//! as DC. A pause can advance playback by at most 10 ms of audible tail (the
-//! same de-click duration used by the engine). Once silent, rendering freezes.
-
 pub(super) struct TransportFade {
-    // Gain for the next stereo frame, on an integer grid. Retargeting never
-    // resets it, so rapid pause/play commands cannot introduce a gain jump.
     level: usize,
     full: usize,
-    // True only after the zero-gain frame has been emitted. Keeping that
-    // endpoint across callbacks makes the rendered frame count invariant.
     muted: bool,
 }
 
@@ -18,8 +8,6 @@ impl TransportFade {
     pub(super) fn new(sample_rate: u32) -> Self {
         let frames = (f64::from(sample_rate) * 0.010).round().max(2.0) as usize;
         let full = frames - 1;
-        // A new/reopened output stream also starts after silence. Its first
-        // Play must fade in; an initially paused stream remains frozen.
         Self { level: 0, full, muted: true }
     }
 
@@ -27,9 +15,6 @@ impl TransportFade {
 
     pub(super) fn silence(&mut self) { self.level = 0; self.muted = true; }
 
-    /// Return the actual number of engine frames rendered. Partial callbacks
-    /// retain the envelope; the unused tail is exact zero. Repeated pause at
-    /// zero never calls the renderer (and cannot consume another occurrence).
     pub(super) fn render(
         &mut self,
         out: &mut [f32],
@@ -46,10 +31,6 @@ impl TransportFade {
         }
         let frames = render(&mut out[..wanted * 2]);
         for frame in out[..frames * 2].chunks_exact_mut(2) {
-            // Realtime engine startup can return a full buffer of silence
-            // while the loader works. Keep the attack armed until real audio
-            // arrives, including silence ending partway through a callback.
-            // Pause tails still finish even if their waveform becomes silent.
             if !paused && self.level == 0 && frame[0] == 0.0 && frame[1] == 0.0 {
                 continue;
             }
@@ -70,8 +51,6 @@ impl TransportFade {
 mod tests {
     use super::*;
 
-    // A continuous stereo waveform with nonzero samples at both transport
-    // boundaries. Chunk size must not alter output, duration or resumed phase.
     fn wave(frame: usize, rate: u32) -> [f32; 2] {
         let x = (0.37 + frame as f64 * 196.0 * std::f64::consts::TAU / rate as f64).sin() as f32;
         [0.4 * x, -0.2 * x]
@@ -130,8 +109,6 @@ mod tests {
             for (i, frame) in resumed.chunks_exact(2).enumerate().skip(span - 1) {
                 assert_eq!(frame, wave(stopped_at + i, rate));
             }
-            // The envelope adds no more than peak/(span-1) to the ordinary
-            // waveform's analytic adjacent-sample bound, including endpoints.
             let bound = 0.4 * (196.0 * std::f64::consts::TAU / rate as f64) as f32
                 + 0.4 / (span - 1) as f32 + 1e-6;
             for output in [&tail, &resumed] {
@@ -177,8 +154,6 @@ mod tests {
     fn first_play_waits_for_audio_without_skipping_source_frames() {
         for rate in [44_100, 48_000] {
             let span = (rate as f64 * 0.010).round() as usize;
-            // Includes complete loader-wait callbacks and a partial silent
-            // prefix, reproducing Engine::render returning want_frames at zero.
             for leading_silence in [0, span * 2 + 3] {
                 for chunk in [1, 17, 192, 4096] {
                     let mut fade = TransportFade::new(rate);

@@ -29,10 +29,7 @@ param(
     [switch]$Run,
     [switch]$SelfTest,
     [switch]$ReplaceBackup,
-    # Keep the live profile as-is during -Run (old behaviour). Default is wipe
-    # to empty so UNC / leftover tracks are not visible.
     [switch]$InPlace,
-    # Skip funkot-cache in backup/restore (faster; analysis may rebuild).
     [switch]$SkipCache,
     [string]$Exe = 'C:\funkot-player-test\funkot-player.exe'
 )
@@ -45,7 +42,6 @@ $Bak = Join-Path $env:APPDATA ($ProfileName + '.guard-bak')
 $Stash = Join-Path $env:APPDATA ($ProfileName + '.guard-stash')
 $ManifestName = 'guard-manifest.txt'
 
-# Root-level files that count as "settings / state" for a round-trip test.
 $StateFiles = @(
     'settings.json',
     'session.json',
@@ -85,9 +81,6 @@ function Remove-LiveStateFiles {
     }
 }
 
-# Put a leftover .guard-stash back over live. Returns $true if a stash was
-# applied. Must run before Invoke-Backup so -ReplaceBackup cannot snapshot an
-# empty test profile and discard the previous backup of real data.
 function Restore-LiveFromStash {
     if (-not (Test-Path -LiteralPath $Stash)) {
         return $false
@@ -168,9 +161,6 @@ function Invoke-ResetToFreshInstall {
         throw "stash already exists: $Stash; restore it before creating another empty live profile"
     }
 
-    # Rename the whole live directory aside. In-place deletion is what left
-    # AppData empty when -Run was killed before restore. files not listed in
-    # $StateFiles (labels.json, history.json, ...) go with the stash too.
     Move-Item -LiteralPath $Live -Destination $Stash
     New-Item -ItemType Directory -Force -Path $Live | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $Live 'Music') | Out-Null
@@ -188,7 +178,6 @@ function Invoke-RestoreFromBak {
         throw "stop funkot-player ($Exe) before restore"
     }
 
-    # Drop anything the test run created, then put backup entries back.
     Remove-LiveStateFiles
     foreach ($name in $StateFiles) {
         $src = Join-Path $Bak $name
@@ -306,8 +295,6 @@ function Invoke-SelfTest {
         Assert-SelfTest (Test-Path -LiteralPath (Join-Path $Stash 'labels.json')) 'stash holds labels.json'
         Assert-SelfTest ((Get-Content -LiteralPath (Join-Path $Stash 'settings.json') -Raw) -match $sentinel) 'stash settings.json keeps sentinel'
 
-        # Simulate a killed -Run: do not restore. The next backup must recover
-        # stash first so -ReplaceBackup cannot overwrite bak with an empty live.
         Invoke-Backup
         Assert-SelfTest (-not (Test-Path -LiteralPath $Stash)) 'backup recovers leftover stash'
         Assert-SelfTest ((Get-Content -LiteralPath $settings -Raw) -match $sentinel) 'live settings.json returns from stash'

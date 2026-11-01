@@ -1,6 +1,5 @@
 import { installIpcForTesting, type TrackRow, type TrackTagsSnapshot, type TauriIpc } from "../../src/lib/tauri";
 
-// Synthetic identities only: these files never exist and no native IPC is used.
 const titles = ["Pulse", "Midnight on the coast — extended festival reconstruction with a very long title", "Dawn", "Afterglow", "帰り道のリミックス", "Last train"];
 const artists = ["DJ Example", "The extraordinarily long artist name featuring Another Imaginary Producer", "A", "Studio Example", "架空のアーティスト", "Guest"];
 const rows: TrackRow[] = titles.map((title, i) => ({
@@ -82,7 +81,6 @@ const ipc: TauriIpc = {
   async invoke<T>(command: string, args?: unknown): Promise<T> {
     calls.push({ command, args: args === undefined ? undefined : JSON.parse(JSON.stringify(args)) });
     if (!Object.prototype.hasOwnProperty.call(replies, command)) {
-      // Fail visibly even when the production store catches the rejection.
       console.error(`Unsupported UI fixture command: ${command}`);
       throw new Error(`Unsupported UI fixture command: ${command}`);
     }
@@ -119,5 +117,4 @@ const ipc: TauriIpc = {
   async listen() { return () => {}; },
 };
 installIpcForTesting(ipc);
-// App's singleton store starts IPC on import; install the seam first.
 await import("../../src/main");

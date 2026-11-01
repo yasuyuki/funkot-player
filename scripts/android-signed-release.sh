@@ -1,23 +1,4 @@
 #!/bin/sh
-# Signed Android release across two Unix users.
-#
-# The signing checkout cannot see the agent tree, and the agent must not see
-# signing material. Source moves over a Windows-side git bundle; the APK
-# comes back through a group-writable drop directory.
-#
-#   prepare  — agent source tree: write bundle + Windows launcher
-#   build    — owner (yasuyuki): sync, signed build, and drop APK
-#   install  — either user: verify cert and adb install -r
-#   pair / connect / status / plan / owner-set
-#
-# `plan` prints the next stage from the handoff and drop already on disk.
-# It does not search for a checkout, probe adb, or call GitHub.
-# Pairing on a host without adb is `apk.sh pair` as the owner.
-# `owner-set` records the signing checkout path in handoff owner.path.
-#
-# Human leftovers: wireless-debug pairing (code is only on the phone), and
-# running `build` as the owner so Gradle can read the keystore in that tree.
-#
 # Host paths default to this machine and are overridable:
 #   FUNKOT_HANDOFF_DIR  Windows-visible dir (bundle + apk.sh + owner.path)
 #   FUNKOT_APK_DROP     signed APK destination
@@ -71,7 +52,6 @@ owner_path_file() {
     printf '%s\n' "$(handoff_dir)/owner.path"
 }
 
-# funkot-player identity: ./dev.sh and src-tauri/Cargo.toml.
 player_checkout_ok() {
     [ -f "$1/dev.sh" ] && [ -f "$1/src-tauri/Cargo.toml" ]
 }
@@ -92,8 +72,6 @@ owner_player() {
     die "owner checkout missing or invalid; re-run owner-set (or apk.sh owner-set)"
 }
 
-# Source tree that has ./dev.sh. prepare uses the checkout we were started from
-# when this file lives in scripts/; otherwise cwd if it looks like the player.
 player_root() {
     d=$(CDPATH= cd "$(dirname "$0")" && pwd)
     if player_checkout_ok "$d/.."; then

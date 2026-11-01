@@ -1,11 +1,4 @@
 <script lang="ts">
-  // The two questions play history can answer, on one pane.
-  //
-  // 「曲ごと」 comes from `history.json` — how often, and when last — so it is
-  // populated from the first run of this build, including plays from before
-  // the chronological log existed. 「再生順」 comes from `play-log.jsonl`,
-  // which starts empty: an aggregate cannot be turned back into a sequence,
-  // which is the whole reason the log was added.
   import { store } from "../lib/state.svelte";
   import { i18n } from "../lib/i18n.svelte";
   import { enqueueManyMessage } from "../lib/messages";
@@ -48,8 +41,6 @@
 
   let view = $state<"tracks" | "log">("tracks");
   let selectMode = $state(false);
-  /// Keyed by path, like the library's: what gets queued is a path, and the
-  /// log lists the same track once per play.
   let selected = $state<Set<string>>(new Set());
   let addManyBusy = $state(false);
   let menu = $state<(HistoryMenuTarget & { at: MenuPoint }) | null>(null);
@@ -119,12 +110,6 @@
     }
   }
 
-  /// Pulled on `history_revision` rather than on the tab being showing: in the
-  /// three-column band this pane is visible while `playSub` is "library", so a
-  /// tab-gated load would leave it permanently empty.
-  ///
-  /// This runs on every poll, because the poll reassigns `player` wholesale.
-  /// `loadPlayHistory` is what turns that into one invoke per track change.
   $effect(() => {
     void store.loadPlayHistory(store.player?.history_revision ?? null);
   });
@@ -133,8 +118,6 @@
   let tracks = $derived(playedOnly(history?.tracks ?? []));
   let days = $derived(groupPlaysByDay(history?.log ?? []));
 
-  /// Ticks only when the pane reloads, which is enough: the boundary these
-  /// dates sit on moves once a day, and a reload happens every track.
   let now = $derived.by(() => {
     void history;
     return Date.now();
@@ -153,8 +136,6 @@
     });
   }
 
-  /// Today and yesterday are named; anything older gets its date, which is
-  /// what the reader would have to work out themselves otherwise.
   function formatPlayedAt(atMs: number): string {
     const time = formatTime(atMs);
     const days = calendarDaysAgo(atMs, now);
@@ -173,8 +154,6 @@
   function setView(next: "tracks" | "log") {
     if (view === next) return;
     view = next;
-    // The two views list different things, so a selection made in one would
-    // silently include rows the other does not show.
     selected = clearSelection();
     menu = null;
   }
@@ -290,8 +269,6 @@
   {:else if days.length === 0}
     <p class="empty">{t.historyLogEmpty}</p>
   {:else}
-    <!-- Grouped by day so a long session does not repeat the same date on
-         every row; the time is what varies within one. -->
     {#each days as day (day.key)}
       <h3 class="day">{formatDayHeading(day.rows[0].at_ms)}</h3>
       <ul class="list">
@@ -354,8 +331,6 @@
   .heading-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-md); }
   .heading-line .heading { margin-bottom: 0; }
 
-  /* Same sticky offset as the library's toolbar, for the same reason: `top: 0`
-     would park under the Android status bar once it sticks. */
   .toolbar {
     position: sticky;
     top: calc(var(--space-xl) + env(safe-area-inset-top, 3rem));
@@ -410,7 +385,6 @@
     padding: 0;
   }
 
-  /* Same fixed row height as the library, so a virtual list stays possible. */
   .row {
     display: flex;
     align-items: center;
@@ -434,7 +408,6 @@
     accent-color: var(--color-accent-bg);
   }
 
-  /* Tabular so the times line up down the column. */
   .at {
     flex: 0 0 auto;
     font-size: var(--font-size-sm);
@@ -442,7 +415,6 @@
     color: var(--color-text-dim);
   }
 
-  /* `min-width: 0` is what lets the ellipsis below actually apply. */
   .text {
     flex: 1;
     min-width: 0;

@@ -1,6 +1,4 @@
 #!/bin/sh
-# Edit-mode entry smoke on device. Usage: smoke-tap-edit.sh <adb-addr>
-# Dumps the node that carries 編集モードへ / 編集 and taps its centre.
 set -eu
 S="${1:?adb address}"
 adb connect "$S" >/dev/null
@@ -11,14 +9,12 @@ adb -s "$S" pull /sdcard/uidump.xml /tmp/uidump.xml >/dev/null
 python3 - <<'PY'
 import re
 xml = open("/tmp/uidump.xml", encoding="utf-8", errors="replace").read()
-# Prefer content-desc 編集モードへ, else text 編集
 patterns = [
     r'content-desc="編集モードへ"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
     r'text="編集"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
     r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"[^>]*content-desc="編集モードへ"',
     r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"[^>]*text="編集"',
 ]
-# nodes may order attrs differently; scan each node chunk
 for m in re.finditer(r"<node [^>]+/>", xml):
     n = m.group(0)
     if ("編集モードへ" in n) or ('text="編集"' in n):
@@ -31,7 +27,6 @@ for m in re.finditer(r"<node [^>]+/>", xml):
             print("TAP", x, y)
             break
 else:
-    # list nearby buttons for debug
     for m in re.finditer(r'text="([^"]+)"', xml):
         t = m.group(1)
         if t and any(k in t for k in ("編集", "再生", "開始", "不適切", "つなぎ")):

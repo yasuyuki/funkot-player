@@ -432,8 +432,6 @@ fn preparing_and_finished_empty_engine_do_not_consume_playlist_occurrences() {
         assert_eq!(owner.catalog.remaining(&other).unwrap().len(), 2);
     }
 
-    // A finite engine with no current deck represents a pending-empty/Finished
-    // lifecycle notification. It is not a TrackStarted event for these claims.
     let empty = playback(&[], 64);
     assert!(empty.render.lock().unwrap().engine.is_finished());
     fixture.service.lock().unwrap().reconcile_with(Some(&empty));
@@ -461,10 +459,6 @@ fn real_engine_events_for_all_prepared_occurrences_are_consumed_by_index() {
     let prepared: Vec<_> = (0..5).map(|_| source.next().unwrap()).collect();
     let entries = fixture.service.lock().unwrap().catalog.definition(&id).unwrap().entries.clone();
 
-    // This synthetic generator checks the Engine-to-service trust boundary,
-    // not the device report's cause. Its 120s@180 BPM source becomes 90 bars
-    // at target 198 BPM: outro at bar 26, 64-bar intro/outro. The transition
-    // plan enters each incoming deck after its own outro, producing 0→4.
     let player = geometry_playback(&prepared);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
     {
@@ -545,8 +539,6 @@ fn restarted_run_rejects_delayed_old_start_and_old_engine_snapshot() {
 
     let mut owner = fixture.service.lock().unwrap();
     owner.catalog.restart(&id).unwrap();
-    // The delayed TrackStarted names old index 1; reconciliation then sees the
-    // real Engine's old index 0 snapshot. Neither belongs to the restarted run.
     owner.observe_started(second.0, Some(&player));
     let restarted = owner.catalog.run(&id).unwrap();
     assert!(restarted.consumed.is_empty());
@@ -566,8 +558,6 @@ fn lagging_started_event_keeps_snapshot_current_and_consumes_once() {
     let mut source = ManagedSource { service: fixture.service.clone(), epoch: 0 };
     let older = source.next().unwrap();
     let newer = source.next().unwrap();
-    // playback() records the first prepared playlist index. Put the newer claim
-    // first so the snapshot and the older event disagree, without another publish.
     let player = playback(&[newer.clone(), older.clone()], 4096);
 
     let mut owner = fixture.service.lock().unwrap();
@@ -704,9 +694,6 @@ fn emitted_track_starts(player: &crate::Playback) -> Vec<usize> {
     let mut starts = render.engine.poll_events().into_iter().filter_map(|event| match event {
         EngineEvent::TrackStarted { index, .. } => Some(index), _ => None,
     }).collect::<Vec<_>>();
-    // Use the Engine contract tests' existing five-second channel deadline.
-    // from_prepared still has an asynchronous tail/exhaustion sender; CPU-speed
-    // silence pulls do not measure track duration while waiting for that sender.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !render.engine.is_finished() && std::time::Instant::now() < deadline {
         let _ = render.engine.render(&mut [0.0; 480]);
@@ -1302,7 +1289,6 @@ fn source_fences_reject_an_engine_current_the_service_has_not_observed() {
         fixture.service.lock().unwrap().reconcile_with(Some(&player));
         let playlist = fixture.install("other", vec![]);
         {
-            // Neither the TrackStarted event nor a new snapshot has reached the service.
             let mut render = player.render.lock().unwrap();
             render.engine.request_nav(funkot_core::engine::NavAction::JumpToNextIntro);
             render.engine.render(&mut [0.0; 128]);
@@ -1511,8 +1497,6 @@ fn ended_restart_is_saved_without_resuming_engine_or_destroying_definition() {
     let current = player.observation.read().unwrap().current;
     assert_eq!(render.engine.render(&mut [0.0; 128]), 0);
     drop(render);
-    // Use the production resume path: publication must happen before another
-    // callback renders, including when a repeated Play has no work to resume.
     player.resume_finished_engine();
     let resumed = crate::engine_observation::EngineSnapshot { current, finished: false };
     assert_eq!(player.observation.read(), Some(resumed));
@@ -1610,8 +1594,6 @@ fn reconcile_does_not_contend_with_held_render_mutex() {
         service.lock().unwrap().reconcile_with(Some(&observer));
         done_tx.send(()).unwrap();
     });
-    // The timeout only prevents a failed regression from stranding the holder;
-    // it is not a latency requirement for a busy test host.
     let completed_while_held = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
     release.wait();
     holder_thread.join().unwrap();
@@ -1791,7 +1773,7 @@ fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
     funkot_core::decode::decode_file(&rejected).expect("generated WAV must decode");
     let accepted = fixture.data.path().join("cached-funkot.wav");
     let mut accepted_wav = fs::read(&rejected).unwrap();
-    accepted_wav[44] ^= 1; // distinct content hash, same decodable pulse pattern
+    accepted_wav[44] ^= 1;
     fs::write(&accepted, accepted_wav).unwrap();
     let mut accepted_analysis = crate::analyzed_cache_entry(
         fixture.cache.path(), &funkot_core::cache::content_hash(&rejected).unwrap()
@@ -1818,8 +1800,6 @@ fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
         "the exact classified occurrence is removed from the durable queue");
     assert!(source.next().is_none(), "removed non-Funkot must not be retried");
 
-    // Exercise the real asynchronous loader, not just the source return: the
-    // first audible Engine event must name the accepted candidate.
     queue::restore_all(&fixture.queue, vec![QueueItem::manual(rejected.clone()), QueueItem::manual(accepted.clone())]);
     let live_service = Arc::new(Mutex::new(Service::new(fixture.data.path(), fixture.cache.path(), fixture.queue.clone())));
     let live_normal = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
@@ -1840,8 +1820,6 @@ fn uncached_non_funkot_first_candidate_is_analysed_before_source_returns() {
     };
     assert_eq!(first_started, accepted);
 
-    // A folder candidate must be analysed before automatic queue membership
-    // is created, so rejected paths never acquire an occurrence to remove.
     let auto_rejected = fixture.data.path().join("uncached-auto-non-funkot.wav");
     let mut auto_wav = fs::read(&rejected).unwrap();
     auto_wav[46] ^= 1;
@@ -1944,9 +1922,6 @@ fn disabling_admission_replaces_ready_future_and_reuses_pending_occurrences() {
         assert_eq!(render.engine.next_track_path(), None);
     }
 
-    // The replacement loader owns the new ManagedSource after commit. Use its
-    // retained Funkot occurrence in a prepared Engine to exercise the actual
-    // manual Next action without racing that loader for the source.
     let accepted_next = (rejected_future.0 + 1, accepted.clone());
     let next_player = playback(&[first.clone(), accepted_next.clone()], 4096);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2003,8 +1978,6 @@ fn off_revokes_prepared_automatic_non_funkot_when_switching_from_on() {
     let current = source.next().unwrap();
     let prepared = source.next().unwrap();
     assert_eq!(prepared.1, prepared_path);
-    // ON admits the automatic future before its analysis completes. The
-    // background result arrives while it is visibly waiting, before OFF.
     fixture.store_analysis(&prepared_path, false);
     fixture.store_analysis(&waiting_path, false);
     let player = playback(&[current.clone(), prepared], 4096);
@@ -2054,8 +2027,6 @@ fn off_reapplies_cleanup_when_admission_atomic_is_already_false() {
     let player = playback(&[current.clone(), prepared], 4096);
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
 
-    // This models a settings read that has already published OFF while an old
-    // source still owns a prepared non-Funkot future.
     crate::ALLOW_NON_FUNKOT.store(false, std::sync::atomic::Ordering::Relaxed);
     reconfigure_admission(&fixture.service, false, Some(&player), |_| Ok(())).unwrap();
 
@@ -2122,8 +2093,6 @@ fn idle_off_hydrates_persisted_normal_before_filtering() {
         store::save_queue(owner.data.as_path(), &std::collections::VecDeque::from([rejected_item.clone(), accepted_item.clone()])).unwrap();
     }
 
-    // This models the settings command before queue-tab preload: no global
-    // service and no in-memory pending items, but catalog.normal is canonical.
     let Fixture { data, cache, queue, service } = fixture;
     drop(service);
     assert!(queue::pending_snapshot(&queue).is_empty());
@@ -2162,8 +2131,6 @@ fn idle_off_merges_live_enqueue_with_persisted_normal() {
         store::save_queue(owner.data.as_path(), &std::collections::VecDeque::from([rejected_item.clone(), accepted_item.clone()])).unwrap();
     }
 
-    // A manual enqueue that began before service initialization has already
-    // reached the live queue when OFF reconstructs the persisted normal set.
     let Fixture { data, cache, queue, service } = fixture;
     drop(service);
     queue::replace_pending(&queue, vec![fresh_item.clone()]);
@@ -2187,8 +2154,6 @@ fn disabling_admission_hashes_a_cached_manual_index_miss() {
     let fixture = Fixture::new();
     let rejected = fixture.file("manual-index-miss.wav");
     fixture.store_analysis(&rejected, false);
-    // `enqueue` may hash a manually selected file without adding it to the
-    // refresh-owned hash index. The completed cache still governs OFF.
     store::save_hash_index(fixture.data.path(), &store::HashIndex::new()).unwrap();
     let rejected_item = QueueItem::manual(rejected);
     queue::replace_pending(&fixture.queue, vec![rejected_item]);
@@ -2232,9 +2197,6 @@ fn disabling_admission_keeps_missing_and_same_fingerprint_replacement() {
     );
     let replacement_hash = funkot_core::cache::content_hash(&replaced).unwrap();
     assert_ne!(replacement_hash, original_hash);
-    // Keep the old hash-index entry intact but record the replacement as
-    // Funkot. A fingerprint-only OFF filter would delete it using the old
-    // non-Funkot verdict; the full hash below must retain it.
     let buffer = funkot_core::decode::AudioBuffer {
         sample_rate: 48_000,
         frames: 48_000 * 30,
@@ -2276,9 +2238,6 @@ fn disabling_admission_fences_engine_before_a_blocked_normal_source_releases() {
     let player = Arc::new(playback(&[first.clone(), rejected_future.clone()], 4096));
     fixture.service.lock().unwrap().reconcile_with(Some(&player));
 
-    // Keep the HostSource mutex unavailable. The setter must still acquire the
-    // core fence before it can wait here, otherwise an old loader can reserve
-    // and persist after the setting has begun to change.
     let normal_source = fixture.service.lock().unwrap().normal_source.clone().unwrap();
     let source_guard = normal_source.lock().unwrap();
     let service = fixture.service.clone();
@@ -2329,8 +2288,6 @@ fn final_admission_blocks_decodable_track_when_cache_write_is_unavailable() {
     let decodable = fixture.wav("cache-write-fails.wav");
     let item = QueueItem::manual(decodable.clone());
     queue::replace_pending(&fixture.queue, vec![item.clone()]);
-    // `decode_file` succeeds, but the cache root is a regular file so
-    // `fill_missing` cannot publish an analysis verdict.
     fs::remove_dir_all(fixture.cache.path()).unwrap();
     fs::write(fixture.cache.path(), b"not a cache directory").unwrap();
     assert_eq!(
@@ -2522,8 +2479,6 @@ fn unavailable_playlist_admission_retries_after_cache_recovers() {
 fn failed_startup_restore_then_select_preserves_the_durable_normal_tail() {
     if isolated_source_fixture("playlist_service::tests::failed_startup_restore_then_select_preserves_the_durable_normal_tail") { return; }
 
-    // Legacy snapshots may retain the same current in the reservation list.
-    // The pending tail deliberately repeats its path with a distinct ID.
     for has_legacy_current_reservation in [true, false] {
         let fixture = Fixture::new();
         let current_path = fixture.file(if has_legacy_current_reservation {
@@ -2876,8 +2831,6 @@ fn online_idle_off_before_first_loader_next_retains_playlist_current() {
     service.lock().unwrap().restore_saved_queue().unwrap();
     assert_eq!(service.lock().unwrap().restored, Some(saved_current.clone()));
 
-    // This is the window after the core control is published but before its
-    // loader performs the first ManagedSource::next call.
     let _source = configure(&service, HostSource::new(
         live_queue,
         queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 },

@@ -8,7 +8,6 @@
 
   let t = $derived(i18n.t);
 
-  /// At most one inline chip editor: `"path\\tintro|outro"` (legacy `openChipKey`).
   let openChipKey = $state<string | null>(null);
   let editorOpener: HTMLButtonElement | null = null;
   let busy = $state(false);
@@ -23,7 +22,6 @@
     tracks: TrackRow[];
   };
 
-  /// First path segment of `relName` (`/`-normalized). Root files → `""`.
   function topSegment(rel: string): string {
     const i = rel.indexOf("/");
     if (i < 0) return "";
@@ -45,17 +43,10 @@
     return store.pathBasename(md) || t.rootFolder;
   }
 
-  /// Exactly one group per top-level segment, ordered by where that segment
-  /// first appears in scan order.
-  ///
-  /// Must not group by *runs* of `rows`: `scan_tracks` sorts whole paths, so a
-  /// root-level file sorts among the directory *names* rather than beside the
-  /// other root-level files (`music/Bbb.mp3` lands between `music/AlbumB/` and
-  /// `music/Cccc/`). Runs therefore emit the `""` group several times, handing
-  /// `{#each}` the same key twice — Svelte throws `each_key_duplicate` there,
-  /// and in a production build that error carries no message, so the table
-  /// silently rendered nothing and the throw took the rest of the flush
-  /// (other panels' handlers, the scan/analysis progress line) with it.
+  /// One group per top-level segment, in first-appearance order. `scan_tracks`
+  /// sorts whole paths, so root-level files interleave with directory names;
+  /// grouping by runs would repeat the `""` key, which Svelte rejects
+  /// (`each_key_duplicate`).
   let groups = $derived.by(() => {
     const byKey = new Map<string, FolderGroup>();
     for (const row of rows) {
@@ -133,7 +124,6 @@
       kind === "outro" ? value : null,
     );
     if (!updated) return;
-    // The path-keyed editor survives refresh; do not steal a newer selection.
     toast.show(t.changed, async () => {
       const restored = await store.doSetBars(
         path,
@@ -171,10 +161,6 @@
     if (busy || (!rootOnly && !absDir)) return;
     busy = true;
     try {
-      // Root heading is music_dir; `set_folder_label` would recurse the whole
-      // library. Label only the root-level files in this group, one call each,
-      // and undo them the same way — the host's bulk undo snapshot belongs to
-      // `set_folder_label`, which this branch never reaches.
       let n: number | null;
       let undo: () => Promise<boolean>;
       if (rootOnly) {

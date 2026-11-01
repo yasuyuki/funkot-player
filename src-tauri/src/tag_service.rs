@@ -102,9 +102,6 @@ impl Service {
             }
             hashes.push(entry.hash.clone());
         }
-        // Manual state is shared by every path with this hash. Validate against
-        // all committed copies, including an unselected copy whose metadata
-        // succeeded while a selected copy had a probe error.
         let selected: std::collections::BTreeSet<_> = hashes.iter().collect();
         for entry in self.library.values().flatten() {
             if selected.contains(&entry.hash) {
@@ -144,7 +141,6 @@ fn track_state(entry: Option<&store::HashIndexEntry>, manual: tags::TrackManualS
     let auto_year = if metadata_status == "ready" { auto_year } else { None };
     let auto = entry.map(auto_tags).unwrap_or_default();
     let resolved = tags::effective_tags(&auto, &manual);
-    // An excessive embedded set is a diagnosed error, never silent truncation.
     let resolved = if resolved.len() > 128 { diagnostics.push("too_many_effective_tags".into()); tags::effective_tags(&[], &manual) } else { resolved };
     let mut effective: Vec<_> = resolved.into_iter().map(|t| {
         let key = t.tag.key();
@@ -410,7 +406,7 @@ mod tests {
             add: vec![tags::Tag::new(tags::TagKind::Custom, "配信候補").unwrap()], ..Default::default()
         }), 2026).unwrap();
         let batch_elapsed = batch_start.elapsed();
-        assert_eq!(batch.changed, 2); // One request is one logical tag-store transaction.
+        assert_eq!(batch.changed, 2);
         assert_eq!(batch.snapshot.tracks[&a].effective[0].key, "year:2024");
         assert_eq!(batch.snapshot.tracks[&b].effective[0].key, "year:2023");
         assert!(batch.snapshot.tracks[&renamed].effective.iter().any(|tag| tag.key == "custom:配信候補"));

@@ -1,10 +1,6 @@
-// Japanese catalogue. The wording here is exactly what was hard-coded in the
-// components before this file existed -- moving the strings out must not
-// change what a Japanese-speaking listener sees.
 import type { Messages } from "./en";
 
 export const ja: Messages = {
-  // --- App shell / navigation ---
   playTabsLabel: "再生サブタブ",
   editTabsLabel: "編集サブタブ",
   queueHeading: "次に再生",
@@ -12,7 +8,6 @@ export const ja: Messages = {
   tabFlags: "直すべきつなぎ",
   tabAllTracks: "すべての曲",
 
-  // --- Transport ---
   start: "開始",
   pause: "⏸ 一時停止",
   resumePlayback: "▶ 再開",
@@ -32,7 +27,6 @@ export const ja: Messages = {
   playbackRecoveryPreserved: "元の2つの保存済み再生待ちはどちらも保持されます。",
   playbackRecoveryFailed: "選択を保存できませんでした。再生待ちを確認してもう一度お試しください。",
 
-  // --- Now playing ---
   phaseIdle: "待機中",
   phaseStarting: "準備中",
   phasePlaying: "再生中",
@@ -41,13 +35,11 @@ export const ja: Messages = {
   phaseFailed: "再生できません",
   phaseDisconnected: "出力先を再接続中",
 
-  // --- Audition ---
   auditioning: (from, to) => `「${from}」→「${to}」を試聴中`,
   autoplayInterrupted: "自動再生を中断しました",
   resumeAction: "〔再開〕",
   auditioningShort: "試聴中",
 
-  // --- Labels ---
   funkot: "Funkot",
   notFunkot: "非Funkot",
   noLabel: "—",
@@ -56,18 +48,15 @@ export const ja: Messages = {
   labelMenuLabel: "トラックの分類",
   bulkLabeled: (n, verdict) => `${n}曲を ${verdict ? "Funkot" : "非Funkot"} に登録`,
 
-  // --- Toast / boundary ---
   undo: "取消",
   retry: "再試行",
   changed: "変更しました",
   deleted: "削除しました",
 
-  // --- New arrivals ---
   queueNewArrivals: (count, playlistName) => playlistName
     ? `新着 ${count} 曲をプレイリスト「${playlistName}」の末尾に追加`
     : `新着 ${count} 曲をキューの先頭に入れる`,
 
-  // --- Log panel ---
   logTitle: "ログ",
   close: "閉じる",
   musicFolderLabel: "音楽フォルダ",
@@ -78,7 +67,6 @@ export const ja: Messages = {
   arrivalsPathsLabel: "新着path",
   showLog: "ログを表示",
 
-  // --- Transition strip ---
   lastAutoTransition: "直前の自動つなぎ",
   secondsAgo: (s) => `${s}秒前`,
   minutesAgo: (m) => `${m}分前`,
@@ -90,7 +78,6 @@ export const ja: Messages = {
   editMode: "編集",
   playMode: "再生",
 
-  // --- Queue ---
   queueEmpty: "キューは空 — 自動選曲で継続",
   queuePreparing: "準備中",
   queuePrepared: "準備済み",
@@ -143,7 +130,6 @@ export const ja: Messages = {
   playlistFailureReason: (reason) => ({ missing: "ファイルが見つかりません。", non_funkot: "Funkotのみの設定で除外されました。", identity_changed: "追加後にファイルが変わりました。", identity_unavailable: "この曲を識別できません。", load_failed: "曲を読み込めませんでした。", loader_failure: "曲を読み込めませんでした。" })[reason] ?? "曲を読み込めませんでした。",
   playlistCreateSavedSelectionFailed: (name, reason) => `「${name}」を作成しましたが、切替できませんでした：${reason}`,
 
-  // --- Library ---
   searchPlaceholder: "検索",
   searchLabel: "ライブラリを検索",
   newOnly: "新着のみ",
@@ -266,7 +252,6 @@ export const ja: Messages = {
   emptyHintAndroid:
     "音声ファイルをMusicフォルダへ入れたあと、⋮ メニューの「再スキャン」でライブラリに反映します。フォルダの場所は ⋮ メニューの「ログを表示」に出ます。",
 
-  // --- Multi-select / bulk add ---
   selectMode: "選択",
   selectModeLabel: "複数の曲を選ぶ",
   selectTrackLabel: (title) => `${title} を選択`,
@@ -280,7 +265,6 @@ export const ja: Messages = {
   enqueueManyNotes: (notes) => `（${notes}）`,
   listSeparator: "、",
 
-  // --- History ---
   historyHeading: "履歴",
   historyByTrack: "曲ごと",
   historyByTime: "再生順",
@@ -301,7 +285,6 @@ export const ja: Messages = {
   removedTrackFromPlayLog: "この曲を再生順から消しました",
   removeTrackFromPlayLogFailed: "再生順から消せませんでした",
 
-  // --- Music folder ---
   pickMusicFolderPrompt: "Musicフォルダを選んでください",
   pickMusicFolder: "Musicフォルダを選ぶ",
   changeMusicFolder: "Musicフォルダを変更",
@@ -319,7 +302,6 @@ export const ja: Messages = {
   musicDirErrUnsupportedPlatform: "この端末では変更できません",
   musicDirErrGeneric: "Musicフォルダを変更できませんでした",
 
-  // --- Overflow menu ---
   rescan: "再スキャン",
   scanFound: (count) => `${count}曲見つかりました`,
   scanBusy: "スキャン中です",
@@ -367,7 +349,6 @@ export const ja: Messages = {
   editTrack: "曲を編集",
   folderActions: "フォルダー操作",
 
-  // --- Edit: flagged list ---
   roleOutgoing: "出る側",
   roleIncoming: "入る側",
   noFlagged: "直すべきつなぎはありません",
@@ -376,7 +357,6 @@ export const ja: Messages = {
   unanalyzed: "未解析",
   missingTrack: "ライブラリにない曲",
 
-  // --- Edit: flagged detail ---
   backToList: "← 一覧へ",
   flagCount: (n) => `${n}回`,
   listenTransitionTo: (title) => `「${title}」へのつなぎを聴く`,
@@ -385,18 +365,15 @@ export const ja: Messages = {
   confirmAction: "〔確定〕",
   cancelAction: "〔キャンセル〕",
 
-  // --- Edit: chip editor ---
   intro: "イントロ",
   outro: "アウトロ",
   chipScale: "短い ←──────→ 長い",
   outroHint: "長くすると切り替わりが早くなる",
   introHint: "長くするほどイントロを飛ばし、短い前振りで入る",
 
-  // --- Edit: all tracks ---
   rootFolder: "（ルート）",
   colLabel: "ラベル",
 
-  // --- Share-sheet import (Android) ---
   importedSummary: (tracks, skipped, failed) => {
     const notes: string[] = [];
     if (skipped > 0) notes.push(`非対応${skipped}件`);

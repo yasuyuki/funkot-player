@@ -40,7 +40,6 @@ test("shared controls, dense browsing, history and playback retain readable targ
   await expect(page.locator("section.library li.row")).toHaveCount(24);
   expect(await controlIssues(page)).toEqual([]);
   await capture(page, testInfo, "dense-library");
-  // A local size regression must actually fail the same computed-style check.
   const add = page.locator("section.library .add").first();
   await add.evaluate(el => el.style.fontSize = "30px");
   expect((await controlIssues(page)).some(issue => issue.failures.includes("font=30px"))).toBe(true);

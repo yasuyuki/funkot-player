@@ -29,7 +29,6 @@ test("the popup hangs off the pointer when there is room", () => {
 });
 
 test("it flips to the other side of the pointer near an edge", () => {
-  // 380 + gap + 200 is past the right edge, 790 + gap + 120 past the bottom.
   const pos = clampMenuPosition({ x: 380, y: 790 }, MENU, VIEWPORT);
   assert.deepEqual(pos, {
     left: 380 - MENU_GAP_PX - MENU.width,
@@ -48,7 +47,6 @@ test("the human label wins over analysis, and analysis fills in for no label", (
   assert.equal(shownVerdict({ is_funkot: false, label: true }), true);
   assert.equal(shownVerdict({ is_funkot: false, label: null }), false);
   assert.equal(shownVerdict({ is_funkot: true, label: null }), true);
-  // "No such row" rather than "unlabeled": the caller draws nothing.
   assert.equal(shownVerdict(undefined), null);
   assert.equal(shownVerdict(null), null);
 });

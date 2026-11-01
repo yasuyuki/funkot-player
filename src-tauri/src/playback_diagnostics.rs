@@ -1,9 +1,3 @@
-//! Callback-safe playback diagnostics.
-//!
-//! The cpal callback only performs fixed-size atomic operations here. Logging
-//! and formatting stay on `audio_thread`. Counters are individually monotonic,
-//! not a transactional snapshot. Only the upgrade record is read coherently.
-//! Its main frame is observed at the callback boundary, not an exact event time.
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use funkot_core::engine::{PreviewUpgrade, RenderDiagnostics};

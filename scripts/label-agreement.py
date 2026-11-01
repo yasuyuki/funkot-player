@@ -271,40 +271,33 @@ def _label(verdict: bool, ms: int = 1) -> dict[str, Any]:
 
 
 def run_self_test() -> None:
-    # --- (1) + (6) agreement / kappa / one_sided ---
     sample_rows: list[dict[str, str]] = []
     labels_a: dict[str, Any] = {}
     labels_b: dict[str, Any] = {}
 
-    # both true: 4
     for i in range(4):
         h = f"h_tt_{i}"
         sample_rows.append({"hash": h, "rel_path": f"tt/{i}.m4a"})
         labels_a[h] = _label(True)
         labels_b[h] = _label(True)
-    # A true B false: 1
     h = "h_tf_0"
     sample_rows.append({"hash": h, "rel_path": "tf/0.m4a"})
     labels_a[h] = _label(True)
     labels_b[h] = _label(False)
-    # A false B true: 2
     for i in range(2):
         h = f"h_ft_{i}"
         sample_rows.append({"hash": h, "rel_path": f"ft/{i}.m4a"})
         labels_a[h] = _label(False)
         labels_b[h] = _label(True)
-    # both false: 3
     for i in range(3):
         h = f"h_ff_{i}"
         sample_rows.append({"hash": h, "rel_path": f"ff/{i}.m4a"})
         labels_a[h] = _label(False)
         labels_b[h] = _label(False)
-    # A only: 2
     for i in range(2):
         h = f"h_aonly_{i}"
         sample_rows.append({"hash": h, "rel_path": f"aonly/{i}.m4a"})
         labels_a[h] = _label(True)
-    # B only: 1
     h = "h_bonly_0"
     sample_rows.append({"hash": h, "rel_path": "bonly/0.m4a"})
     labels_b[h] = _label(False)
@@ -323,7 +316,6 @@ def run_self_test() -> None:
         app_dir = Path(tmp)
         music_dir = r"\\HOST\music"
 
-        # Synthetic hash-index: paths intentionally not in extraction order
         paths = [
             rf"{music_dir}\z_last\track.m4a",
             rf"{music_dir}\a_first\track.m4a",
@@ -350,30 +342,23 @@ def run_self_test() -> None:
             encoding="utf-8",
         )
 
-        # --- (2) sample determinism ---
         out1 = app_dir / "s1.tsv"
         out2 = app_dir / "s2.tsv"
         cmd_sample(app_dir, seed=42, count=4, out=out1)
         cmd_sample(app_dir, seed=42, count=4, out=out2)
         assert out1.read_bytes() == out2.read_bytes(), "sample TSV not deterministic"
 
-        # --- (3) sample order is absolute-path sort ---
-        # seed that yields a scrambled subset; output must still be path-sorted
         cmd_sample(app_dir, seed=7, count=4, out=out1)
         lines = out1.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 5, f"expected header+4, got {len(lines)} lines"
         body = list(csv.DictReader(lines, delimiter="\t"))
-        # Reconstruct abs paths from rel_path + music_dir and check sort
         abs_from_rel = []
         for row in body:
-            # reverse of rel_path_for under music_dir prefix
             abs_from_rel.append(music_dir + "\\" + row["rel_path"].replace("/", "\\"))
         assert abs_from_rel == sorted(abs_from_rel), "sample rows not path-sorted"
-        # Also: rel_path string sort matches (spec acceptance)
         rels = [row["rel_path"] for row in body]
         assert rels == sorted(rels), "rel_path not sorted"
 
-        # --- (4) clear keeps out-of-sample ---
         in_h1, in_h2 = "hash_in_1", "hash_in_2"
         out_h1, out_h2 = "hash_out_1", "hash_out_2"
         labels = {
@@ -400,8 +385,6 @@ def run_self_test() -> None:
         bak_after_clear = list(app_dir.glob("labels.json.bak-*"))
         assert bak_after_clear, "clear did not leave a backup"
 
-        # --- (5) snapshot backup + identical --out ---
-        # Immediate snapshot (same-second bak name must not collide).
         save_labels(app_dir / LABELS_FILE, {out_h1: _label(True, 99)})
         snap_out = app_dir / "pass-1.json"
         before = (app_dir / LABELS_FILE).read_bytes()
@@ -410,7 +393,6 @@ def run_self_test() -> None:
         bak_all = list(app_dir.glob("labels.json.bak-*"))
         assert len(bak_all) >= 2, "snapshot did not leave an additional backup"
 
-        # Human path is snapshot then clear, often in the same second.
         cmd_clear(app_dir, sample_path, assume_yes=True)
         bak_after_snap_clear = list(app_dir.glob("labels.json.bak-*"))
         assert len(bak_after_snap_clear) >= 3, "same-second snapshot+clear bak collision"

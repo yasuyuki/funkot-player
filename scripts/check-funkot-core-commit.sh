@@ -1,5 +1,4 @@
 #!/bin/sh
-# Verify the sibling used by the path dependency before a player build.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)

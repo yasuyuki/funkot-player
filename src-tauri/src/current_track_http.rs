@@ -1,9 +1,3 @@
-//! Opt-in, loopback-only current-track endpoint for local companion tools.
-//!
-//! This deliberately is a tiny HTTP reader rather than a Tauri command: the
-//! consumer is a separate local process. It has no controls and is started
-//! only on Windows when `FUNKOT_CURRENT_TRACK_PORT` names a valid port.
-
 use std::env;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
@@ -28,8 +22,6 @@ impl CurrentTrackSnapshot {
         Self { version: 1, title: String::new(), artist: String::new(), playing: false }
     }
 
-    /// Maps the player state to the public contract. Keep this pure so the
-    /// transport-state rules do not depend on TCP handling.
     pub(crate) fn from_state(
         metadata: Option<(String, String)>,
         phase_is_playing: bool,
@@ -48,9 +40,6 @@ impl CurrentTrackSnapshot {
     }
 }
 
-/// Starts the endpoint if the operator opted in with a valid non-zero port.
-/// Startup failure is intentionally non-fatal: playback must never depend on
-/// an optional display integration.
 pub(crate) fn start(snapshot: fn() -> CurrentTrackSnapshot) {
     let Some(port) = configured_port() else { return; };
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);

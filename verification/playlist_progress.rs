@@ -1,4 +1,3 @@
-//! Standalone driver: the path below is the production module, not a model.
 #[path = "../src-tauri/src/playlist_progress.rs"]
 mod playlist_progress;
 
@@ -23,12 +22,9 @@ mod proofs {
         }
     }
     fn state() -> Progress {
-        // Include restored/imported states too; no state assumption is needed.
         Progress { consumed: kani::any(), failed: kani::any() }
     }
 
-    // Specification of the evidence that can justify *this* occurrence. Kept
-    // separate from the transition's state writes and accepted outcome.
     fn justified(target: Option<Occurrence<u8>>, c: Option<Claim<u8>>, e: Observation<u8>) -> bool {
         match e {
             Observation::Started(index) | Observation::Current(index) => c.is_some_and(|c|
@@ -53,7 +49,6 @@ mod proofs {
         assert!(!after.progress.consumed || before.consumed || valid);
         assert!(!after.progress.failed || before.failed || after.progress.consumed);
         assert!(valid == after.accepted.is_some());
-        // Success is required too: a no-op implementation cannot pass.
         assert!(!valid || after.progress.consumed);
         assert!(valid || after.progress == before);
         assert_eq!(observe(target, after.progress, c, e).progress, after.progress);

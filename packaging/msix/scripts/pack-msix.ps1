@@ -1,26 +1,5 @@
-# Pack an unsigned MSIX for Funkot (Microsoft Store / Partner Center upload).
-#
-# Prerequisites (Windows):
-#   - Node.js + npm deps (`npm ci` in repo root)
-#   - Rust toolchain able to `npm run tauri -- build --no-bundle`
-#   - Windows 10 SDK (makeappx.exe under "Windows Kits\10\bin")
-#
-# Usage (from repo root, PowerShell):
-#   .\packaging\msix\scripts\pack-msix.ps1
-#   .\packaging\msix\scripts\pack-msix.ps1 -SkipBuild   # use existing release exe
-#
 # Output (unsigned):
 #   packaging\msix\out\Funkot_0.9.1.0_x64.msix
-#
-# Notes:
-#   - Build uses --no-bundle so WiX/NSIS icons are not required; MSIX is packed
-#     separately with makeappx.
-#   - Release builds use crt-static (src-tauri/.cargo/config.toml); extra VC++
-#     runtime DLLs are generally not required beside the exe.
-#   - WebView2 is a system dependency (Evergreen Runtime). Do not ship the
-#     full runtime inside the MSIX; ensure the Store / device has WebView2.
-#   - Replace Identity Name / Publisher in Package.appxmanifest before Store
-#     submission (see packaging/msix/README.md).
 
 [CmdletBinding()]
 param(
@@ -137,7 +116,6 @@ try {
     Copy-Item -Path $ManifestSrc -Destination (Join-Path $StagingDir "AppxManifest.xml")
     Copy-Item -Path $ExePath -Destination (Join-Path $StagingDir $ExeName)
 
-    # Optional sidecars (usually none with crt-static; WebView2Loader.dll if present).
     Get-ChildItem -Path $ReleaseDir -Filter "*.dll" -File -ErrorAction SilentlyContinue |
         ForEach-Object { Copy-Item $_.FullName -Destination $StagingDir }
 

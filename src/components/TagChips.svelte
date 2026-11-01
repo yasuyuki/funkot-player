@@ -1,8 +1,6 @@
 <script lang="ts">
   import type { TrackTagState } from "../lib/tauri";
   let { state }: { state: TrackTagState | null } = $props();
-  // One readable line, with no per-token truncation or duplicate entrypoints.
-  // Complete values and metadata status remain available in the tag editor.
   let compact = $derived(["year", "genre", "custom"].flatMap(kind => {
     const tag = state?.effective.find(tag => tag.kind === kind);
     return tag ? [tag.value] : [];

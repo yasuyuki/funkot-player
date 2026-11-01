@@ -1,15 +1,4 @@
-// Canonical message catalogue. `Messages` is derived from this object, so
-// every other locale is checked against it by `npm run check`: a missing key,
-// a stray key, or a function whose parameters drifted all fail to compile.
-//
-// Interpolated messages are *functions*, not templates with placeholders.
-// Word order moves between the three languages ("Found 3 tracks" /
-// "3曲見つかりました" / "3 lagu ditemukan"), and a function lets each locale
-// put the pieces where its own grammar wants them -- including the plural
-// suffix English needs and Indonesian does not.
-
 export const en = {
-  // --- App shell / navigation ---
   playTabsLabel: "Playback tabs",
   editTabsLabel: "Edit tabs",
   queueHeading: "Up next",
@@ -17,7 +6,6 @@ export const en = {
   tabFlags: "Transitions to fix",
   tabAllTracks: "All tracks",
 
-  // --- Transport ---
   start: "Start",
   pause: "⏸ Pause",
   resumePlayback: "▶ Resume",
@@ -37,7 +25,6 @@ export const en = {
   playbackRecoveryPreserved: "Both original saved queues are preserved.",
   playbackRecoveryFailed: "Could not save that choice. Review the queues and try again.",
 
-  // --- Now playing ---
   phaseIdle: "Idle",
   phaseStarting: "Starting",
   phasePlaying: "Playing",
@@ -46,13 +33,11 @@ export const en = {
   phaseFailed: "Cannot play",
   phaseDisconnected: "Reconnecting output",
 
-  // --- Audition ---
   auditioning: (from: string, to: string) => `Auditioning “${from}” → “${to}”`,
   autoplayInterrupted: "Auto-play interrupted",
   resumeAction: "〔Resume〕",
   auditioningShort: "Auditioning",
 
-  // --- Labels ---
   funkot: "Funkot",
   notFunkot: "Non-Funkot",
   noLabel: "—",
@@ -62,19 +47,16 @@ export const en = {
   bulkLabeled: (n: number, verdict: boolean) =>
     `Labeled ${n} ${n === 1 ? "track" : "tracks"} as ${verdict ? "Funkot" : "non-Funkot"}`,
 
-  // --- Toast / boundary ---
   undo: "Undo",
   retry: "Retry",
   changed: "Changed",
   deleted: "Deleted",
 
-  // --- New arrivals ---
   queueNewArrivals: (count: number, playlistName: string | null) =>
     playlistName
       ? `Append ${count} new ${count === 1 ? "track" : "tracks"} to ${playlistName}`
       : `Put ${count} new ${count === 1 ? "track" : "tracks"} at the front of the queue`,
 
-  // --- Log panel ---
   logTitle: "Log",
   close: "Close",
   musicFolderLabel: "Music folder",
@@ -85,7 +67,6 @@ export const en = {
   arrivalsPathsLabel: "New paths",
   showLog: "Show log",
 
-  // --- Transition strip ---
   lastAutoTransition: "Last automatic transition",
   secondsAgo: (s: number) => `${s}s ago`,
   minutesAgo: (m: number) => `${m}m ago`,
@@ -97,7 +78,6 @@ export const en = {
   editMode: "Edit",
   playMode: "Play",
 
-  // --- Queue ---
   queueEmpty: "Queue is empty — auto-select keeps going",
   queuePreparing: "Preparing",
   queuePrepared: "Ready",
@@ -150,7 +130,6 @@ export const en = {
   playlistFailureReason: (reason: string) => ({ missing: "The file is missing.", non_funkot: "Excluded by the Funkot-only setting.", identity_changed: "The file changed since it was added.", identity_unavailable: "This track could not be identified.", load_failed: "The track could not be loaded.", loader_failure: "The track could not be loaded." })[reason] ?? "The track could not be loaded.",
   playlistCreateSavedSelectionFailed: (name: string, reason: string) => `Created “${name}”, but could not switch to it: ${reason}`,
 
-  // --- Library ---
   searchPlaceholder: "Search",
   searchLabel: "Search the library",
   newOnly: "New only",
@@ -277,7 +256,6 @@ export const en = {
   emptyHintAndroid:
     "Put audio files in the Music folder, then pick “Rescan” from the ⋮ menu to bring them into the library. The ⋮ menu’s “Show log” tells you where that folder is.",
 
-  // --- Multi-select / bulk add ---
   selectMode: "Select",
   selectModeLabel: "Select several tracks",
   selectTrackLabel: (title: string) => `Select ${title}`,
@@ -294,7 +272,6 @@ export const en = {
   enqueueManyNotes: (notes: string) => ` (${notes})`,
   listSeparator: ", ",
 
-  // --- History ---
   historyHeading: "History",
   historyByTrack: "By track",
   historyByTime: "In order",
@@ -315,7 +292,6 @@ export const en = {
   removedTrackFromPlayLog: "Removed this song from play order",
   removeTrackFromPlayLogFailed: "Could not remove from play order",
 
-  // --- Music folder ---
   pickMusicFolderPrompt: "Pick a Music folder",
   pickMusicFolder: "Pick Music folder",
   changeMusicFolder: "Change Music folder",
@@ -333,7 +309,6 @@ export const en = {
   musicDirErrUnsupportedPlatform: "This device cannot change it",
   musicDirErrGeneric: "Could not change the Music folder",
 
-  // --- Overflow menu ---
   rescan: "Rescan",
   scanFound: (count: number) => `Found ${count} ${count === 1 ? "track" : "tracks"}`,
   scanBusy: "A scan is already running",
@@ -383,19 +358,14 @@ export const en = {
   editTrack: "Edit track",
   folderActions: "Folder actions",
 
-  // --- Edit: flagged list ---
   roleOutgoing: "Outgoing",
   roleIncoming: "Incoming",
   noFlagged: "No transitions to fix",
   seeAllTracks: "See all tracks",
   dismissFlag: "〔Dismiss〕",
   unanalyzed: "Not analyzed",
-  /// Stand-in title for a flagged track that is no longer in the library.
-  /// The host sends an empty title with `missing: true`; the wording lives
-  /// here so it stays in one catalogue with everything else.
   missingTrack: "Track not in the library",
 
-  // --- Edit: flagged detail ---
   backToList: "← Back to list",
   flagCount: (n: number) => `${n}×`,
   listenTransitionTo: (title: string) => `Listen to the transition into “${title}”`,
@@ -404,18 +374,15 @@ export const en = {
   confirmAction: "〔Confirm〕",
   cancelAction: "〔Cancel〕",
 
-  // --- Edit: chip editor ---
   intro: "Intro",
   outro: "Outro",
   chipScale: "short ←──────→ long",
   outroHint: "Longer means the switch starts earlier",
   introHint: "Longer skips more of the intro and comes in on a short run-up",
 
-  // --- Edit: all tracks ---
   rootFolder: "(root)",
   colLabel: "label",
 
-  // --- Share-sheet import (Android) ---
   importedSummary: (tracks: number, skipped: number, failed: number) => {
     const notes: string[] = [];
     if (skipped > 0) notes.push(`${skipped} unsupported`);
@@ -431,8 +398,6 @@ export const en = {
   },
 };
 
-/// The shape every locale has to satisfy. Derived rather than hand-written so
-/// adding a key to `en` is the only edit needed to make the other two fail.
 type MessageValue<T> = T extends (...args: infer Args) => unknown
   ? (...args: Args) => string
   : string;

@@ -4,8 +4,6 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 
-// Read-only WASAPI render-session observer. It writes one JSON object to stdout
-// only after finding exactly one active session owned by the requested process.
 internal static class WindowsRouteObserver
 {
     private const int Render = 0;

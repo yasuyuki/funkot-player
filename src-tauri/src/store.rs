@@ -1,19 +1,3 @@
-//! Persistence for the coherent playback snapshot (`playback-state.json`),
-//! the bar counts the user has corrected by hand (`library.json`), transition
-//! flags the listener marked as bad (`flags.json`), human Funkot / non-Funkot
-//! labels (`labels.json`), and play history (`history.json`). Standalone
-//! queue, session, settings, and playlist files are a one-generation import
-//! source only.
-//!
-//! # Why the app keeps its own copy of the manual bars
-//!
-//! The engine preserves manual values when converting the immediately preceding
-//! cache version. The app also owns corrections independently of that conversion
-//! window and cache retention. It reapplies its stored corrections after analysis.
-//!
-//! Entries are keyed by `funkot_core::cache::content_hash`, the same key the
-//! engine's cache uses, so moving or renaming a file keeps its corrections.
-//!
 //! # Where these files live
 //!
 //! In `AppDirs::data_dir`, and deliberately *not* in the analysis cache.
@@ -28,9 +12,6 @@
 //! new permission and stays out of the MTP-visible folder. `labels.json` and
 //! `history.json` have never lived in the cache, so they are not part of
 //! [`migrate_from`].
-//!
-//! Early builds did keep queue/library in the cache; `migrate_from` moves
-//! anything still there (including `flags.json` if present).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -55,7 +36,6 @@ const WINDOW_FILE: &str = "window.json";
 const HASH_INDEX_FILE: &str = "hash-index.json";
 const PLAY_LOG_FILE: &str = "play-log.jsonl";
 
-/// Metadata bundled with a feedback ZIP (`share_feedback`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FeedbackMeta {
     pub version_name: String,
@@ -65,7 +45,6 @@ pub struct FeedbackMeta {
     pub sent_at: String,
 }
 
-/// Seconds since UNIX epoch → `YYYY-MM-DDTHH:MM:SSZ` (UTC; leap seconds ignored).
 pub fn utc_rfc3339_from_unix_secs(secs: u64) -> String {
     const SECONDS_PER_DAY: u64 = 86_400;
     let days = secs / SECONDS_PER_DAY;
@@ -77,7 +56,6 @@ pub fn utc_rfc3339_from_unix_secs(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-/// Current UTC time as RFC3339 with second precision.
 pub fn utc_rfc3339_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -86,12 +64,10 @@ pub fn utc_rfc3339_now() -> String {
     utc_rfc3339_from_unix_secs(secs)
 }
 
-/// `2026-08-05T13:37:00Z` → `20260805T133700Z` for feedback ZIP filenames.
 pub fn feedback_filename_stamp(sent_at: &str) -> String {
     sent_at.replace('-', "").replace(':', "")
 }
 
-/// Days since 1970-01-01 (UTC) → `(year, month, day)`.
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -106,16 +82,6 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
     (year as i32, m as u32, d as u32)
 }
 
-/// Move persisted files from a previous location into `dir`, if they are
-/// still there. Safe to call on every launch; a no-op once nothing is left
-/// behind.
-///
-/// A file already present at the destination wins and the stale copy is left
-/// alone: the destination is the live one, and overwriting it with an older
-/// copy would undo everything that happened since the move.
-///
-/// Failures are logged, not returned. Losing the move costs the user their
-/// queue and corrections *later*; failing the launch costs them the app now.
 pub fn migrate_from(old_dir: &Path, dir: &Path) {
     if old_dir == dir {
         return;
@@ -126,8 +92,6 @@ pub fn migrate_from(old_dir: &Path, dir: &Path) {
         if !from.exists() || to.exists() {
             continue;
         }
-        // Both directories are inside the app's own storage, so this is always
-        // a same-filesystem rename — there is no cross-device case to handle.
         match fs::rename(&from, &to) {
             Ok(()) => log::info!("moved {name} out of {}", old_dir.display()),
             Err(e) => log::warn!("cannot move {name} out of {}: {e}", old_dir.display()),
@@ -135,7 +99,6 @@ pub fn migrate_from(old_dir: &Path, dir: &Path) {
     }
 }
 
-/// Persisted queue representation accepted only during strict legacy import.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum PersistedQueueItem {
@@ -164,7 +127,6 @@ pub(crate) fn load_legacy_queue_strict(dir: &Path) -> Result<Option<Vec<QueueIte
     Ok(Some(items.into_iter().map(PersistedQueueItem::into_item).collect()))
 }
 
-/// Load the queue from the coherent playback state.
 pub fn load_queue(dir: &Path) -> io::Result<Vec<QueueItem>> {
     PlaybackStore::open(dir.to_path_buf())
         .snapshot()
@@ -172,7 +134,6 @@ pub fn load_queue(dir: &Path) -> io::Result<Vec<QueueItem>> {
         .map_err(persistence_io_error)
 }
 
-/// Persist the queue as one component of the coherent playback state.
 pub fn save_queue<T>(dir: &Path, queue: &VecDeque<T>) -> io::Result<()>
 where
     T: Clone + Into<QueueItem>,
@@ -186,22 +147,8 @@ where
         .map_err(persistence_io_error)
 }
 
-/// Playback state restored across a restart: which tracks were already
-/// mid-flight (out of `pending` but not yet finished playing) and whether
-/// the transport was paused.
-///
-/// Deliberately does not include a position within `in_flight[0]`; a restart
-/// always resumes that track from the top. The session lives in the coherent
-/// playback snapshot, with `session.json` retained only for one-generation
-/// import when no snapshot exists.
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
-    /// Tracks `HostSource::next` (`src-tauri/src/queue.rs`) has already
-    /// popped from `pending` but that had not finished playing as of the
-    /// last save. Index `0` is the engine's active track; anything after it
-    /// is reserved ahead of it. These never appear in the snapshot's queue
-    /// component (which mirrors `pending` only), which is exactly why a plain
-    /// restart used to lose the first two tracks — see [`restored_pending`].
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_queue_items")]
     pub in_flight: Vec<QueueItem>,
@@ -226,7 +173,6 @@ impl Session {
     }
 }
 
-/// Strictly read the immediately preceding standalone session generation.
 pub(crate) fn load_legacy_session_strict(dir: &Path) -> Result<Session, LoadState> {
     let bytes = match fs::read(dir.join(SESSION_FILE)) {
         Ok(bytes) => bytes,
@@ -236,8 +182,6 @@ pub(crate) fn load_legacy_session_strict(dir: &Path) -> Result<Session, LoadStat
     serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)
 }
 
-/// Load the session from the coherent playback state. A recovery restriction
-/// leaves runtime playback empty but subsequent writes remain rejected.
 pub fn load_session(dir: &Path) -> Session {
     match PlaybackStore::open(dir.to_path_buf()).snapshot() {
         Ok(state) => state.session,
@@ -248,7 +192,6 @@ pub fn load_session(dir: &Path) -> Session {
     }
 }
 
-/// Persist the session as one component of the coherent playback state.
 pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
     let session = session.clone();
     PlaybackStore::open(dir.to_path_buf())
@@ -259,11 +202,6 @@ pub fn save_session(dir: &Path, session: &Session) -> io::Result<()> {
         .map_err(persistence_io_error)
 }
 
-/// Logical inner size of the desktop window, remembered across launches.
-///
-/// Desktop only: Android is always full-screen. Missing, corrupt, or
-/// unusable numbers → [`None`], and the window keeps `tauri.conf.json`'s
-/// defaults. Losing this file only resets the size; it is not listener work.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WindowFrame {
     pub width: f64,
@@ -272,20 +210,11 @@ pub struct WindowFrame {
     pub maximized: bool,
 }
 
-/// Smallest inner size we will restore. Below this the chrome is unusable
-/// (buttons clip); the listener can still shrink live, we just will not
-/// reopen that small.
 pub const WINDOW_FRAME_MIN: f64 = 200.0;
 
-/// Sanity cap so a saved value from a disconnected 8K display cannot
-/// reopen larger than any monitor we expect to see. Restore also clamps
-/// to the current monitor when that information is available.
 pub const WINDOW_FRAME_MAX: f64 = 8192.0;
 
 impl WindowFrame {
-    /// Accept a live or saved size, or `None` if it must not be applied.
-    /// Oversized values are clamped; non-finite or below [`WINDOW_FRAME_MIN`]
-    /// are rejected so a corrupt file cannot open a 0×0 window.
     pub fn new(width: f64, height: f64, maximized: bool) -> Option<Self> {
         if !width.is_finite() || !height.is_finite() {
             return None;
@@ -300,8 +229,6 @@ impl WindowFrame {
         })
     }
 
-    /// Shrink to fit a monitor's logical size. Never grows, and never
-    /// drops below [`WINDOW_FRAME_MIN`] even if the monitor reports smaller.
     pub fn clamp_to(self, max_width: f64, max_height: f64) -> Self {
         let max_w = max_width.max(WINDOW_FRAME_MIN);
         let max_h = max_height.max(WINDOW_FRAME_MIN);
@@ -313,10 +240,6 @@ impl WindowFrame {
     }
 }
 
-/// Load the last desktop window size under `dir`.
-///
-/// Missing or unusable → [`None`] (same policy as a missing session: the
-/// next launch uses the config default rather than refusing to start).
 pub fn load_window_frame(dir: &Path) -> Option<WindowFrame> {
     let bytes = match fs::read(dir.join(WINDOW_FILE)) {
         Ok(b) => b,
@@ -331,15 +254,12 @@ pub fn load_window_frame(dir: &Path) -> Option<WindowFrame> {
     }
 }
 
-/// Persist `frame` under `dir`, overwriting any previous save.
 pub fn save_window_frame(dir: &Path, frame: &WindowFrame) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(frame)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_atomic(&dir.join(WINDOW_FILE), &json)
 }
 
-/// Make a restored queue the durable editable owner of all session entries
-/// in one coherent playback-state commit.
 pub fn save_restored_queue_and_clear_session(
     dir: &Path,
     queue: &VecDeque<QueueItem>,
@@ -354,41 +274,16 @@ pub fn save_restored_queue_and_clear_session(
         .map_err(persistence_io_error)
 }
 
-/// User-configurable app settings in the coherent playback snapshot.
-///
-/// `music_dir`, when set, is the folder the listener picked via
-/// `set_music_dir` (desktop only); `None` means no folder has been chosen
-/// yet (`music_dir_needed`). An unreadable configured path is left in this
-/// file — `resolve_music_dir` reports it as needed/unavailable without
-/// clearing the setting.
-///
-/// `allow_non_funkot` is read/written on every platform (library enqueue and
-/// folder-drain gate).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub music_dir: Option<PathBuf>,
-    /// When `false`, analysed non-Funkot tracks cannot be enqueued and are
-    /// skipped by folder drain. Default is `true` (missing key / file / corrupt
-    /// → allow). Greying in the library is independent.
     #[serde(default = "default_allow_non_funkot")]
     pub allow_non_funkot: bool,
-    /// When `true`, prepare switches to a head-only (20s from first_downbeat)
-    /// stretch for every track so a labeler can move through the library
-    /// without waiting on a full-track stretch. See
-    /// `EngineOptions::head_only_secs`. Fixed at `Engine` construction — a
-    /// change here takes effect on the next Start, not the running session.
     #[serde(default)]
     pub labeling_mode: bool,
-    /// Whether the first (or post–music-dir-change) arrivals baseline has
-    /// finished a complete scan and index save. Missing key / [`Default`] =
-    /// `false`.
     #[serde(default)]
     pub arrivals_baseline_done: bool,
-    /// UI language the listener picked (`"en"` / `"ja"` / `"id"`). `None`
-    /// means nothing has been picked, and the UI follows the platform locale
-    /// instead — so this stays `None` on a fresh install rather than being
-    /// stamped with whatever the first launch happened to detect.
     #[serde(default)]
     pub locale: Option<String>,
 }
@@ -409,7 +304,6 @@ impl Default for Settings {
     }
 }
 
-/// Strictly read the immediately preceding standalone settings generation.
 pub(crate) fn load_legacy_settings_strict(dir: &Path) -> Result<Settings, LoadState> {
     let bytes = match fs::read(dir.join(SETTINGS_FILE)) {
         Ok(bytes) => bytes,
@@ -419,8 +313,6 @@ pub(crate) fn load_legacy_settings_strict(dir: &Path) -> Result<Settings, LoadSt
     serde_json::from_slice(&bytes).map_err(|_| LoadState::Corrupt)
 }
 
-/// Load settings from a coherent snapshot or an unchanged recovery conflict.
-/// A settings read never authorizes a replacement write.
 pub fn load_settings(dir: &Path) -> Settings {
     match PlaybackStore::open(dir.to_path_buf()).settings_snapshot() {
         Ok(settings) => settings,
@@ -431,7 +323,6 @@ pub fn load_settings(dir: &Path) -> Settings {
     }
 }
 
-/// Persist settings as one component of the coherent playback state.
 pub fn save_settings(dir: &Path, settings: &Settings) -> io::Result<()> {
     let settings = settings.clone();
     PlaybackStore::open(dir.to_path_buf())
@@ -446,10 +337,6 @@ fn persistence_io_error(error: crate::playlists::PlaylistError) -> io::Error {
     io::Error::other(format!("{error:?}"))
 }
 
-/// Restore the active occurrence first, then manual and automatic entries.
-/// Queue and session overlap is deduplicated by occurrence ID. Legacy entries
-/// receive new IDs when loaded; their ambiguous overlaps are retained so an
-/// intentional duplicate path is never discarded by a path-based guess.
 pub fn restored_pending(
     in_flight: &[QueueItem],
     saved_queue: &[QueueItem],
@@ -483,32 +370,12 @@ pub fn restored_pending(
     restored
 }
 
-/// Retire exactly the revoked occurrence from the persisted engine claims.
 pub fn retire_revoked(in_flight: &mut Vec<QueueItem>, revoked: &QueueItem) {
     if let Some(pos) = in_flight.iter().position(|item| item.entry_id == revoked.entry_id) {
         in_flight.remove(pos);
     }
 }
 
-/// Where to resume folder cycling (`DrainPolicy::ContinueFolder`,
-/// `src-tauri/src/queue.rs`) after a restart. `tracks` must be sorted the
-/// same way `start_impl` builds it.
-///
-/// Finds `last_reserved` in `tracks` and resumes right after it — wrapping to
-/// `0` if it was the last entry, exactly like `HostSource::next`'s own
-/// `(pos + 1) % tracks.len()` step, so a restart mid-cycle does not repeat or
-/// skip a track. Returns `0` if `last_reserved` is `None` (nothing was ever
-/// reserved) or not found in `tracks` (a library edit removed it since).
-///
-/// `last_reserved` is meant to be `in_flight`'s *last* entry, not its first
-/// (the active track): by the time this runs the folder-drain and pending
-/// origins of `in_flight`'s entries can no longer be told apart (both are
-/// recorded the same way, via `on_reserved`), so this cannot resume exactly
-/// where the folder cycle left off in every case. But "continue after
-/// whatever was reserved most recently" is still correct whenever the
-/// restart really was mid-folder-cycle, and even when it was not (the last
-/// reservation came from `pending`) it is strictly better than the old
-/// `pos: 0`, which silently rewound to the folder's start every single time.
 pub fn restored_folder_pos(tracks: &[PathBuf], last_reserved: Option<&Path>) -> usize {
     let Some(last_reserved) = last_reserved else {
         return 0;
@@ -519,43 +386,22 @@ pub fn restored_folder_pos(tracks: &[PathBuf], last_reserved: Option<&Path>) -> 
     }
 }
 
-/// Bar counts the user corrected by hand for one track.
-///
-/// A side left as `None` was never touched, and stays whatever the analyzer
-/// says — including after a reanalysis moves it. Only what the user actually
-/// changed is pinned.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BarOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro_bars: Option<u32>,
-    /// The *structural* outro boundary, not the mix trigger. The trigger is
-    /// derived from it by the engine (boundary + a fixed lead-in), so pinning
-    /// the trigger instead would fight that rule; see
-    /// `funkot_core::cache::set_manual_structure_bars`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outro_structure_bars: Option<u32>,
-    /// Manual Funkot / non-Funkot override. `None` follows analysis
-    /// `is_funkot`. One-way mirror of [`TrackLabel`] in `labels.json`
-    /// (label is source of truth); set by `set_label` / `set_folder_label`,
-    /// not by bar-edit UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub funkot: Option<bool>,
 }
 
-/// Effective Funkot flag: `override.funkot` when set, else analysis.
 pub fn effective_is_funkot(analysis_is_funkot: bool, override_funkot: Option<bool>) -> bool {
     override_funkot.unwrap_or(analysis_is_funkot)
 }
 
-/// Hand-corrected bars for the whole library, keyed by content hash.
 pub type Overrides = BTreeMap<String, BarOverride>;
 
-/// Load the hand-corrected bars saved under `dir`.
-///
-/// A missing file is an empty map, not an error (first run). A *corrupt* file
-/// is also an empty map: the alternative is refusing to scan the library at
-/// all, and these are corrections the user can redo — losing them is
-/// recoverable, a library that will not open is not.
 pub fn load_overrides(dir: &Path) -> Overrides {
     let bytes = match fs::read(dir.join(LIBRARY_FILE)) {
         Ok(b) => b,
@@ -570,21 +416,12 @@ pub fn load_overrides(dir: &Path) -> Overrides {
     }
 }
 
-/// Persist `overrides` under `dir`, overwriting any previous save.
 pub fn save_overrides(dir: &Path, overrides: &Overrides) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(overrides)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(LIBRARY_FILE), json)
 }
 
-/// One file's content-hash cache entry, keyed by path in [`HashIndex`].
-///
-/// `mtime_ms` + `len` are a cheap fingerprint so a library rescan can skip
-/// re-reading file bytes when nothing has changed on disk.
-///
-/// When `tags_cached` is true, `title`/`artist` were probed (both `None` means
-/// the file has no usable tags). Older `hash-index.json` entries lack these
-/// fields and deserialize as `tags_cached: false`.
 pub const METADATA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -598,27 +435,20 @@ pub struct HashIndexEntry {
     pub mtime_ms: u64,
     pub len: u64,
     pub hash: String,
-    /// When true, `title`/`artist` were probed and may be stored (both None = no tags).
     #[serde(default)]
     pub tags_cached: bool,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub artist: Option<String>,
-    /// RFC3339 UTC. `None` = present since baseline (legacy missing field → `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_seen: Option<String>,
-    /// Stable library-addition batch. Unlike `first_seen`, play history never
-    /// clears it. Missing values are filled by [`stamp_missing_added_order`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_order: Option<u64>,
 }
 
-/// Path → content hash, with mtime/size so unchanged files skip re-hashing.
 pub type HashIndex = BTreeMap<String, HashIndexEntry>;
 
-/// How [`load_hash_index`] obtained its map. Distinguishes a legitimate empty
-/// index (`Loaded` of `{}`) from a missing or unreadable file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashIndexProvenance {
     Loaded,
@@ -626,14 +456,12 @@ pub enum HashIndexProvenance {
     Corrupt,
 }
 
-/// Result of loading `hash-index.json` without taking any lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedHashIndex {
     pub index: HashIndex,
     pub provenance: HashIndexProvenance,
 }
 
-/// Hash + embedded tags for one library file after [`resolve_library_file`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedLibraryFile {
     pub hash: String,
@@ -641,12 +469,6 @@ pub struct ResolvedLibraryFile {
     pub artist: Option<String>,
 }
 
-/// Load the content-hash index saved under `dir`.
-///
-/// Does not take any lock — callers that mutate and save must serialize at
-/// the orchestration layer. Missing file → empty + [`HashIndexProvenance::Missing`];
-/// other I/O / JSON errors → empty + [`HashIndexProvenance::Corrupt`];
-/// successful parse (including `{}`) → [`HashIndexProvenance::Loaded`].
 pub fn load_hash_index(dir: &Path) -> LoadedHashIndex {
     let bytes = match fs::read(dir.join(HASH_INDEX_FILE)) {
         Ok(b) => b,
@@ -679,16 +501,12 @@ pub fn load_hash_index(dir: &Path) -> LoadedHashIndex {
     }
 }
 
-/// Persist `index` under `dir`, overwriting any previous save.
-///
-/// This independent derived index uses its existing atomic write helper.
 pub fn save_hash_index(dir: &Path, index: &HashIndex) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(index)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_atomic(&dir.join(HASH_INDEX_FILE), &json)
 }
 
-/// Arrivals handling mode derived from the baseline flag and index provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArrivalsKind {
     Baseline,
@@ -696,8 +514,6 @@ pub enum ArrivalsKind {
     Normal,
 }
 
-/// Decide arrivals mode: not done → Baseline; done + Loaded (incl. empty) →
-/// Normal; done + Missing/Corrupt → Recovery.
 pub fn arrivals_kind(baseline_done: bool, provenance: HashIndexProvenance) -> ArrivalsKind {
     if !baseline_done {
         ArrivalsKind::Baseline
@@ -708,8 +524,6 @@ pub fn arrivals_kind(baseline_done: bool, provenance: HashIndexProvenance) -> Ar
     }
 }
 
-/// Stamp `first_seen` on keys that were not in `original_keys` and still have
-/// `None`. Keys present in `original_keys` with `None` are never touched.
 pub fn stamp_new_paths(index: &mut HashIndex, original_keys: &BTreeSet<String>, now: &str) {
     for (key, entry) in index.iter_mut() {
         if !original_keys.contains(key) && entry.first_seen.is_none() {
@@ -718,16 +532,6 @@ pub fn stamp_new_paths(index: &mut HashIndex, original_keys: &BTreeSet<String>, 
     }
 }
 
-/// Fill every authoritative index entry that still lacks an addition order.
-///
-/// `first_seen is None` is the legacy baseline and gets `order`. Entries that
-/// already carry a first-seen stamp — new paths this scan, or arrivals a
-/// previous build recorded — get the next batch when both kinds are present.
-/// Recency is not inferred from mtime or play history. Call only when the
-/// refresh commit will save the index.
-///
-/// Returns `None` when a distinct recent batch is required but `order + 1`
-/// would overflow.
 pub fn stamp_missing_added_order(index: &mut HashIndex, order: u64) -> Option<()> {
     let mut has_legacy = false;
     let mut has_recent = false;
@@ -757,7 +561,6 @@ pub fn stamp_missing_added_order(index: &mut HashIndex, order: u64) -> Option<()
     Some(())
 }
 
-/// Next scan batch, strictly greater than every persisted batch.
 pub fn next_added_order(index: &HashIndex) -> Option<u64> {
     index
         .values()
@@ -767,7 +570,6 @@ pub fn next_added_order(index: &HashIndex) -> Option<u64> {
         .checked_add(1)
 }
 
-/// Clear `first_seen` on every entry whose key is in `scan_keys`.
 pub fn apply_baseline_markers(index: &mut HashIndex, scan_keys: &BTreeSet<String>) {
     for key in scan_keys {
         if let Some(entry) = index.get_mut(key) {
@@ -776,21 +578,12 @@ pub fn apply_baseline_markers(index: &mut HashIndex, scan_keys: &BTreeSet<String
     }
 }
 
-/// A new-arrival row: path plus its first-seen stamp (always `Some` in extract
-/// results — entries without a stamp are not arrivals).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewArrival {
     pub path: String,
-    /// RFC3339. Only entries with `Some` first_seen are extracted.
     pub first_seen: String,
 }
 
-/// Extract new arrivals from a committed hash index.
-///
-/// Returns empty when baseline is not done or provenance is Missing/Corrupt
-/// (only a Loaded committed index is authoritative). Otherwise: entries with
-/// `first_seen.is_some()` whose content hash is absent from `history`.
-/// Order: first_seen ascending, then path ascending. No Music file I/O.
 pub fn extract_new_arrivals(
     index: &HashIndex,
     history: &History,
@@ -821,10 +614,6 @@ pub fn extract_new_arrivals(
     out
 }
 
-/// Clear `first_seen` on entries whose content hash is present in `history`.
-///
-/// Returns `true` if any entry changed (caller should persist). Does not fold
-/// stamps whose hash is absent from history.
 pub fn fold_played_arrivals(index: &mut HashIndex, history: &History) -> bool {
     let mut changed = false;
     for entry in index.values_mut() {
@@ -836,9 +625,6 @@ pub fn fold_played_arrivals(index: &mut HashIndex, history: &History) -> bool {
     changed
 }
 
-/// Clear `first_seen` on entries whose content hash matches `hash`.
-///
-/// Returns `true` if any entry changed (caller should persist).
 pub fn fold_played_arrival_for_hash(index: &mut HashIndex, hash: &str) -> bool {
     let mut changed = false;
     for entry in index.values_mut() {
@@ -850,18 +636,12 @@ pub fn fold_played_arrival_for_hash(index: &mut HashIndex, hash: &str) -> bool {
     changed
 }
 
-/// What a refresh commit should write after stamping / baseline markers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArrivalsCommitPlan {
     pub save_index: bool,
-    /// After a successful index save, reload Settings and set
-    /// `arrivals_baseline_done = true`.
     pub mark_baseline_done: bool,
 }
 
-/// Commit plan for arrivals after a scan. Normal always saves the index and
-/// never touches the baseline flag. Baseline/Recovery save and mark done only
-/// when the scan was complete.
 pub fn arrivals_commit_plan(kind: ArrivalsKind, complete: bool) -> ArrivalsCommitPlan {
     match kind {
         ArrivalsKind::Normal => ArrivalsCommitPlan {
@@ -884,7 +664,6 @@ pub fn arrivals_commit_plan(kind: ArrivalsKind, complete: bool) -> ArrivalsCommi
     }
 }
 
-/// Unique temp path next to `dest` (`.<name>.<pid>.<nanos>.part`).
 fn unique_tmp_beside(dest: &Path) -> PathBuf {
     let parent = dest.parent().unwrap_or_else(|| Path::new("."));
     let name = dest
@@ -898,11 +677,6 @@ fn unique_tmp_beside(dest: &Path) -> PathBuf {
     parent.join(format!(".{name}.{}.{nanos}.part", std::process::id()))
 }
 
-/// Write `bytes` to `dest` via a same-directory temp file + rename.
-///
-/// Injected ops mirror [`crate`]'s `copy_atomic_with`: failure paths must
-/// remove the temp file. On Windows, `rename` replaces by removing `dest`
-/// first (no extra crate); on Unix/Android, `rename` overwrites.
 pub fn write_atomic_with(
     dest: &Path,
     bytes: &[u8],
@@ -946,9 +720,6 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> io::Result<()> {
     )
 }
 
-/// `metadata.modified()` as UNIX-epoch milliseconds, plus file length.
-///
-/// `None` when either side is unavailable — callers treat that as an index miss.
 fn file_mtime_ms_and_len(path: &Path) -> Option<(u64, u64)> {
     let meta = fs::metadata(path).ok()?;
     let len = meta.len();
@@ -961,22 +732,11 @@ fn file_mtime_ms_and_len(path: &Path) -> Option<(u64, u64)> {
     Some((mtime_ms, len))
 }
 
-/// Probe embedded title/artist via symphonia (open + metadata only).
-///
-/// Successful probes include "no tags" (`Ok((None, None))`). I/O / probe
-/// errors are `Err` so callers can avoid marking `tags_cached`.
 pub fn probe_audio_tags(path: &Path) -> Result<(Option<String>, Option<String>), String> {
     let metadata = crate::audio_metadata::probe(path)?;
     Ok((metadata.title, metadata.artist))
 }
 
-/// Return `path`'s content hash, reusing [`HashIndex`] when mtime+size match.
-///
-/// Does not probe or clear tags on a fingerprint hit. On miss:
-/// - no prior entry → insert with `first_seen: None` (stamping is refresh's job)
-/// - same hash → keep `first_seen` and tags fields
-/// - different hash → new identity: stamp `first_seen` now, tags cleared
-// ponytail: mtime+size fingerprint can disagree after same-mtime overwrite; re-verify content if needed.
 pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<String> {
     let key = path.to_string_lossy().into_owned();
     let fingerprint = file_mtime_ms_and_len(path);
@@ -1034,30 +794,12 @@ pub fn resolve_content_hash(path: &Path, index: &mut HashIndex) -> io::Result<St
     Ok(hash)
 }
 
-/// The hash [`resolve_content_hash`] would return without touching the file:
-/// `Some` when `path`'s mtime+size still match its `index` entry.
-///
-/// Split out so a caller holding the index behind a lock can answer from
-/// memory and drop the lock before hashing on a miss -- hashing reads the
-/// whole file, which is not something to do with a shared index locked. Must
-/// stay identical to the fingerprint test in [`resolve_content_hash`]; only
-/// what happens after a miss differs.
 pub fn fingerprint_hit(path: &Path, index: &HashIndex) -> Option<String> {
     let (mtime_ms, len) = file_mtime_ms_and_len(path)?;
     let entry = index.get(&*path.to_string_lossy())?;
     (entry.mtime_ms == mtime_ms && entry.len == len).then(|| entry.hash.clone())
 }
 
-/// Resolve content hash and embedded tags for a library scan, updating `index`
-/// in place. Does not persist to disk.
-///
-/// - Fingerprint miss → content-hash + tags probe → write full entry
-/// - Fingerprint hit + `tags_cached` → no file open; return stored hash/tags
-/// - Fingerprint hit + `!tags_cached` → skip content-hash; probe tags only;
-///   `first_seen` unchanged
-///
-/// Carry-forward on miss: no prior entry → `first_seen: None`; same hash →
-/// keep `first_seen`; different hash → stamp now and use probe results for tags.
 pub fn resolve_library_file(path: &Path, index: &mut HashIndex) -> io::Result<ResolvedLibraryFile> {
     resolve_library_file_with(path, index,
         |p| funkot_core::cache::content_hash(p).map_err(|e| e.to_string()),
@@ -1106,32 +848,22 @@ fn resolve_library_file_with(
     Ok(ResolvedLibraryFile { hash, title, artist })
 }
 
-/// Editing checks the existing lightweight identity fingerprint, never decodes
-/// or rehashes audio. Like the existing index it cannot detect same-size,
-/// same-mtime rewrites; the content hash's own partial-file limit also remains.
 pub fn fingerprint_matches(path: &Path, entry: &HashIndexEntry) -> bool {
     file_mtime_ms_and_len(path) == Some((entry.mtime_ms, entry.len))
 }
 
-/// One automatic transition pair the listener flagged as bad.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TransitionFlag {
     pub count: u32,
-    /// Unix epoch milliseconds of the most recent flag press for this pair.
     pub last_flagged_ms: u64,
 }
 
-/// Keyed by `"from_hash\tto_hash"` (content hashes joined by a single TAB).
 pub type Flags = BTreeMap<String, TransitionFlag>;
 
-/// Build the map key for a flagged transition pair.
 pub fn flag_key(from_hash: &str, to_hash: &str) -> String {
     format!("{from_hash}\t{to_hash}")
 }
 
-/// Load transition flags saved under `dir`.
-///
-/// Missing or corrupt → empty map (same policy as [`load_overrides`]).
 pub fn load_flags(dir: &Path) -> Flags {
     let bytes = match fs::read(dir.join(FLAGS_FILE)) {
         Ok(b) => b,
@@ -1146,30 +878,20 @@ pub fn load_flags(dir: &Path) -> Flags {
     }
 }
 
-/// Persist `flags` under `dir`, overwriting any previous save.
 pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(flags)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(FLAGS_FILE), json)
 }
 
-/// Human Funkot / non-Funkot label for one track.
-///
-/// Keyed by content hash in [`Labels`]. Presence of a key means the listener
-/// has judged the track; `verdict == false` is distinct from "not yet labeled"
-/// (no key). [`BarOverride::funkot`] mirrors this one-way.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrackLabel {
     pub verdict: bool,
     pub labeled_at_ms: u64,
 }
 
-/// Hand-assigned Funkot labels for the whole library, keyed by content hash.
 pub type Labels = BTreeMap<String, TrackLabel>;
 
-/// Load human labels saved under `dir`.
-///
-/// Missing or corrupt → empty map (same policy as [`load_flags`]).
 pub fn load_labels(dir: &Path) -> Labels {
     let bytes = match fs::read(dir.join(LABELS_FILE)) {
         Ok(b) => b,
@@ -1184,27 +906,20 @@ pub fn load_labels(dir: &Path) -> Labels {
     }
 }
 
-/// Persist `labels` under `dir`, overwriting any previous save.
 pub fn save_labels(dir: &Path, labels: &Labels) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(labels)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(LABELS_FILE), json)
 }
 
-/// One play-history entry for a track (keyed by content hash in [`History`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlayRecord {
     pub count: u32,
-    /// Unix epoch milliseconds of the most recent time this track became now.
     pub last_played_ms: u64,
 }
 
-/// Play counts / last-played times for the whole library, keyed by content hash.
 pub type History = BTreeMap<String, PlayRecord>;
 
-/// Load play history saved under `dir`.
-///
-/// Missing or corrupt → empty map (same policy as [`load_flags`]).
 pub fn load_history(dir: &Path) -> History {
     let bytes = match fs::read(dir.join(HISTORY_FILE)) {
         Ok(b) => b,
@@ -1219,14 +934,12 @@ pub fn load_history(dir: &Path) -> History {
     }
 }
 
-/// Persist `history` under `dir`, overwriting any previous save.
 pub fn save_history(dir: &Path, history: &History) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(history)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(HISTORY_FILE), json)
 }
 
-/// Increment play count and stamp `last_played_ms` for `hash`.
 pub fn record_play(history: &mut History, hash: &str, now_ms: u64) {
     let entry = history.entry(hash.to_string()).or_insert(PlayRecord {
         count: 0,
@@ -1236,44 +949,18 @@ pub fn record_play(history: &mut History, hash: &str, now_ms: u64) {
     entry.last_played_ms = now_ms;
 }
 
-/// One play, appended to `play-log.jsonl` when a track becomes `now`.
-///
-/// [`History`] answers "how often, and when last"; this answers "in what
-/// order". Replaying a track overwrites [`PlayRecord::last_played_ms`], so the
-/// aggregate cannot be turned back into a sequence -- the two files are not
-/// redundant.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlayLogEntry {
-    /// Unix epoch milliseconds, the same clock `PlayRecord::last_played_ms`
-    /// stamps.
     pub at_ms: u64,
-    /// `funkot_core::cache::content_hash` -- the key every other file here
-    /// uses, so a rename or a move keeps the entry pointing at the track.
     pub hash: String,
-    /// How the track reached the queue. `None` when the in-flight list could
-    /// not answer (the first `TrackStarted` of a run races the reserve push).
-    /// Recorded from the start even though no UI shows it yet: once a play has
-    /// happened, how it was chosen is gone, so this is the one field that
-    /// cannot be backfilled later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<QueueOrigin>,
 }
 
-/// Newest entries kept by [`compact_play_log`]. At ~123 bytes a line that is
-/// roughly 615 KB, or about 330 hours of listening at four minutes a track.
 pub const PLAY_LOG_MAX_ENTRIES: usize = 5_000;
 
-/// Size that triggers compaction (~8,000 lines), so a compaction runs about
-/// once per 3,000 further plays and its rewrite amortises to nothing.
 pub const PLAY_LOG_COMPACT_BYTES: u64 = 1_000_000;
 
-/// Append one play. O(1) in the log's length: no read, no re-serialise.
-///
-/// Deliberately *not* [`write_atomic`]: this is the hot path (it runs on the
-/// events thread under `SAVE_LOCK` on every track change), and the failure
-/// mode it trades for is a single truncated line, which [`load_play_log`]
-/// already drops. A whole-file rewrite here would also make the log's size cap
-/// double as a per-track cost, which is exactly the coupling append avoids.
 pub fn append_play_log(dir: &Path, entry: &PlayLogEntry) -> io::Result<()> {
     let mut line = serde_json::to_vec(entry)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1285,13 +972,6 @@ pub fn append_play_log(dir: &Path, entry: &PlayLogEntry) -> io::Result<()> {
     file.write_all(&line)
 }
 
-/// Read the log oldest-first.
-///
-/// Missing file → empty (first run). A line that will not parse is warned
-/// about and skipped, so one bad byte costs one play rather than the whole
-/// record -- the reason this file is lines rather than one JSON document.
-/// A truncated final line is the crash-mid-append case and lands here too, so
-/// it is expected rather than exceptional.
 pub fn load_play_log(dir: &Path) -> Vec<PlayLogEntry> {
     let bytes = match fs::read(dir.join(PLAY_LOG_FILE)) {
         Ok(b) => b,
@@ -1300,8 +980,6 @@ pub fn load_play_log(dir: &Path) -> Vec<PlayLogEntry> {
     parse_play_log(&bytes)
 }
 
-/// Pure body of [`load_play_log`], so the skip rules are testable without a
-/// temp dir.
 pub fn parse_play_log(bytes: &[u8]) -> Vec<PlayLogEntry> {
     let mut out = Vec::new();
     for (n, line) in bytes.split(|b| *b == b'\n').enumerate() {
@@ -1316,18 +994,12 @@ pub fn parse_play_log(bytes: &[u8]) -> Vec<PlayLogEntry> {
     out
 }
 
-/// `true` when the log has grown past `max_bytes`. One `metadata` call, so
-/// this is cheap enough to run on every track change.
 pub fn play_log_needs_compaction(dir: &Path, max_bytes: u64) -> bool {
     fs::metadata(dir.join(PLAY_LOG_FILE))
         .map(|m| m.len() > max_bytes)
         .unwrap_or(false)
 }
 
-/// Rewrite the log keeping only its newest `keep` entries.
-///
-/// [`write_atomic`] here and not on append: losing the whole file is this
-/// operation's failure mode, which is the one `write_atomic` exists for.
 pub fn compact_play_log(dir: &Path, keep: usize) -> io::Result<()> {
     let entries = load_play_log(dir);
     let start = entries.len().saturating_sub(keep);
@@ -1340,8 +1012,6 @@ pub fn compact_play_log(dir: &Path, keep: usize) -> io::Result<()> {
     write_atomic(&dir.join(PLAY_LOG_FILE), &bytes)
 }
 
-/// Drop the whole log. Paired with wiping [`History`] -- clearing play history
-/// has to clear both, or "履歴を消す" would leave a timestamped record behind.
 pub fn clear_play_log(dir: &Path) -> io::Result<()> {
     match fs::remove_file(dir.join(PLAY_LOG_FILE)) {
         Ok(()) => Ok(()),
@@ -1350,7 +1020,6 @@ pub fn clear_play_log(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Remove one entry matching `at_ms` from `play-log.jsonl`.
 pub fn remove_play_log_entry(dir: &Path, at_ms: u64) -> io::Result<bool> {
     let entries = load_play_log(dir);
     let matches = entries.iter().filter(|entry| entry.at_ms == at_ms).count();
@@ -1374,23 +1043,17 @@ pub fn remove_play_log_entry(dir: &Path, at_ms: u64) -> io::Result<bool> {
     Ok(true)
 }
 
-/// One chronological row: a single play, named.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PlayLogRow {
     pub at_ms: u64,
     pub track_hash: String,
     pub title: String,
     pub artist: String,
-    /// Absolute path when the track is still in the library.
     pub path: Option<String>,
     pub missing: bool,
-    /// `"manual"` / `"automatic"`, or `None` when it was not recorded. A
-    /// string rather than the enum for the same reason `FlaggedTrackRow.role`
-    /// is one: the frontend maps codes to text and need not track a Rust enum.
     pub origin: Option<String>,
 }
 
-/// One aggregate row: a track and how much of it has been heard.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PlayedTrackRow {
     pub track_hash: String,
@@ -1402,22 +1065,13 @@ pub struct PlayedTrackRow {
     pub last_played_ms: u64,
 }
 
-/// Both halves of the history tab.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PlayHistory {
-    /// Newest first, truncated to the caller's limit.
     pub log: Vec<PlayLogRow>,
-    /// `last_played_ms` descending, then title. Sourced from [`History`], so
-    /// plays from before the log existed still appear here -- only the
-    /// chronological half starts empty on upgrade.
     pub tracks: Vec<PlayedTrackRow>,
-    /// Entries in the file before the limit was applied.
     pub log_total: u32,
 }
 
-/// Trimmed tag value, or `None` when it is absent or blank. An empty tag is
-/// the same as no tag for display -- `session_metadata_for` treats it that way
-/// too, and a blank row would read as a bug.
 fn non_empty(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -1425,7 +1079,6 @@ fn non_empty(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Last path component, for a file with no usable title tag.
 fn file_name_of(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -1433,24 +1086,17 @@ fn file_name_of(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// Name resolved from the hash index for one content hash.
 struct HashName {
     path: String,
     title: String,
     artist: String,
 }
 
-/// hash → name, built by walking the index once.
-///
-/// Two files with identical content share a hash; the lowest path wins so the
-/// answer does not depend on map iteration order.
 fn names_by_hash(index: &HashIndex) -> BTreeMap<String, HashName> {
     let mut out: BTreeMap<String, HashName> = BTreeMap::new();
     for (path, entry) in index {
         let name = HashName {
             path: path.clone(),
-            // Same fallback as `TrackRow.title`: an untagged file is shown by
-            // its file name, never blank.
             title: non_empty(entry.title.as_deref()).unwrap_or_else(|| file_name_of(path)),
             artist: non_empty(entry.artist.as_deref()).unwrap_or_default(),
         };
@@ -1464,10 +1110,6 @@ fn names_by_hash(index: &HashIndex) -> BTreeMap<String, HashName> {
     out
 }
 
-/// Build both history views. Pure: no I/O, so the join rules are testable.
-///
-/// `limit` caps the chronological half only; the aggregate is the whole of
-/// `history`, which is already one row per track.
 pub fn build_play_history(
     log: &[PlayLogEntry],
     history: &History,
@@ -1510,9 +1152,6 @@ pub fn build_play_history(
             }
         })
         .collect();
-    // Most recently heard first; title then hash so equal stamps -- which the
-    // millisecond clock does produce for a same-millisecond restore -- do not
-    // reorder between calls.
     tracks.sort_by(|a, b| {
         b.last_played_ms
             .cmp(&a.last_played_ms)
@@ -1527,8 +1166,6 @@ pub fn build_play_history(
     }
 }
 
-/// Wire label for [`QueueOrigin`]. Kept next to the rows that carry it so the
-/// string the UI switches on has one definition.
 pub fn play_origin_label(origin: QueueOrigin) -> &'static str {
     match origin {
         QueueOrigin::Manual => "manual",
@@ -1538,7 +1175,6 @@ pub fn play_origin_label(origin: QueueOrigin) -> &'static str {
 
 const EMPTY_JSON_OBJECT: &[u8] = b"{}";
 
-/// Read a JSON file's raw bytes, or `{}` when missing / unreadable.
 fn read_json_or_empty_object(path: &Path) -> Vec<u8> {
     match fs::read(path) {
         Ok(bytes) => bytes,
@@ -1551,10 +1187,6 @@ fn stored_zip_options() -> zip::write::SimpleFileOptions {
         .compression_method(zip::CompressionMethod::Stored)
 }
 
-/// Write `library.json`, `flags.json`, and `meta.json` entries into `dest` (Stored).
-///
-/// Callers that need a consistent snapshot with concurrent saves should hold
-/// `SAVE_LOCK` around [`write_feedback_zip`].
 pub fn write_feedback_zip_bytes(
     library_json: &[u8],
     flags_json: &[u8],
@@ -1580,10 +1212,6 @@ pub fn write_feedback_zip_bytes(
     Ok(())
 }
 
-/// Snapshot `library.json` / `flags.json` from `data_dir` into a ZIP at `dest`.
-///
-/// Missing or unreadable sources become an `{}` entry. Does not touch
-/// `dismissed.json` / `queue.json`, and never moves or deletes the originals.
 pub fn write_feedback_zip(data_dir: &Path, dest: &Path, meta: &FeedbackMeta) -> io::Result<()> {
     let library = read_json_or_empty_object(&data_dir.join(LIBRARY_FILE));
     let flags = read_json_or_empty_object(&data_dir.join(FLAGS_FILE));
@@ -1592,20 +1220,12 @@ pub fn write_feedback_zip(data_dir: &Path, dest: &Path, meta: &FeedbackMeta) -> 
     write_feedback_zip_bytes(&library, &flags, &meta_json, dest)
 }
 
-/// Keys of track×role rows the listener dismissed from the edit list.
-///
-/// Does not remove the underlying flag pairs — only hides those rows from
-/// [`aggregate_flags`]. Keyed by [`dismiss_key`].
 pub type Dismissed = BTreeSet<String>;
 
-/// Build the map key for a dismissed track×role row.
 pub fn dismiss_key(track_hash: &str, role: &str) -> String {
     format!("{track_hash}\t{role}")
 }
 
-/// Load dismissed track×role keys saved under `dir`.
-///
-/// Missing or corrupt → empty set (same policy as [`load_flags`]).
 pub fn load_dismissed(dir: &Path) -> Dismissed {
     let bytes = match fs::read(dir.join(DISMISSED_FILE)) {
         Ok(b) => b,
@@ -1620,16 +1240,12 @@ pub fn load_dismissed(dir: &Path) -> Dismissed {
     }
 }
 
-/// Persist `dismissed` under `dir`, overwriting any previous save.
 pub fn save_dismissed(dir: &Path, dismissed: &Dismissed) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(dismissed)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(dir.join(DISMISSED_FILE), json)
 }
 
-/// Display / confidence / bar metadata for one content hash, used by
-/// [`aggregate_flags`]. Built by the command from the music folder scan
-/// (same sources as `track_row` / `analyzed_cache_entry`).
 #[derive(Debug, Clone)]
 pub struct FlagTrackMeta {
     pub title: String,
@@ -1639,30 +1255,24 @@ pub struct FlagTrackMeta {
     pub path: Option<String>,
     pub intro_bars: Option<u32>,
     pub outro_structure_bars: Option<u32>,
-    /// Mix-trigger bars derived by the engine (read-only in the UI).
     pub outro_bars: Option<u32>,
     pub intro_manual: bool,
     pub outro_manual: bool,
     pub analyzed: bool,
 }
 
-/// One partner of a [`FlaggedTrackRow`] (the other side of a flagged pair).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FlagPartner {
     pub track_hash: String,
     pub title: String,
     pub count: u32,
     pub missing: bool,
-    /// Absolute path when the partner is still in the library; API-only (not
-    /// persisted in `flags.json`).
     pub path: Option<String>,
 }
 
-/// One aggregated row: a track in one role (outgoing or incoming).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FlaggedTrackRow {
     pub track_hash: String,
-    /// `"outgoing"` (出る側) or `"incoming"` (入る側).
     pub role: String,
     pub title: String,
     pub artist: String,
@@ -1673,28 +1283,16 @@ pub struct FlaggedTrackRow {
     pub path: Option<String>,
     pub intro_bars: Option<u32>,
     pub outro_structure_bars: Option<u32>,
-    /// Mix-trigger bars derived by the engine (read-only in the UI).
     pub outro_bars: Option<u32>,
     pub intro_manual: bool,
     pub outro_manual: bool,
     pub analyzed: bool,
 }
 
-/// Title for a flagged track that is no longer in the library. Left empty on
-/// purpose: `FlaggedTrackRow.missing` / `FlagPartner.missing` already tell the
-/// UI what this row is, and the stand-in wording belongs in the UI's message
-/// catalogue with everything else the listener reads, not in a Rust literal
-/// this layer could never translate.
 const MISSING_TITLE: &str = "";
 const ROLE_OUTGOING: &str = "outgoing";
 const ROLE_INCOMING: &str = "incoming";
 
-/// Aggregate raw `from\tto` flags into track×role rows for the edit tab.
-///
-/// Pure: no I/O. `meta_by_hash` is whatever the caller resolved from the
-/// library scan; hashes absent from it become `missing` rows.
-/// Rows whose `(track_hash, role)` is in `dismissed` are omitted; partner
-/// tallies still come from the full `flags` map.
 pub fn aggregate_flags(
     flags: &Flags,
     meta_by_hash: &BTreeMap<String, FlagTrackMeta>,
@@ -1702,7 +1300,6 @@ pub fn aggregate_flags(
 ) -> Vec<FlaggedTrackRow> {
     use std::collections::HashMap;
 
-    // (track_hash, role) → (total count, partner_hash → count)
     let mut acc: HashMap<(String, &'static str), (u32, HashMap<String, u32>)> = HashMap::new();
 
     for (key, flag) in flags {
@@ -1849,7 +1446,6 @@ pub fn aggregate_flags(
         b.count
             .cmp(&a.count)
             .then_with(|| {
-                // outgoing before incoming
                 let ra = if a.role == ROLE_OUTGOING { 0 } else { 1 };
                 let rb = if b.role == ROLE_OUTGOING { 0 } else { 1 };
                 ra.cmp(&rb)
@@ -1896,7 +1492,6 @@ mod tests {
         assert_ne!(loaded[0].entry_id, loaded[1].entry_id);
     }
 
-    /// Fresh temp dir per test, cleaned up on drop.
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -1996,7 +1591,6 @@ mod tests {
         assert!(load_overrides(&dir.0).is_empty());
     }
 
-    /// A corrupt file must not take the library down with it.
     #[test]
     fn corrupt_overrides_file_is_empty_not_a_panic() {
         let dir = TempDir::new("overrides-corrupt");
@@ -2073,7 +1667,6 @@ mod tests {
         assert_eq!(loaded.provenance, HashIndexProvenance::Loaded);
     }
 
-    /// Second resolve with unchanged mtime+len must not re-read file bytes.
     #[test]
     fn resolve_reuses_cached_hash_when_mtime_and_len_match() {
         let dir = TempDir::new("hash-index-hit");
@@ -2084,7 +1677,6 @@ mod tests {
         let first = resolve_content_hash(&path, &mut index).unwrap();
         assert_eq!(index.len(), 1);
 
-        // Same size, different bytes; restore mtime so the fingerprint still hits.
         let mtime = fs::metadata(&path).unwrap().modified().unwrap();
         fs::write(&path, vec![9u8; 256]).unwrap();
         fs::File::options()
@@ -2096,7 +1688,6 @@ mod tests {
 
         let second = resolve_content_hash(&path, &mut index).unwrap();
         assert_eq!(first, second);
-        // Fresh content_hash would see the new bytes — proves we skipped it.
         let fresh = funkot_core::cache::content_hash(&path).unwrap();
         assert_ne!(first, fresh);
     }
@@ -2127,8 +1718,6 @@ mod tests {
         let mut index = HashIndex::new();
         let first = resolve_content_hash(&path, &mut index).unwrap();
 
-        // Same bytes, bumped mtime → miss → rehash; hash value stays equal but
-        // the index entry's mtime_ms must update.
         let old_mtime_ms = index[&path.to_string_lossy().into_owned()].mtime_ms;
         let later = std::time::SystemTime::UNIX_EPOCH
             + std::time::Duration::from_millis(old_mtime_ms + 5_000);
@@ -2190,8 +1779,6 @@ mod tests {
         assert!(!loaded.contains_key("/music/gone.flac"));
     }
 
-    /// Fingerprint + tags_cached hit must not open the file: changed bytes with
-    /// restored mtime still return the stored hash and title.
     #[test]
     fn resolve_library_reuses_tags_when_fingerprint_and_tags_cached() {
         let dir = TempDir::new("hash-index-tags-hit");
@@ -2231,15 +1818,11 @@ mod tests {
         assert_eq!(resolved.hash, "stale-hash");
         assert_eq!(resolved.title.as_deref(), Some("Cached Title"));
         assert_eq!(resolved.artist.as_deref(), Some("Cached Artist"));
-        // Fresh content_hash would see the new bytes — proves we skipped open
-        // for hashing; stored title would be wiped by a real probe of this
-        // non-audio payload, so keeping it proves tags were not re-probed.
         let fresh = funkot_core::cache::content_hash(&path).unwrap();
         assert_ne!(resolved.hash, fresh);
         assert_eq!(index[&key].title.as_deref(), Some("Cached Title"));
     }
 
-    /// Tiny PCM WAV (no tags) so `probe_audio_tags` succeeds with both None.
     fn write_silent_wav(path: &Path, fill: u8) {
         let sample_rate = 8_000u32;
         let channels = 1u16;
@@ -2252,7 +1835,7 @@ mod tests {
         buf.extend_from_slice(b"WAVE");
         buf.extend_from_slice(b"fmt ");
         buf.extend_from_slice(&16u32.to_le_bytes());
-        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&1u16.to_le_bytes());
         buf.extend_from_slice(&channels.to_le_bytes());
         buf.extend_from_slice(&sample_rate.to_le_bytes());
         let byte_rate = sample_rate * u32::from(channels) * (u32::from(bits) / 8);
@@ -2266,8 +1849,6 @@ mod tests {
         fs::write(path, buf).unwrap();
     }
 
-    /// Pre-tags index entry: fingerprint hit still skips content_hash, probes
-    /// tags once, and upgrades the entry to `tags_cached`.
     #[test]
     fn resolve_library_upgrades_old_entry_tags_without_rehash() {
         let dir = TempDir::new("hash-index-tags-upgrade");
@@ -2311,14 +1892,10 @@ mod tests {
         let entry = &index[&key];
         assert!(entry.tags_cached);
         assert_eq!(entry.hash, "kept-hash");
-        // Tagless WAV: both None is still a successful probe.
         assert!(entry.title.is_none());
         assert!(entry.artist.is_none());
     }
 
-    /// `resolve_content_hash` miss must not wipe a prior tags-cached entry's
-    /// fields only when fingerprint still hits — and on miss inserts
-    /// tags_cached: false without inventing tags.
     #[test]
     fn resolve_content_hash_miss_inserts_without_tags() {
         let dir = TempDir::new("hash-index-hash-only-miss");
@@ -2335,7 +1912,6 @@ mod tests {
         assert!(entry.artist.is_none());
     }
 
-    /// Fingerprint hit on `resolve_content_hash` must leave tags fields alone.
     #[test]
     fn resolve_content_hash_hit_preserves_tags() {
         let dir = TempDir::new("hash-index-hash-preserves-tags");
@@ -2409,7 +1985,6 @@ mod tests {
         assert!(!old.0.join(FLAGS_FILE).exists());
     }
 
-    /// The whole point is that this runs on every launch.
     #[test]
     fn migrate_with_nothing_to_move_is_a_no_op() {
         let old = TempDir::new("migrate-empty-old");
@@ -2420,7 +1995,6 @@ mod tests {
         assert!(load_flags(&new.0).is_empty());
     }
 
-    /// A leftover in the old location must never clobber the live file.
     #[test]
     fn migrate_keeps_the_destination_when_both_exist() {
         let old = TempDir::new("migrate-both-old");
@@ -2438,7 +2012,6 @@ mod tests {
         assert_eq!(load_queue(&new.0).unwrap(), vec![PathBuf::from("/music/live.flac")]);
     }
 
-    /// `data_dir == cache_dir` would otherwise rename a file onto itself.
     #[test]
     fn migrate_from_the_same_directory_leaves_the_file_alone() {
         let dir = TempDir::new("migrate-same");
@@ -2652,8 +2225,6 @@ mod tests {
             log.iter().map(|e| e.at_ms).collect::<Vec<_>>(),
             vec![100, 200, 300],
         );
-        // The same track twice is two entries -- the thing `history.json`
-        // cannot express.
         assert_eq!(log[0].hash, "a");
         assert_eq!(log[2].hash, "a");
         assert_eq!(log[0].origin, Some(QueueOrigin::Manual));
@@ -2673,7 +2244,6 @@ mod tests {
 
     #[test]
     fn play_log_survives_a_truncated_final_line() {
-        // The crash-mid-append case: everything written before it stays.
         let log = parse_play_log(b"{\"at_ms\":1,\"hash\":\"a\"}\n{\"at_ms\":2,\"ha");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].at_ms, 1);
@@ -2752,7 +2322,6 @@ mod tests {
         assert_eq!(view.log[0].origin.as_deref(), Some("automatic"));
         assert_eq!(view.log[1].origin, None);
         assert!(!view.log[0].missing);
-        // Aggregate: one row per track, most recently heard first.
         assert_eq!(
             view.tracks
                 .iter()
@@ -2778,7 +2347,6 @@ mod tests {
         let view = build_play_history(&log, &history, &HashIndex::new(), 2);
         assert_eq!(view.log.len(), 2);
         assert_eq!(view.log_total, 3);
-        // The aggregate is one row per track already, so the limit leaves it alone.
         assert_eq!(view.tracks.len(), 2);
     }
 
@@ -2812,8 +2380,6 @@ mod tests {
 
     #[test]
     fn build_play_history_picks_the_lowest_path_for_a_shared_hash() {
-        // Two identical files share a content hash; the answer must not depend
-        // on map iteration order.
         let log = vec![play(1, "same", None)];
         let mut index = HashIndex::new();
         let (path, entry) = indexed("/music/z.m4a", "same", Some("Z"));
@@ -2853,7 +2419,6 @@ mod tests {
         }
     }
 
-    /// Outgoing and incoming of the same pair are separate parent rows.
     #[test]
     fn aggregate_splits_outgoing_and_incoming() {
         let mut flags = Flags::new();
@@ -2867,7 +2432,7 @@ mod tests {
         assert_eq!(rows[0].role, ROLE_OUTGOING);
         assert_eq!(rows[0].track_hash, "aaa");
         assert_eq!(rows[0].title, "Alpha");
-        assert!(rows[0].low_confidence); // outro
+        assert!(rows[0].low_confidence);
         assert_eq!(rows[0].partners.len(), 1);
         assert_eq!(rows[0].partners[0].track_hash, "bbb");
         assert_eq!(
@@ -2883,12 +2448,11 @@ mod tests {
         assert_eq!(rows[1].role, ROLE_INCOMING);
         assert_eq!(rows[1].track_hash, "bbb");
         assert_eq!(rows[1].title, "Beta");
-        assert!(rows[1].low_confidence); // intro
+        assert!(rows[1].low_confidence);
         assert_eq!(rows[1].partners[0].track_hash, "aaa");
         assert!(rows[1].analyzed);
     }
 
-    /// Multiple partners for one track×role sum into one parent count.
     #[test]
     fn aggregate_sums_counts_across_partners() {
         let mut flags = Flags::new();
@@ -2912,8 +2476,6 @@ mod tests {
         assert_eq!(out.partners[1].count, 2);
     }
 
-    /// Parent sort: count desc → outgoing before incoming → title asc.
-    /// `last_flagged_ms` must not affect order.
     #[test]
     fn aggregate_sorts_by_count_role_title() {
         let mut flags = Flags::new();
@@ -2940,8 +2502,6 @@ mod tests {
         meta_map.insert("eee".into(), meta("Epsilon", "", false, false));
 
         let rows = aggregate_flags(&flags, &meta_map, &Dismissed::new());
-        // count=3: ccc outgoing, ddd incoming
-        // count=1: aaa outgoing, bbb outgoing (+incoming from aaa), eee incoming, …
         assert_eq!(rows[0].track_hash, "ccc");
         assert_eq!(rows[0].role, ROLE_OUTGOING);
         assert_eq!(rows[0].count, 3);
@@ -2949,7 +2509,6 @@ mod tests {
         assert_eq!(rows[1].role, ROLE_INCOMING);
         assert_eq!(rows[1].count, 3);
 
-        // Among count=1 outgoing: Alpha before Beta (title asc); outgoing before incoming.
         let count1: Vec<_> = rows.iter().filter(|r| r.count == 1).collect();
         let outgoings: Vec<_> = count1
             .iter()
@@ -2983,10 +2542,8 @@ mod tests {
             .find(|r| r.track_hash == "zzz")
             .expect("missing incoming");
         assert!(missing.missing);
-        // No title: `missing` is the signal, and the UI's catalogue owns the
-        // stand-in wording (see MISSING_TITLE).
         assert_eq!(missing.title, "");
-        assert!(!missing.low_confidence); // never ⚠ on missing
+        assert!(!missing.low_confidence);
         assert_eq!(missing.role, ROLE_INCOMING);
         assert!(!missing.analyzed);
         assert_eq!(missing.path, None);
@@ -3009,7 +2566,6 @@ mod tests {
         assert_eq!(out.partners[0].path, None);
     }
 
-    /// Dismissing one side of a pair hides only that row; flags stay intact.
     #[test]
     fn aggregate_hides_dismissed_row_only() {
         let mut flags = Flags::new();
@@ -3069,7 +2625,6 @@ mod tests {
         assert!(load_dismissed(&dir.0).is_empty());
     }
 
-    /// Partners: count desc, then title asc.
     #[test]
     fn aggregate_sorts_partners_by_count_then_title() {
         let mut flags = Flags::new();
@@ -3117,14 +2672,12 @@ mod tests {
         buf
     }
 
-    /// Present files are stored under exact entry names; missing ones become `{}`.
     #[test]
     fn feedback_zip_stores_files_and_empty_object_fallback() {
         let dir = TempDir::new("feedback-zip");
         let library = br#"{"aaa":{"intro_bars":16}}"#;
         fs::write(dir.0.join(LIBRARY_FILE), library).unwrap();
         fs::write(dir.0.join("playlists.json"), br#"{"name":"private set","path":"private/music.wav"}"#).unwrap();
-        // flags.json deliberately absent → `{}`
 
         let meta = FeedbackMeta {
             version_name: "0.1.0".into(),
@@ -3151,7 +2704,6 @@ mod tests {
         assert!(!read_zip_entry(&dest, META_FILE)
             .windows(b"nickname".len())
             .any(|w| w == b"nickname"));
-        // Originals stay put (flags was never created).
         assert_eq!(fs::read(dir.0.join(LIBRARY_FILE)).unwrap(), library);
         assert!(!dir.0.join(FLAGS_FILE).exists());
         assert!(!dir.0.join(QUEUE_FILE).exists());
@@ -3221,7 +2773,6 @@ mod tests {
         let restored = restored_pending(&session.in_flight, &[]);
         save_restored_queue_and_clear_session(&dir.0, &VecDeque::from(restored)).unwrap();
 
-        // Listener clears the preloaded row before pressing Start.
         save_queue(&dir.0, &VecDeque::<QueueItem>::new()).unwrap();
 
         let at_start = restored_pending(
@@ -3297,10 +2848,6 @@ mod tests {
         assert_eq!(load_settings(&dir.0).locale.as_deref(), Some("id"));
     }
 
-    /// A settings file written before this key existed must stay `None`, not
-    /// pick up a language: `None` is what makes the UI follow the platform
-    /// locale, and stamping one in would silently freeze the language for
-    /// every existing install.
     #[test]
     fn settings_old_json_without_locale_stays_unset() {
         let dir = TempDir::new("settings-legacy-locale");
@@ -3586,8 +3133,6 @@ mod tests {
         );
     }
 
-    /// Resuming after the last track in the folder wraps back to the start,
-    /// same as `HostSource::next`'s own wrap-around.
     #[test]
     fn restored_folder_pos_wraps_after_the_last_track() {
         let tracks = vec![
@@ -3619,8 +3164,6 @@ mod tests {
         assert_eq!(restored_folder_pos(&tracks, None), 0);
     }
 
-    /// The duplicate case `retire_revoked` exists for: the actively-playing
-    /// entry at index `0` must survive, only the later reservation goes.
     #[test]
     fn retire_revoked_removes_exact_id_among_duplicate_paths() {
         let mut in_flight = vec![
@@ -3771,8 +3314,6 @@ mod tests {
         );
     }
 
-    /// Empty Loaded index + baseline done, then a later path is stamped; a
-    /// pre-existing None stays None.
     #[test]
     fn empty_baseline_then_new_path_is_stamped() {
         let dir = TempDir::new("arrivals-empty-baseline");
@@ -3827,8 +3368,6 @@ mod tests {
         );
     }
 
-    /// Incomplete recovery must not save; a later complete baseline must not
-    /// stamp paths that were already in the (unsaved) reconstructed index as NEW.
     #[test]
     fn incomplete_recovery_skips_save_and_complete_does_not_false_stamp() {
         let plan = arrivals_commit_plan(ArrivalsKind::Recovery, false);
@@ -3852,11 +3391,9 @@ mod tests {
                 added_order: None,
             },
         );
-        // Incomplete: do not save. Next complete recovery applies baseline markers.
         let scan_keys: BTreeSet<String> = ["/music/existing.flac".into()].into_iter().collect();
         apply_baseline_markers(&mut index, &scan_keys);
         let original_keys = scan_keys.clone();
-        // Normal would stamp only keys absent from original_keys — existing stays None.
         stamp_new_paths(&mut index, &original_keys, "2026-08-30T00:00:00Z");
         assert!(index["/music/existing.flac"].first_seen.is_none());
     }
@@ -3964,7 +3501,6 @@ mod tests {
                 added_order: Some(3),
             },
         );
-        // Bump mtime → miss → same content hash.
         let later = std::time::SystemTime::UNIX_EPOCH
             + std::time::Duration::from_millis(mtime_ms + 5_000);
         fs::File::options()
@@ -4120,7 +3656,6 @@ mod tests {
             labeling_mode: true,
             ..Default::default()
         };
-        // Concurrent readers during rename must not fall to defaults via corrupt JSON.
         let dir_path = dir.0.clone();
         let old_r = old.clone();
         let new_r = new.clone();
@@ -4357,7 +3892,7 @@ mod metadata_migration_tests {
         let hash = resolve_content_hash(&path, &mut index).unwrap();
         let key = path.to_string_lossy().into_owned();
         let entry = index.get_mut(&key).unwrap();
-        entry.tags_cached = true; // Old title/artist cache must still migrate.
+        entry.tags_cached = true;
         entry.first_seen = Some("2024-01-01T00:00:00Z".into());
         entry.added_order = Some(7);
         let hashes = Cell::new(0); let probes = Cell::new(0);

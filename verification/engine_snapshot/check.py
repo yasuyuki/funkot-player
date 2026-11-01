@@ -18,7 +18,6 @@ TESTS = [
     "proof::reader_can_span_two_serialized_publishes",
     "proof::quiescent_publish_is_exactly_the_written_pair",
 ]
-# Production and test publishes of this snapshot. A different set fails the run.
 WRITER_COUNTS = {
     "src-tauri/src/lib.rs": 4,
     "src-tauri/src/playlist_service.rs": 6,

@@ -1,7 +1,3 @@
-//! Occurrence-level progress, shared by the service and the Kani driver.
-//! IDs need equality only: production borrows catalog IDs; proofs quantify
-//! their equality relations. Paths, source generations and epochs are not IDs.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Occurrence<I> {
     pub playlist: I,
@@ -23,7 +19,6 @@ pub enum Observation<I> {
     Current(usize),
     Failed { index: usize, reason_present: bool },
     Unavailable { occurrence: Occurrence<I>, reason_present: bool },
-    // Preparation, exhaustion and lifecycle notifications are not starts.
     Passive,
 }
 
@@ -42,10 +37,6 @@ pub struct Update {
     pub accepted: Option<Cause>,
 }
 
-/// Apply one observation to one catalog occurrence. `target` comes from the
-/// current catalog run/membership, not from the event. Claims bind a unique
-/// engine index to the original occurrence, including after source switches.
-/// A delayed start may refer to a retired (non-live), but not cancelled, claim.
 pub fn observe<I: Copy + Eq>(
     target: Option<Occurrence<I>>,
     before: Progress,

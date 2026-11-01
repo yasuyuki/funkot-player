@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Local and Checks use this same bounded verification, after tool preparation.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 image=funkot-player-kani:0.68.0

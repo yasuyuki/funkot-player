@@ -34,17 +34,7 @@
   );
   let labelProgress = $derived(store.labelProgress);
 
-  // `lastError` is included, not just `phase === "failed"`, because the
-  // always-on `#log` from legacy/index.html is gone (behind the ⋮ menu
-  // now): without this an `invoke` failure that does not also flip the
-  // phase (e.g. a failed `skip_next` while still playing) would be
-  // completely invisible.
   let showLogLink = $derived(phase === "failed" || store.lastError !== null);
-  // Store certification path: when Start fails for an empty library, offer
-  // the same Music-folder opener as Library / OverflowMenu next to the log
-  // link. The substring has to stay in step with `ensure_tracks_available`
-  // (src-tauri/src/lib.rs), which spells the error `need >= 1 track in <dir>,
-  // found 0`.
   let showOpenMusic = $derived(
     store.lastError !== null && store.lastError.includes("need >= 1 track"),
   );
@@ -101,20 +91,11 @@
     {#if nowRow}
       <FavoriteButton path={nowRow.path} contentHash={nowRow.content_hash} title={nowRow.title} />
     {/if}
-    <!-- n / total is the folder-scan position: a meter for the labelling
-         pass, not for listening. Off the play screen unless labelling mode is
-         on, where it is the only way to tell how far through the folder the
-         session has got. -->
     {#if store.labelingMode}
       <span class="progress">{labelProgress.current} / {labelProgress.total}</span>
     {/if}
   </div>
 
-  <!-- Reserved height on the title/artist block: the title/artist arrive a
-       poll cycle after the phase does (they come from `now_playing` + a
-       library lookup), and without a fixed minimum height here the
-       Transport buttons below jump down the moment they land -- exactly
-       the #now behaviour legacy/index.html reserved height for. -->
   <div class="title-block">
     <div class="title">{store.nowTitle ?? ""}</div>
     <div class="artist">{store.nowArtist}</div>
@@ -186,7 +167,6 @@
   }
 
   .title-block {
-    /* Two lines' worth of reserved height -- see the comment in the markup. */
     min-height: calc(var(--font-size-md) * 1.5 + var(--font-size-sm) * 1.5);
     margin-bottom: var(--space-sm);
   }
@@ -226,8 +206,6 @@
   .bar-fill {
     height: 100%;
     background: var(--color-status-playing);
-    /* No transition: this is driven by a 250ms interpolation tick already,
-       animating on top of that would make the bar visibly lag itself. */
   }
 
   .error-actions {

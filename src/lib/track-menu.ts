@@ -1,18 +1,7 @@
-// The right-click / long-press track menu, minus the DOM.
-//
-// Two things the library and the history pane both need and neither should
-// own: the gesture that opens the menu, and where the popup lands once it is
-// open. A mouse right-click arrives as one `contextmenu` event and needs
-// nothing; a finger has to be timed, and told apart from the start of a
-// scroll. Keeping both here is what makes the two panes behave identically —
-// and, being rune-free, testable under the repo's node:test harness.
-
 /// How long a finger stays down before the menu opens. Chrome's own
 /// long-press threshold is about this, so a phone user already expects it.
 export const LONG_PRESS_MS = 500;
 
-/// Movement that turns a press into a scroll. A list of rows is scrolled far
-/// more often than it is long-pressed, so the press loses ties.
 export const LONG_PRESS_MOVE_PX = 10;
 
 /// Distance between the pointer and the popup's near corner.
@@ -28,12 +17,6 @@ export interface MenuPoint {
   y: number;
 }
 
-/// Where to draw the popup so it stays on screen.
-///
-/// The pointer is the near corner (offset by [`MENU_GAP_PX`]); when that
-/// would overflow, the menu flips to the other side of the pointer instead of
-/// being nudged, which is what keeps it from covering the row it belongs to.
-/// The clamp afterwards is for the case where neither side fits.
 export function clampMenuPosition(
   at: MenuPoint,
   menu: { width: number; height: number },
@@ -50,10 +33,6 @@ export function clampMenuPosition(
   };
 }
 
-/// What the menu shows as the current answer: the human label when there is
-/// one, else what analysis decided. Same rule as the now-playing badge
-/// (`shownFunkot` in `NowCard.svelte`), so the two never disagree about the
-/// same track. `null` is "no such row", not "unlabeled".
 export function shownVerdict(
   row: { is_funkot: boolean; label: boolean | null } | null | undefined,
 ): boolean | null {
@@ -61,8 +40,6 @@ export function shownVerdict(
   return row.label ?? row.is_funkot;
 }
 
-/// The subset of `PointerEvent` the gesture reads. Narrow on purpose: a real
-/// event satisfies it, and so does a plain object in a test.
 interface PressPoint {
   clientX: number;
   clientY: number;

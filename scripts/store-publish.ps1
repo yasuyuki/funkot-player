@@ -1,19 +1,3 @@
-# Stage a Microsoft Store update as a draft submission, then stop.
-#
-# This is the API path, and it needs Entra ID credentials in msstore. The
-# account does not have a tenant yet, so the browser path in
-# scripts/store-draft.mjs is what runs today; this one waits for the tenant
-# (docs/store-submission.md).
-#
-#   pwsh scripts/store-publish.ps1 -Msix C:\path\Funkot_0.8.0.0_x64.msix
-#   pwsh scripts/store-publish.ps1 -Msix ... -DryRun   # no API call at all
-#
-# The listing text is not duplicated here: scripts/store-notes.mjs reads it
-# from the paste blocks in docs/store-submission.md, the same blocks
-# scripts/check-doc-claims.sh already guards. Edit the document, not a copy.
-#
-# msstore must already hold Entra ID credentials (`msstore reconfigure`, run by
-# the account owner). This script never reads, prints or stores them.
 param(
     [Parameter(Mandatory = $true)][string]$Msix,
     [string]$Version,
@@ -68,8 +52,6 @@ function Invoke-MsStore {
     return ($output | Out-String)
 }
 
-# --- 1. version, identity, listing text -------------------------------------
-
 if (-not (Test-Path -LiteralPath $Msix)) { throw "no package at $Msix" }
 $msixPath = (Resolve-Path -LiteralPath $Msix).ProviderPath
 
@@ -90,8 +72,6 @@ foreach ($field in 'Name', 'Publisher') {
     }
 }
 
-# store-notes.mjs also fails when a heading names a different version, so a
-# stale block cannot be shipped with a new package.
 $notesJson = & node (Join-Path $repoRoot 'scripts\store-notes.mjs') $Version 2>&1
 if ($LASTEXITCODE -ne 0) { throw "scripts/store-notes.mjs failed:`n$($notesJson | Out-String)" }
 $notes = ($notesJson | Out-String | ConvertFrom-Json).notes
@@ -109,8 +89,6 @@ if ($DryRun) {
     Write-Host 'OK: dry run -- nothing was sent to Partner Center'
     return
 }
-
-# --- 2. do not walk over a submission that is already moving ----------------
 
 Invoke-MsStore -Arguments @('info') | Out-Null
 
@@ -135,8 +113,6 @@ Write-Host "status   $($status.Trim())"
 if (-not $Force -and $status -match '(?i)in ?progress|pending|certification|publishing') {
     throw 'a submission looks pending -- review it in Partner Center. Re-run with -Force only if that draft can be discarded'
 }
-
-# --- 3. upload the package (draft), then the listing text -------------------
 
 Write-Host ''
 Write-Host 'uploading the package as a draft...'

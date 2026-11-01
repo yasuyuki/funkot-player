@@ -17,14 +17,11 @@ tauri-build = { version = "2", features = [] }
 # `tauri build` / `tauri android build` pass this feature; `tauri dev` does not.
 # Without it every build is a dev build, so a plain `cargo build` produces a
 # binary that shows "Could not connect to localhost" with no dev server up.
-# DO NOT REMOVE.
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 verified-capture = []
 
 [dependencies]
-# `devtools` is the inspector API. We only *open* it in debug desktop
-# (see `run` setup). Release Store builds must not auto-open it.
 tauri = { version = "2", features = ["devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,28 +30,15 @@ unicode-normalization = "0.1"
 tempfile = "3"
 cpal = "0.18"
 log = "0.4"
-# Embedded tags for Android MediaSession title/artist (probe only; no decode).
 symphonia = { version = "0.6", default-features = false, features = [
     "mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "alac", "id3v2",
 ] }
-# Feedback ZIP (`share_feedback`): Stored only, no extra codecs.
 zip = { version = "9", default-features = false }
 
-# Path dependency on purpose: the two repos are kept separate to stop sources
-# mixing, not to make this one build in isolation. ./dev.sh mounts the sibling
-# checkout at the matching location. The exact adopted commit is tracked in
-# ../funkot-core.commit and verified by build.rs and the build entry points.
-#
-# The sibling is `funkot-autodj-for-ui`, a second checkout of the funkot-autodj
-# repo reserved for this player: a path dependency builds whatever is checked
-# out, so sharing one checkout with engine work meant an unrelated branch switch
-# changed this build. Engine work stays in `funkot-autodj`; this one only moves
-# when the player needs it.
 funkot-core = { path = "../../funkot-autodj-for-ui/funkot-core" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
-# End the Android process without WebView/graphics libc finalizers.
 libc = "0.2"
 # Only used to hand the Android Context to cpal's AAudio host; see JNI_OnLoad in
 # src/lib.rs. Versions must match what cpal 0.18 links against.
@@ -66,16 +50,14 @@ env_logger = "0.11"
 # wayland は親ウィンドウ識別子のため。無いと Wayland の set_parent はポータルに渡らない。
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", "wayland"] }
 
-# The shipped APK is a --debug build (see README), so the dev profile is what
-# runs on the phone. Unoptimized, funkot-core's decode/analysis/stretch is ~26x
-# slower: a full-track Preserve stretch measured 162s instead of 6.3s, which is
-# longer than the 20s head preview `prepare_first_live` plays while it runs, so
-# the first track went silent for minutes waiting for the Upgrade.
+# Debug APKs (`tauri android build --debug`) run the dev profile. Unoptimized,
+# funkot-core's decode/analysis/stretch is ~26x slower: a full-track Preserve
+# stretch measured 162s instead of 6.3s, longer than the 20s head preview
+# `prepare_first_live` plays while it runs.
 #
-# funkot-autodj sets this in its own workspace root, but profile settings come
-# from the workspace being built -- as a path dependency here, funkot-core got
-# this crate's (absent) settings instead. Do not delete without making the
-# Android build --release.
+# Cargo reads profile settings only from the root manifest of the workspace
+# being built, so funkot-autodj's own profile does not reach this path
+# dependency.
 #
 # "*" covers signalsmith-stretch too: cc passes OPT_LEVEL to the C++ compiler,
 # so the header-only DSP is what the -O0 penalty mostly lands on.

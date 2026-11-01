@@ -72,7 +72,6 @@ class BrowserThemeController implements ThemeController {
     try {
       this.options.storage?.setItem(THEME_STORAGE_KEY, preference);
     } catch {
-      // A blocked storage write must not prevent the listener from using this choice now.
     }
     this.apply();
   }

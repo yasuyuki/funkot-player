@@ -1,10 +1,4 @@
 <script lang="ts">
-  // The second line of a pane's toolbar while multi-select is on: how many are
-  // ticked, select-all / clear, and the bulk add.
-  //
-  // Takes props only -- no store access -- so the library and the history pane
-  // can both use it without either one's ordering or filtering rules leaking
-  // in here.
   import { i18n } from "../lib/i18n.svelte";
 
   let {
@@ -71,9 +65,6 @@
 </div>
 
 <style>
-  /* Wraps as the toolbar's second line rather than sticking on its own: the
-     toolbar's `top` is a hand-computed safe-area calc, and a second sticky
-     element would need a second, height-dependent copy of it. */
   .bar {
     display: flex;
     flex-wrap: wrap;

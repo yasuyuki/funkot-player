@@ -163,7 +163,6 @@ test("Library and tag review states", async ({ page }, testInfo) => {
   await expect(library.getByLabel("Tag candidate", { exact: true })).toHaveCount(0);
   await expect(library.locator("li.row")).toHaveCount(5);
   await toggle.click();
-  // Exercise combined predicates and removal through the single toolbar entry.
   await library.getByLabel("Production year unset", { exact: true }).check();
   await expect(library.locator("li.row")).toHaveCount(3);
   await library.getByLabel("Tag candidate", { exact: true }).selectOption("year:2024");
@@ -198,7 +197,6 @@ test("Library and tag review states", async ({ page }, testInfo) => {
   await dialog.getByLabel("Production year", { exact: true }).selectOption("auto");
   await dialog.getByLabel("Production year", { exact: true }).selectOption("unset");
   await dialog.getByLabel("Production year", { exact: true }).selectOption("unchanged");
-  // Exercise warnings through the existing store seam; no persistence is mocked.
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");
     store.trackTags = { ...store.trackTags, revision: "changed-elsewhere", store_status: "invalid" };

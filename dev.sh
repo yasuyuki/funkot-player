@@ -1,32 +1,4 @@
 #!/bin/sh
-# Run a command inside the build container.
-#
-# This repo and the sibling funkot-autodj-for-ui checkout are mounted under
-# /work/by-core... with distinct paths for each host worktree,
-# while ../../funkot-autodj-for-ui from src-tauri still resolves to the core mount.
-#
-# funkot-autodj-for-ui is a second checkout of the funkot-autodj repo. Official
-# builds require its clean HEAD to equal funkot-core.commit; point
-# FUNKOT_CORE_REPO at a clean sibling with that SHA, or use the explicit
-# FUNKOT_CORE_CANDIDATE_SHA route for an unmerged candidate.
-#
-# Usage:
-#   ./dev.sh npx tauri android build --debug --target aarch64
-#   ./dev.sh cargo test --manifest-path src-tauri/Cargo.toml
-#
-# ADB=1 additionally shares the host network, for talking to a device over
-# wireless debugging. It first ensures the persistent adb server container
-# (`funkot-player-adb`, via ./scripts/adb-server.sh start) is running, then
-# runs as a client against that server on port 5037:
-#   ADB=1 ./dev.sh adb devices -l
-#
-# Connect once per session; later ADB=1 ./dev.sh adb ... calls reuse the same
-# device list. Multiple ADB=1 clients at once are fine (they share one server).
-# Commands that occupy the device (e.g. `android dev`) can still conflict with
-# each other. Do not `adb kill-server` casually — that stops the persistent
-# server; use ./scripts/adb-server.sh stop instead. Pairing keys live in the
-# funkot-player-android-home volume as before.
-#
 # Hot reload on the device needs BOTH --host 127.0.0.1 and adb reverse. Without
 # --host the Tauri CLI rewrites devUrl to WSL2's NAT address, which the phone
 # cannot reach, and the window comes up blank; setting TAURI_DEV_HOST first does
@@ -48,10 +20,6 @@
 #   ./dev.sh npm run build
 #   ./dev.sh cargo build --manifest-path src-tauri/Cargo.toml --release --features custom-protocol
 #   GUI=1 ./dev.sh /cargo-target/release/funkot-player
-#
-# /root/.android is a named volume on every run, not just for adb: the debug
-# keystore lives there, and letting it be regenerated per build changes the APK
-# signature and makes `adb install -r` fail with INSTALL_FAILED_UPDATE_INCOMPATIBLE.
 set -eu
 cd "$(dirname "$0")"
 
@@ -96,7 +64,6 @@ FUNKOT_CARGO_TARGET_EXPLICIT=0
 FUNKOT_CARGO_TARGET=${FUNKOT_CARGO_TARGET:-funkot-player-cargo-target}
 export FUNKOT_CARGO_TARGET_EXPLICIT
 
-# Core paths shared by player checkouts keep the same container path.
 core_host=$(CDPATH= cd "$CORE_DIR" && pwd -P)
 player_host=$(pwd -P)
 core_seg=$(printf '%s' "$core_host" | sha256sum | cut -d ' ' -f 1)
@@ -105,7 +72,6 @@ bind_parent=/work/by-core${core_seg}
 PLAYER_MOUNT=${bind_parent}/${player_seg}
 CORE_MOUNT=${bind_parent}/funkot-autodj-for-ui
 
-# Leftover worktree target dirs are not the Cargo output under this design.
 if [ -d "$PWD/src-tauri/target" ] && [ ! -L "$PWD/src-tauri/target" ]; then
     echo "note: $PWD/src-tauri/target is not the Cargo output; container store is $STORE_MOUNT" >&2
 fi
@@ -114,10 +80,6 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker build -t "$IMAGE" .
 fi
 
-# A lifecycle-managed invocation receives an opaque v1 context from the public
-# runner. The specialized owner creates and registers exactly one task generation
-# before Docker can create its dedicated Cargo volume. Ordinary invocations keep
-# the long-lived shared target volume above unchanged.
 MANAGED_OWNER=0
 if [ -n "${WORKSPACE_LIFECYCLE_CONTEXT:-}" ]; then
     OWNER_INTERPRETER=$(python3 -c 'import json, os; print(json.loads(os.environ["WORKSPACE_LIFECYCLE_CONTEXT"])["owner_receipt_argv"][0])') || {
@@ -176,16 +138,6 @@ else
     NET=""
 fi
 
-# GUI=1 runs the desktop build with a screen and a sound card: the Wayland
-# and PulseAudio sockets from WSLg are passed in, and cpal's ALSA host
-# reaches Pulse through the pulse plugin (see /etc/asound.conf in the Dockerfile).
-#
-# The container must run as the WSLg session user (the wayland-0 owner) with
-# host PID/IPC. Root in a PID namespace is what produced a Windows taskbar
-# button and no window (weston ClientGetAppidReq pid:0). Default backend is
-# Wayland so RAIL binds a real Win32 window. GUI_X11=1 restores GDK_BACKEND=x11
-# for xdotool/import from a second container; that path can ghost again.
-#
 # The app's data lives on the host so the analysis cache and the queue survive a
 # restart; drop the tracks to play into .desktop-data/Music.
 GUI_ARGS=""
@@ -246,7 +198,6 @@ if [ "$MANAGED_OWNER" != 1 ]; then
     "$IMAGE" sh -c 'core=$1; shift; python3 scripts/dev_source_guard.py --source-root "$PWD" --source-root "$PWD/src-tauri" --source-root "$core" -- "$@"; status=$?; '"$CHOWN"'; exit $status' -- "$CORE_MOUNT" "$@"
 fi
 
-# Managed failures still must remove empty Docker-created mountpoint dirs.
 set +e
 # shellcheck disable=SC2086
 docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \

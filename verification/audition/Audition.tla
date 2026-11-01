@@ -52,93 +52,90 @@ MainAudible == installed = 0 /\ ~paused
 BannerShown == auditioning \/ preparing
 Building == \E r \in Req : pc[r] = "building"
 
-\* ---- audition_transition(r) and prepare_audition ----
 Listen(r) ==
     /\ pc[r] \in {"idle", "done", "failed"}
-    /\ Serialize => ~LockHeld           \* lib.rs:4247
-    /\ preparing' = TRUE                \* lib.rs:4294
-    /\ before' = [before EXCEPT ![r] = paused]  \* lib.rs:4295
-    /\ paused' = TRUE                   \* lib.rs:4295
+    /\ Serialize => ~LockHeld           \* lib.rs:3226
+    /\ preparing' = TRUE                \* lib.rs:3257
+    /\ before' = [before EXCEPT ![r] = paused]  \* lib.rs:3258
+    /\ paused' = TRUE                   \* lib.rs:3258
     /\ pc' = [pc EXCEPT ![r] = "building"]
     /\ UNCHANGED <<auditioning, installed, wantMain, rpc, tpc>>
 
 PrepareFails(r) ==
     /\ pc[r] = "building"
-    /\ paused' = IF RestoreOnFailure THEN before[r] ELSE FALSE  \* lib.rs:4298
-    /\ preparing' = FALSE               \* lib.rs:4300
+    /\ paused' = IF RestoreOnFailure THEN before[r] ELSE FALSE  \* lib.rs:3261
+    /\ preparing' = FALSE               \* lib.rs:3263
     /\ pc' = [pc EXCEPT ![r] = "failed"]
     /\ UNCHANGED <<auditioning, installed, wantMain, before, rpc, tpc>>
 
 RaiseAuditioning(r) ==
     /\ pc[r] = "building"
-    /\ auditioning' = TRUE              \* lib.rs:4210
+    /\ auditioning' = TRUE              \* lib.rs:3191
     /\ pc' = [pc EXCEPT ![r] = "flagged"]
     /\ UNCHANGED <<paused, preparing, installed, wantMain, before, rpc, tpc>>
 
 SwapInAudition(r) ==
     /\ pc[r] = "flagged"
-    /\ installed' = r                   \* lib.rs:4219-4220
+    /\ installed' = r                   \* lib.rs:3198-3199
     /\ pc' = [pc EXCEPT ![r] = "swapped"]
     /\ UNCHANGED <<paused, auditioning, preparing, wantMain, before, rpc, tpc>>
 
 UnmuteAudition(r) ==
     /\ pc[r] = "swapped"
-    /\ paused' = FALSE                  \* lib.rs:4226
+    /\ paused' = FALSE                  \* lib.rs:3205
     /\ pc' = [pc EXCEPT ![r] = "unmuted"]
     /\ UNCHANGED <<auditioning, preparing, installed, wantMain, before, rpc, tpc>>
 
 EndPreparing(r) ==
     /\ pc[r] = "unmuted"
-    /\ preparing' = FALSE               \* lib.rs:4300
+    /\ preparing' = FALSE               \* lib.rs:3263
     /\ pc' = [pc EXCEPT ![r] = "done"]
     /\ UNCHANGED <<paused, auditioning, installed, wantMain, before, rpc, tpc>>
 
-\* ---- resume_autodj ----
 PressResume ==
     /\ rpc = "idle"
-    /\ BannerShown                      \* App.svelte:170
-    /\ IF Serialize THEN ~LockHeld      \* lib.rs:4307
+    /\ BannerShown                      \* App.svelte:131
+    /\ IF Serialize THEN ~LockHeld      \* lib.rs:3269
                     ELSE ~preparing     \* the pre-#115 AUDITION_PREPARING guard
     /\ rpc' = "checked"
     /\ UNCHANGED <<paused, auditioning, preparing, installed, wantMain, before, pc, tpc>>
 
 ResumeMutes ==
     /\ rpc = "checked"
-    /\ paused' = TRUE                   \* lib.rs:4312
+    /\ paused' = TRUE                   \* lib.rs:3271
     /\ rpc' = "muted"
     /\ UNCHANGED <<auditioning, preparing, installed, wantMain, before, pc, tpc>>
 
 ResumeClearsAuditioning ==
     /\ rpc = "muted"
-    /\ auditioning' = FALSE             \* lib.rs:4319
+    /\ auditioning' = FALSE             \* lib.rs:3274
     /\ rpc' = "restored"
     /\ UNCHANGED <<paused, preparing, installed, wantMain, before, pc, tpc>>
 
 ResumeTakesAudition ==
     /\ rpc = "restored"
-    /\ installed' = 0                   \* lib.rs:4335
+    /\ installed' = 0                   \* lib.rs:3289
     /\ rpc' = "taken"
     /\ UNCHANGED <<paused, auditioning, preparing, wantMain, before, pc, tpc>>
 
 ResumeUnmutes ==
     /\ rpc = "taken"
-    /\ paused' = FALSE                  \* lib.rs:4348
-    /\ wantMain' = TRUE                 \* lib.rs:4360
+    /\ paused' = FALSE                  \* lib.rs:3296
+    /\ wantMain' = TRUE                 \* lib.rs:3301
     /\ rpc' = "idle"
     /\ UNCHANGED <<auditioning, preparing, installed, before, pc, tpc>>
 
-\* ---- toggle_pause ----
 PressPause ==
     /\ tpc = "idle"
-    /\ ~BannerShown                     \* transportMode.ts:51
-    /\ Serialize => ~LockHeld           \* lib.rs:4407
-    /\ ~auditioning /\ ~preparing       \* lib.rs:4408-4411
+    /\ ~BannerShown                     \* transportMode.ts:18
+    /\ Serialize => ~LockHeld           \* lib.rs:3346
+    /\ ~auditioning /\ ~preparing       \* lib.rs:3347-3350
     /\ tpc' = "checked"
     /\ UNCHANGED <<paused, auditioning, preparing, installed, wantMain, before, pc, rpc>>
 
 PauseFlips ==
     /\ tpc = "checked"
-    /\ paused' = ~paused                \* lib.rs:317
+    /\ paused' = ~paused                \* lib.rs:213
     /\ wantMain' = paused
     /\ tpc' = "idle"
     /\ UNCHANGED <<auditioning, preparing, installed, before, pc, rpc>>
@@ -160,15 +157,10 @@ Spec == Init /\ [][Next]_vars
 
 Settled == ~ENABLED System
 
-\* While an audition is being prepared, the queue's music stays silent.
 QuietWhilePreparing == Building => ~MainAudible
 
-\* Once everything settles with no audition playing, the queue plays exactly
-\* when the listener chose to play it.
 QueueFollowsListener == (Settled /\ installed = 0) => (MainAudible = wantMain)
 
-\* Once everything settles, the audition banner is shown exactly while an
-\* audition engine is in place.
 BannerMatchesAudition == Settled => (auditioning = (installed # 0))
 
 =============================================================================

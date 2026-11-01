@@ -22,10 +22,6 @@
     );
   });
 
-  // Baseline captured when the detail opens — cancel restores these values
-  // and the corresponding manual flags (so auto-analysed tracks lose `*`).
-  // Re-open after 「← 一覧へ」 re-captures from the (already edited) row,
-  // matching legacy `showFlaggedDetail`.
   let baselineIntro = $state<number | null>(null);
   let baselineOutro = $state<number | null>(null);
   let baselineIntroManual = $state(false);
@@ -145,7 +141,6 @@
       const updated = await store.doSetBars(r.path, introBars, outroStructureBars);
       if (!updated) return;
       const n = await store.doDismissFlags(r.track_hash, r.role);
-      // Legacy stays on detail when dismiss_flags throws; do not close on null.
       if (n === null) return;
       ui.closeFlaggedDetail();
       if (n) {
@@ -161,8 +156,6 @@
     if (!r || busy) return;
     busy = true;
     try {
-      // Drop chip undo toast first so 「取消」cannot rewrite bars after
-      // baseline restore (legacy `hideFlagToast` before set_bars).
       toast.dismiss();
       if (dirty) {
         if (!r.path) {
@@ -179,7 +172,6 @@
           outroStructureBars,
           markManual,
         );
-        // Legacy stays on detail when baseline restore throws.
         if (!restored) return;
       }
       ui.closeFlaggedDetail();

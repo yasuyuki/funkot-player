@@ -1,9 +1,3 @@
-//! Durable playlist definitions and their non-destructive playback progress.
-//!
-//! This module deliberately has no engine or IPC dependency.  Its callers
-//! prepare a cloned [`Catalog`], persist it, then publish that clone only after
-//! `persist` succeeds.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -58,17 +52,13 @@ pub struct CurrentOccurrence {
     pub entry_id: Option<String>,
     pub track_ref: TrackRef,
     pub origin: PlaybackOrigin,
-    /// Retains manual/automatic priority when a suspended normal current is
-    /// requeued after restart. Playlist currents always leave this `None`.
     #[serde(default)] pub queue_origin: Option<QueueOrigin>,
-    /// Exact normal-queue occurrence identity for restart de-duplication.
     #[serde(default)] pub queue_item: Option<QueueItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NormalResume {
     pub items: Vec<QueueItem>,
-    /// None until the legacy folder cursor can be resolved at first Start.
     pub folder_pos: Option<usize>,
 }
 
@@ -124,8 +114,6 @@ impl Catalog {
     pub fn favorite(&self, hash: &str) -> Option<&Entry> {
         self.definition(FAVORITES_ID).ok()?.entries.iter().find(|entry| entry.track.content_hash == hash)
     }
-    /// Selects the source for future claims without starting playback or
-    /// changing that playlist's run.
     pub fn select(&mut self, id: Option<String>) -> Result<(), PlaylistError> {
         if let Some(id) = id.as_deref() { self.definition(id)?; }
         if self.active_id != id { self.active_id = id; self.source_changed(); }
@@ -194,8 +182,6 @@ impl Catalog {
         if self.current.as_ref().is_some_and(|current| current.playlist_id.as_deref() == Some(id) && current.entry_id.as_deref() == Some(entry_id)) { self.current = None; }
         self.definition_changed(id)?; self.changed(); Ok(removed)
     }
-    /// Restores only this occurrence.  Neighbours still present determine its
-    /// insertion point, so later edits are never replaced wholesale.
     pub fn undo_remove(&mut self, id: &str, removed: RemovedEntry) -> Result<(), PlaylistError> {
         let definition = self.definition_mut(id)?;
         if definition.entries.iter().any(|e| e.entry_id == removed.entry.entry_id
@@ -232,15 +218,12 @@ impl Catalog {
         if self.current.as_ref().is_some_and(|current| current.playlist_id.as_deref() == Some(id)) { self.current = None; }
         self.source_changed(); Ok(new_run_id)
     }
-    /// All live progress writes pass through the same occurrence transition.
-    /// Resolve membership/run from the catalog rather than trusting the event.
     pub(crate) fn observe_progress(&mut self, claim: Option<ProgressClaim<&str>>,
         mut observation: Observation<&str>, reason: Option<&str>) -> bool {
         let identity = match observation {
             Observation::Unavailable { occurrence, .. } => occurrence,
             _ => match claim { Some(c) => c.occurrence, None => return false },
         };
-        // The pure input flag is derived here from a real, retained reason.
         match &mut observation {
             Observation::Failed { reason_present, .. } | Observation::Unavailable { reason_present, .. } =>
                 *reason_present = reason.is_some_and(|r| !r.trim().is_empty()),
@@ -268,8 +251,6 @@ impl Catalog {
         self.observe_progress(None, Observation::Unavailable {
             occurrence: Occurrence { playlist: id, run, entry }, reason_present: false }, Some(reason))
     }
-    /// On app restart, the playing occurrence has already been consumed.  Put
-    /// it back only if its exact membership and run are still valid.
     pub fn resume_after_restart(&mut self) -> Option<CurrentOccurrence> {
         let current = self.current.clone()?;
         if current.origin == PlaybackOrigin::Normal { self.current = None; self.changed(); return Some(current); }

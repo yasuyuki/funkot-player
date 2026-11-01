@@ -1,4 +1,3 @@
-//! Standalone driver: the path below is the production module, not a model.
 #[path = "../src-tauri/src/playback_recovery.rs"]
 mod playback_recovery;
 

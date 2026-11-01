@@ -379,8 +379,6 @@ test("a prepared playlist enables both next controls without a normal reservatio
     store.player = { ...store.player, phase: "playing", now_playing: "/fixture/music/track-3.mp3", position_secs: 12, duration_secs: 274, playback_started_frames: 48000 };
     window.__uiFixture.setReply("player_state", store.player);
   });
-  // This is the native playlist shape: reserved=null/false, but a playlist
-  // occurrence is prepared. The normal queue flag must not disable Next.
   await expect(next).toBeEnabled();
   await next.click();
   await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter(c => c.command === "skip_next").length)).toBe(1);

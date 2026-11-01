@@ -9,7 +9,6 @@
 @import "@radix-ui/colors/red.css";
 @import "@radix-ui/colors/red-dark.css";
 
-/* Radix scales supply color values. Component styles use semantic roles. */
 :root {
   color-scheme: dark;
   --color-bg: var(--gray-1);
@@ -74,38 +73,29 @@
   --color-chip-current-text: var(--color-accent-text);
   --color-flagged-warn: var(--amber-11);
   --color-log-bg: var(--gray-1);
-  /* Library / queue row heights — fixed so a virtual list can drop in later */
   --library-row-height: 3.4rem;
   --queue-row-height: 3.2rem;
 
-  /* Desktop shell: first-launch width is 1024 (tauri.conf.json), under this
-   * 1200px cap. Wider windows centre the column. */
   --shell-max-width: 1200px;
 
-  /* Two-column browse area (play mode). The 48rem switch point is spelled out
-   * in App.svelte's @container -- a container query cannot read a custom
-   * property -- and comes from these two: 2 x 360px + 1.5rem = 744px. */
+  /* App.svelte's @container breakpoints (48rem, 70.5rem) are derived from
+   * these by hand: var() is not valid in a container query condition. */
   --browse-col-min: 360px;
   --browse-gutter: 1.5rem;
 
-  /* Spacing */
   --space-xs: 0.3rem;
   --space-sm: 0.4rem;
   --space-md: 0.6rem;
   --space-lg: 0.8rem;
   --space-xl: 1rem;
 
-  /* Radius */
   --radius-sm: 0.3rem;
   --radius-md: 0.4rem;
 
-  /* Font sizes */
   --font-size-sm: 0.85rem;
   --font-size-md: 0.95rem;
   --font-size-lg: 1.2rem;
 
-  /* Shared control geometry. 44 CSS px remains the floor at every pointer
-     type; a wide viewport may still be used with touch. Rems allow zoom. */
   --control-target: max(44px, 2.75rem);
   --control-line-height: 1.5;
 
@@ -154,9 +144,6 @@ body {
   color: var(--color-text);
 }
 
-/* Centred shell. `body` carries symmetric side padding, so `margin-inline:
- * auto` lands the app in the middle of the viewport; below the cap nothing
- * changes and the column is still full width. */
 #app {
   max-width: var(--shell-max-width);
   margin-inline: auto;
@@ -180,7 +167,6 @@ button, input:not([type="checkbox"]):not([type="radio"]), select, textarea {
 button {
   width: auto;
   overflow-wrap: anywhere;
-  /* No transition: a tap must show up immediately, not after a fade. */
   touch-action: manipulation;
   -webkit-tap-highlight-color: var(--color-tap-highlight);
 }

@@ -113,9 +113,6 @@ struct NormalSource {
 
 type Shared = Arc<Mutex<Service>>;
 static SERVICE: OnceLock<Shared> = OnceLock::new();
-// Serializes pre-playback queue commands with service creation. Otherwise a
-// command that checked `existing()` just before OFF creates the service could
-// mutate the queue after OFF has captured its canonical normal snapshot.
 static PRESTART_QUEUE_GATE: Mutex<()> = Mutex::new(());
 pub fn lock_prestart_queue() -> MutexGuard<'static, ()> {
     PRESTART_QUEUE_GATE.lock().unwrap_or_else(|e| e.into_inner())
@@ -131,9 +128,6 @@ impl Service {
         let mut catalog = disk.snapshot().unwrap_or_default();
         catalog.ensure_favorites();
         let restored = catalog.resume_after_restart();
-        // When no playlist is active, the snapshot queue and session own normal
-        // restoration. `catalog.normal` is only a suspended normal source for
-        // an active playlist, so it cannot resurrect an older standalone cache.
         let ended = catalog.active_id.as_deref().is_some_and(|id| catalog.definition(id).is_ok_and(|d| !d.entries.is_empty())
             && catalog.remaining(id).is_ok_and(|r| r.is_empty())) && restored.is_none();
         Self { data: data.into(), cache: cache.into(), queue, disk, catalog, normal_source: None,
@@ -237,8 +231,6 @@ impl Service {
                     queue_item: claim.source.is_none().then(|| claim.item.clone()) }); }
             }
         }
-        // Edits made before Play must not lose the saved audible occurrence
-        // from a different source, even across another application restart.
         if self.current_index.is_none() && catalog.current.is_none() {
             if let Some(current) = self.restored.as_ref().filter(|c| c.origin == PlaybackOrigin::Normal
                 || c.playlist_id.as_deref().is_some_and(|id| catalog.run(id).is_ok_and(|r| r.run_id == c.run_id)
@@ -253,8 +245,6 @@ impl Service {
         self.capture_normal(&mut candidate, None);
         let queue = queue::pending_snapshot(&self.queue);
         let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        // Current playback, normal pending work, and reservations share one
-        // commit. A failure leaves the older complete snapshot intact.
         self.progress_error = self.disk.update(|state| {
             state.catalog = candidate.clone();
             state.queue = queue;
@@ -288,8 +278,6 @@ impl Service {
             self.started(index);
             return;
         }
-        // Events may lag a polling snapshot or a whole short track. Consume
-        // the exact event occurrence, but never move current playback backward.
         if let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled) {
             if self.current_index != Some(index) { claim.live = false; }
             self.catalog.observe_progress(claim.progress(index), Observation::Started(index), None);
@@ -303,7 +291,6 @@ impl Service {
     }
     fn failed(&mut self, index: usize, message: &str) {
         let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled && c.live) else { return; };
-        // An empty failure is not a reason to discard an unplayed occurrence.
         if message.trim().is_empty() { return; }
         self.catalog.observe_progress(claim.progress(index),
             Observation::Failed { index, reason_present: false }, Some(message));
@@ -322,8 +309,6 @@ impl Service {
         if finished {
             let had_current = self.current_index.take();
             if let Some(old) = had_current.and_then(|i| self.claims.get_mut(&i)) { old.live = false; }
-            // A newly selected/restarted/appended source may have pending work
-            // while the old finite engine waits for explicit Play.
             self.ended = self.active().is_some_and(|id| self.catalog.definition(id).is_ok_and(|d| !d.entries.is_empty())
                 && self.catalog.remaining(id).is_ok_and(|r| r.is_empty()));
             if had_current.is_some() || self.catalog.current.is_some() {
@@ -336,8 +321,6 @@ impl Service {
         let index = store::load_hash_index(&self.data).index;
         let matches = |path: &Path, entry: &store::HashIndexEntry| entry.hash == track.content_hash && store::fingerprint_matches(path, entry);
         if index.get(track.preferred_path.to_string_lossy().as_ref()).is_some_and(|e| matches(&track.preferred_path, e)) { return Ok(track.preferred_path.clone()); }
-        // Resolve only this referenced file if its fingerprint changed; never
-        // rehash the whole library for a playlist operation.
         if track.preferred_path.is_file() && funkot_core::cache::content_hash(&track.preferred_path).is_ok_and(|h| h == track.content_hash) {
             return Ok(track.preferred_path.clone());
         }
@@ -456,8 +439,6 @@ impl TrackSource for ManagedSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
         let mut unavailable_this_call = BTreeSet::new();
         loop {
-            // Folder admission can decode an unanalysed track. Keep the
-            // service mutex available to UI commands while that work runs.
             let normal_source = {
                 let owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                 if owner.epoch != self.epoch { return None; }
@@ -569,8 +550,6 @@ impl TrackSource for ManagedSource {
                             owner.exhausted = true;
                             return None;
                         };
-                        // A queue edit may have revoked the reservation while
-                        // folder analysis ran without the service mutex.
                         let Some(item) = queue::reserved_item(&owner.queue)
                             .filter(|item| item.path == path) else { continue; };
                         Some(Claim {
@@ -679,9 +658,6 @@ pub fn configure(service: &Shared, normal: HostSource) -> ManagedSource {
 }
 
 
-/// Persist an admission switch only after the core has accepted a future-source
-/// fence. The old source's normal reservation path is held quiescent while the
-/// epoch changes, so it cannot write a stale session claim after restoration.
 pub fn reconfigure_admission(
     service: &Shared,
     allow_non_funkot: bool,
@@ -690,9 +666,6 @@ pub fn reconfigure_admission(
 ) -> Result<(), CommandError> {
     let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
     let previous = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
-    // OFF is a cleanup operation as well as a setting change. The atomic can
-    // already be false while an older source still has admitted normal
-    // reservations, so only an unchanged ON setting may skip the future fence.
     if previous == allow_non_funkot && allow_non_funkot {
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         return owner.disk.update(|state| {
@@ -739,8 +712,6 @@ pub fn reconfigure_admission(
     let prepared = PreparedSourceReplacement::new(Box::new(ManagedSource {
         service: service.clone(), epoch: next_epoch,
     })).map_err(|_| error("busy"))?;
-    // Freeze the core future before waiting for a loader already in
-    // HostSource::next. Do not hold render while taking normal_source.
     let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
     let token = if crate::AUDITIONING.load(Ordering::Relaxed)
         || crate::AUDITION_PREPARING.load(Ordering::Relaxed)
@@ -760,8 +731,6 @@ pub fn reconfigure_admission(
     }
     drop(render);
 
-    // ManagedSource releases service while HostSource reserves. Quiesce it
-    // after the core fence so a waiting loader cannot admit the old future.
     let normal_source = owner.normal_source.clone();
     let mut normal_source_guard = normal_source.as_ref().map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
     let revoked_normal = owner.normal_future_items();
@@ -840,8 +809,6 @@ pub fn reconfigure_admission(
     };
     crate::NEXT_PREPARED.store(false, Ordering::Relaxed);
     crate::YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
-    // The retired loader may still be waiting to re-enter ManagedSource::next.
-    // It observes the new epoch only after it acquires this service lock.
     drop(owner);
     drop(retired);
     Ok(())
@@ -887,8 +854,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         return if old == &fingerprint { Ok(receipt.clone()) } else { Err(error("stale")) };
     }
     owner.reconcile_with(playback);
-    // A source replacement must snapshot normal work only after the old
-    // HostSource has stopped reserving it. Keep this guard through publication.
     let normal_source = owner.normal_source.clone();
     let mut normal_source_guard = normal_source.as_ref()
         .map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
@@ -990,8 +955,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     }
     let future = owner.future_claims();
     let normal_claims = owner.normal_future_items();
-    // Preserve the established manual-priority deadline. A committed automatic
-    // next track stays first; adding manual work still succeeds behind it.
     if normal_append && !normal_claims.is_empty() {
         if let Some(playback) = playback {
             let render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
@@ -1010,8 +973,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     } else {
         normal.get(..normal_claims.len()) != Some(normal_claims.as_slice())
     };
-    // Startup publishes the source before the audio control handle. A change
-    // affecting already claimed work must wait for that handle's fence.
     if playback.is_none() && owner.normal_source.is_some() && (force_source || invalidates_claim) {
         return Err(error("busy"));
     }
@@ -1030,8 +991,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         }) };
         match token {
             Ok(token) => {
-                // A callback may have started a track since reconcile. Fail
-                // before save instead of editing a different displayed row.
                 if token.current_index() != owner.current_index {
                     render.engine.abort_future_update(token);
                     playback.publish_engine_observation(&render.engine);
@@ -1091,8 +1050,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     if let Some(removed) = removed { owner.undo.insert(request.request_id.clone(), removed); }
     if let Some(id) = undo_used { owner.undo.remove(&id); }
     if replace {
-        // Waking this same finite source must replay an interrupted restore
-        // claim before its appended tail. A source choice intentionally clears it.
         if append_action && owner.current_index.is_none()
             && owner.claims.values().any(|c| c.restoring && c.live && !c.cancelled) {
             owner.restored = owner.catalog.current.clone();
@@ -1119,11 +1076,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         drop(normal_source_guard);
         drop(_saving);
     }
-    // Appending to an ended list makes new pending work, but core remains
-    // naturally stopped until the existing Play control explicitly resumes.
     if force_source && playback.is_none() { owner.ended = false; }
-    // A reopened terminal list has no exhausted source yet, but new pending
-    // entries still replace the ended display after their save succeeds.
     if append_action && result.added > 0 && owner.active().is_some() { owner.ended = false; }
     owner.receipts.insert(request.request_id, (fingerprint, result.clone()));
     drop(owner);
@@ -1131,9 +1084,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     Ok(result)
 }
 
-/// This destructive removal path uses the same full content hash as final
-/// admission. It must not trust the index fingerprint: a replacement can keep
-/// its length and mtime while changing content. Unreadable paths stay queued.
 fn gated_non_funkot_for_reconfigure(
     path: &Path,
     cache: &Path,
@@ -1145,8 +1095,6 @@ fn gated_non_funkot_for_reconfigure(
     !store::effective_is_funkot(analysis.is_funkot, override_funkot)
 }
 
-/// Merge the startup-normal snapshot with items added to the live queue
-/// after that snapshot. Matching occurrence IDs retain canonical order.
 fn merge_normal_items(
     mut canonical: Vec<QueueItem>,
     live: impl IntoIterator<Item = QueueItem>,
@@ -1160,8 +1108,6 @@ fn merge_normal_items(
     canonical
 }
 
-/// Keep the uncancellable future once, with new manual entries at the head of
-/// pending. Equal paths with different origins remain distinct queue items.
 fn preserve_claims(normal: &mut Vec<QueueItem>, claims: &[QueueItem]) {
     for claim in claims { if let Some(at) = normal.iter().position(|item| item == claim) { normal.remove(at); } }
     normal.splice(..0, claims.iter().cloned());

@@ -1,8 +1,6 @@
-// Indonesian catalogue.
 import type { Messages } from "./en";
 
 export const id: Messages = {
-  // --- App shell / navigation ---
   playTabsLabel: "Tab pemutaran",
   editTabsLabel: "Tab penyuntingan",
   queueHeading: "Diputar berikutnya",
@@ -10,7 +8,6 @@ export const id: Messages = {
   tabFlags: "Transisi yang perlu diperbaiki",
   tabAllTracks: "Semua lagu",
 
-  // --- Transport ---
   start: "Mulai",
   pause: "⏸ Jeda",
   resumePlayback: "▶ Lanjutkan",
@@ -30,7 +27,6 @@ export const id: Messages = {
   playbackRecoveryPreserved: "Kedua antrean tersimpan asli tetap dipertahankan.",
   playbackRecoveryFailed: "Pilihan itu tidak dapat disimpan. Tinjau antrean dan coba lagi.",
 
-  // --- Now playing ---
   phaseIdle: "Siaga",
   phaseStarting: "Menyiapkan",
   phasePlaying: "Memutar",
@@ -39,13 +35,11 @@ export const id: Messages = {
   phaseFailed: "Tidak dapat memutar",
   phaseDisconnected: "Menyambungkan ulang keluaran",
 
-  // --- Audition ---
   auditioning: (from, to) => `Mempratinjau “${from}” → “${to}”`,
   autoplayInterrupted: "Pemutaran otomatis dihentikan",
   resumeAction: "〔Lanjutkan〕",
   auditioningShort: "Pratinjau",
 
-  // --- Labels ---
   funkot: "Funkot",
   notFunkot: "Non-Funkot",
   noLabel: "—",
@@ -54,18 +48,15 @@ export const id: Messages = {
   labelMenuLabel: "Label trek",
   bulkLabeled: (n, verdict) => `${n} lagu dilabeli ${verdict ? "Funkot" : "non-Funkot"}`,
 
-  // --- Toast / boundary ---
   undo: "Urungkan",
   retry: "Coba lagi",
   changed: "Diubah",
   deleted: "Dihapus",
 
-  // --- New arrivals ---
   queueNewArrivals: (count, playlistName) => playlistName
     ? `Tambahkan ${count} lagu baru ke akhir ${playlistName}`
     : `Taruh ${count} lagu baru di awal antrean`,
 
-  // --- Log panel ---
   logTitle: "Log",
   close: "Tutup",
   musicFolderLabel: "Folder musik",
@@ -76,7 +67,6 @@ export const id: Messages = {
   arrivalsPathsLabel: "Path baru",
   showLog: "Tampilkan log",
 
-  // --- Transition strip ---
   lastAutoTransition: "Transisi otomatis terakhir",
   secondsAgo: (s) => `${s} dtk lalu`,
   minutesAgo: (m) => `${m} mnt lalu`,
@@ -88,7 +78,6 @@ export const id: Messages = {
   editMode: "Sunting",
   playMode: "Putar",
 
-  // --- Queue ---
   queueEmpty: "Antrean kosong — pemilihan otomatis tetap jalan",
   queuePreparing: "Menyiapkan",
   queuePrepared: "Siap",
@@ -141,7 +130,6 @@ export const id: Messages = {
   playlistFailureReason: (reason) => ({ missing: "File tidak ditemukan.", non_funkot: "Dikecualikan oleh pengaturan khusus Funkot.", identity_changed: "File berubah sejak ditambahkan.", identity_unavailable: "Lagu ini tidak dapat diidentifikasi.", load_failed: "Lagu tidak dapat dimuat.", loader_failure: "Lagu tidak dapat dimuat." })[reason] ?? "Lagu tidak dapat dimuat.",
   playlistCreateSavedSelectionFailed: (name, reason) => `“${name}” dibuat, tetapi tidak dapat dialihkan: ${reason}`,
 
-  // --- Library ---
   searchPlaceholder: "Cari",
   searchLabel: "Cari di pustaka",
   newOnly: "Hanya yang baru",
@@ -265,7 +253,6 @@ export const id: Messages = {
   emptyHintAndroid:
     "Taruh berkas audio di folder Musik, lalu pilih “Pindai ulang” dari menu ⋮ untuk memasukkannya ke pustaka. Menu ⋮ → “Tampilkan log” menunjukkan letak folder itu.",
 
-  // --- Multi-select / bulk add ---
   selectMode: "Pilih",
   selectModeLabel: "Pilih beberapa lagu",
   selectTrackLabel: (title) => `Pilih ${title}`,
@@ -279,7 +266,6 @@ export const id: Messages = {
   enqueueManyNotes: (notes) => ` (${notes})`,
   listSeparator: ", ",
 
-  // --- History ---
   historyHeading: "Riwayat",
   historyByTrack: "Per lagu",
   historyByTime: "Urutan main",
@@ -300,7 +286,6 @@ export const id: Messages = {
   removedTrackFromPlayLog: "Lagu ini dihapus dari urutan main",
   removeTrackFromPlayLogFailed: "Tidak dapat menghapus dari urutan main",
 
-  // --- Music folder ---
   pickMusicFolderPrompt: "Pilih folder Musik",
   pickMusicFolder: "Pilih folder Musik",
   changeMusicFolder: "Ganti folder Musik",
@@ -318,7 +303,6 @@ export const id: Messages = {
   musicDirErrUnsupportedPlatform: "Perangkat ini tidak dapat menggantinya",
   musicDirErrGeneric: "Tidak dapat mengganti folder Musik",
 
-  // --- Overflow menu ---
   rescan: "Pindai ulang",
   scanFound: (count) => `${count} lagu ditemukan`,
   scanBusy: "Pemindaian sedang berjalan",
@@ -368,7 +352,6 @@ export const id: Messages = {
   editTrack: "Edit lagu",
   folderActions: "Tindakan folder",
 
-  // --- Edit: flagged list ---
   roleOutgoing: "Sisi keluar",
   roleIncoming: "Sisi masuk",
   noFlagged: "Tidak ada transisi yang perlu diperbaiki",
@@ -377,7 +360,6 @@ export const id: Messages = {
   unanalyzed: "Belum dianalisis",
   missingTrack: "Lagu tidak ada di pustaka",
 
-  // --- Edit: flagged detail ---
   backToList: "← Kembali ke daftar",
   flagCount: (n) => `${n}×`,
   listenTransitionTo: (title) => `Dengarkan transisi masuk ke “${title}”`,
@@ -386,18 +368,15 @@ export const id: Messages = {
   confirmAction: "〔Konfirmasi〕",
   cancelAction: "〔Batal〕",
 
-  // --- Edit: chip editor ---
   intro: "Intro",
   outro: "Outro",
   chipScale: "pendek ←──────→ panjang",
   outroHint: "Makin panjang, pergantian dimulai makin awal",
   introHint: "Makin panjang, makin banyak intro dilewati dan masuk dengan ancang-ancang pendek",
 
-  // --- Edit: all tracks ---
   rootFolder: "(akar)",
   colLabel: "label",
 
-  // --- Share-sheet import (Android) ---
   importedSummary: (tracks, skipped, failed) => {
     const notes: string[] = [];
     if (skipped > 0) notes.push(`${skipped} tidak didukung`);

@@ -1,11 +1,6 @@
 #!/bin/sh
-# Print machine-answerable labeling facts for a funkot session start.
-# Read-only: never writes under the app data directory.
-#
-# Usage: ./scripts/labeling-facts.sh [--print] [--app-dir DIR]
 set -eu
 
-# --- expected values (edit here only; measured 2026-08-20) ---
 EXPECT_CACHE=798
 EXPECT_IS_FUNKOT=412
 EXPECT_MANUAL=0
@@ -45,8 +40,6 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-# Convert a Windows path (backslashes, optional drive letter) to a POSIX path
-# usable from WSL (/mnt/c/...) or Git Bash (/c/...). App-data directory only.
 win_path_to_posix() {
 	_p=$1
 	case $_p in
@@ -67,8 +60,6 @@ win_path_to_posix() {
 	printf '%s\n' "$_p" | tr '\\' '/'
 }
 
-# Workspace root: first ancestor of this script that contains both
-# funkot-player/ and funkot-autodj-for-ui/ as direct children.
 resolve_workspace_root() {
 	_here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 	_dir=$_here
@@ -100,8 +91,6 @@ resolve_app_dir() {
 		fi
 	fi
 
-	# Glob in the for-list (not `for d in $pat`): a match with spaces in the
-	# Windows user name must stay one word.
 	_matches=
 	_n=0
 	for _d in \
@@ -176,7 +165,6 @@ else
 	exit 1
 fi
 
-# Facts file: integers only (safe to source). Human sections go to stdout.
 FACTS=$(mktemp /tmp/labeling-facts.XXXXXX)
 trap 'rm -f "$FACTS"' EXIT INT TERM
 

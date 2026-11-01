@@ -1,7 +1,3 @@
-//! funkot-player: drives funkot-core's auto-DJ engine from a Tauri app.
-//!
-//! Still minimal: no library UI. The playback queue (`queue.rs`) is wired to
-//! the engine, and its contents survive a restart via `store.rs`.
 
 mod queue;
 mod queue_progress;
@@ -45,23 +41,15 @@ use funkot_core::EngineOptions;
 
 use queue::{DrainPolicy, HostSource, QueueItem, QueueOrigin, SharedQueue};
 
-/// Global handle to the running engine's playback controls.
-///
-/// Notification-button JNI callbacks (`onNativeControl`) do not go through
-/// Tauri, so they cannot reach a `tauri::State`; this is set once, from the
-/// audio thread, before the `Engine` moves into the cpal callback closure.
 struct Playback {
     paused: Arc<AtomicBool>,
     nav_tx: SyncSender<NavAction>,
-    /// Shared with the cpal callback so Tauri commands can install / clear an
-    /// audition `Engine` without touching the main one.
     render: Arc<Mutex<RenderState>>,
     observation: Arc<engine_observation::EngineObservation>,
     sample_rate: u32,
 }
 
 impl Playback {
-    // Callers serialize publication with the render mutex.
     fn publish_engine_observation(&self, engine: &Engine) {
         self.observation.publish(engine.current_index(), engine.is_finished());
     }
@@ -75,21 +63,8 @@ impl Playback {
 
 static PLAYBACK: OnceLock<Playback> = OnceLock::new();
 
-/// The data dir `resolve_dirs` resolved, for the handful of save paths that
-/// have no `tauri::AppHandle` to resolve it themselves: `flip_paused`
-/// (shared with the Android notification's JNI callback), `events_thread`,
-/// and the loader's `on_reserved` observer inside `audio_thread`. Everything
-/// else still calls `resolve_dirs(app)` directly and ignores this.
-///
-/// Set from `start_impl` right after it resolves `data`, and again from
-/// `run()`'s `setup` (before `start_impl` ever runs, for the startup
-/// preload) — `OnceLock` makes the second `set` a harmless no-op. A command
-/// that runs before either has (there should be none, but nothing enforces
-/// it) finds this empty and just skips saving; see `persist_session`.
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Live copy of the playback snapshot's `allow_non_funkot` setting. Folder drain reads this
-/// on the loader thread; `set_allow_non_funkot` updates it without restart.
 static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 
 /// Whether Android's foreground playback service has been started for this
@@ -97,34 +72,14 @@ static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 /// `startForegroundService` would otherwise create a ghost notification.
 static SERVICE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Live copy of the playback snapshot's `locale`, or empty when the listener
-/// has not picked one. Exists for the Android `currentLocaleTag` JNI entry,
-/// which Kotlin calls with no `AppHandle` to reach the persisted setting through — the
-/// same reason `LAST_SESSION_META` exists for `currentTitle`. Empty means
-/// "follow the device locale", which is what Android resource selection does
-/// on its own.
 static LOCALE_TAG: Mutex<String> = Mutex::new(String::new());
 
-/// Bumped after a successful `history.json` persist (`record_heard`, history
-/// wipe). `player_state` exposes it so the UI can re-pull arrivals.
 static HISTORY_REVISION: AtomicU64 = AtomicU64::new(0);
 
-/// Labeling mode's head window length (seconds), input-side, per the
-/// confirmed design: kept at the same 20s already used for the first-live
-/// preview.
 const LABELING_HEAD_SECS: f64 = 20.0;
 
-/// ラベリングモードの先読みは 20 秒 head を最大 `HEAD_ONLY_PREFETCH + 3` 本
-/// 同時に保持する（48 kHz ステレオ f32 で約 115 MB）。Android の予算ではない。
-/// ⋮ のトグルは `OverflowMenu.svelte` 側で隠すが、それは表示の話でしかない。
-/// これは `settings.json` に居座った `labeling_mode: true` が先読みを起動して
-/// しまわないための、唯一の実効的な関門。
 const LABELING_AVAILABLE: bool = !cfg!(target_os = "android");
 
-/// The playback snapshot's raw `labeling_mode` gated by platform availability. The
-/// mode is fixed at `Engine` construction (no live switch — see
-/// `EngineOptions::head_only_secs`), so this is the one place that decides
-/// whether a session actually runs with labeling prefetch on.
 fn effective_labeling_mode(setting: bool) -> bool {
     setting && LABELING_AVAILABLE
 }
@@ -140,41 +95,20 @@ mod labeling_mode_tests {
         assert!(effective_labeling_mode(true));
         #[cfg(target_os = "android")]
         assert!(!effective_labeling_mode(true));
-        // `LABELING_AVAILABLE` is the only gate: `true` gated by it must
-        // match `effective_labeling_mode(true)` exactly.
         assert_eq!(effective_labeling_mode(true), LABELING_AVAILABLE);
     }
 }
 
-/// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
-/// Written from `start_impl` before spawn and from the loader's
-/// `on_folder_pos` observer; read by `queue_state` for the labeling UI.
 static FOLDER_POS: AtomicUsize = AtomicUsize::new(0);
 
-/// Folder-track count for the current playback session (`paths.len()` at
-/// `start_impl`). Written before spawn so the UI does not flash `0/0`
-/// while Starting.
 static FOLDER_LEN: AtomicUsize = AtomicUsize::new(0);
 
-/// True while an audition `Engine` is installed in [`RenderState::audition`].
-/// `events_thread` uses this only to drop stale audition-tagged events after
-/// resume; origin itself comes from the event payload's `audition` flag.
 static AUDITIONING: AtomicBool = AtomicBool::new(false);
 
-/// True from mute-for-audition until `install_audition` finishes (or prepare
-/// fails). Covers the gap where the main queue is silenced but [`AUDITIONING`]
-/// is still false — pause transport must stay rejected in that window too.
 static AUDITION_PREPARING: AtomicBool = AtomicBool::new(false);
 
-/// Held for the whole of `audition_transition`, `resume_autodj` and every
-/// pause-transport change. The shared `paused` flag and the single
-/// `AUDITION_PREPARING` flag cannot describe two of these in flight: a request
-/// that finishes first would clear or unmute another request's prepare.
-/// verification/audition models this lock.
 static AUDITION_LOCK: Mutex<()> = Mutex::new(());
 
-/// Refuse instead of waiting: a second audition press or pause while another
-/// one is in flight is the listener's retry, not queued work.
 fn try_audition_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     match AUDITION_LOCK.try_lock() {
         Ok(guard) => Ok(guard),
@@ -183,19 +117,11 @@ fn try_audition_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     }
 }
 
-/// Volatile audition session (no persistence). `pair` survives `resume_autodj`
-/// so 「もう一度聴く」 can re-run after returning to the main engine.
-/// `parked_*` snapshot [`NOW`] across an audition so resume restores the
-/// main-engine titles (audition events otherwise overwrite them).
 struct AuditionSession {
     pair: Option<(PathBuf, PathBuf)>,
     parked_now: Option<PathBuf>,
     parked_previous: Option<PathBuf>,
     parked_in_progress: Option<(PathBuf, PathBuf, Origin, u64, u64)>,
-    /// [`NowTracker::now_started_frames`] at park time. `MAIN_FRAMES` freezes
-    /// for the whole audition (it only advances for the main engine), so
-    /// restoring this on resume is what makes `position_secs` pick up again
-    /// from where the listener left off instead of jumping or going stale.
     parked_now_started_frames: Option<u64>,
     parked_now_entry_frame_out: u64,
 }
@@ -209,12 +135,6 @@ static AUDITION_SESSION: Mutex<AuditionSession> = Mutex::new(AuditionSession {
     parked_now_entry_frame_out: 0,
 });
 
-/// What the transport is doing, as the audio thread sees it. The webview polls
-/// this rather than guessing from which commands it has sent, so the
-/// notification's buttons and a stalled engine both show up in the UI.
-///
-/// Independent of `PLAYBACK`: `start()` needs to record `Starting` before the
-/// audio thread exists to set `PLAYBACK`, so this cannot live inside it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum Phase {
@@ -224,11 +144,6 @@ enum Phase {
     Paused = 3,
     Stalled = 4,
     Failed = 5,
-    /// The audio callback has stopped running (or the stream reported an
-    /// error). `audio_thread` closes the stream and retries reopen until the
-    /// device returns; see `CallbackWatch`. Distinct from `Stalled`, which
-    /// means the callback is alive but has nothing prepared to play — here
-    /// nothing is calling `render` at all any more.
     Disconnected = 6,
 }
 
@@ -245,10 +160,6 @@ impl Phase {
         }
     }
 
-    /// Unknown values fall back to `Idle` rather than panicking: this only
-    /// ever decodes what `set_phase` itself wrote, but a `static` outliving a
-    /// future refactor that adds a variant should not be able to crash a
-    /// running app over a stale encoding.
     fn from_u8(v: u8) -> Phase {
         match v {
             1 => Phase::Starting,
@@ -272,11 +183,6 @@ fn get_phase() -> Phase {
     Phase::from_u8(PHASE.load(Ordering::Relaxed))
 }
 
-/// Persist a real pause-state change shared by toggle, play, and pause.
-/// The caller has already performed any resume work, so this never takes the
-/// render lock while holding `SESSION`. Pausing preserves `Disconnected`; on
-/// resume it does not claim `Playing`, leaving the audio callback or watchdog
-/// to publish the observed phase.
 fn record_pause_change(paused: &AtomicBool, now_paused: bool) {
     if now_paused && get_phase() != Phase::Disconnected {
         set_phase(Phase::Paused);
@@ -284,43 +190,31 @@ fn record_pause_change(paused: &AtomicBool, now_paused: bool) {
     persist_pause_state(paused);
 }
 
-/// Mirror the current pause flag off the audio thread. Finished events can
-/// arrive after an explicit play, so do not restore an event-time snapshot or
-/// change the observed phase here.
 fn persist_pause_state(paused: &AtomicBool) {
     {
         let mut session = SESSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Read the atomic under the session lock: a caller's desired state is
-        // not authoritative if another control changed it first.
         session.paused = paused.load(Ordering::Relaxed);
     }
     persist_session();
 }
 
-/// Resume a finished engine before clearing the pause flag, preserving the
-/// established render-lock ordering for explicit play and toggle requests.
 fn resume_finished_engine_before_play() {
     if let Some(playback) = PLAYBACK.get() {
         playback.resume_finished_engine();
     }
 }
 
-/// Flips a `Playback`'s paused flag and reports the new state. Shared between
-/// `toggle_pause` (in-app button) and `onNativeControl` action 0.
 fn flip_paused(paused: &AtomicBool) -> bool {
     if paused.load(Ordering::Relaxed) {
         resume_finished_engine_before_play();
     }
-    // fetch_xor(true) returns the previous value; the new state is its negation.
     let now_paused = !paused.fetch_xor(true, Ordering::Relaxed);
     record_pause_change(paused, now_paused);
     now_paused
 }
 
-/// Set a `Playback` pause state. Returns whether it changed. Repeated
-/// dedicated play/pause requests do no engine resume or persistence work.
 #[cfg(any(target_os = "android", test))]
 fn set_paused(paused: &AtomicBool, desired: bool) -> bool {
     let prior = paused.load(Ordering::Relaxed);
@@ -338,9 +232,6 @@ fn set_paused(paused: &AtomicBool, desired: bool) -> bool {
     true
 }
 
-/// Pause/play transport is refused while auditioning or preparing an
-/// audition — only 〔再開〕 returns. Pure so the guard is unit-testable
-/// without `PLAYBACK` / Android JNI.
 fn ensure_pause_allowed(auditioning: bool, preparing: bool) -> Result<(), String> {
     if auditioning || preparing {
         Err("audition in progress".into())
@@ -349,8 +240,6 @@ fn ensure_pause_allowed(auditioning: bool, preparing: bool) -> Result<(), String
     }
 }
 
-/// Pack paused + phase for the Android `onNativeControl` JNI return value.
-/// bit0 = paused; bits 1.. = `Phase as u8`. Must stay in lockstep with Kotlin.
 #[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 fn pack_native_control_state(paused: bool, phase: Phase) -> i32 {
     ((phase as i32) << 1) | (paused as i32)
@@ -373,49 +262,19 @@ fn pack_native_control_state(paused: bool, phase: Phase) -> i32 {
 fn playback_session_alive(has_playback: bool, phase: Phase) -> bool {
     match phase {
         Phase::Idle | Phase::Failed => false,
-        // `start_impl` publishes `Starting` before spawning the audio thread
-        // that sets `PLAYBACK`, and it starts the service in the same breath,
-        // so the very first start legitimately has no `PLAYBACK` yet.
         Phase::Starting => true,
         _ => has_playback,
     }
 }
 
-/// Where the app keeps music, the analysis cache, and its own data, as
-/// absolute paths.
-///
-/// Cache and data exist by the time this is returned. `music_dir` is empty
-/// (and not created) on desktop while `music_dir_needed` is `true`.
 #[derive(serde::Serialize, Clone, Debug)]
 struct AppDirs {
-    /// Drop tracks here. On Android this is the app's external files dir, which
-    /// shows up over MTP so a PC can copy into it. Empty on desktop
-    /// when `music_dir_needed` is `true` (no usable configured folder yet).
     music_dir: String,
-    /// `EngineOptions::cache_dir`. Must be absolute: the default in funkot-core
-    /// is the relative `"funkot-cache"`.
     cache_dir: String,
-    /// The queue and the hand-corrected bar counts (see `store`). Held apart
-    /// from `cache_dir` because deleting the cache is a documented repair for
-    /// bad analysis, and it must not take the listener's own work with it.
     data_dir: String,
-    /// The `settings.json` value that produced `music_dir`, if any was set.
-    /// `None` on a fresh install or always on Android (`music_dir_configurable`
-    /// is `false` there). Distinct from `music_dir` itself: this is what the
-    /// UI shows as "currently configured", which stays the listener's choice
-    /// even when it could not be used this launch (see `music_dir_unavailable`
-    /// / `music_dir_needed`).
     music_dir_custom: Option<String>,
-    /// `true` when `music_dir_custom` was set but unusable this launch (could
-    /// not be read). `settings.json` is left untouched — see `resolve_music_dir`.
-    /// Implies `music_dir_needed`.
     music_dir_unavailable: bool,
-    /// Desktop: `true` until settings has a readable `music_dir` (unset or
-    /// unreadable). Android: always `false`. While `true`, the library is not
-    /// scanned and Start must not run.
     music_dir_needed: bool,
-    /// Whether `set_music_dir` can do anything on this platform. `true` on
-    /// desktop, `false` on Android.
     music_dir_configurable: bool,
 }
 
@@ -441,8 +300,6 @@ fn platform_dirs() -> Result<AppDirs, String> {
             )?
             .l()?;
         let s = unsafe { JString::from_raw(env, obj.into_raw()) };
-        // Bound to a local on purpose: the MUTF8Chars view borrows `s`, and
-        // returning the expression directly drops them in the wrong order.
         let path = String::from(s.mutf8_chars(env)?);
         Ok(path)
     }
@@ -470,8 +327,6 @@ fn platform_dirs() -> Result<AppDirs, String> {
                     &[(&music_kind).into()],
                 )?
                 .l()?;
-            // Null when external storage is unavailable (unmounted, or shared
-            // storage still locked on a freshly booted device).
             if music_file.is_null() {
                 return Err(jni::errors::Error::NullPtr("getExternalFilesDir"));
             }
@@ -492,9 +347,6 @@ fn platform_dirs() -> Result<AppDirs, String> {
         })
         .map_err(|e: jni::errors::Error| format!("cannot resolve Android app dirs: {e}"))?;
 
-    // Both are internal: the cache is derived data and the app's own data is
-    // nobody else's business, and keeping them out of the MTP-visible folder
-    // means a PC only ever sees the music.
     let data = PathBuf::from(&files);
     let cache = data.join("funkot-cache");
     ensure_dirs(Some(Path::new(&music)), &cache, &data)?;
@@ -509,9 +361,6 @@ fn platform_dirs() -> Result<AppDirs, String> {
     })
 }
 
-/// Desktop: everything under the per-app data directory Tauri resolves for
-/// us, except `music_dir`, which the listener can redirect via
-/// `set_music_dir` (`settings.json`, see `store::Settings`).
 #[cfg(not(target_os = "android"))]
 fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
     use tauri::Manager;
@@ -521,8 +370,6 @@ fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
         .app_data_dir()
         .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
     let cache = base.join("funkot-cache");
-    // Rescue the preceding standalone generation before the first unified
-    // settings read can create its replacement snapshot.
     ensure_dirs(None, &cache, &base)?;
     let configured = store::load_settings(&base).music_dir;
     let (music, unavailable, needed) = resolve_music_dir(configured.as_deref(), |p| {
@@ -534,8 +381,6 @@ fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
             configured.as_deref().unwrap_or(Path::new("")).display()
         );
     }
-    // Unset / unreadable: only cache + data. Do not create a default Music
-    // root or seed demos — the listener must pick a folder first.
     ensure_dirs(music.as_deref(), &cache, &base)?;
     Ok(AppDirs {
         music_dir: music
@@ -551,23 +396,6 @@ fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
     })
 }
 
-/// Resolve the configured music folder for a desktop launch.
-///
-/// Returns `(music_dir, unavailable, needed)`:
-/// - nothing configured → `(None, false, true)`
-/// - configured and readable → `(Some(path), false, false)`
-/// - configured but unreadable → `(None, true, true)` (`settings.json` left
-///   alone; no fallback to a default Music root)
-///
-/// `readable` is injected so this stays testable without touching the
-/// filesystem (same pattern as `store::restored_pending`'s `exists`).
-///
-/// Never returns `configured` unchecked: `ensure_dirs`'s `create_dir_all`
-/// must only ever see a path that `read_dir` just confirmed it can list.
-///
-/// Android's `platform_dirs` never calls this (its `AppDirs` is built by
-/// hand — see its `#[cfg]` split), so this would otherwise be dead code
-/// there.
 #[cfg_attr(target_os = "android", allow(dead_code))]
 fn resolve_music_dir(
     configured: Option<&Path>,
@@ -580,15 +408,6 @@ fn resolve_music_dir(
     }
 }
 
-/// Rejects a candidate music folder without touching the filesystem: not an
-/// absolute path, or a folder that would itself contain the app's own data
-/// dir (which would put `settings.json`/`queue.json`/the analysis cache
-/// inside the folder the library scanner walks). Filesystem-backed checks
-/// (exists / is a directory / is readable) live in `set_music_dir` itself —
-/// see its doc comment.
-///
-/// Android does not call `set_music_dir`'s real body (see its `#[cfg]`
-/// split), so this would otherwise be dead code there.
 #[cfg_attr(target_os = "android", allow(dead_code))]
 fn check_music_dir_shape(candidate: &Path, data_dir: &Path) -> Result<(), &'static str> {
     if !candidate.is_absolute() {
@@ -667,7 +486,6 @@ mod music_dir_tests {
     }
 
     fn shape_data_dir() -> PathBuf {
-        // Shape-only tests do no I/O, but Windows absolute paths require a drive.
         std::env::current_dir().unwrap().join("shape-fixture").join("app")
     }
 
@@ -698,10 +516,6 @@ mod music_dir_tests {
         );
     }
 
-    /// The default music dir (`data_dir.join("Music")`) must never be
-    /// rejected: `platform_dirs` runs it through the exact same shape check
-    /// as a user's choice by construction, so a false rejection here would
-    /// break every fresh install.
     #[test]
     fn check_music_dir_shape_accepts_the_default_music_dir() {
         let data_dir = shape_data_dir();
@@ -717,10 +531,6 @@ mod music_dir_tests {
         );
     }
 
-    /// Pins which path `resolve_music_dir` actually probes: only ever the
-    /// configured one, never the default. A `readable` that ignored its
-    /// argument (e.g. `|_| true`) would pass every other test in this module
-    /// even if the real predicate call site were wrong.
     #[test]
     fn resolve_music_dir_probes_only_the_configured_path() {
         let configured = Path::new("/elsewhere/MyMusic");
@@ -833,9 +643,6 @@ mod music_dir_tests {
     }
 }
 
-/// Runs `store::migrate_from` once per process rather than once per call.
-/// Only the first caller can find anything to move; the rest would race it and
-/// log a failure for a rename whose source another thread just consumed.
 static MIGRATED: std::sync::Once = std::sync::Once::new();
 
 fn ensure_dirs(
@@ -851,14 +658,10 @@ fn ensure_dirs(
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    // Rescue the queue and the manual bars from where older builds put them.
-    // Hooked in here because every path into the app resolves its directories
-    // through this function, so there is no launch that can skip it.
     MIGRATED.call_once(|| store::migrate_from(cache, data));
     Ok(())
 }
 
-/// Resolve the app's directories, hiding the platform split from callers.
 fn resolve_dirs(#[allow(unused)] app: &tauri::AppHandle) -> Result<AppDirs, String> {
     #[cfg(target_os = "android")]
     let dirs = platform_dirs();
@@ -925,18 +728,10 @@ fn open_music_dir(app: tauri::AppHandle) -> Result<String, String> {
     Ok(dirs.music_dir)
 }
 
-/// Outcome of [`set_music_dir`].
 #[derive(serde::Serialize, Clone, Debug)]
 struct SetMusicDirResult {
-    /// Whether the listener actually picked a folder. `false` on a cancelled
-    /// dialog.
     changed: bool,
-    /// The resolved directories after this call — the same as before the
-    /// call when `changed` is `false`.
     dirs: AppDirs,
-    /// `true` when `changed` and the audio thread has already started this
-    /// launch (`AppState::started`): the running `Engine` keeps scanning the
-    /// old folder until the app restarts.
     restart_required: bool,
 }
 
@@ -1009,22 +804,12 @@ fn set_music_dir(
     }
 }
 
-/// Outcome of [`share_feedback`]: Android opened a chooser, or desktop wrote a path.
 #[derive(serde::Serialize, Clone, Debug)]
 struct ShareFeedbackResult {
-    /// `"shared"` (Android chooser opened) or `"saved"` (desktop path written).
     mode: String,
-    /// Absolute path of the staged ZIP.
     path: String,
 }
 
-/// Stage `library.json` + `flags.json` + `meta.json` into a dated feedback ZIP and share it.
-///
-/// Android: write under `getCacheDir()/funkot-export/` (FileProvider
-/// `<cache-path>`), then open `ACTION_SEND` via [`feedback_share`].
-/// Desktop: write under `cache_dir/funkot-export/` and return the path for a toast.
-///
-/// Does not move or delete anything under `data_dir`.
 #[tauri::command(async)]
 fn share_feedback(app: tauri::AppHandle, title: String) -> Result<ShareFeedbackResult, String> {
     let dirs = resolve_dirs(&app)?;
@@ -1080,51 +865,14 @@ fn share_feedback(app: tauri::AppHandle, title: String) -> Result<ShareFeedbackR
     }
 }
 
-/// Outcome of [`take_pending_import`].
 #[derive(serde::Serialize, Clone, Debug, Default)]
 struct ImportResult {
-    /// Files copied into `music_dir`.
     tracks: u32,
-    /// Staged files whose extension `is_supported_track` does not recognise.
     skipped: u32,
-    /// Staged files that passed `classify_import` but whose copy into
-    /// `music_dir` failed (`copy_atomic`), plus URIs that failed even
-    /// earlier, during staging itself (`Import.kt`'s `onIntent` — see
-    /// `Import.takeFailed`), before a file ever reached this walk.
     failed: u32,
-    /// `true` when `Import.kt` is still copying a file into the staging
-    /// dir. `Import.onIntent`'s copy runs on a background thread and this
-    /// command can easily win the race against it — a multi-MB share is
-    /// still copying by the time the cold-start `take_pending_import` call
-    /// runs. Without this, that call sees an empty (or partial) staging dir
-    /// and never retries: the app is already foregrounded by then, so the
-    /// `visibilitychange` path never fires again either, and the share is
-    /// silently lost. The frontend polls again shortly while this is `true`
-    /// (see `doTakePendingImport` in `state.svelte.ts`). Always `false` on
-    /// desktop.
     in_flight: bool,
 }
 
-/// The receiving half of [`share_feedback`]'s ZIP-out path: walks files
-/// `Import.kt` staged from the system share sheet (`getCacheDir()/
-/// funkot-import/`, filled by `Import.onIntent` — see `AndroidManifest.xml`'s
-/// `ACTION_SEND` / `ACTION_SEND_MULTIPLE` intent filters) into `music_dir`.
-///
-/// Desktop is always a no-op: nothing ever stages anything there, since
-/// those intent filters only exist on Android.
-///
-/// The staging directory's actual contents are the source of truth here —
-/// there is deliberately no separate in-process queue of what was staged
-/// (an earlier version of this command had one; it could both drop a file
-/// that finished copying in the gap between a status check and the drain,
-/// and permanently strand one if the process died between the copy
-/// finishing and the next drain, since the queue does not survive a
-/// restart but the file on disk does).
-///
-/// Every staged file this walk actually looks at (i.e. not a `.part` still
-/// being written) is removed regardless of outcome — copied, skipped for an
-/// unsupported extension, or a failed copy — so `funkot-import/` never
-/// accumulates leftovers across calls.
 #[tauri::command(async)]
 fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
     #[cfg(not(target_os = "android"))]
@@ -1137,36 +885,10 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
         let dirs = resolve_dirs(&app)?;
         let music_dir = Path::new(&dirs.music_dir);
 
-        // Read before the walk below, never after: `Import.kt` only ever
-        // creates a `<name>.part` file while a copy thread owns it, and
-        // renames it to its final name once the copy finishes. If a copy
-        // finishes *after* this read but the `<name>.part` -> `<name>` rename
-        // still lands inside the `read_dir` snapshot below, this being read
-        // first means it is still `true`, so the frontend retries and picks
-        // the file up on the next call. Reading it after the walk instead
-        // would let that same file slip through as `in_flight: false` with
-        // nothing telling the frontend to look again.
         let in_flight = android_import_has_in_flight()?;
 
         let staging_dir = android_cache_dir()?.join("funkot-import");
 
-        // Must be read after `in_flight` above, never before: an increment
-        // of `Import`'s `failed` counter always completes, inside the copy
-        // thread's loop, before that thread's `finally` decrements
-        // `inFlight`. So once `in_flight` reads `false`, every failure from
-        // that run is already reflected here. Reading this first instead
-        // risks a failure landing in between the two reads: `in_flight`
-        // would then still report `false` (nothing tells the frontend to
-        // poll again) while the failure that just happened is lost.
-        //
-        // Read after `android_cache_dir()?` above (rather than right after
-        // `in_flight`) so that if that call fails, this destructive read
-        // (see `Import.takeFailed`'s doc comment) never happens and the
-        // failure count survives to be picked up on the next poll instead
-        // of being reset and lost. A later `read_dir` I/O error below can
-        // still lose an already-taken count, but that path returns `Err`
-        // and surfaces to the frontend as `lastError`, unlike a silently
-        // dropped toast.
         let failed = android_import_take_failed()?;
 
         let mut result = ImportResult {
@@ -1176,7 +898,6 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
         };
         let entries = match std::fs::read_dir(&staging_dir) {
             Ok(entries) => entries,
-            // Nothing has ever been shared yet — not an error.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
             Err(e) => return Err(format!("cannot read {}: {e}", staging_dir.display())),
         };
@@ -1184,12 +905,6 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("part") {
-                // A `.part` file only exists while `Import.onIntent`'s copy
-                // thread owns it (see `copy_atomic`'s Kotlin counterpart).
-                // `in_flight` was read above, before this snapshot, so `false`
-                // here means no such thread was running even before this walk
-                // started -- this one was abandoned (most likely the process
-                // died mid-copy) and will never be finished or claimed.
                 if !in_flight {
                     let _ = std::fs::remove_file(&path);
                 }
@@ -1219,48 +934,14 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
     }
 }
 
-/// Serializes hash-index load–mutate–save and the arrivals-baseline Settings
-/// commit that accompanies a refresh. Held across the music-folder walk so a
-/// concurrent `set_music_dir` cannot swap folders mid-refresh. Does **not**
-/// wrap every hash-index *read* — `load_hash_index` itself takes no lock;
-/// orchestration decides when to hold this.
-///
-/// Lock order (fixed, never reversed): `INDEX_LOCK` → [`SAVE_LOCK`] →
-/// [`SESSION`] → queue (`src-tauri/src/queue.rs`) → render.
 static INDEX_LOCK: Mutex<()> = Mutex::new(());
 
-/// Serialises writes under `data_dir` (the playback snapshot plus `flags.json`,
-/// `labels.json`, `library.json`, and `history.json`).
-///
-/// The mutating commands run on Tauri's blocking threadpool, so two of them
-/// really do overlap — tapping ✕ on one row and ↑ on another in quick
-/// succession is enough. Each takes its snapshot *inside* this lock, so the
-/// last write is always the latest state; without it the two snapshots can
-/// reach disk in the opposite order and leave the file a revision behind, or
-/// interleave inside a non-atomic write and leave it torn. Settings and
-/// hash-index saves use tmp+rename; this lock still prevents lost updates
-/// across read-modify-write writers.
-///
-/// Process-wide (not on `AppState`) so Android notification JNI can share the
-/// same lock without a Tauri handle.
-///
-/// Lock order (fixed, never reversed): [`INDEX_LOCK`] → `SAVE_LOCK` →
-/// [`SESSION`] → queue (`src-tauri/src/queue.rs`) → render. `persist_session`
-/// and the new-arrivals bulk insert nest `SAVE_LOCK` and `SESSION`; the latter
-/// continues into queue so its exclusion test and insert remain atomic.
-/// Refresh holds `INDEX_LOCK` across the scan and only takes `SAVE_LOCK` at
-/// commit time for the baseline flag — never for the whole walk.
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Key last written by `flag_last_transition`, for a single-shot undo.
 static LAST_FLAG_UNDO: Mutex<Option<String>> = Mutex::new(None);
 
-/// Dismiss key last written by `dismiss_flags`, for a single-shot undo.
 static LAST_DISMISS_UNDO: Mutex<Option<String>> = Mutex::new(None);
 
-/// One track's label state as it stood immediately before a
-/// `set_folder_label` wrote over it. `None` means "there was no entry", which
-/// undo restores by removing rather than by writing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FolderLabelUndo {
     hash: String,
@@ -1268,46 +949,12 @@ struct FolderLabelUndo {
     funkot: Option<bool>,
 }
 
-/// What `set_folder_label` overwrote, for a single-shot undo — the bulk
-/// counterpart of [`LAST_FLAG_UNDO`].
-///
-/// The webview used to undo a folder label by replaying `set_label` once per
-/// track, which meant one round trip (and one `labels.json` + `library.json`
-/// rewrite) per track, and could only ever restore the rows the *listing*
-/// knew about. `set_folder_label` walks the folder on *disk*, so anything on
-/// disk but not yet in the listing was labeled and then left labeled.
-/// Snapshotting here keeps what undo touches identical to what the write
-/// touched.
-///
-/// In memory only. The 取消 that reaches this does not outlive the toast
-/// offering it, so there is nothing for a persisted token to be useful for,
-/// and a token reloaded next launch would name a folder that may since have
-/// changed on disk.
 static LAST_FOLDER_LABEL_UNDO: Mutex<Option<Vec<FolderLabelUndo>>> = Mutex::new(None);
 
-/// What the next launch will restore (see `store::Session`). Mutated by its
-/// three save sites directly (each takes only this mutex, the same pattern
-/// `reorder`/`dequeue` use for `queue` — see `persist_queue`), then handed to
-/// `persist_session` to write out. Mutations normally release it before
-/// persisting. The new-arrivals bulk insert may read it under `SAVE_LOCK` and
-/// continue into queue, always in the documented global order.
 static SESSION: Mutex<store::Session> = Mutex::new(store::Session::new());
 
-/// Nonzero generation while an automatic reserved track may still need to
-/// yield to manual work. Compare-and-clear prevents an older watchdog pass
-/// from erasing a concurrent enqueue's newer request.
 static MANUAL_PRIORITY_REQUEST: AtomicU64 = AtomicU64::new(0);
 
-/// Save `SESSION`'s current value under [`DATA_DIR`]. Best-effort: no
-/// `DATA_DIR` yet (nothing has resolved it this launch) or a write failure
-/// is `log::warn!`-only, never propagated — the caller's command or event
-/// must not fail or block on this.
-///
-/// Read `SESSION` fresh under `SAVE_LOCK` rather than taking a value from the
-/// caller, for the same reason `persist_queue` re-reads `queue` instead of
-/// trusting a captured snapshot: two save sites can race (e.g. `flip_paused`
-/// racing an `on_reserved` push), and re-reading under the lock means
-/// whichever finishes last always writes the true latest state.
 fn persist_session() {
     let Some(dir) = DATA_DIR.get() else {
         log::warn!("persist_session: DATA_DIR not resolved yet");
@@ -1345,36 +992,12 @@ impl Default for AppState {
     }
 }
 
-/// Turns "was this callback's output bit-exact silence?" into a UI phase.
-///
-/// The engine fills the buffer with zeros while it waits for the loader
-/// (see funkot-core engine.rs `render`), and skips the mix bus at bit-exact
-/// silence, so a whole silent buffer is the one signal a host gets that
-/// playback has starved.
-///
-/// It is not a *proof* of one: a track with a real digital-silence break
-/// decodes to bit-exact zeros too, and nothing downstream of the decoder
-/// necessarily disturbs them. Hence [`STALL_AFTER`] rather than reacting to
-/// the first quiet buffer — the stall this exists to report runs for minutes,
-/// so waiting a couple of seconds costs nothing and keeps a produced silence
-/// from being announced as a fault.
-///
-/// Deliberately does no logging of its own: this runs inside the cpal
-/// callback, and `log` formats a string and writes to the logd socket, which
-/// is exactly the kind of unbounded work that turns a reported stall into a
-/// reported stall *plus* a dropout. The audio thread watches [`PHASE`] from
-/// its idle loop instead and logs the edges from there.
 struct StallWatch {
     silent_frames: u64,
     stall_after_frames: u64,
-    /// Whether a non-silent buffer has ever been seen. Distinguishes "still
-    /// warming up for the first track" (`Starting`) from "was playing, went
-    /// quiet" (`Stalled`) — both look like silence to the counter alone.
     started: bool,
 }
 
-/// How long the output has to stay bit-exact silent before it is called a
-/// stall. See [`StallWatch`] for why this is not simply "one buffer".
 const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl StallWatch {
@@ -1386,8 +1009,6 @@ impl StallWatch {
         }
     }
 
-    /// Feed one callback's frame count and whether its buffer was bit-exact
-    /// silence; returns the phase the UI should show for it.
     fn observe(&mut self, frames: u64, silent: bool) -> Phase {
         if !silent {
             self.silent_frames = 0;
@@ -1405,20 +1026,11 @@ impl StallWatch {
         Phase::Playing
     }
 
-    /// Drop whatever silence has accumulated so far without touching
-    /// `started`. Used when pausing: the buffers written while paused are
-    /// deliberate silence, not starvation, and must not count toward a stall
-    /// that fires the moment playback resumes.
     fn reset_silence(&mut self) {
         self.silent_frames = 0;
     }
 }
 
-/// How long [`CALLBACK_TICKS`] can go unmoved before the callback is declared
-/// dead. At the engine's 1026-frame buffer and 48 kHz, the callback runs
-/// about 47 times a second, so a full second of no movement is already well
-/// past anything a live stream should ever do; three gives scheduling jitter
-/// room without meaningfully delaying the report.
 const STUCK_SECS_BEFORE_LOST: u32 = 3;
 
 /// Turns "is the cpal data callback still being invoked at all" into a UI
@@ -1489,9 +1101,9 @@ mod cb_watch_tests {
     #[test]
     fn stuck_for_the_full_threshold_is_lost() {
         let mut w = CallbackWatch::new(5);
-        assert!(!w.observe(5, false)); // 1
-        assert!(!w.observe(5, false)); // 2
-        assert!(w.observe(5, false)); // 3: STUCK_SECS_BEFORE_LOST reached
+        assert!(!w.observe(5, false));
+        assert!(!w.observe(5, false));
+        assert!(w.observe(5, false));
     }
 
     #[test]
@@ -1500,9 +1112,7 @@ mod cb_watch_tests {
         assert!(!w.observe(5, false));
         assert!(!w.observe(5, false));
         assert!(w.observe(5, false));
-        // Ticks move again: self-recovers, no latching.
         assert!(!w.observe(6, false));
-        // And the stuck counter really was reset, not just skipped this once.
         assert!(!w.observe(6, false));
         assert!(!w.observe(6, false));
     }
@@ -1524,8 +1134,6 @@ mod cb_watch_tests {
 mod stall_watch_tests {
     use super::*;
 
-    /// A 2 Hz "sample rate", so `STALL_AFTER` works out to 4 frames and the
-    /// assertions below can count them by hand.
     fn watch() -> StallWatch {
         let w = StallWatch::new(2);
         assert_eq!(w.stall_after_frames, 4, "tests below assume a 4-frame threshold");
@@ -1549,10 +1157,10 @@ mod stall_watch_tests {
     #[test]
     fn stalls_after_enough_silence_once_started() {
         let mut w = watch();
-        w.observe(4, false); // started
-        assert!(w.observe(3, true) == Phase::Playing); // under the threshold
-        assert!(w.observe(1, true) == Phase::Stalled); // crossed 4 frames
-        assert!(w.observe(100, true) == Phase::Stalled); // stays stalled
+        w.observe(4, false);
+        assert!(w.observe(3, true) == Phase::Playing);
+        assert!(w.observe(1, true) == Phase::Stalled);
+        assert!(w.observe(100, true) == Phase::Stalled);
     }
 
     #[test]
@@ -1564,15 +1172,12 @@ mod stall_watch_tests {
         assert!(w.observe(4, false) == Phase::Playing);
     }
 
-    /// Pausing writes silence deliberately. Without the reset, a long pause
-    /// would bank enough silent frames to report a stall on the very first
-    /// buffer after resuming — while the engine is in fact fine.
     #[test]
     fn pausing_does_not_bank_silence_toward_a_stall() {
         let mut w = watch();
-        w.observe(4, false); // started
+        w.observe(4, false);
         for _ in 0..10 {
-            w.reset_silence(); // what the callback does on every paused buffer
+            w.reset_silence();
         }
         assert!(w.observe(3, true) == Phase::Playing);
     }
@@ -1598,8 +1203,6 @@ mod flip_paused_tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// `PHASE` is process-global; these tests must not interleave with each other
-    /// under cargo's default multi-threaded runner.
     static PHASE_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -1669,7 +1272,6 @@ mod flip_paused_tests {
         persist_pause_state(&paused);
         assert!(!SESSION.lock().unwrap().paused);
 
-        // The callback reaches the finite source's end before emitting Finished.
         paused.store(true, Ordering::Relaxed);
         set_phase(Phase::Paused);
         persist_pause_state(&paused);
@@ -1685,7 +1287,6 @@ mod flip_paused_tests {
         persist_pause_state(&paused);
         assert!(SESSION.lock().unwrap().paused);
 
-        // An explicit play wins before the Finished event is processed.
         paused.store(false, Ordering::Relaxed);
         set_phase(Phase::Playing);
         persist_pause_state(&paused);
@@ -1693,7 +1294,6 @@ mod flip_paused_tests {
         assert!(!paused.load(Ordering::Relaxed));
         assert!(get_phase() == Phase::Playing);
 
-        // Mirroring also must not overwrite the output-device state.
         paused.store(true, Ordering::Relaxed);
         set_phase(Phase::Disconnected);
         persist_pause_state(&paused);
@@ -1704,7 +1304,6 @@ mod flip_paused_tests {
 
     #[test]
     fn pack_native_control_state_encodes_paused_and_phase() {
-        // Pure encoder; does not touch `PHASE`.
         assert!(
             pack_native_control_state(true, Phase::Disconnected)
                 == ((Phase::Disconnected as i32) << 1) | 1
@@ -1716,15 +1315,10 @@ mod flip_paused_tests {
 
     #[test]
     fn stale_notification_has_no_live_playback_session() {
-        // Fresh process started by a leftover notification: no `PLAYBACK`.
         assert!(!playback_session_alive(false, Phase::Idle));
         assert!(!playback_session_alive(false, Phase::Playing));
-        // ... but the first start of a real session precedes `PLAYBACK`.
         assert!(playback_session_alive(false, Phase::Starting));
-        // Audio thread gave up: nothing for the transport to drive either.
         assert!(!playback_session_alive(true, Phase::Failed));
-        // Paused, and the output device dropped out mid-session, both stay
-        // drivable — the notification is how the listener comes back.
         assert!(playback_session_alive(true, Phase::Paused));
         assert!(playback_session_alive(true, Phase::Disconnected));
         assert!(playback_session_alive(true, Phase::Playing));
@@ -1766,9 +1360,6 @@ mod flip_paused_tests {
     }
 }
 
-/// Who started a transition. Only distinguishes "should this feed the ⚑
-/// flag work (S5)" — a listener's own skip, or an edit-tab audition mix, is
-/// not a mixing judgement worth reviewing, so it must not be confused for one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Origin {
     Automatic,
@@ -1776,21 +1367,11 @@ enum Origin {
     Audition,
 }
 
-/// What crosses the audio thread's event channel. `EngineEvent` is
-/// everything the engine itself reports; `TransitionEnded` is synthesized by
-/// the cpal callback (see its comment) because the engine has no event of
-/// its own for "the overlap just finished".
-///
-/// `audition` is stamped at send time from whether the callback was rendering
-/// the audition engine — receivers must not re-read [`AUDITIONING`], or a
-/// late event after `resume_autodj` would be mis-attributed.
 enum PlaybackEvent {
     Engine { event: EngineEvent, audition: bool },
     TransitionEnded { audition: bool },
 }
 
-/// A transition that has finished, kept only long enough to answer "what did
-/// the ⚑ flag work (S5) need to know about the last mix".
 struct CompletedTransition {
     from: PathBuf,
     to: PathBuf,
@@ -1798,32 +1379,12 @@ struct CompletedTransition {
     at: Instant,
 }
 
-/// Folds the engine's `TrackStarted`/`TransitionStarted` events (plus the
-/// synthesized `TransitionEnded`) into "what is playing now". Kept free of
-/// channels and mutexes so it can be tested as a plain state machine — the
-/// only clock it reads is the `Instant` stamped on a completed transition,
-/// which no test asserts on.
-///
-/// The display switch happens on transition *end*, not start: a transition
-/// overlaps two tracks for tens of seconds at 180 BPM, and switching at the
-/// start would show the wrong title/notification for most of that overlap.
 struct NowTracker {
     now: Option<PathBuf>,
     previous: Option<PathBuf>,
     in_progress: Option<(PathBuf, PathBuf, Origin, u64, u64)>,
-    /// The last transition worth flagging — i.e. not a listener-triggered
-    /// skip and not a same-track restart. See `on_transition_ended`.
     last_transition: Option<CompletedTransition>,
-    /// `MAIN_FRAMES` at the moment `now` most recently started being audible.
-    /// Read by `player_state` (together with the live `MAIN_FRAMES` value) to
-    /// derive `PlayerState::position_secs`.
-    ///
-    /// Invariant: every place that changes `now` changes this too, by the
-    /// same rule — see each method below. There is no path that moves `now`
-    /// without also moving this and `now_entry_frame_out`; a stale stamp would misreport
-    /// how far into the track playback actually is.
     now_started_frames: Option<u64>,
-    /// Actual entry within the stretched track, supplied by the engine.
     now_entry_frame_out: u64,
 }
 
@@ -1839,34 +1400,6 @@ impl NowTracker {
         }
     }
 
-    /// Records the transition as in-progress; `now` does not change until it
-    /// completes (see the struct doc comment) — except when one is already
-    /// in progress, in which case that one is folded into `now`/`previous`
-    /// right here instead.
-    ///
-    /// A transition already being in progress means a nav interrupted it: the
-    /// engine's `begin_transition_to` calls `abort_active_transition()` and
-    /// starts the new transition within the same `render()` call (nav is
-    /// drained frame by frame inside `render`, so an interruption always
-    /// completes inside one buffer). That means `on_transition_ended`'s
-    /// buffer-boundary edge — `transition_frames_into()` going from `Some` to
-    /// `None` — can *never* fire for the interrupted transition; it stays
-    /// `Some` straight through into the new one. Waiting for it here would
-    /// leave `now` on the pre-interruption track for as long as the second
-    /// transition takes to finish, which is exactly the "wrong title for
-    /// tens of seconds" problem switching on transition-end exists to avoid.
-    ///
-    /// The interrupted transition is not recorded as `last_transition`: the
-    /// listener never heard it through to the end, so it is not a mixing
-    /// decision worth flagging.
-    ///
-    /// `at_frames` is `MAIN_FRAMES` at the moment this transition started —
-    /// the frame the incoming `to` began being mixed in. It only becomes
-    /// `now_started_frames` if this call folds an *interrupted* transition
-    /// into `now`/`previous` right here (whose own stamp, not `at_frames`,
-    /// is what applies — the interrupted one is what is actually playing);
-    /// `at_frames` and the actual entry are stashed in `in_progress` for `on_transition_ended`
-    /// (or a later interrupt) to use once *this* transition resolves.
     fn on_transition_started(&mut self, from: PathBuf, to: PathBuf, origin: Origin, at_frames: u64, entry_frame_out: u64) {
         if let Some((old_from, old_to, _, stamp, entry)) = self.in_progress.take() {
             self.previous = Some(old_from);
@@ -1877,12 +1410,6 @@ impl NowTracker {
         self.in_progress = Some((from, to, origin, at_frames, entry_frame_out));
     }
 
-    /// The engine pushes `TransitionStarted` then `TrackStarted` for the
-    /// track it just began mixing in, so a `TrackStarted` that arrives while
-    /// a transition is in progress is that same entry announcing itself —
-    /// not a new track playing solo. Only a `TrackStarted` with nothing in
-    /// progress (the first track, or a track that started without a
-    /// transition) should move `now` — and, in lockstep, `now_started_frames`.
     fn on_track_started(&mut self, path: PathBuf, at_frames: u64, entry_frame_out: u64) {
         if self.in_progress.is_none() {
             self.now = Some(path);
@@ -1891,23 +1418,12 @@ impl NowTracker {
         }
     }
 
-    /// Applies the completed transition and returns `(from, to, origin)` for
-    /// the caller to log, regardless of whether it also went into
-    /// `last_transition`. A no-op (returns `None`) if nothing was in
-    /// progress. An interrupted transition never reaches here at all — see
-    /// `on_transition_started`, which folds it into `now`/`previous` itself
-    /// the moment the interruption is observed — so by the time this runs,
-    /// `in_progress`, if present, always describes the transition that is
-    /// actually ending.
     fn on_transition_ended(&mut self) -> Option<(PathBuf, PathBuf, Origin)> {
         let (from, to, origin, stamp, entry) = self.in_progress.take()?;
         self.previous = Some(from.clone());
         self.now = Some(to.clone());
         self.now_started_frames = Some(stamp);
         self.now_entry_frame_out = entry;
-        // A listener's own skip (Manual) and a same-track restart (from ==
-        // to) both still switch the displayed title above, but neither is a
-        // mixing decision worth flagging: the operator picked it themselves.
         if origin == Origin::Automatic && from != to {
             self.last_transition = Some(CompletedTransition {
                 from: from.clone(),
@@ -1955,18 +1471,10 @@ mod now_tracker_tests {
         let mut t = NowTracker::new();
         t.on_track_started(p("a.wav"), 100, 0);
         t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic, 200, 0);
-        // The engine announces the entry it just mixed in with its own
-        // TrackStarted; that must not be mistaken for a standalone track.
         t.on_track_started(p("b.wav"), 250, 0);
         assert_eq!(t.now, Some(p("a.wav")));
     }
 
-    /// Regression test for a nav interrupting a transition already in
-    /// progress (e.g. ⏭ pressed while an automatic mix is underway).
-    /// `on_transition_ended` can never fire for the interrupted A→B — see
-    /// `on_transition_started`'s doc comment — so this must fold it into
-    /// `now`/`previous` itself, immediately, when B→C starts. Without this,
-    /// `now` would stay on A until the *second* transition finishes.
     #[test]
     fn a_transition_started_while_one_is_in_progress_folds_the_interrupted_one_in() {
         let mut t = NowTracker::new();
@@ -1976,14 +1484,9 @@ mod now_tracker_tests {
         assert_eq!(t.now, Some(p("b.wav")), "the interrupted transition's destination is what is actually playing");
         assert_eq!(t.previous, Some(p("a.wav")));
         assert_eq!(t.now_started_frames, Some(200), "now_started_frames must promote to the interrupted transition's own stamp, not the one that interrupted it");
-        // The listener never heard A→B through to the end, so it must not
-        // become a ⚑ candidate.
         assert!(t.last_transition.is_none());
     }
 
-    /// Continuation of the above: once the second transition (the one that
-    /// did the interrupting) itself completes normally, it is recorded like
-    /// any other automatic transition.
     #[test]
     fn the_transition_that_did_the_interrupting_is_recorded_normally_once_it_ends() {
         let mut t = NowTracker::new();
@@ -2018,7 +1521,6 @@ mod now_tracker_tests {
         t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Manual, 200, 0);
         t.on_transition_ended();
         assert!(t.last_transition.is_none());
-        // The title switch still happens; only the flag-worthy record does not.
         assert_eq!(t.now, Some(p("b.wav")));
     }
 
@@ -2055,8 +1557,6 @@ mod now_tracker_tests {
             let mut t = NowTracker::new();
             t.on_track_started(p("a.wav"), 0, 11);
             t.on_transition_started(p("a.wav"), p("b.wav"), Origin::Automatic, start, entry);
-            // A later TrackStarted for the incoming deck must not replace
-            // its transition stamp or the outgoing track's position.
             t.on_track_started(p("b.wav"), start + 192, entry);
             assert_eq!(t.now_entry_frame_out, 11);
             t.on_transition_ended();
@@ -2082,12 +1582,9 @@ mod now_tracker_tests {
         assert_eq!((t.now_started_frames, t.now_entry_frame_out), (Some(200), 2000));
         t.on_transition_ended();
         assert_eq!((t.now_started_frames, t.now_entry_frame_out), (Some(300), 3000));
-        // The core deliberately emits no TrackStarted for a same-track
-        // restart. TransitionStarted alone must replace the old entry.
         t.on_transition_started(p("c.wav"), p("c.wav"), Origin::Manual, 400, 20);
         t.on_transition_ended();
         assert_eq!((t.now_started_frames, t.now_entry_frame_out), (Some(400), 20));
-        // A hard jump uses TrackStarted alone, including nonzero downbeats.
         t.on_track_started(p("b.wav"), 500, 30);
         assert_eq!((t.now_started_frames, t.now_entry_frame_out), (Some(500), 30));
     }
@@ -2105,123 +1602,33 @@ mod now_tracker_tests {
     }
 }
 
-/// Shared "what is playing now" state. Written only by `events_thread` (the
-/// dedicated drain thread, never the cpal callback — see `audio_thread`) and
-/// read by `player_state`.
 static NOW: Mutex<NowTracker> = Mutex::new(NowTracker::new());
 
-/// Count of `PlaybackEvent`s the cpal callback could not hand to
-/// `events_thread` because the channel (capacity 64) was full. Bumped with
-/// `fetch_add` only — no logging — for the same reason `StallWatch` does not
-/// log from inside the callback either. `audio_thread`'s idle loop reports
-/// increases from here once a second; capacity 64 should never fill under
-/// normal use, so any increase means a transition edge — and therefore a
-/// potential ⚑ flag — was lost and is worth a warning.
 static EVENTS_DROPPED: AtomicU64 = AtomicU64::new(0);
 
-/// Incremented by one, with `fetch_add` only, at the very top of the cpal
-/// data callback — before even the `paused` early return, since a paused
-/// callback is still being invoked and that is exactly the fact this exists
-/// to prove. `audio_thread`'s idle loop compares this against its own clock
-/// (see `CallbackWatch`) to notice the one failure `StallWatch` cannot see
-/// from inside the callback: the callback not running at all any more.
 static CALLBACK_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Frames of the *main* engine rendered so far, bumped by one `fetch_add` in
-/// the cpal callback right after `render`, guarded so it only counts buffers
-/// the main engine produced (never the audition one). This — not the wall
-/// clock — is the only correct basis for "how far into the current track has
-/// playback gotten":
-///
-/// - paused buffers never reach the increment (the callback early-returns
-///   before it), so a pause freezes this exactly when it should;
-/// - while an audition `Engine` is installed the callback renders *it*
-///   instead of the main engine (the main playhead is meant to freeze during
-///   an audition — see `RenderState`), so this must not move either;
-/// - a lost/reopening output device stops the callback from being invoked at
-///   all, so this stays put through a disconnect too.
-///
-/// `player_state` reads this (via `events_thread`'s stamp, see
-/// `NowTracker::now_started_frames`) to derive `PlayerState::position_secs`.
 static MAIN_FRAMES: AtomicU64 = AtomicU64::new(0);
 
-/// Mirrors `Engine::next_track_path().is_some()` for the *main* engine,
-/// published from the same `if !audition` branch as `MAIN_FRAMES` above (and
-/// for the same reason: this must reflect the main engine, not whichever
-/// engine an audition happens to be rendering). `reorder`/`dequeue` read this
-/// to decide whether the reserved slot has anything to revoke before
-/// bothering to take the render lock, and `queue_state` reads it for
-/// `QueueSnapshot::reserved_swappable`.
-///
-/// Freezes at whatever value it last held while an audition engine is
-/// installed, since the branch that updates it does not run then — that is
-/// fine here, because both readers already gate on `AUDITIONING` /
-/// `AUDITION_PREPARING` separately and must not trust this value in that
-/// window anyway.
-///
-/// Published with a plain atomic, not behind `render`'s `Mutex`: nothing in
-/// the cpal callback may take a lock (see `render.try_lock()` above), so this
-/// has to be readable by other threads without the callback ever blocking on
-/// them, and writable by the callback without it ever blocking on a reader.
-/// `player_state`'s 2 Hz poll landing on a lock the callback also wants is
-/// exactly the failure mode this avoids — see the module-level warning on
-/// `RenderState` and `open_output_stream`'s `try_lock`.
 static NEXT_PREPARED: AtomicBool = AtomicBool::new(false);
 
-/// Analysis worker yields while the main engine needs its next slot prepared.
-/// The cpal callback updates this after every render, including transitions.
-/// Atomic-only so the callback never takes a lock.
 static YIELD_FOR_LOADER: AtomicBool = AtomicBool::new(false);
 
-/// Mirrors `Engine::frames_until_transition()` for the main engine, same
-/// publish site and same audition-freezes caveat as `NEXT_PREPARED` above.
-/// `u64::MAX` is the sentinel for "unknown" (covers both `Engine`'s own
-/// `None` — no active deck — and the period before the callback has run even
-/// once): readers must treat it as "no answer", not as a real frame count.
 static FRAMES_UNTIL_TRANSITION: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Set by the cpal error callback; cleared by `audio_thread` when it drops a
-/// lost stream before reopen. Read by `CallbackWatch` to let a genuine stream
-/// error shorten how long a stall has to run before it is reported — see its
-/// doc comment for why this alone never triggers a report.
 static STREAM_ERROR_SEEN: AtomicBool = AtomicBool::new(false);
 
-/// How long to wait after closing a lost stream (or a failed reopen) before
-/// trying `open_output_stream` again. No retry cap — stay in `Disconnected`
-/// until the device comes back.
 const REOPEN_COOLDOWN: Duration = Duration::from_secs(2);
 
-/// State owned by the audio callback across stream reopen. Held in
-/// `Arc<Mutex<_>>` so `audio_thread` can drop and rebuild the cpal stream
-/// without rebuilding the `Engine`. The main `engine` stays put while
-/// `audition` is `Some` so the main playhead freezes (not rendered).
 struct RenderState {
     engine: Engine,
     audition: Option<Engine>,
     stall: StallWatch,
-    /// Edge-detects the end of a transition from `Engine::transition_frames_into`
-    /// at buffer boundaries; see `PlaybackEvent::TransitionEnded` in the
-    /// callback below. Tracks whichever engine the callback is rendering.
     was_in_transition: bool,
 }
 
-/// UNIX-epoch milliseconds of the last nav this app itself requested via
-/// [`request_skip_next`], or `0` for "none pending". Lets `events_thread`
-/// tell a listener's own skip apart from a `TransitionStarted` the engine
-/// raised on its own, without the audio thread having to carry that
-/// knowledge across the event channel itself.
 static NAV_REQUESTED_MS: AtomicU64 = AtomicU64::new(0);
 
-/// How long a nav mark in [`NAV_REQUESTED_MS`] stays valid. Not a real
-/// deadline — a safety valve: `begin_nav` silently drops `TransitionToNext`
-/// whenever `next_track` is `None` (see funkot-core `engine.rs`), and that is
-/// not some rare edge case — it is true for a stretch after *every*
-/// transition starts, until the loader has the following track ready again.
-/// Tap skip during that window and the mark is never consumed by a matching
-/// `TransitionStarted`; without an expiry it would stick around and mislabel
-/// some later, unrelated automatic transition as manual. A false Manual only
-/// keeps that automatic transition out of `last_transition` (the ⚑
-/// candidate) — it does not affect what is displayed as playing.
 const NAV_MARK_TTL: Duration = Duration::from_secs(10);
 
 fn now_ms() -> u64 {
@@ -2231,12 +1638,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Ask the engine to transition to the next track, marking the request so
-/// `events_thread` can attribute the resulting `TransitionStarted` to this
-/// app rather than to the engine's own automatic mixing. Both places that can
-/// ask for a skip — the `skip_next` command and the notification's
-/// `onNativeControl` action 1 — go through this so the mark is never set in
-/// one place and missed in the other.
 fn request_skip_next() -> Result<(), String> {
     navigation_capture::request_next();
     if AUDITIONING.load(Ordering::Relaxed) {
@@ -2256,9 +1657,6 @@ fn request_skip_next() -> Result<(), String> {
     MANUAL_NEXT_EXPECTED_INDEX.store(current, Ordering::Release);
     MANUAL_NEXT_PENDING.store(true, Ordering::Release);
     drop(_request);
-    // The deck may still be decoding, and a library scan may already own the
-    // decoder. Hold the request until the deck exists and that scan has yielded;
-    // otherwise core can only choose its head-entry fallback.
     if next_dispatch_ready() && dispatch_manual_next(playback)? {
         return Ok(());
     }
@@ -2274,7 +1672,7 @@ fn request_skip_next() -> Result<(), String> {
                     if let Some(playback) = PLAYBACK.get() {
                         match dispatch_manual_next(playback) {
                             Ok(true) => break,
-                            Ok(false) => {}, // channel full: keep this request pending
+                            Ok(false) => {},
                             Err(error) => {
                                 log::warn!("manual Next dispatch failed: {error}");
                                 MANUAL_NEXT_PENDING.store(false, Ordering::Release);
@@ -2339,10 +1737,6 @@ fn dispatch_manual_next(playback: &Playback) -> Result<bool, String> {
     }
 }
 
-/// Whether a nav marked at `marked_ms` (`0` for "no mark") is still fresh
-/// enough at `now_ms` to explain a `TransitionStarted` arriving now. Split out
-/// from `resolve_nav_origin` as a pure function purely so the TTL arithmetic
-/// can be unit-tested without going through the statics.
 fn nav_origin(marked_ms: u64, now_ms: u64) -> Origin {
     if marked_ms != 0 && now_ms.saturating_sub(marked_ms) <= NAV_MARK_TTL.as_millis() as u64 {
         Origin::Manual
@@ -2402,18 +1796,11 @@ mod nav_origin_tests {
     }
 }
 
-/// Consumes the current nav mark (if any and still fresh) and reports what
-/// origin the transition it is being asked about should be attributed to.
-/// Consuming rather than peeking is what keeps a second, unrelated
-/// `TransitionStarted` shortly after a skip from also being blamed on it.
 fn resolve_nav_origin() -> Origin {
     let marked = NAV_REQUESTED_MS.swap(0, Ordering::Relaxed);
     nav_origin(marked, now_ms())
 }
 
-/// Basename only: title fallback in [`session_metadata_for`] when tags are
-/// missing. Not used for anything that needs to identify a track uniquely —
-/// use [`path_str`] for that.
 fn file_name_str(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -2421,14 +1808,10 @@ fn file_name_str(path: &Path) -> String {
         .to_string()
 }
 
-/// UI-facing key for a track. Must stay in sync with `TrackRow::path` /
-/// `QueueSnapshot`'s `to_string_lossy().into_owned()`, since the frontend
-/// treats the two as the same map key.
 fn path_str(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Raw embedded tags cached per path (probe once; sync/pause must not reopen).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct CachedTags {
     title: Option<String>,
@@ -2438,10 +1821,6 @@ struct CachedTags {
 static TAG_CACHE: LazyLock<Mutex<HashMap<PathBuf, CachedTags>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Resolve MediaSession title/artist from optional `now` path + cached tags.
-///
-/// Blank (whitespace-only) tags are treated as absent. When `now` is set but
-/// title is missing, falls back to [`file_name_str`]; artist falls back to `""`.
 fn session_metadata_for(now: Option<&Path>, tags: &CachedTags) -> (String, String) {
     let Some(path) = now else {
         return ("funkot-player".to_string(), String::new());
@@ -2468,8 +1847,6 @@ fn probe_tags_inner(path: &Path) -> Result<CachedTags, String> {
     Ok(CachedTags { title, artist })
 }
 
-/// Path-keyed tag cache. Successful probes (including "no tags") are stored;
-/// I/O / probe errors are not, so a transient open failure can retry.
 fn cached_tags_for(path: &Path) -> CachedTags {
     {
         let cache = TAG_CACHE.lock().unwrap();
@@ -2492,12 +1869,9 @@ fn cached_tags_for(path: &Path) -> CachedTags {
     }
 }
 
-/// Last resolved `(now path, title, artist)` so `currentTitle` / `currentArtist`
-/// JNI see one consistent snapshot even when Kotlin calls them back-to-back.
 static LAST_SESSION_META: Mutex<(Option<PathBuf>, String, String)> =
     Mutex::new((None, String::new(), String::new()));
 
-/// Current MediaSession title/artist from `NOW.now` (+ path-cached tags).
 fn session_metadata() -> (String, String) {
     let now = NOW.lock().unwrap().now.clone();
     {
@@ -2517,9 +1891,6 @@ fn session_metadata() -> (String, String) {
     meta
 }
 
-/// Snapshot for the optional local current-track HTTP API. It copies the
-/// event-thread state, probes tags without holding `NOW`, then verifies that
-/// the same main track remains current before exposing it.
 #[cfg(any(target_os = "windows", test))]
 fn current_track_http_snapshot() -> current_track_http::CurrentTrackSnapshot {
     let (path, auditioning) = {
@@ -2530,8 +1901,6 @@ fn current_track_http_snapshot() -> current_track_http::CurrentTrackSnapshot {
     if auditioning { return current_track_http::CurrentTrackSnapshot::empty(); }
     let tags = cached_tags_for(&path);
     let metadata = session_metadata_for(Some(path.as_path()), &tags);
-    // Sample the public state after metadata I/O. A later transition is
-    // naturally reflected by the next request; no audio lock is needed.
     let now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if now.now.as_ref() != Some(&path) {
         return current_track_http::CurrentTrackSnapshot::empty();
@@ -2544,14 +1913,11 @@ fn current_track_http_snapshot() -> current_track_http::CurrentTrackSnapshot {
     )
 }
 
-/// Used by the Android `currentTitle` JNI entry; desktop builds only exercise
-/// [`session_metadata_for`] in unit tests.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn notification_title() -> String {
     session_metadata().0
 }
 
-/// Used by the Android `currentArtist` JNI entry.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn notification_artist() -> String {
     session_metadata().1
@@ -2609,7 +1975,6 @@ mod session_metadata_tests {
         );
     }
 
-    /// S2 regression: no tags → file name title, empty artist.
     #[test]
     fn untagged_uses_file_name() {
         assert_eq!(
@@ -2619,24 +1984,10 @@ mod session_metadata_tests {
     }
 }
 
-/// Drains the audio thread's event channel and folds it into [`NOW`]. Its own
-/// thread rather than the UI's 500ms poll (`player_state`): Android suspends
-/// the WebView's JS timers once the screen turns off, which is exactly the
-/// "still playing, screen off" case this app exists for, so draining from
-/// there would let events pile up past the channel's capacity instead of
-/// just arriving late.
-/// Drop audition-tagged events that arrive after [`resume_autodj`] cleared
-/// [`AUDITIONING`]. Pure so the stale-after-resume rule is unit-testable.
 fn is_stale_audition_event(audition: bool, auditioning: bool) -> bool {
     audition && !auditioning
 }
 
-/// Lock [`NOW`], unless this event is a stale audition event.
-///
-/// The [`AUDITIONING`] read has to happen *under* the `NOW` lock rather than
-/// before it: `resume_autodj` clears the flag and restores parked titles while
-/// holding this same lock, so a check made outside can pass, block on the
-/// lock, and write the audition's titles over the restored ones.
 fn lock_now_unless_stale(audition: bool) -> Option<std::sync::MutexGuard<'static, NowTracker>> {
     let now = NOW.lock().unwrap();
     if is_stale_audition_event(audition, AUDITIONING.load(Ordering::Relaxed)) {
@@ -2645,7 +1996,6 @@ fn lock_now_unless_stale(audition: bool) -> Option<std::sync::MutexGuard<'static
     Some(now)
 }
 
-/// A queue occurrence is no longer owed once its own playback starts.
 fn retire_started_in_flight(item: &QueueItem) {
     {
         let mut session = SESSION
@@ -2656,34 +2006,11 @@ fn retire_started_in_flight(item: &QueueItem) {
     persist_session();
 }
 
-/// Heard = this path just became `NowTracker::now`. No duration threshold
-/// (labeling skips too fast for one). Audition is not heard.
-///
-/// Writes both halves of play history: the per-track aggregate
-/// (`history.json`, "how often and when last") and one line on the
-/// chronological log (`play-log.jsonl`, "in what order"). The aggregate cannot
-/// answer the second question — a replay overwrites its timestamp — so the two
-/// are not redundant.
-///
-/// Order matters. The log append is best-effort and must never stop the
-/// history save: new-arrival detection is defined as "hash absent from
-/// `history.json`" (`store::extract_new_arrivals`), so a failed append that
-/// aborted the save would leave a track that has just played still badged NEW.
-/// `HISTORY_REVISION` is still bumped only on a successful history save.
-///
-/// `origin` is how the track reached the queue, captured by the retire helpers
-/// while they held the session lock. Nothing displays it yet; it is recorded
-/// from the start because it is the one field that cannot be reconstructed
-/// afterwards — once a play has happened, how it was chosen is gone.
 fn record_heard(path: &Path, origin: Option<QueueOrigin>) {
     let Some(data_dir) = DATA_DIR.get() else {
         log::warn!("record_heard: DATA_DIR not resolved yet");
         return;
     };
-    // Hash outside SAVE_LOCK (same as gated_non_funkot): index is read-only
-    // here — never save. Persist of hash-index is `refresh_library` only.
-    // `store_cache` answers from the parsed index instead of re-reading the
-    // whole file for one lookup on every track change.
     let hash = match store_cache::content_hash(data_dir, path) {
         Ok(h) => h,
         Err(e) => {
@@ -2703,9 +2030,6 @@ fn record_heard(path: &Path, origin: Option<QueueOrigin>) {
     if let Err(e) = store::append_play_log(data_dir, &entry) {
         log::warn!("cannot append play log: {e}");
     } else if store::play_log_needs_compaction(data_dir, store::PLAY_LOG_COMPACT_BYTES) {
-        // Under the lock this call already holds, on the events thread,
-        // between two tracks: the one place a rewrite cannot race an append
-        // and the only thread where a few milliseconds are free.
         if let Err(e) = store::compact_play_log(data_dir, store::PLAY_LOG_MAX_ENTRIES) {
             log::warn!("cannot compact play log: {e}");
         }
@@ -2742,27 +2066,17 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 event: EngineEvent::TransitionStarted { from, to, entry_frame_out },
                 audition,
             } => {
-                // Origin from the send-time tag, not `AUDITIONING` — a delayed
-                // audition event after resume must not look automatic/manual.
                 let origin = if audition {
                     Origin::Audition
                 } else {
                     resolve_nav_origin()
                 };
-                // Read `MAIN_FRAMES` here, on this thread, rather than
-                // stamping it in the cpal callback and carrying it over the
-                // channel: this keeps the callback's event payload and
-                // `EngineEvent` itself untouched, at the cost of up to one
-                // buffer + one channel hop (a few ms) of staleness. Position
-                // is displayed to the second, so that is not observable.
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
                 if origin == Origin::Manual {
                     if let Some(playback) = PLAYBACK.get() {
                         log_manual_plan(&playback.render);
                     }
                 }
-                // Only an interrupt fold moves `now`; a plain TransitionStarted
-                // leaves it alone, so sync only when the title would change.
                 let (changed, now_path) = {
                     let Some(mut tracker) = lock_now_unless_stale(audition) else {
                         continue;
@@ -2774,11 +2088,8 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 if changed {
                     service_sync_state();
                 }
-                // Auditions never consume the main queue.
                 if changed && !audition {
                     let origin = playlist_service::current_queue_origin();
-                    // Interrupt fold assigned `now` — record heard (tracker
-                    // guard already dropped).
                     if let Some(ref p) = now_path {
                         record_heard(p, origin);
                     }
@@ -2789,8 +2100,6 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 audition,
             } => {
                 let started_origin = if audition { None } else { playlist_service::started(index) };
-                // See the `MAIN_FRAMES` comment on the TransitionStarted arm
-                // above — same reasoning applies here.
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
                 let (changed, now_path) = {
                     let Some(mut tracker) = lock_now_unless_stale(audition) else {
@@ -2805,7 +2114,6 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 }
                 if changed && !audition {
                     let origin = started_origin;
-                    // `on_track_started` assigned `now` (in_progress was none).
                     if let Some(ref p) = now_path {
                         record_heard(p, origin);
                     }
@@ -2824,9 +2132,6 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
             } => {
                 if !audition {
                     playlist_service::finished();
-                    // The callback paused before sending Finished. Mirror its
-                    // current flag without putting persistence or JNI in the
-                    // callback, and without undoing a newer explicit play.
                     if let Some(playback) = PLAYBACK.get() {
                         persist_pause_state(&playback.paused);
                     }
@@ -2857,9 +2162,6 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                     service_sync_state();
                 }
                 let origin = if heard { playlist_service::current_queue_origin() } else { None };
-                // Record even when path is unchanged (same-track restart:
-                // `changed` is false but `now = to` was assigned). Skip
-                // no-op TransitionEnded (`completed` is None).
                 if heard {
                     if let Some(ref p) = now_path {
                         record_heard(p, origin);
@@ -2914,12 +2216,6 @@ fn log_playback_diagnostics(sample_rate: u32, snapshot: playback_diagnostics::Di
     }
 }
 
-/// Open (or reopen) the default output device at the engine's sample rate.
-///
-/// Looks up `default_output_device` every call so a reconnect after Bluetooth
-/// drop can see the device again. Uses `sample_rate` from Engine creation
-/// (not the device's current default) and stereo / `BufferSize::Default`.
-/// Sample format is f32, matching the first open.
 fn open_output_stream(
     sample_rate: u32,
     render: Arc<Mutex<RenderState>>,
@@ -2965,9 +2261,6 @@ fn open_output_stream(
         .build_output_stream(
             config,
             move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                // First thing, unconditionally: this is the proof the callback is
-                // still alive at all, including while paused. See
-                // `CALLBACK_TICKS` and `CallbackWatch`.
                 let sequence = CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
                 let output_frames = (out.len() / 2) as u64;
                 let timestamp = capture.as_ref().map(|_| info.timestamp());
@@ -2985,16 +2278,12 @@ fn open_output_stream(
                     record_capture(None, None, true, false, false, 0);
                     return;
                 }
-                // try_lock: never block the realtime callback on the audio
-                // thread's reopen / drop path (same idea as funkot-cli ClipPlayer).
                 let Ok(mut state) = render.try_lock() else {
                     record_capture(None, None, paused.load(Ordering::Relaxed), false, true, 0);
                     diagnostics.record_render_lock_miss((out.len() / 2) as u64);
                     navigation_capture::silence_device_output(out);
                     return;
                 };
-                // Snapshot once: a control arriving during this buffer takes
-                // effect next time, continuing from the same fade level.
                 let requested_pause = paused.load(Ordering::Relaxed);
                 if requested_pause && transport_fade.is_silent() {
                     let frame = state.engine.render_frame();
@@ -3004,10 +2293,6 @@ fn open_output_stream(
                     set_phase(Phase::Paused);
                     return;
                 }
-                // Audition, when present, owns the callback; main is not
-                // rendered so its playhead stays frozen until resume. Scoped
-                // so the engine borrow ends before `stall` / `was_in_transition`.
-                // Stamp `audition` at send time from this buffer's engine choice.
                 let audition = state.audition.is_some();
                 let engine_start = state.engine.render_frame();
                 let (events, in_transition, render_diagnostics, rendered_silence) = {
@@ -3015,23 +2300,12 @@ fn open_output_stream(
                         Some(aud) => aud,
                         None => &mut state.engine,
                     };
-                    // Render only the audible pause tail, then freeze the
-                    // engine. Its events and playhead still account for every
-                    // rendered frame through the normal path below.
                     let frames = transport_fade.render(out, requested_pause, |out| engine.render(out));
                     let rendered_silence = navigation_capture::finalize_rendered_output(capture.as_ref(), out);
-                    // Only the main engine advances the playhead `player_state`
-                    // reports as `position_secs` — see `MAIN_FRAMES`'s doc
-                    // comment for why this must not run in the audition branch.
                     if !audition {
                         MAIN_FRAMES.fetch_add(frames as u64, Ordering::Relaxed);
-                        // See `NEXT_PREPARED` / `FRAMES_UNTIL_TRANSITION`'s
-                        // doc comments: atomic publish only, no lock, since
-                        // this callback must never block on one.
                         let next_ready = engine.next_track_path().is_some();
                         NEXT_PREPARED.store(next_ready, Ordering::Relaxed);
-                        // Re-arm after every transition, so the loader's next
-                        // candidate analysis wins over the library scan.
                         let finished = engine.is_finished();
                         YIELD_FOR_LOADER.store(!next_ready && !finished, Ordering::Relaxed);
                         let expected = MANUAL_NEXT_EXPECTED_INDEX.load(Ordering::Acquire);
@@ -3044,14 +2318,6 @@ fn open_output_stream(
                             Ordering::Relaxed,
                         );
                     }
-                    // The returned `Vec` drops here, on the audio thread, which
-                    // frees it here too — not just allocates it here.
-                    // `pending_events` already grows and gets collected on every
-                    // transition, so neither the allocation nor this free is
-                    // new work this adds; it is the engine's existing cost, and
-                    // it happens only a few times per transition (a few times a
-                    // minute at most), which is judged cheap enough for the
-                    // callback.
                     let events = engine.poll_events();
                     if !audition {
                         if let Some(capture) = &capture {
@@ -3062,21 +2328,6 @@ fn open_output_stream(
                             }
                         }
                     }
-                    // Edge-detects the end of a transition from
-                    // `Engine::transition_frames_into` at buffer boundaries,
-                    // since the engine has no event of its own for "the overlap
-                    // just finished" (see `PlaybackEvent::TransitionEnded`). A
-                    // nav that arrives *during* a transition makes the engine
-                    // abort and immediately start a new one within the same
-                    // `render` call, so this still reads `Some` afterwards and
-                    // the edge for the interrupted transition is never seen
-                    // here — only a second `TransitionStarted` arrives, with no
-                    // `TransitionEnded` in between. That is a deliberate
-                    // consequence of only sampling at buffer boundaries;
-                    // `NowTracker::on_transition_started` is what actually
-                    // copes with it, by folding the interrupted transition into
-                    // the display the moment the second one starts rather than
-                    // waiting for an end edge that will never come.
                     let in_transition = engine.transition_frames_into().is_some();
                     let render_diagnostics = (!audition).then(|| engine.render_diagnostics());
                     (events, in_transition, render_diagnostics, rendered_silence)
@@ -3098,13 +2349,9 @@ fn open_output_stream(
                 }
                 record_capture(Some(engine_start), Some(state.engine.render_frame()), requested_pause,
                     audition, false, state.engine.navigation_trace_dropped() as u64);
-                // Publish the main engine before its events are sent. Audition
-                // leaves the main observation unchanged while it is frozen.
                 if !audition {
                     observation.publish(state.engine.current_index(), state.engine.is_finished());
                 }
-                // Bit-exact silence is the one signal a host gets that the
-                // engine had nothing prepared for this buffer; see `StallWatch`.
                 let silent = rendered_silence;
                 let total_frames = (out.len() / 2) as u64;
                 let phase = if !audition && state.engine.is_finished() {
@@ -3160,14 +2407,7 @@ fn audio_thread(
     log: Sender<String>,
     queue: SharedQueue,
     initial_paused: bool,
-    // Where `DrainPolicy::ContinueFolder` resumes folder cycling — see
-    // `store::restored_folder_pos`. Computed by `start_impl` (before `paths`
-    // moves in here) rather than here, since the restored session's
-    // `in_flight` it depends on lives there.
     folder_pos: usize,
-    // Already gated by `effective_labeling_mode` in `start_impl`. Fixed for
-    // the life of this `Engine` — there is no live switch (see
-    // `EngineOptions::head_only_secs`); changing it requires a restart.
     labeling_mode: bool,
 ) {
     macro_rules! say {
@@ -3185,7 +2425,6 @@ fn audio_thread(
             return;
         }
     };
-    // cpal 0.18: Device is Display; there is no name() -> Result any more.
     say!("device: {device}");
 
     let supported = match device.default_output_config() {
@@ -3196,7 +2435,6 @@ fn audio_thread(
             return;
         }
     };
-    // cpal 0.18: SampleRate/ChannelCount are plain u32/u16 aliases, not newtypes.
     say!(
         "config: {} ch, {} Hz, {:?}",
         supported.channels(),
@@ -3210,35 +2448,16 @@ fn audio_thread(
         return;
     }
 
-    // Fixed for the life of this Engine; reopen uses the same rate even if the
-    // device's default sample rate has changed in the meantime.
     let sample_rate = supported.sample_rate();
 
     let mut options = EngineOptions::default();
     options.output_sample_rate = sample_rate;
-    // Kept apart from `options.cache_dir` (which takes ownership below): the
-    // C-3 loader-status log needs to hash and look up the cache itself, on
-    // this same thread, to say whether the track `HostSource::next` just
-    // reserved was already analyzed.
     let cache_dir_for_log = cache_dir.clone();
     let playlist_cache = cache_dir_for_log.clone();
     options.cache_dir = cache_dir;
     options.head_only_secs = labeling_mode.then_some(LABELING_HEAD_SECS);
 
-    // `options.loop_playlist` is not set here: `Engine::new_with_source`
-    // never reads it (only `Engine::new`'s internal `PlaylistSource` does).
-    // Looping once the host-managed queue drains is instead the job of
-    // `DrainPolicy::ContinueFolder`, passed to `HostSource` below.
-    //
-    // Playing a track is the one way the pending queue shrinks without a
-    // command running, so the source persists it too. Doing it here rather
-    // than from `queue_state` is what makes it survive backgrounding: that
-    // command only runs while the webview is polling, and the whole point of
-    // this app is to keep playing with the screen off.
     let queue_dir = data_dir.clone();
-    // Cloned before `queue` moves into `HostSource::new` below: the
-    // `on_pending_consumed` closure needs its own handle so it can re-read
-    // the queue under `SAVE_LOCK` (see the closure body).
     let queue_for_save = Arc::clone(&queue);
     let queue_for_priority = Arc::clone(&queue);
     let queue_for_reserved = Arc::clone(&queue);
@@ -3257,9 +2476,6 @@ fn audio_thread(
         },
     )
         .skip_folder_entry(Box::new(move |path| {
-            // Decide before automatic membership is created. A rejected
-            // pending occurrence must remain until playback or user deletion,
-            // so adding an unanalysed non-Funkot path would leave a ghost row.
             admit_playback_path(
                 path,
                 &folder_gate_cache,
@@ -3268,29 +2484,6 @@ fn audio_thread(
             ) == PlaybackAdmission::Rejected
         }))
         .on_pending_consumed(Box::new(move |_pending| {
-            // Ignore the slice this observer is handed — it is a snapshot
-            // `HostSource::next` took *after releasing the queue lock*
-            // (see its own doc comment), so by the time this closure runs
-            // it can already be stale. This observer only needs the fact
-            // that a pop happened; it re-reads the queue itself, under
-            // `SAVE_LOCK`, so the value it writes is exactly as fresh as
-            // what a command's `persist_queue` would write, not whatever
-            // `pending` happened to look like at pop time.
-            //
-            // That staleness is not hypothetical: `reorder`/`dequeue` can
-            // now revoke `reserved` and hand it back to `pending` (see
-            // `queue::edit_displayed`), which frees the loader permit this
-            // very `next()` call was waiting on. So a command can run,
-            // read+write the queue, and finish *before* this closure gets
-            // around to taking `SAVE_LOCK` with the older slice it captured
-            // at pop time — e.g. loader pops leaving `[b, c]`, the listener
-            // deletes `b` (command writes `[c]`), and only then does this
-            // closure take `SAVE_LOCK` and (if it still wrote `[b, c]`)
-            // resurrect the just-deleted `b`. Re-reading under the lock
-            // instead of trusting the captured slice is what rules that
-            // out: whichever of this closure or a command's `persist_queue`
-            // takes `SAVE_LOCK` second simply re-reads the queue fresh and
-            // overwrites the file with the (correct) latest state.
             let _saving = SAVE_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -3313,19 +2506,8 @@ fn audio_thread(
                 "loader: preparing {} (analysis: {analysis})",
                 item.path.display()
             );
-            // Record this as in-flight when reserved. The pending occurrence
-            // remains durable until observed playback starts, so a process
-            // death before it plays cannot lose it — see `store::Session` and
-            // `store::restored_pending`. Uses `DATA_DIR` (not `queue_dir`,
-            // moved into the `on_pending_consumed` closure above and no
-            // longer available here) — `start_impl` sets it before spawning
-            // this thread, so it is always populated by the time the loader
-            // makes its first call.
             let _saving = SAVE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut session = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            // A user may have removed this reservation while source.next()
-            // waited for the save lock. QueueRemove saves the session and
-            // replaces the queue under the same lock.
             if queue::reserved_item(&queue_for_reserved)
                 .is_some_and(|reserved| reserved.entry_id == item.entry_id)
             {
@@ -3349,7 +2531,6 @@ fn audio_thread(
             return;
         }
     };
-    // Never block in the audio callback.
     engine.set_realtime(true);
     let capture = match navigation_capture::start(&mut engine, &capture_options, &capture_inputs) {
         Ok(capture) => capture,
@@ -3361,10 +2542,6 @@ fn audio_thread(
     };
     say!("engine created");
 
-    // Grab the nav sender before `engine` moves into `RenderState`, and publish
-    // it with `render` / `paused` for Tauri commands and the notification's
-    // JNI callback. Cold-start audition sets `initial_paused` so the main
-    // engine never becomes audible before the audition engine is installed.
     let paused = Arc::new(AtomicBool::new(initial_paused));
     let nav_tx = engine.nav_sender();
     let observation = Arc::new(engine_observation::EngineObservation::new(engine.current_index(), engine.is_finished()));
@@ -3433,40 +2610,12 @@ fn audio_thread(
     };
     say!("PLAYING");
 
-    // Hold the stream alive — it dies with this thread — and, while we are
-    // here anyway, keep a log of when the output went quiet. `StallWatch`
-    // works this out inside the cpal callback but must not do the logging
-    // there; this thread has nothing else to do and can block freely.
-    //
-    // The pair of lines this writes is what identifies a stall after the
-    // fact: read together with the "loader: preparing X (analysis: …)" line
-    // above it, logcat says both that playback starved and what the loader
-    // was busy with at the time.
-    //
-    // When the callback is lost, this loop drops the stream, clears
-    // `STREAM_ERROR_SEEN`, and retries `open_output_stream` after
-    // `REOPEN_COOLDOWN` until the device returns. Engine / queue / playhead
-    // stay in `RenderState`.
     let mut stalled_since: Option<Instant> = None;
-    // Last value seen from `EVENTS_DROPPED`, so the warning below reports
-    // only the increase since the last check rather than the running total
-    // every second.
     let mut events_dropped_seen = 0u64;
-    // See `CallbackWatch`. Seeded from the current tick count rather than 0
-    // so the first `observe` a second from now compares against a callback
-    // that has actually had a chance to run, not a spurious jump from 0.
-    // Recreated after each successful reopen.
     let mut cb_watch = CallbackWatch::new(CALLBACK_TICKS.load(Ordering::Relaxed));
-    // Whether the last watchdog check already reported the callback lost, so
-    // the log line below fires once, on the alive-to-lost edge, and not every
-    // second the callback stays lost.
     let mut reported_lost = false;
     let mut retry_after: Option<Instant> = None;
     loop {
-        // A second's granularity on a gap that runs for minutes. Kept coarse
-        // on purpose: this thread lives for the whole listening session, and
-        // the rest of the app goes out of its way not to wake a phone up for
-        // no reason.
         std::thread::sleep(Duration::from_secs(1));
 
         let request = MANUAL_PRIORITY_REQUEST.load(Ordering::Acquire);
@@ -3490,17 +2639,12 @@ fn audio_thread(
             }
         }
 
-        // No open stream: stay Disconnected and retry reopen on the cooldown.
-        // Do not set `Failed` — that is for the initial setup path only.
         if stream.is_none() {
             set_phase(Phase::Disconnected);
             let ready = retry_after
                 .map(|t| Instant::now() >= t)
                 .unwrap_or(true);
             if ready {
-                // Reset silence *before* `play()` so the first buffers of the
-                // new stream cannot observe a stale `silent_frames` count.
-                // Safe: no callback is running while `stream` is `None`.
                 if let Ok(mut state) = render.lock() {
                     state.stall.reset_silence();
                 }
@@ -3539,18 +2683,10 @@ fn audio_thread(
             continue;
         }
 
-        // The callback check comes first because it decides how to read PHASE
-        // below: once the callback is gone, PHASE is whatever this loop last
-        // wrote, not a report from the engine.
         let lost = cb_watch.observe(
             CALLBACK_TICKS.load(Ordering::Relaxed),
             STREAM_ERROR_SEEN.load(Ordering::Relaxed),
         );
-        // Skipped entirely while the callback is lost. `Disconnected` is not
-        // `Stalled`, so leaving this to run would read the phase this loop
-        // itself just wrote as "no longer stalled" and log a resume that never
-        // happened — directly on top of the disconnect it is meant to help
-        // diagnose.
         if !lost {
             match (get_phase() == Phase::Stalled, stalled_since) {
                 (true, None) => {
@@ -3564,10 +2700,6 @@ fn audio_thread(
                 _ => {}
             }
         }
-        // Capacity 64 should never fill under normal use; an increase here
-        // means a transition edge — and therefore a potential ⚑ flag — was
-        // lost, which is worth knowing about even though nothing can be done
-        // about it after the fact.
         let dropped = EVENTS_DROPPED.load(Ordering::Relaxed);
         if dropped > events_dropped_seen {
             log::warn!(
@@ -3576,10 +2708,6 @@ fn audio_thread(
             );
             events_dropped_seen = dropped;
         }
-        // Callback gone (or error while stuck): close the stream and retry
-        // reopen after cooldown. PHASE stays `Disconnected` until the data
-        // callback's `set_phase` overwrites it — this loop must not write
-        // `Playing` on a successful reopen.
         if lost {
             set_phase(Phase::Disconnected);
             if !reported_lost {
@@ -3592,9 +2720,6 @@ fn audio_thread(
             // so the error callback finishes first.
             drop(stream.take());
             STREAM_ERROR_SEEN.store(false, Ordering::Relaxed);
-            // Do not carry a pre-disconnect stall across reopen — otherwise the
-            // next non-stalled buffer logs a silence duration that includes the
-            // time the device was gone.
             stalled_since = None;
             retry_after = Some(Instant::now() + REOPEN_COOLDOWN);
         } else {
@@ -3603,7 +2728,6 @@ fn audio_thread(
     }
 }
 
-/// Whether `path` has one of the extensions the engine can decode.
 fn is_supported_track(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
@@ -3612,41 +2736,13 @@ fn is_supported_track(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// What `take_pending_import` should do with one candidate path found in the
-/// staging dir (`getCacheDir()/funkot-import/`).
 #[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 enum ImportDecision {
-    /// `is_supported_track` does not recognise the extension — count towards
-    /// `ImportResult::skipped`, do not copy.
     Skip,
-    /// Copy the candidate to this path under `music_dir` (already resolved
-    /// past any name collision).
     CopyTo(PathBuf),
 }
 
-/// Decides what to do with one path found in the staging dir, without
-/// touching the filesystem beyond the injected `exists` check (same pattern
-/// as `resolve_music_dir`'s `readable`).
-///
-/// Only `candidate`'s file name is used to build the destination — even if it
-/// carries directory separators or `..` segments (defense in depth:
-/// `Import.kt` already sanitises the display name it copies into the
-/// cache-staged file, but this must not trust that unconditionally) — so the
-/// result can never leave `music_dir`. A `candidate` with no file name at all
-/// (e.g. `..` or `/`) is treated as unsupported.
-///
-/// Strips any leading dots from the stem before building the destination
-/// name: `scan_tracks_into` skips dot-prefixed entries unconditionally, but
-/// `is_supported_track` does not reject a dot-prefixed name (`.hidden.mp3`
-/// still has a recognised `mp3` extension) — without this, such a file would
-/// report as imported (`ImportResult::tracks`) and then never appear in the
-/// library. If stripping leaves nothing before the extension, the candidate
-/// is treated as unsupported.
-///
-/// On a name collision, appends a `" (2)"`, `" (3)"`, … suffix before the
-/// extension, same convention as most desktop file managers, and never
-/// overwrites an existing file.
 #[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 fn classify_import(
     candidate: &Path,
@@ -3659,13 +2755,6 @@ fn classify_import(
     let Some(file_name) = candidate.file_name().and_then(|n| n.to_str()) else {
         return ImportDecision::Skip;
     };
-    // Both `unwrap_or_default` fallbacks are unreachable in practice:
-    // `is_supported_track` above only returns `true` once `Path::extension`
-    // already did, and `Path::file_stem` returns `None` under the exact same
-    // condition `extension` does (a name that is only a leading dot, e.g.
-    // `.mp3`) — so once `is_supported_track` holds, both are `Some`. Kept as
-    // fallbacks rather than an `unwrap`/`expect` purely to avoid a panic if
-    // that invariant is ever wrong.
     let stem = Path::new(file_name)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -3693,16 +2782,10 @@ fn classify_import(
     }
 }
 
-/// Copies `src` into `music_dir` at `dest` atomically, through injected
-/// `copy` / `rename` / `remove_tmp` operations so the failure path (the temp
-/// file cleaned up, not left behind) is testable without touching the
-/// filesystem — same pattern as `classify_import`'s `exists`. The real
-/// [`copy_atomic`] is this wired to `std::fs`.
-///
-/// The temp file lives in `dest`'s own parent (i.e. inside `music_dir`), not
-/// the staging dir: `fs::rename` is only atomic within one filesystem, and
-/// `music_dir` (external storage) and the staging dir (`getCacheDir()`,
-/// internal storage) are different mounts on Android.
+/// The temp file lives in `dest`'s own parent, not the staging dir:
+/// `fs::rename` is only atomic within one filesystem, and `music_dir`
+/// (external storage) and the staging dir (`getCacheDir()`, internal
+/// storage) are different mounts on Android.
 #[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 fn copy_atomic_with(
     src: &Path,
@@ -3725,12 +2808,6 @@ fn copy_atomic_with(
     result
 }
 
-/// Copies `src` into `music_dir` at `dest`. See [`copy_atomic_with`] for why
-/// this goes through a temp file rather than `fs::copy` straight to `dest`:
-/// a `fs::copy` that fails partway (or a concurrent `refresh_library` walk)
-/// must never see a truncated file directly at `dest`, which
-/// `scan_tracks_into` would otherwise pick up as a broken track to analyse,
-/// or the library-list dedup keys off half-written bytes.
 #[cfg(target_os = "android")]
 fn copy_atomic(src: &Path, dest: &Path) -> std::io::Result<()> {
     // Wrapped in closures rather than passed as `std::fs::copy` /
@@ -3773,8 +2850,6 @@ mod import_tests {
         );
     }
 
-    /// A second collision (both the plain name and the first `(2)` suffix
-    /// already taken) must keep counting up rather than overwrite either.
     #[test]
     fn classify_import_keeps_counting_up_past_the_first_collision() {
         let music_dir = Path::new("/music");
@@ -3787,9 +2862,6 @@ mod import_tests {
         );
     }
 
-    /// The destination must never leave `music_dir`, even if the candidate
-    /// path carries directory separators or `..` segments — only the file
-    /// name is ever used to build it.
     #[test]
     fn classify_import_keeps_the_destination_inside_music_dir() {
         let music_dir = Path::new("/music");
@@ -3800,8 +2872,6 @@ mod import_tests {
         );
     }
 
-    /// `.hidden.mp3` must lose its leading dot in `music_dir`, or
-    /// `scan_tracks_into` would silently hide the "imported" file forever.
     #[test]
     fn classify_import_strips_a_leading_dot() {
         let music_dir = Path::new("/music");
@@ -3812,8 +2882,6 @@ mod import_tests {
         );
     }
 
-    /// Extension matching is case-insensitive (`is_supported_track`), and the
-    /// destination keeps the candidate's original casing.
     #[test]
     fn classify_import_accepts_an_uppercase_extension() {
         let music_dir = Path::new("/music");
@@ -3824,9 +2892,6 @@ mod import_tests {
         );
     }
 
-    /// `.mp3` alone is a dotfile with no extension by `Path::extension`'s own
-    /// rule (a name that is only a leading dot never has one) — must not be
-    /// mistaken for a bare "mp3" file.
     #[test]
     fn classify_import_skips_a_bare_dotfile_extension() {
         let music_dir = Path::new("/music");
@@ -3834,8 +2899,6 @@ mod import_tests {
         assert_eq!(decision, ImportDecision::Skip);
     }
 
-    /// Paths with no file name at all must not panic and must be treated as
-    /// unsupported.
     #[test]
     fn classify_import_skips_paths_with_no_file_name() {
         let music_dir = Path::new("/music");
@@ -3900,23 +2963,8 @@ mod import_tests {
     }
 }
 
-/// Recursively walk `dir` for supported track files, sorted.
-///
-/// Symlinks (file or directory) are never followed — `DirEntry::file_type()`
-/// reports the link itself rather than its target, so this is a plain
-/// membership check rather than a stat of whatever the link points at. That
-/// sidesteps having to detect symlink cycles, at the cost of not following
-/// tracks or subfolders reached only via a link.
-///
-/// Dot-prefixed names (files and directories alike) are skipped, since
-/// Android's MTP / thumbnail bookkeeping directories can end up inside the
-/// Music folder.
-///
-/// The top-level `dir` itself must be readable, or this fails outright. A
-/// subdirectory discovered during the walk that fails to read is instead
-/// logged and skipped, and marks the scan **incomplete** so callers can avoid
-/// pruning / baseline-commit on a partial walk. Entry / `file_type` errors
-/// also set incomplete; dotted / symlink / unsupported-extension skips do not.
+/// Symlinks are never followed: `DirEntry::file_type()` reports the link
+/// itself rather than its target, so symlink cycles cannot occur.
 fn scan_tracks(dir: &Path) -> Result<(Vec<PathBuf>, bool), String> {
     let mut paths = Vec::new();
     let mut complete = true;
@@ -3927,9 +2975,6 @@ fn scan_tracks(dir: &Path) -> Result<(Vec<PathBuf>, bool), String> {
     Ok((paths, complete))
 }
 
-/// Walk one already-opened directory's entries into `paths`, recursing into
-/// subdirectories. Read failures on a subdirectory are logged, skipped, and
-/// mark `*complete = false` — see [`scan_tracks`].
 fn scan_tracks_into(
     entries: std::fs::ReadDir,
     paths: &mut Vec<PathBuf>,
@@ -3939,7 +2984,6 @@ fn scan_tracks_into(
         let entry = match entry_result {
             Ok(e) => e,
             Err(_) => {
-                // Err from ReadDir → incomplete (do not silently drop via ok()).
                 *complete = false;
                 continue;
             }
@@ -3977,14 +3021,8 @@ fn scan_tracks_into(
     }
 }
 
-/// `start_impl`'s "the audio thread is already up" error. Named because
-/// `audition_transition` singles it out to fall through on, so it must not be
-/// spelled out at both ends.
 const ALREADY_STARTED: &str = "already started";
 
-/// Reject an empty library, but allow a single track: [`queue::HostSource`]
-/// cycles the folder and gives each pass a new playlist index, so one file is
-/// a valid repeating playlist.
 fn ensure_tracks_available(paths: &[PathBuf], dir: &Path) -> Result<(), String> {
     if paths.is_empty() {
         return Err(format!("need >= 1 track in {}, found 0", dir.display()));
@@ -3992,29 +3030,6 @@ fn ensure_tracks_available(paths: &[PathBuf], dir: &Path) -> Result<(), String> 
     Ok(())
 }
 
-/// Start the main audio thread. `initial_paused` is for cold-start audition:
-/// PLAYBACK is published paused so the main engine never becomes audible
-/// before an audition engine is installed.
-///
-/// Restores both `pending` and `SESSION` from the previous run every time
-/// this is called — including on a cold-start audition. That used to be
-/// gated behind a `load_persisted_queue` argument, to keep cold-start
-/// audition's pending queue empty while the loader served folder tracks
-/// (`on_pending_consumed` only runs when something was actually taken from
-/// `pending`, so leaving it empty kept its persisted snapshot component untouched).
-/// That gate is gone now: `store::restored_pending` folds `session.in_flight`
-/// in ahead of the snapshot queue component, so whatever the loader pops — pending or
-/// folder-drain alike — is recorded via `on_reserved` and survives a crash
-/// either way, and there is no longer a reason to suppress the restore.
-/// Injection still happens exactly once, here, before the loader thread
-/// starts pulling — not later from `resume_autodj`, which would still reorder
-/// whatever the loader had already taken from the folder.
-///
-/// Idempotent by construction: `replace_pending` overwrites rather than
-/// appends, so a caller that runs this twice back-to-back (the startup
-/// preload in `run()`'s `setup`, then this restore) does not duplicate
-/// the queue. The preload skips music-folder I/O; this path still
-/// `exists`-filters and applies the strict gate.
 fn start_impl(
     music_dir: &str,
     cache_dir: &str,
@@ -4035,7 +3050,6 @@ fn start_impl(
     let (paths, _complete): (Vec<PathBuf>, bool) = scan_tracks(&dir)?;
 
     if !playlist_service::existing().is_some_and(|s| s.lock().unwrap_or_else(|e|e.into_inner()).has_playlist()) {
-        // A normal folder source needs music; an empty finite list may end.
         ensure_tracks_available(&paths, &dir)?;
     }
 
@@ -4043,18 +3057,8 @@ fn start_impl(
     *state.log_rx.lock().unwrap() = Some(rx);
     let found = format!("{} tracks", paths.len());
     let cache = PathBuf::from(cache_dir);
-    // Resolved here rather than taken as an argument: the webview passes the
-    // music and cache paths because it displays them, but the data dir is
-    // internal and it has no business naming it.
     let data = PathBuf::from(resolve_dirs(app)?.data_dir);
-    // Published for the save paths that have no `AppHandle` of their own —
-    // see `DATA_DIR`'s doc comment. Also set from `run()`'s `setup`, but that
-    // runs first only when it succeeds (best-effort; Android's JNI context
-    // may not be ready that early), so this is not redundant.
     let _ = DATA_DIR.set(data.clone());
-    // Fixed for the life of this `Engine` — there is no live labeling switch
-    // (see `EngineOptions::head_only_secs`), so `effective_labeling_mode` is
-    // resolved once here and carried straight into `audio_thread`.
     let _prestart = playlist_service::lock_prestart_queue();
     let source_owner = playlist_service::get(&data, &cache, &state.queue);
     let restored = source_owner.lock().unwrap_or_else(|e| e.into_inner())
@@ -4063,10 +3067,6 @@ fn start_impl(
     ALLOW_NON_FUNKOT.store(restored.settings.allow_non_funkot, Ordering::Relaxed);
     let labeling_mode = effective_labeling_mode(restored.settings.labeling_mode);
     let session = restored.session;
-    // Where `DrainPolicy::ContinueFolder` resumes folder cycling — see
-    // `store::restored_folder_pos`. Computed here, before `paths` moves into
-    // `audio_thread` below, from `in_flight`'s *last* entry (the most
-    // recently reserved track, whichever queue it came from).
     let folder_pos = restored.folder_pos.unwrap_or_else(||
         store::restored_folder_pos(
             &paths,
@@ -4079,18 +3079,9 @@ fn start_impl(
         ));
     let queue = Arc::clone(&state.queue);
 
-    // Set before the audio thread starts: any in-flight analysis worker
-    // (from `refresh_library`) holds off while the phase says `Starting`.
     set_phase(Phase::Starting);
-    // Prefer playback/loader over background decode until the first next
-    // slot is prepared (cleared in the cpal callback via `NEXT_PREPARED`).
     YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
 
-    // Use the caller's `initial_paused` only (normal Start: false; cold
-    // audition: true). Do not OR in disk `session.paused` — Start is a play
-    // intent, and cold audition mute is already expressed by the caller flag.
-    // Publish folder cursor before spawn so Starting-phase polls do not see
-    // a stale 0/0 while the audio thread is still coming up.
     FOLDER_LEN.store(paths.len(), Ordering::Relaxed);
     FOLDER_POS.store(folder_pos, Ordering::Relaxed);
     if let Err(e) = std::thread::Builder::new()
@@ -4120,7 +3111,6 @@ fn start(
     start_impl(&music_dir, &cache_dir, &app, &state, false)
 }
 
-/// How long cold-start audition waits for the audio thread to publish PLAYBACK.
 const PLAYBACK_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn wait_for_playback() -> Result<&'static Playback, String> {
@@ -4136,7 +3126,6 @@ fn wait_for_playback() -> Result<&'static Playback, String> {
     }
 }
 
-/// Fast-forward a non-realtime audition engine to ~8 bars before A's outro.
 fn fast_forward_audition(engine: &mut Engine, from: &PreparedTrack, bar_frames: f64) {
     let preroll = (8.0 * bar_frames).round() as u64;
     let target = from.outro_start_out.saturating_sub(preroll);
@@ -4154,7 +3143,6 @@ fn fast_forward_audition(engine: &mut Engine, from: &PreparedTrack, bar_frames: 
     }
 }
 
-/// Build a two-track audition engine at `sample_rate`, fast-forwarded to the mix.
 fn build_audition_engine(
     from_path: &Path,
     to_path: &Path,
@@ -4188,10 +3176,6 @@ fn build_audition_engine(
 fn install_audition(engine: Engine) -> Result<(), String> {
     let playback = PLAYBACK.get().ok_or("not playing")?;
     let first_install = !AUDITIONING.load(Ordering::Relaxed);
-    // Park main-engine display only on the first install of a session. A
-    // second install (「もう一度聴く」 while still auditioning) must not
-    // snapshot the audition titles as if they were the main engine's.
-    // Lock order: NOW before AUDITION_SESSION (never reverse).
     if first_install {
         let mut now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut session = AUDITION_SESSION
@@ -4204,13 +3188,8 @@ fn install_audition(engine: Engine) -> Result<(), String> {
         session.parked_now_entry_frame_out = now.now_entry_frame_out;
         now.in_progress = None;
     }
-    // Raise the flag before the engine goes in: the callback can run the moment
-    // the render lock is released, and `events_thread` drops audition-tagged
-    // events while the flag is down.
     AUDITIONING.store(true, Ordering::Relaxed);
     let in_transition = engine.transition_frames_into().is_some();
-    // Take any previous audition engine under the render lock, then drop it
-    // after unlock so Engine teardown does not hold the realtime mutex.
     let previous = {
         let mut state = playback
             .render
@@ -4248,17 +3227,6 @@ fn audition_transition(
 
     let cold_start = PLAYBACK.get().is_none();
     if cold_start {
-        // Cold audition: paused main engine, restored pending/session same as
-        // a normal `start` — `start_impl` no longer special-cases this (see
-        // its doc comment for why suppressing the restore is not needed any
-        // more). Another start can win the race — the ▶ button, or a second
-        // audition press — because PLAYBACK is published only after the
-        // engine is built, so `is_none()` stays true for seconds after
-        // `start`. Waiting for that thread is right; failing here would leave
-        // the button dead with no explanation. Pause the main engine as soon
-        // as PLAYBACK is up, before `build_audition_engine` (which can take
-        // seconds); otherwise a winning ▶ leaves `paused=false` and queue
-        // audio leaks until `install_audition`.
         match start_impl(&music_dir, &cache_dir, &app, &state, true) {
             Ok(_) => {}
             Err(e) if e == ALREADY_STARTED => {}
@@ -4267,7 +3235,6 @@ fn audition_transition(
         wait_for_playback()?;
     }
     let playback = PLAYBACK.get().ok_or("not playing")?;
-    // Pair goes in early so the UI banner can show.
     {
         let mut session = AUDITION_SESSION
             .lock()
@@ -4282,10 +3249,6 @@ fn audition_transition(
     )
 }
 
-/// Mute and block pause for the whole prepare window (AUDITIONING is still
-/// false until install), then build and install. A failed prepare restores
-/// the `paused` it found: the listener may have paused the queue, or this is
-/// 「もう一度聴く」 over a playing audition. The caller holds the audition lock.
 fn prepare_audition<E>(
     paused: &AtomicBool,
     build: impl FnOnce() -> Result<E, String>,
@@ -4303,17 +3266,9 @@ fn prepare_audition<E>(
 
 #[tauri::command]
 fn resume_autodj() -> Result<(), String> {
-    // An in-flight `audition_transition` would install after we returned.
     let _audition = try_audition_lock()?;
     let playback = PLAYBACK.get().ok_or("not playing")?;
-    // Pause before teardown: `install_audition` leaves main unmuted, so taking
-    // audition first lets main render TrackStarted into NOW; cold-start then
-    // overwrites with None parked_now. Brief mute of audition audio is OK.
     playback.paused.store(true, Ordering::Relaxed);
-    // Clear AUDITIONING and restore parked under the NOW lock together so a
-    // queued audition TrackStarted cannot rewrite titles after restore
-    // (`lock_now_unless_stale` re-checks the flag while holding NOW). Do this
-    // before audition.take(). Lock order: NOW before AUDITION_SESSION.
     {
         let mut now = NOW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         AUDITIONING.store(false, Ordering::Relaxed);
@@ -4326,7 +3281,6 @@ fn resume_autodj() -> Result<(), String> {
         now.now_started_frames = session.parked_now_started_frames.take();
         now.now_entry_frame_out = session.parked_now_entry_frame_out;
     }
-    // Take the audition engine under the render lock; drop it after unlock.
     let previous = {
         let mut state = playback
             .render
@@ -4339,20 +3293,7 @@ fn resume_autodj() -> Result<(), String> {
     };
     drop(previous);
     service_sync_state();
-    // Spec: resume returns to auto-DJ — including cold-start where main was
-    // only ever paused under audition. `start_impl` already restored pending
-    // and `SESSION` once, before the loader started pulling from either; do
-    // not `load_queue` / `replace_pending` again here — the loader may
-    // already have taken folder tracks in the meantime, and injecting pending
-    // now would reorder them (same reasoning as `start_impl`'s doc comment).
     playback.paused.store(false, Ordering::Relaxed);
-    // Unlike `install_audition`'s unmute or `audition_transition`'s
-    // prepare-time mute/failure restore, this is the one place a `paused`
-    // write here reflects the *listener's* intent: the main transport is
-    // actually returning to playing, not just being muted/unmuted around a
-    // volatile (never-persisted) `AUDITION_SESSION`. Mirror it into
-    // `SESSION` so a restart does not come back paused just because the
-    // listener last left via an audition.
     {
         let mut session = SESSION
             .lock()
@@ -4389,7 +3330,6 @@ fn audition_again(
     )
 }
 
-/// Drain whatever the audio thread has said so far.
 #[tauri::command]
 fn poll_log(state: tauri::State<AppState>) -> Vec<String> {
     let mut lines = state.lines.lock().unwrap();
@@ -4401,7 +3341,6 @@ fn poll_log(state: tauri::State<AppState>) -> Vec<String> {
     lines.clone()
 }
 
-/// Flip the paused flag. Returns the new state.
 #[tauri::command]
 fn toggle_pause() -> Result<bool, String> {
     let _audition = try_audition_lock()?;
@@ -4415,7 +3354,6 @@ fn toggle_pause() -> Result<bool, String> {
     Ok(now_paused)
 }
 
-/// Ask the engine to transition to the next track.
 #[tauri::command]
 fn skip_next() -> Result<(), String> {
     request_skip_next()
@@ -4429,46 +3367,27 @@ fn is_paused() -> bool {
         .unwrap_or(false)
 }
 
-/// One completed transition, for display. See `NowTracker::last_transition`
-/// for why this is only ever the last *automatic* one.
 #[derive(serde::Serialize, Clone)]
 struct TransitionInfo {
-    /// Absolute path, same format as `TrackRow::path`.
     from: String,
-    /// Absolute path, same format as `TrackRow::path`.
     to: String,
     automatic: bool,
     seconds_ago: f64,
 }
 
-/// What the UI paints. Cheap enough to poll twice a second.
 #[derive(serde::Serialize, Clone)]
 struct PlayerState {
     phase: &'static str,
     paused: bool,
-    /// Absolute path, same format as `TrackRow::path`.
     now_playing: Option<String>,
-    /// Absolute path, same format as `TrackRow::path`.
     previous: Option<String>,
     last_transition: Option<TransitionInfo>,
     auditioning: bool,
     audition_from: Option<String>,
     audition_to: Option<String>,
-    /// Position within the stretched track: the engine's actual entry offset
-    /// plus the frames rendered since that entry. Both this and duration use
-    /// the output-time domain, including intros skipped by a transition.
-    /// Pause and audition freeze MAIN_FRAMES, preserving this position.
     position_secs: Option<f64>,
-    /// The current track's length *as played* — i.e. after the engine's
-    /// tempo stretch (see `played_duration_secs`), not the raw file length.
-    /// The raw (tag/analysis-cache) length would run 10-40% longer or
-    /// shorter than what is actually heard, at which point `position_secs`
-    /// would overtake it well before the track actually ends.
     duration_secs: Option<f64>,
-    /// Monotonic counter bumped after a successful history persist. The UI
-    /// re-pulls new arrivals when this changes (not on now-playing alone).
     history_revision: u64,
-    /// Start frame of the audible track; changes when playback actually advances.
     playback_started_frames: Option<u64>,
 }
 
@@ -4491,9 +3410,6 @@ fn played_duration_secs(analysis: &funkot_core::TrackAnalysis) -> Option<f64> {
         return None;
     }
     let source_secs = analysis.total_frames as f64 / analysis.sample_rate as f64;
-    // Same fallback `finish_prepare` uses: an unmeasured/invalid intro BPM
-    // stretches to the nominal tempo rather than dividing by something
-    // useless.
     let intro_bpm = if analysis.intro_bpm.is_finite() && analysis.intro_bpm > 0.0 {
         analysis.intro_bpm
     } else {
@@ -4549,9 +3465,6 @@ mod played_duration_secs_tests {
 
     #[test]
     fn scales_by_target_over_intro_bpm() {
-        // 200s of source at 48kHz, intro at nominal 180 BPM: target is
-        // 180 * 1.10 = 198, so speed = 198/180 = 1.1 and played length is
-        // 200 / 1.1 ≈ 181.818s.
         let a = analysis(48_000, 48_000 * 200, 180.0);
         let got = played_duration_secs(&a).unwrap();
         assert!((got - 200.0 / 1.1).abs() < 1e-6, "got {got}");
@@ -4576,22 +3489,8 @@ mod played_duration_secs_tests {
     }
 }
 
-/// Last computed played-duration, keyed by the track it belongs to.
-/// `player_state` is polled at 2 Hz and this costs a content hash (256 KiB of
-/// I/O) plus a cache JSON read, so it must not run per poll. A `None` result
-/// is memoised too — an unanalysed track would otherwise re-hash twice a
-/// second forever.
 static PLAYED_DURATION: Mutex<Option<(PathBuf, Option<f64>)>> = Mutex::new(None);
 
-/// `played_duration_secs` for `now` (its *full* path — `NOW` holds full
-/// paths, and `PlayerState::now_playing` is now a full path too), memoised
-/// in `PLAYED_DURATION` so repeated polls of the
-/// same track cost nothing after the first. Only a track change pays for the
-/// content hash + cache read (and, on Android, the JNI round trip inside
-/// `resolve_dirs` that a per-poll call would otherwise incur).
-///
-/// Neither `PLAYED_DURATION` nor (per the caller) `NOW` is held across this
-/// function's own I/O.
 fn played_duration_for(app: &tauri::AppHandle, now: &Path) -> Option<f64> {
     {
         let memo = PLAYED_DURATION.lock().unwrap();
@@ -4611,8 +3510,6 @@ fn played_duration_for(app: &tauri::AppHandle, now: &Path) -> Option<f64> {
     secs
 }
 
-/// Use the engine's final entry (including phase alignment), never an
-/// analysis-derived estimate of skipped bars. Duration stays the full track.
 fn track_position_secs(rendered: u64, started: u64, entry: u64, sample_rate: u32) -> Option<f64> {
     if sample_rate == 0 { return None; }
     Some((entry as f64 + rendered.saturating_sub(started) as f64) / sample_rate as f64)
@@ -4620,9 +3517,6 @@ fn track_position_secs(rendered: u64, started: u64, entry: u64, sample_rate: u32
 
 #[tauri::command]
 fn player_state(app: tauri::AppHandle) -> PlayerState {
-    // Never hold NOW and AUDITION_SESSION together; never hold either across
-    // the tag-probe I/O in `audition_display_title` or the cache I/O in
-    // `played_duration_for`.
     let (now_playing, previous, last_transition, now_started_frames, now_entry_frame_out) = {
         let now = NOW.lock().unwrap();
         (
@@ -4653,11 +3547,6 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
     };
     let auditioning =
         AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed);
-    // While auditioning, `NOW` is parked and `now_playing` below is the
-    // pre-audition main track — its position/duration would just be stale
-    // (frozen at park time) if shown here, so withhold both rather than
-    // paint a bar that looks live but is not moving for a reason the UI
-    // cannot explain.
     let (position_secs, duration_secs) = if auditioning {
         (None, None)
     } else {
@@ -4691,7 +3580,6 @@ fn player_state(app: tauri::AppHandle) -> PlayerState {
     }
 }
 
-/// Result of recording the last automatic transition as a bad mix.
 #[derive(serde::Serialize, Clone)]
 struct FlagResult {
     from_title: String,
@@ -4730,9 +3618,6 @@ fn flag_last_transition_impl(data_dir: &Path, record_undo: bool) -> Result<FlagR
 
     let key = store::flag_key(&from_hash, &to_hash);
 
-    // Unlike `set_bars` (warn-and-succeed), a failed write here must not
-    // advertise success: the toast offers undo, and undoing a count that
-    // never landed on disk would silently drop an older flag.
     let count = {
         let _saving = SAVE_LOCK
             .lock()
@@ -4746,7 +3631,6 @@ fn flag_last_transition_impl(data_dir: &Path, record_undo: bool) -> Result<FlagR
         entry.last_flagged_ms = now_ms();
         let count = entry.count;
         store::save_flags(data_dir, &flags).map_err(|e| format!("cannot persist flags: {e}"))?;
-        // Re-flagging clears dismiss hides for this pair's two list rows.
         let mut dismissed = store::load_dismissed(data_dir);
         dismissed.remove(&store::dismiss_key(&from_hash, "outgoing"));
         dismissed.remove(&store::dismiss_key(&to_hash, "incoming"));
@@ -4773,11 +3657,6 @@ fn flag_last_transition(app: tauri::AppHandle) -> Result<FlagResult, String> {
     flag_last_transition_impl(Path::new(&dirs.data_dir), true)
 }
 
-/// List flagged transitions aggregated by track × role for the edit tab.
-///
-/// Loads `flags.json` under `SAVE_LOCK`, scans `music_dir` for hash→meta
-/// (title / artist / low-confidence), then returns [`store::aggregate_flags`].
-/// Does not start analysis or mutate flags.
 #[tauri::command(async)]
 fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackRow>, String> {
     let dirs = resolve_dirs(&app)?;
@@ -4806,7 +3685,6 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
         let Ok(hash) = funkot_core::cache::content_hash(path) else {
             continue;
         };
-        // Same path/bars/manual/analyzed sources as the library table.
         let row = track_row(
             path,
             &cache_dir,
@@ -4837,11 +3715,6 @@ fn list_flagged_tracks(app: tauri::AppHandle) -> Result<Vec<store::FlaggedTrackR
     Ok(store::aggregate_flags(&flags, &meta_by_hash, &dismissed))
 }
 
-/// Hide one track×role row from the flagged list (`outgoing` / `incoming`).
-///
-/// Writes `dismissed.json` only — `flags.json` is unchanged. Returns `1` when
-/// a new dismiss key was recorded (and arms undo); `0` when already dismissed
-/// or `role` is not a known value (undo slot left alone).
 #[tauri::command(async)]
 fn dismiss_flags(
     app: tauri::AppHandle,
@@ -4861,7 +3734,6 @@ fn dismiss_flags(
     let mut dismissed = store::load_dismissed(&data_dir);
     let key = store::dismiss_key(&track_hash, &role);
     if !dismissed.insert(key.clone()) {
-        // Already dismissed — do not clobber a previous toast's undo target.
         return Ok(0);
     }
     store::save_dismissed(&data_dir, &dismissed)
@@ -4872,7 +3744,6 @@ fn dismiss_flags(
     Ok(1)
 }
 
-/// Restore the dismiss key last written by [`dismiss_flags`] (single-shot).
 #[tauri::command(async)]
 fn undo_last_dismiss(app: tauri::AppHandle) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
@@ -4898,7 +3769,6 @@ fn undo_last_dismiss(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Undo the most recent `flag_last_transition` (single-shot).
 #[tauri::command(async)]
 fn undo_last_flag(app: tauri::AppHandle) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
@@ -4925,29 +3795,12 @@ fn undo_last_flag(app: tauri::AppHandle) -> Result<(), String> {
         None => {}
     }
     store::save_flags(&data_dir, &flags).map_err(|e| format!("cannot persist flags: {e}"))?;
-    // Only consume the undo token after the write lands, so a failed save
-    // leaves the toast's 取消 usable.
     *LAST_FLAG_UNDO
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     Ok(())
 }
 
-/// The minimum time-until-transition (`QueueSnapshot::transition_in_secs`)
-/// `reorder`/`dequeue` accept an edit that revokes `reserved` for. Below
-/// this, `QueueSnapshot::reserved_swappable` is `false` and the UI disables
-/// the operation rather than let the listener hit a doomed `"too_late"`.
-///
-/// Revoking `reserved` makes the loader decode and time-stretch its
-/// replacement from scratch; measured at ~8s for a full stretch on a Pixel 8
-/// Pro debug APK (`[profile.dev.package."*"] opt-level = 2`; see
-/// `funkot-autodj-for-ui`'s AGENTS.md, "モバイル (Android) ビルド" section).
-/// 30s leaves headroom for a longer track. Erring low just costs some
-/// editable seconds — `edit_displayed` still refuses the edit safely if the
-/// deadline is missed. Erring high is worse: the engine can reach its outro
-/// with nothing prepared, and the resulting wait for the replacement can
-/// leave the mix without the next track's intro to layer under it (a
-/// listener hears the outro run out solo).
 const SWAP_DEADLINE_SECS: f64 = 30.0;
 
 fn manual_priority_swap_safe(
@@ -4993,32 +3846,15 @@ mod manual_priority_tests {
     }
 }
 
-/// Snapshot of the playback queue, for the UI.
 #[derive(serde::Serialize, Clone)]
 struct QueueSnapshot {
     source: playlist_service::SourceTarget,
     playlist: Option<playlist_service::Details>,
     catalog_revision: u64,
     playlist_store_status: String,
-    /// Reserved = already handed to the engine to play next. `None` while the
-    /// only reserved track is the first of a run (being prepared as current,
-    /// not as next-up).
     reserved: Option<QueueItem>,
-    /// Waiting queue; its head is "reserved's successor".
     pending: Vec<QueueItem>,
-    /// Main-engine tracks handed out but not yet retired, in reservation
-    /// order. Raw occurrences are preserved; the frontend unions by path.
     in_flight: Vec<QueueItem>,
-    /// Whether `reorder`/`dequeue` would currently accept an edit that
-    /// reaches into the `reserved` slot (`Move`/`Remove` at displayed index
-    /// `0`, or `Move { to: 0, .. }`). `false` while: nothing is reserved; an
-    /// audition is running or still preparing (the main engine's runway is
-    /// frozen then — see `NEXT_PREPARED`/`FRAMES_UNTIL_TRANSITION`); the
-    /// loader hasn't finished preparing `reserved`'s eventual replacement yet
-    /// (`NEXT_PREPARED` false right after a transition — revoking now would
-    /// have nothing to give back, and whatever the loader is mid-preparing
-    /// would land moments later as an unwanted substitute); or
-    /// `transition_in_secs` has dropped to or below `SWAP_DEADLINE_SECS`.
     reserved_swappable: bool,
     /// Whether the engine has actually finished preparing `reserved` for
     /// playback. `false` right after a transition or right after `reserved`
@@ -5036,14 +3872,8 @@ struct QueueSnapshot {
     /// the whole audition/pause, so this field reads as prepared (`true`) in
     /// both states instead.
     reserved_prepared: bool,
-    /// Seconds until the active track's automatic transition may begin, or
-    /// `null` when unknown: stopped, auditioning/preparing an audition, or no
-    /// active deck yet.
     transition_in_secs: Option<f64>,
-    /// Next 0-based folder-drain index (`DrainPolicy::ContinueFolder.pos`).
     folder_pos: usize,
-    /// Folder-track count for this playback session (`scan_tracks` length at
-    /// start). `0` before the first successful `start`.
     folder_len: usize,
 }
 
@@ -5056,8 +3886,6 @@ fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
     Ok(allow)
 }
 
-/// Persist `allow_non_funkot` and reconfigure the normal queue and any live
-/// future source before publishing the admission atomic to the loader.
 #[tauri::command(async)]
 fn set_allow_non_funkot(
     app: tauri::AppHandle,
@@ -5067,9 +3895,6 @@ fn set_allow_non_funkot(
     let _prestart = playlist_service::lock_prestart_queue();
     let dirs = resolve_dirs(&app)?;
     let data = Path::new(&dirs.data_dir);
-    // Settings can be changed before startup or before `queue_state` has
-    // initialized the service. Create it here so OFF filters the same durable
-    // normal queue/catalog resume that startup will later prefer.
     let service = playlist_service::existing().unwrap_or_else(|| {
         playlist_service::get(data, Path::new(&dirs.cache_dir), &state.queue)
     });
@@ -5080,16 +3905,12 @@ fn set_allow_non_funkot(
     Ok(allow)
 }
 
-/// Current `settings.json` `labeling_mode` (raw, pre-platform-gate).
 #[tauri::command(async)]
 fn get_labeling_mode(app: tauri::AppHandle) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
     Ok(store::load_settings(Path::new(&dirs.data_dir)).labeling_mode)
 }
 
-/// Persist `labeling_mode`. Fixed at `Engine` construction (no live switch —
-/// see `EngineOptions::head_only_secs`), so a running session keeps whatever
-/// mode it started with; the new value takes effect on the next Start.
 #[tauri::command(async)]
 fn set_labeling_mode(app: tauri::AppHandle, on: bool) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
@@ -5100,10 +3921,6 @@ fn set_labeling_mode(app: tauri::AppHandle, on: bool) -> Result<bool, String> {
     Ok(on)
 }
 
-/// The stored UI language, or `None` when the listener has never picked one
-/// (fresh install) — the UI then follows the platform locale. Also refreshes
-/// [`LOCALE_TAG`] so the Android notification agrees with the app after a
-/// cold start, not only after a switch.
 #[tauri::command(async)]
 fn get_locale(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let dirs = resolve_dirs(&app)?;
@@ -5112,12 +3929,6 @@ fn get_locale(app: tauri::AppHandle) -> Result<Option<String>, String> {
     Ok(locale)
 }
 
-/// Persist the UI language and apply it to the Android notification.
-///
-/// [`LOCALE_TAG`] is stored **before** `SAVE_LOCK` is released (same shape as
-/// `set_allow_non_funkot`). `service_sync_state` then makes a running
-/// `PlaybackService` rebuild its notification and re-read the tag through
-/// `currentLocaleTag`. Before playback starts it is deliberately a no-op.
 #[tauri::command(async)]
 fn set_locale(app: tauri::AppHandle, locale: String) -> Result<String, String> {
     let dirs = resolve_dirs(&app)?;
@@ -5136,13 +3947,11 @@ fn set_locale(app: tauri::AppHandle, locale: String) -> Result<String, String> {
     Ok(saved)
 }
 
-/// Used by the Android `currentLocaleTag` JNI entry.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn notification_locale_tag() -> String {
     LOCALE_TAG.lock().unwrap().clone()
 }
 
-/// `SAVE_LOCK`-scoped Settings read-modify-write: reload, mutate, atomic save.
 fn with_settings_rmw(
     data: &Path,
     mutate: impl FnOnce(&mut store::Settings),
@@ -5150,8 +3959,6 @@ fn with_settings_rmw(
     with_settings_rmw_then(data, mutate, |_| ())
 }
 
-/// Like [`with_settings_rmw`], but runs `after_save` **before** releasing
-/// `SAVE_LOCK` (e.g. update `ALLOW_NON_FUNKOT` after a successful persist).
 fn with_settings_rmw_then<R>(
     data: &Path,
     mutate: impl FnOnce(&mut store::Settings),
@@ -5188,9 +3995,6 @@ fn revoke_reserved_for_manual_priority() -> Option<PathBuf> {
     path
 }
 
-/// Replace a prepared automatic next track with the oldest waiting manual
-/// item when there is enough runway to decode the replacement safely.
-/// Returns true only when a replacement actually happened.
 fn clear_request_if_current(cell: &AtomicU64, request: u64) {
     let _ = cell.compare_exchange(
         request,
@@ -5220,8 +4024,6 @@ fn try_prioritize_manual(queue: &SharedQueue, request: u64) -> bool {
         manual_priority_swap_safe(auditioning, prepared, frames, playback.sample_rate)
     });
     if !safe {
-        // This automatic track is already committed. The manual partition is
-        // at the head of pending, so it will take over immediately after it.
         clear_manual_priority_request(request);
         return false;
     }
@@ -5241,8 +4043,6 @@ fn try_prioritize_manual(queue: &SharedQueue, request: u64) -> bool {
 
 #[tauri::command(async)]
 fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
-    // The source owner serializes claims, progress and all destination edits.
-    // Reconcile against the engine before publishing the displayed revision.
     let _prestart = playlist_service::lock_prestart_queue();
     let service = match playlist_service::existing() {
         Some(service) => service,
@@ -5263,9 +4063,6 @@ fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Q
     let transition_in_secs = if auditioning || frames == u64::MAX {
         None
     } else {
-        // Same guard as `played_duration_secs`: a `0` sample rate would turn
-        // this into `inf`, which `reserved_swappable`'s `> SWAP_DEADLINE_SECS`
-        // check below would then read as "plenty of runway".
         PLAYBACK.get().and_then(|p| {
             if p.sample_rate == 0 {
                 return None;
@@ -5277,11 +4074,6 @@ fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Q
         && !auditioning
         && NEXT_PREPARED.load(Ordering::Relaxed)
         && transition_in_secs.is_some_and(|s| s > SWAP_DEADLINE_SECS);
-    // Not `reserved_swappable`-derived on purpose: that flag is deliberately
-    // `false` during an audition (edits must not reach into `reserved` then),
-    // but `reserved_prepared` reads as prepared during an audition/pause so
-    // the "準備中" badge does not stay stuck on screen for their whole
-    // duration — see the field's doc comment.
     let paused = PLAYBACK
         .get()
         .is_some_and(|p| p.paused.load(Ordering::Relaxed));
@@ -5303,47 +4095,27 @@ fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Q
     })
 }
 
-/// One row of the library listing: a track plus whatever the analysis cache
-/// already knows about it.
 #[derive(serde::Serialize, Clone)]
 struct TrackRow {
     content_hash: Option<String>,
-    /// Absolute path. Used as the UI's key.
     path: String,
-    /// Tag TITLE, or file name when absent (same resolution as session metadata).
     title: String,
-    /// Tag ARTIST, or `""` when absent.
     artist: String,
-    /// Rounded seconds from analysis `total_frames` / `sample_rate`, if analyzed.
     duration_secs: Option<u32>,
-    /// Whether a cached analysis exists. If false, the bar fields are null.
     analyzed: bool,
-    /// Effective Funkot flag (`override.funkot` ?? analysis). Unanalysed rows
-    /// are `true` so the library does not grey them; the enqueue gate still
-    /// lets unanalysed tracks through separately.
     is_funkot: bool,
-    /// Human Funkot / non-Funkot label from `labels.json`. Unlabeled is `None`
-    /// (distinct from effective [`Self::is_funkot`]).
     label: Option<bool>,
     intro_bars: Option<u32>,
-    /// The structural outro boundary — where the track collapses. This is the
-    /// number the UI shows and edits.
     outro_structure_bars: Option<u32>,
-    /// The mix trigger the engine derives from the boundary. Read-only, shown
-    /// only so the effect of an edit is visible.
     outro_bars: Option<u32>,
     intro_manual: bool,
     outro_manual: bool,
     intro_low_confidence: bool,
     outro_low_confidence: bool,
-    /// `history.json` `last_played_ms` for this track's content hash; `None`
-    /// when never heard (count is not exposed on the row).
     played_at_ms: Option<u64>,
-    /// Stable library-addition batch from `hash-index.json`.
     added_order: Option<u64>,
 }
 
-/// Counts of human labels vs library size for the labeling UI.
 #[derive(serde::Serialize, Clone)]
 struct LabelStats {
     labeled: usize,
@@ -5352,28 +4124,13 @@ struct LabelStats {
     not_funkot: usize,
 }
 
-/// Guards against starting a second analysis worker while one is running.
 static ANALYZING: AtomicBool = AtomicBool::new(false);
-/// True only while the background worker decodes or analyses a library file.
 static LIBRARY_ANALYSIS_BUSY: AtomicBool = AtomicBool::new(false);
-/// A manual Next waits for the next deck and for an in-flight library job.
 static MANUAL_NEXT_PENDING: AtomicBool = AtomicBool::new(false);
-/// Keep background analysis out until the requested current track transitions.
 static MANUAL_NEXT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static MANUAL_NEXT_EXPECTED_INDEX: AtomicUsize = AtomicUsize::new(0);
 static MANUAL_NEXT_REQUEST_LOCK: Mutex<()> = Mutex::new(());
 
-/// The cache entry for `path`, but only if it is *complete* -- present and
-/// with `needs_reanalysis` clear. `cache::load` alone is not enough: a kept
-/// entry with a stripped auto side (see `cache::purge_auto`) still loads, but
-/// the loader thread would have to run a fresh analysis on it before playback
-/// could use it, which is exactly the synchronous-analysis stall this exists
-/// to keep out of the audio path. Centralised so the library listing
-/// (`track_row`), `refresh_library`'s pending pick, and the loader-status log in
-/// `audio_thread` cannot drift on what "still needs analysis" means.
-///
-/// `hash` is the caller's already-resolved content hash — this never opens the
-/// audio file. A missing / incomplete cache entry reads the same as "not cached".
 fn analyzed_cache_entry(
     cache_dir: &std::path::Path,
     hash: &str,
@@ -5421,8 +4178,6 @@ pub(crate) fn admit_playback_path(
         PlaybackAdmission::Rejected
     }
 }
-/// `true` when the track is analysed and effectively non-Funkot. Unanalysed
-/// tracks are never gated. Does not consult `allow_non_funkot` (caller does).
 fn gated_non_funkot(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -5434,8 +4189,6 @@ fn gated_non_funkot(
     !store::effective_is_funkot(analysis.is_funkot, override_funkot)
 }
 
-/// Filter a list using only completed analysis. Used by gate unit tests;
-/// actual queue members remain pending until playback admission.
 #[cfg(test)]
 fn apply_non_funkot_gate(
     paths: Vec<PathBuf>,
@@ -5452,8 +4205,6 @@ fn apply_non_funkot_gate(
         .collect()
 }
 
-/// Index-only gate for new-arrival selection, without music-file I/O.
-/// A missing index or cache entry is left for final playback admission.
 fn gated_non_funkot_from_index(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -5470,8 +4221,6 @@ fn gated_non_funkot_from_index(
     !store::effective_is_funkot(a.is_funkot, override_funkot)
 }
 
-/// Like [`apply_non_funkot_gate`], but never stats/hashes/exists music files.
-/// Loads hash-index and overrides once for library selection.
 #[cfg(test)]
 fn apply_non_funkot_gate_from_index(
     paths: Vec<PathBuf>,
@@ -5490,8 +4239,6 @@ fn apply_non_funkot_gate_from_index(
         .collect()
 }
 
-/// Queue-tab preload shared by desktop and Android setup. It does not
-/// inspect music files; playback admission checks each reserved candidate.
 fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
     use tauri::Manager;
     let _ = DATA_DIR.set(data.clone());
@@ -5511,18 +4258,6 @@ fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
 
 }
 
-/// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.
-///
-/// `hash` is resolved once by the caller (`resolve_content_hash` /
-/// `resolve_library_file` / `content_hash`) so this path never content-hashes
-/// the file again.
-///
-/// `tags: Some` uses the caller's tags (library refresh after hash-index
-/// resolve). `tags: None` falls back to [`cached_tags_for`] (analysis worker
-/// and other call sites).
-///
-/// `label` comes from `labels` (content-hash key), not from `overrides.funkot`.
-/// `played_at_ms` comes from `history` (same key).
 fn track_row(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -5593,9 +4328,6 @@ mod cache_state_tests {
     use super::*;
     use funkot_core::engine::TrackSource;
 
-    /// Fresh temp dir per test, cleaned up on drop. Same shape as the one in
-    /// `store`'s tests; not shared because neither module should have to
-    /// export test scaffolding to the other.
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -5619,8 +4351,6 @@ mod cache_state_tests {
         }
     }
 
-    /// A file to hash plus a plausible analysis of it. The contents are never
-    /// decoded — only `content_hash` reads them — so any bytes will do.
     fn track_with_analysis(dir: &Path) -> (PathBuf, funkot_core::TrackAnalysis) {
         let track = dir.join("track.wav");
         std::fs::write(&track, vec![0u8; 4096]).unwrap();
@@ -5676,19 +4406,12 @@ mod cache_state_tests {
         );
         assert!(row.analyzed);
         assert_eq!(row.intro_bars, Some(analysis.intro_bars));
-        // Tagless fixture: title falls back to file name, artist empty;
-        // duration comes from provisional frames / sample_rate (200s).
         assert_eq!(row.title, file_name_str(&track));
         assert_eq!(row.artist, "");
         assert_eq!(row.duration_secs, Some(200));
         assert_eq!(row.is_funkot, analysis.is_funkot);
     }
 
-    /// The regression this whole change turns on. An entry that loads but has
-    /// `needs_reanalysis` set is one the engine's loader will re-analyse *on
-    /// its own thread, mid-playback* — so the library must not call it
-    /// analyzed, or the background worker skips it and the listener gets the
-    /// silence instead.
     #[test]
     fn an_entry_needing_reanalysis_reads_as_unanalyzed() {
         let dir = TempDir::new("stale");
@@ -5708,8 +4431,6 @@ mod cache_state_tests {
             None,
         );
         assert!(!row.analyzed);
-        // And the numbers are withheld too: showing bars the engine is about
-        // to recompute invites hand-correcting a value that is on its way out.
         assert_eq!(row.intro_bars, None);
         assert_eq!(row.outro_structure_bars, None);
         assert!(row.is_funkot);
@@ -5732,8 +4453,6 @@ mod cache_state_tests {
         .analyzed);
     }
 
-    /// `track_row` must honour the hash the caller already resolved — no second
-    /// `content_hash` — so an override keyed by that hash is applied.
     #[test]
     fn track_row_uses_passed_hash_for_override_without_rehash() {
         let cache = TempDir::new("row-hash-cache");
@@ -5763,8 +4482,6 @@ mod cache_state_tests {
         assert!(row.is_funkot);
     }
 
-    /// `tags: Some` must be used as-is — no `cached_tags_for` / file open.
-    /// A missing path would fail probe; passed tags still win.
     #[test]
     fn track_row_uses_passed_tags_without_probe() {
         let dir = TempDir::new("row-tags");
@@ -5872,7 +4589,6 @@ mod cache_state_tests {
         analysis.is_funkot = false;
         store_for(&non_funkot, &cache.0, &analysis);
 
-        // Second file: different bytes so a distinct hash; no cache entry.
         let unanalysed = cache.0.join("unanalysed.wav");
         std::fs::write(&unanalysed, vec![1u8; 4096]).unwrap();
 
@@ -6034,9 +4750,6 @@ mod cache_state_tests {
         assert!(!store::load_overrides(&data.0).contains_key(&hash));
     }
 
-    /// Cancel/undo with `mark_manual = false` must clear the touched side's
-    /// manual flag and drop its `library.json` override (the bug where `*`
-    /// survived after values reverted).
     #[test]
     fn set_bars_mark_manual_false_clears_flag_and_override() {
         let cache = TempDir::new("set-bars-cache");
@@ -6079,7 +4792,6 @@ mod cache_state_tests {
         assert!(!overrides.contains_key(&hash));
     }
 
-    /// Confirm / normal chip edit survives fresh cache and library.json reads.
     #[test]
     fn set_bars_mark_manual_true_persists_across_reloads() {
         let cache = TempDir::new("set-bars-keep-cache");
@@ -6137,8 +4849,6 @@ mod cache_state_tests {
         )
         .unwrap();
 
-        // Simulate the worker writing a fresh automatic result after it had
-        // captured the old override, then reapply only what is now on disk.
         store_for(&track, &cache.0, &analysis);
         reapply_overrides(&track, &cache.0, &data.0);
 
@@ -6192,8 +4902,6 @@ mod cache_state_tests {
         );
     }
 
-    /// `path_str` is what `PlayerState` now uses to identify a track; it must
-    /// agree with `TrackRow::path` or the frontend's map-key lookups break.
     #[test]
     fn path_str_matches_track_row_path() {
         let cache = TempDir::new("path-str-cache");
@@ -6463,7 +5171,6 @@ mod cache_state_tests {
         )
         .unwrap();
 
-        // No list/pull: revision stale, but fold still clears A's stamp.
         clear_play_counts_impl(&data.0).unwrap();
 
         let loaded = store::load_hash_index(&data.0).index;
@@ -6473,10 +5180,8 @@ mod cache_state_tests {
             Some("2026-01-02T00:00:00Z")
         );
         assert!(store::load_history(&data.0).is_empty());
-        // Play log is NOT cleared by clear_play_counts:
         assert_eq!(store::load_play_log(&data.0).len(), 1);
 
-        // Without pull, A must not reappear as NEW after history wipe.
         let settings = store::Settings {
             arrivals_baseline_done: true,
             ..Default::default()
@@ -6590,7 +5295,6 @@ mod cache_state_tests {
             Some("2026-01-02T00:00:00Z")
         );
 
-        // Play log is untouched
         assert_eq!(store::load_play_log(&data.0).len(), 1);
     }
 
@@ -6632,7 +5336,6 @@ mod cache_state_tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].at_ms, 200);
 
-        // History count is untouched
         assert_eq!(store::load_history(&data.0)["hash-a"].count, 2);
     }
 
@@ -6688,7 +5391,6 @@ mod cache_state_tests {
             },
         )
         .unwrap();
-        // No hash-index.json → Missing provenance.
         let err = list_new_arrivals_impl(&data.0).unwrap_err();
         assert!(
             err.contains("arrivals_index_unavailable"),
@@ -6792,9 +5494,6 @@ mod cache_state_tests {
         let in_flight = vec![QueueItem::manual(PathBuf::from("/music/z.flac"))];
         let added = queue_new_arrivals_with(&data.0, &cache.0, &q, true, &in_flight).unwrap();
         assert_eq!(added, 2);
-        // `queue_new_arrivals` calls `persist_queue` only after this returns
-        // (INDEX/SAVE/queue guards dropped). Do not try_lock process-wide
-        // mutexes here — other tests share them.
 
         let (reserved, pending) = queue::state_snapshot(&q);
         assert_eq!(reserved, None);
@@ -6845,8 +5544,6 @@ mod cache_state_tests {
                 skipped: 0,
             }
         );
-        // Selection order, not sorted: the list the listener ticked is the
-        // order they expect to hear.
         assert_eq!(
             queue::snapshot(&q),
             vec![
@@ -6876,7 +5573,6 @@ mod cache_state_tests {
                 "/music/a.flac".to_string(),
                 "/music/b.flac".to_string(),
                 "/music/c.flac".to_string(),
-                // A duplicate inside one selection is a skip too.
                 "/music/c.flac".to_string(),
             ],
         );
@@ -6928,7 +5624,6 @@ mod cache_state_tests {
             &[nf_path.clone(), ua_path.clone()],
         );
 
-        // One rejected row must not lose the other.
         assert_eq!(
             result,
             EnqueueManyResult {
@@ -7034,7 +5729,6 @@ mod cache_state_tests {
     fn set_folder_label_impl_recurses_and_skips_non_audio() {
         let data = TempDir::new("folder-label-data");
         let music = TempDir::new("folder-label-music");
-        // Distinct bytes so content hashes differ (keys are hashes, not paths).
         std::fs::write(music.0.join("a.wav"), vec![1u8; 4096]).unwrap();
         std::fs::create_dir_all(music.0.join("sub").join("nested")).unwrap();
         std::fs::write(music.0.join("sub").join("b.wav"), vec![2u8; 4096]).unwrap();
@@ -7052,8 +5746,6 @@ mod cache_state_tests {
         assert!(store::load_labels(&data.0).values().all(|l| l.verdict));
     }
 
-    /// Undo puts every track back where it was, including the distinction
-    /// between "was labeled the other way" and "was never labeled".
     #[test]
     fn undo_folder_label_restores_previous_state() {
         let cache = TempDir::new("folder-undo-cache");
@@ -7063,7 +5755,6 @@ mod cache_state_tests {
         std::fs::write(music.0.join("b.wav"), vec![2u8; 4096]).unwrap();
         std::fs::write(music.0.join("c.mp3"), vec![3u8; 4096]).unwrap();
 
-        // a was already non-Funkot; b and c were never judged.
         let a = music.0.join("a.wav");
         set_label_impl(&cache.0, &data.0, &a, Some(false)).unwrap();
         let before = store::load_labels(&data.0);
@@ -7085,7 +5776,6 @@ mod cache_state_tests {
         );
     }
 
-    /// Undo clears the `funkot` mirror without taking hand-set bars with it.
     #[test]
     fn undo_folder_label_keeps_manual_bars() {
         let data = TempDir::new("folder-undo-bars-data");
@@ -7095,7 +5785,6 @@ mod cache_state_tests {
         let (_, undo) = set_folder_label_impl(&data.0, &music.0, true).unwrap();
         assert_eq!(undo.len(), 1);
 
-        // A bar edit lands after the bulk label, before 取消 is pressed.
         let mut overrides = store::load_overrides(&data.0);
         overrides.get_mut(&undo[0].hash).unwrap().intro_bars = Some(32);
         store::save_overrides(&data.0, &overrides).unwrap();
@@ -7118,7 +5807,6 @@ mod cache_state_tests {
 
         set_folder_label_impl(&data.0, &music.0, true).unwrap();
         let a = music.0.join("a.wav");
-        // Relabel one track as non-Funkot via path hash (no cache needed).
         let cache = TempDir::new("label-stats-cache");
         set_label_impl(&cache.0, &data.0, &a, Some(false)).unwrap();
 
@@ -7156,8 +5844,6 @@ mod cache_state_tests {
 mod scan_tracks_tests {
     use super::*;
 
-    /// Fresh temp dir per test, cleaned up on drop. Same shape as the one in
-    /// `cache_state_tests`; not shared for the same reason given there.
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -7269,11 +5955,6 @@ mod scan_tracks_tests {
         assert_eq!(found, vec![dir.0.join("inside.wav")]);
     }
 
-    /// Recursive scanning can surface the same file name in different
-    /// subfolders; both must survive as distinct entries, and only their
-    /// full paths (not `file_name_str`) tell them apart — this is the
-    /// reasoning behind keying `PlayerState` on `path_str` rather than the
-    /// file name.
     #[test]
     fn same_basename_in_different_subdirs_both_survive() {
         let dir = TempDir::new("same-basename");
@@ -7313,9 +5994,6 @@ mod arrivals_settings_rmw_tests {
     use super::*;
     use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 
-    /// `ALLOW_NON_FUNKOT` is one atomic for the whole test binary, so a test
-    /// that asserts on it cannot run beside one that writes it. Every test in
-    /// this module that touches the atomic takes this first.
     pub(crate) static ALLOW_NON_FUNKOT_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_allow_non_funkot() -> MutexGuard<'static, ()> {
@@ -7497,7 +6175,6 @@ mod arrivals_settings_rmw_tests {
             |_data| Err("injected baseline save failure".into()),
         );
         assert!(err.is_err());
-        // Index was written; baseline flag must not be treated as success.
         assert!(store::load_hash_index(&dir.0).provenance == store::HashIndexProvenance::Loaded);
         assert!(!store::load_settings(&dir.0).arrivals_baseline_done);
     }
@@ -7539,9 +6216,6 @@ mod arrivals_settings_rmw_tests {
     }
 }
 
-/// Kick off a background analysis worker for a caller-supplied list of tracks
-/// that still need analysis. `refresh_library` builds this list from `track_row`
-/// so each file is content-hashed only once.
 fn analyze_these(
     app: &tauri::AppHandle,
     pending: Vec<PathBuf>,
@@ -7564,14 +6238,8 @@ fn analyze_these(
     );
 }
 
-/// Progress payload for the `library-scan` event.
-///
-/// Emitted while `refresh_library` walks the music folder and content-hashes
-/// each track — especially useful over SMB where hashing can take a long time
-/// and the UI would otherwise keep showing the previous library with no feedback.
 #[derive(serde::Serialize, Clone)]
 struct LibraryScanProgress {
-    /// `"walking"` while collecting paths; `"hashing"` while building rows.
     phase: String,
     found: usize,
     done: usize,
@@ -7643,7 +6311,6 @@ fn scan_library_under_index_lock(
             done: 0,
         });
 
-    // Explicit loop (not `.map`) so we can emit progress after each resolve.
     let mut rows: Vec<TrackRow> = Vec::with_capacity(found);
     let mut seen_paths = std::collections::BTreeSet::new();
     for path in &paths {
@@ -7656,9 +6323,6 @@ fn scan_library_under_index_lock(
                     title: resolved.title,
                     artist: resolved.artist,
                 };
-                // Seed TAG_CACHE from the index whenever tags are known so
-                // later cached_tags_for callers (MediaSession, analysis rows)
-                // neither re-open on hit nor keep stale tags after a re-probe.
                 if hash_index
                     .get(&path_key)
                     .is_some_and(|e| e.tags_cached)
@@ -7740,9 +6404,6 @@ fn scan_library_under_index_lock(
         }
     });
 
-    // A later baseline-settings failure does not undo a successful index save.
-    // Publish that committed metadata revision before returning the warning, so
-    // an editor cannot accept the old automatic snapshot against the new index.
     if index_saved || !plan.save_index {
       let committed = store_cache::with_index(&data_dir, |index| {
         rows.iter().map(|row| {
@@ -7842,8 +6503,6 @@ fn update_track_tags(app: tauri::AppHandle, request: tag_service::UpdateRequest)
     tag_service::update(Path::new(&dirs.data_dir), request)
 }
 
-/// Persist hash-index / baseline flag per [`store::ArrivalsCommitPlan`].
-/// Injected save ops make baseline-flag failure testable without mock crates.
 fn commit_arrivals_after_scan(
     data_dir: &Path,
     index: &store::HashIndex,
@@ -7864,8 +6523,6 @@ fn commit_arrivals_after_scan(
     Ok(())
 }
 
-/// Reload Settings under `SAVE_LOCK` and set `arrivals_baseline_done = true`.
-/// Caller must already hold [`INDEX_LOCK`].
 fn mark_arrivals_baseline_done(data_dir: &Path) -> Result<(), String> {
     let _saving = SAVE_LOCK
         .lock()
@@ -7876,12 +6533,6 @@ fn mark_arrivals_baseline_done(data_dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot save settings: {e}"))
 }
 
-/// Push stored corrections into the engine's analysis cache for one track.
-///
-/// Only the sides present in `o` are written; the rest stay whatever the
-/// analyzer decided. Run after every fresh analysis — the analyzer has just
-/// committed its result. The library copy also retains corrections independently
-/// of the cache's supported conversion window.
 fn apply_override(
     cache_dir: &std::path::Path,
     hash: &str,
@@ -7900,18 +6551,6 @@ fn apply_override(
     Ok(())
 }
 
-/// Hand-edit one track's intro bars and/or outro boundary.
-///
-/// The outro number is the *structural* boundary — where the track collapses,
-/// which is what a listener can actually judge. The engine re-derives the mix
-/// trigger from it, so the transition keeps finishing exactly where the outro
-/// begins; pinning the trigger directly would break that relation.
-///
-/// Sides left as `null` are not touched, so the UI can send one cell at a time.
-///
-/// `mark_manual` defaults to `true` (confirm / normal chip edit). Pass `false`
-/// when reverting a cancel/undo so the `*_manual` flags and `library.json`
-/// overrides for the touched side are cleared instead of re-pinned.
 #[tauri::command(async)]
 fn set_bars(
     app: tauri::AppHandle,
@@ -7936,13 +6575,6 @@ fn set_bars(
     )
 }
 
-/// Core of [`set_bars`], split out so unit tests can drive cache + library.json
-/// without an `AppHandle` / global lock.
-///
-/// Caller must hold `SAVE_LOCK` (or be single-threaded in tests): the
-/// `library.json` read-modify-write below is the same one [`set_label_impl`]
-/// and [`set_folder_label_impl`] do for the funkot mirror, so without the lock
-/// a concurrent bar edit and label write lose one of the two.
 fn set_bars_impl(
     cache_dir: &std::path::Path,
     data_dir: &std::path::Path,
@@ -7959,10 +6591,6 @@ fn set_bars_impl(
         outro_structure_bars,
         funkot: None,
     };
-    // `edit_bars` derives the trigger, changes the requested manual flags, and
-    // persists under the core cache lock. Keeping the undo path in that single
-    // operation prevents an old snapshot from overwriting a concurrent manual
-    // edit between apply_override/load/store.
     funkot_core::cache::edit_bars(
         cache_dir,
         &hash,
@@ -7982,8 +6610,6 @@ fn set_bars_impl(
             entry.outro_structure_bars = Some(n);
         }
     } else if let Some(entry) = overrides.get_mut(&hash) {
-        // Revert: drop the touched side's override; remove the hash entry when
-        // both sides are empty. No entry → nothing to do.
         if intro_bars.is_some() {
             entry.intro_bars = None;
         }
@@ -7997,9 +6623,6 @@ fn set_bars_impl(
             overrides.remove(&hash);
         }
     }
-    // Warn-only, as with the queue: the edit already took effect for playback,
-    // so failing the command here would misreport what happened. What is lost
-    // is only the ability to re-apply it after a future reanalysis.
     if let Err(e) = store::save_overrides(data_dir, &overrides) {
         log::warn!("cannot persist manual bars: {e}");
     }
@@ -8017,10 +6640,6 @@ fn set_bars_impl(
     ))
 }
 
-/// Set or clear the human Funkot label for one track.
-///
-/// `verdict: Some(true/false)` writes `labels.json` and mirrors into
-/// `BarOverride.funkot`. `None` removes the label and clears the mirror.
 #[tauri::command(async)]
 fn set_label(
     app: tauri::AppHandle,
@@ -8036,17 +6655,12 @@ fn set_label(
     set_label_impl(&cache_dir, &data_dir, Path::new(&path), verdict)
 }
 
-/// Core of [`set_label`], split out so unit tests can drive labels + library
-/// without an `AppHandle` / global lock.
 fn set_label_impl(
     cache_dir: &std::path::Path,
     data_dir: &std::path::Path,
     track: &std::path::Path,
     verdict: Option<bool>,
 ) -> Result<TrackRow, String> {
-    // Read-only, like `record_heard`: this path labels one track and never
-    // persists the index. Reading it from memory is what keeps a keypress off
-    // the size of the library.
     let hash = store_cache::content_hash(data_dir, track)
         .map_err(|e| format!("cannot hash {}: {e}", track.display()))?;
 
@@ -8102,12 +6716,6 @@ fn set_label_impl(
     ))
 }
 
-/// Label every supported track under `dir` (recursive) with the same verdict.
-///
-/// Returns how many tracks were labeled (hash successes, including relabels).
-/// There is no bulk-clear: `verdict` is always a concrete bool.
-///
-/// Arms [`undo_last_folder_label`] with what this overwrote.
 #[tauri::command(async)]
 fn set_folder_label(
     app: tauri::AppHandle,
@@ -8126,11 +6734,6 @@ fn set_folder_label(
     Ok(count)
 }
 
-/// Core of [`set_folder_label`], split for unit tests without `AppHandle`.
-///
-/// Returns `(labeled count, undo snapshot)`. The count is per *path* (what
-/// the toast reports as 曲数); the snapshot is per *content hash*, which is
-/// what the label files are keyed by.
 fn set_folder_label_impl(
     data_dir: &std::path::Path,
     dir: &std::path::Path,
@@ -8149,10 +6752,6 @@ fn set_folder_label_impl(
         let Ok(hash) = store::resolve_content_hash(path, &mut index) else {
             continue;
         };
-        // Snapshot before the write, and at most once per hash: the same
-        // track copied into two subfolders resolves to one hash, and the
-        // second visit would otherwise record the verdict written moments
-        // ago as if it were the previous state.
         if snapshotted.insert(hash.clone()) {
             undo.push(FolderLabelUndo {
                 hash: hash.clone(),
@@ -8180,9 +6779,6 @@ fn set_folder_label_impl(
     Ok((count, undo))
 }
 
-/// Restore what the most recent [`set_folder_label`] overwrote (single-shot).
-///
-/// Returns how many tracks were restored.
 #[tauri::command(async)]
 fn undo_last_folder_label(app: tauri::AppHandle) -> Result<usize, String> {
     let dirs = resolve_dirs(&app)?;
@@ -8199,15 +6795,12 @@ fn undo_last_folder_label(app: tauri::AppHandle) -> Result<usize, String> {
     };
 
     let restored = undo_folder_label_impl(&data_dir, &entries)?;
-    // Only consume the token after both writes land, so a failed save leaves
-    // the toast's 取消 usable — same rule as [`undo_last_flag`].
     *LAST_FOLDER_LABEL_UNDO
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     Ok(restored)
 }
 
-/// Core of [`undo_last_folder_label`], split for unit tests without `AppHandle`.
 fn undo_folder_label_impl(
     data_dir: &std::path::Path,
     entries: &[FolderLabelUndo],
@@ -8229,11 +6822,6 @@ fn undo_folder_label_impl(
                 overrides.entry(entry.hash.clone()).or_default().funkot = Some(v);
             }
             None => {
-                // Restore only `funkot`. A `set_bars` edit may have landed on
-                // this entry since the bulk write, and removing the entry
-                // outright would take those hand-set bars with it. Drop it
-                // only once nothing is left — same rule as `set_label_impl`'s
-                // `None` branch.
                 if let Some(o) = overrides.get_mut(&entry.hash) {
                     o.funkot = None;
                     if o.intro_bars.is_none() && o.outro_structure_bars.is_none() {
@@ -8250,7 +6838,6 @@ fn undo_folder_label_impl(
     Ok(entries.len())
 }
 
-/// Summarise human labels vs the current music library size.
 #[tauri::command(async)]
 fn label_stats(app: tauri::AppHandle) -> Result<LabelStats, String> {
     let dirs = resolve_dirs(&app)?;
@@ -8266,7 +6853,6 @@ fn label_stats(app: tauri::AppHandle) -> Result<LabelStats, String> {
     Ok(label_stats_impl(&data_dir, music_dir))
 }
 
-/// Core of [`label_stats`], split for unit tests without `AppHandle`.
 fn label_stats_impl(data_dir: &std::path::Path, music_dir: Option<&Path>) -> LabelStats {
     let labels = store::load_labels(data_dir);
     let labeled = labels.len();
@@ -8284,10 +6870,6 @@ fn label_stats_impl(data_dir: &std::path::Path, music_dir: Option<&Path>) -> Lab
     }
 }
 
-/// Wipe all human labels and clear `BarOverride.funkot` mirrors.
-///
-/// Intro/outro hand edits are kept. Empty override entries (no intro, outro, or
-/// funkot) are removed — same rule as [`set_label_impl`]'s `None` branch.
 #[tauri::command(async)]
 fn clear_labels(app: tauri::AppHandle) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
@@ -8302,7 +6884,6 @@ fn clear_labels(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Core of [`clear_labels`], split for unit tests without `AppHandle`.
 fn clear_labels_impl(data_dir: &std::path::Path) -> Result<(), String> {
     store::save_labels(data_dir, &store::Labels::new())
         .map_err(|e| format!("cannot persist labels: {e}"))?;
@@ -8318,7 +6899,6 @@ fn clear_labels_impl(data_dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Wipe the chronological play log (`play-log.jsonl`), keeping aggregate play counts.
 #[tauri::command(async)]
 fn clear_play_log(app: tauri::AppHandle) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
@@ -8331,16 +6911,11 @@ fn clear_play_log(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Core of [`clear_play_log`], split for unit tests without `AppHandle`.
 fn clear_play_log_impl(data_dir: &std::path::Path) -> Result<(), String> {
     store::clear_play_log(data_dir).map_err(|e| format!("cannot clear play log: {e}"))?;
     Ok(())
 }
 
-/// Wipe aggregate play counts (`history.json`), keeping the chronological play log.
-///
-/// Before wiping counts, folds played arrivals in the hash index (decision 8).
-/// Index save failure aborts the command and leaves history intact.
 #[tauri::command(async)]
 fn clear_play_counts(app: tauri::AppHandle) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
@@ -8355,9 +6930,6 @@ fn clear_play_counts(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Core of [`clear_play_counts`], split for unit tests without `AppHandle`.
-///
-/// Caller must hold `INDEX_LOCK` → `SAVE_LOCK` (or be single-threaded in tests).
 fn clear_play_counts_impl(data_dir: &std::path::Path) -> Result<(), String> {
     clear_play_counts_with_index_save(
         data_dir,
@@ -8366,9 +6938,6 @@ fn clear_play_counts_impl(data_dir: &std::path::Path) -> Result<(), String> {
     )
 }
 
-/// Same as [`clear_play_counts_impl`], with injectable index save and
-/// revision counter so tests can prove history is kept on index-save failure
-/// and that revision bumps without racing the process-wide atomic.
 fn clear_play_counts_with_index_save(
     data_dir: &std::path::Path,
     save_index: impl FnOnce(&std::path::Path, &store::HashIndex) -> std::io::Result<()>,
@@ -8385,7 +6954,6 @@ fn clear_play_counts_with_index_save(
     Ok(())
 }
 
-/// Remove one playback entry from the chronological play log (`play-log.jsonl`) by `at_ms`.
 #[tauri::command(async)]
 fn remove_play_log_entry(app: tauri::AppHandle, at_ms: u64) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
@@ -8398,15 +6966,11 @@ fn remove_play_log_entry(app: tauri::AppHandle, at_ms: u64) -> Result<(), String
     Ok(())
 }
 
-/// Core of [`remove_play_log_entry`], split for unit tests without `AppHandle`.
 fn remove_play_log_entry_impl(data_dir: &std::path::Path, at_ms: u64) -> Result<(), String> {
     store::remove_play_log_entry(data_dir, at_ms).map_err(|e| format!("cannot remove play log entry: {e}"))?;
     Ok(())
 }
 
-/// Clear aggregate play count for one track (`history.json`) by content hash.
-///
-/// Folds the track's arrival in the hash index if it was played (decision 8).
 #[tauri::command(async)]
 fn clear_track_play_count(app: tauri::AppHandle, hash: String) -> Result<(), String> {
     let dirs = resolve_dirs(&app)?;
@@ -8421,7 +6985,6 @@ fn clear_track_play_count(app: tauri::AppHandle, hash: String) -> Result<(), Str
     Ok(())
 }
 
-/// Core of [`clear_track_play_count`], split for unit tests without `AppHandle`.
 fn clear_track_play_count_impl(data_dir: &std::path::Path, hash: &str) -> Result<(), String> {
     clear_track_play_count_with_index_save(
         data_dir,
@@ -8450,20 +7013,6 @@ fn clear_track_play_count_with_index_save(
     Ok(())
 }
 
-/// Both halves of play history for the 履歴 tab: the newest `limit` plays in
-/// order, plus the per-track aggregate.
-///
-/// Reads three files and does no Music-folder I/O — unlike
-/// [`list_flagged_tracks`], which walks it — so this is cheap enough to run on
-/// every `history_revision` bump, which is once per track change.
-///
-/// `SAVE_LOCK` covers the reads only. The join runs after the guard drops, so
-/// formatting a few hundred rows never blocks [`record_heard`] on the events
-/// thread. The hash index is parsed fresh rather than taken from
-/// `store_cache`, whose contract is to keep the closure short — holding that
-/// mutex across an O(library) join would stall the same events thread on its
-/// `content_hash` lookup. `list_new_arrivals_impl` reads it the same way on
-/// the same trigger.
 #[tauri::command(async)]
 fn list_play_history(app: tauri::AppHandle, limit: usize) -> Result<store::PlayHistory, String> {
     let dirs = resolve_dirs(&app)?;
@@ -8482,16 +7031,6 @@ fn list_play_history(app: tauri::AppHandle, limit: usize) -> Result<store::PlayH
     Ok(store::build_play_history(&log, &history, &index, limit))
 }
 
-/// Fold played arrivals if needed, then list every new arrival (gate-agnostic).
-///
-/// Reads settings + hash-index + history only (no Music I/O). Holds
-/// `INDEX_LOCK` → `SAVE_LOCK` for the whole command; does not call
-/// [`persist_queue`].
-///
-/// `Err("arrivals_index_unavailable")` when the index is not authoritative
-/// (`!baseline_done` or provenance is not [`store::HashIndexProvenance::Loaded`])
-/// so the front end cannot treat a miss as an empty list. Authoritative
-/// absence of stamps is `Ok([])`.
 #[tauri::command(async)]
 fn list_new_arrivals(app: tauri::AppHandle) -> Result<Vec<store::NewArrival>, String> {
     let dirs = resolve_dirs(&app)?;
@@ -8527,10 +7066,6 @@ fn list_new_arrivals_impl(data_dir: &std::path::Path) -> Result<Vec<store::NewAr
     ))
 }
 
-/// Testable body of [`queue_new_arrivals_locked`]: no `AppHandle`.
-///
-/// After return, `SAVE_LOCK` and the queue lock are free (so
-/// [`persist_queue`] can re-acquire them).
 #[cfg(test)]
 fn queue_new_arrivals_with(
     data_dir: &std::path::Path,
@@ -8549,8 +7084,6 @@ fn queue_new_arrivals_with(
     queue_new_arrivals_under_locks(data_dir, cache_dir, queue, allow_non_funkot, in_flight)
 }
 
-/// Body shared by production (which also holds `SESSION`) and tests (which
-/// pass an explicit in-flight snapshot). Callers must hold INDEX then SAVE.
 fn queue_new_arrivals_under_locks(
     data_dir: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -8579,8 +7112,6 @@ fn queue_new_arrivals_under_locks(
     let candidates = if allow_non_funkot {
         candidates
     } else {
-        // Same policy as enqueue / `apply_non_funkot_gate_from_index`, using
-        // the already-loaded index (no Music file I/O).
         let overrides = store::load_overrides(data_dir);
         candidates
             .into_iter()
@@ -8588,7 +7119,6 @@ fn queue_new_arrivals_under_locks(
             .collect()
     };
 
-    // NOW while holding SAVE is allowed; NOW → SAVE is not.
     let now_playing = {
         let now = NOW
             .lock()
@@ -8602,25 +7132,16 @@ fn queue_new_arrivals_under_locks(
         now_playing.as_deref(),
         in_flight,
     );
-    // `_saving` / `_index` / queue guard (inside prepend) drop here.
     Ok(added as u32)
 }
 
-/// What [`enqueue_many`] did with the paths it was handed.
-///
-/// Three numbers rather than one because the two ways a path can fail to be
-/// queued mean different things to the listener: `rejected` is "the app
-/// refused it", `skipped` is "it was already coming up".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 struct EnqueueManyResult {
     added: u32,
-    /// Dropped by the non-Funkot gate.
     rejected: u32,
-    /// Already reserved, pending, playing, or in flight.
     skipped: u32,
 }
 
-/// Testable body of [`enqueue_many_locked`]: no `AppHandle`.
 #[cfg(test)]
 fn enqueue_many_with(
     data_dir: &std::path::Path,
@@ -8647,8 +7168,6 @@ fn enqueue_many_with(
     )
 }
 
-/// Body shared by production (which also holds `SESSION`) and tests (which
-/// pass an explicit in-flight snapshot). Callers must hold INDEX then SAVE.
 fn enqueue_many_under_locks(
     data_dir: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -8662,8 +7181,6 @@ fn enqueue_many_under_locks(
     let candidates = if allow_non_funkot {
         candidates
     } else {
-        // Same policy as enqueue / `queue_new_arrivals_under_locks`, from the
-        // index rather than the Music folder (no file I/O).
         let index = store::load_hash_index(data_dir).index;
         let overrides = store::load_overrides(data_dir);
         candidates
@@ -8673,7 +7190,6 @@ fn enqueue_many_under_locks(
     };
     let rejected = requested - candidates.len();
 
-    // NOW while holding SAVE is allowed; NOW → SAVE is not.
     let now_playing = {
         let now = NOW
             .lock()
@@ -8694,13 +7210,6 @@ fn enqueue_many_under_locks(
     }
 }
 
-/// Progress payload for the `analysis-progress` event.
-///
-/// Carries the row the analysis just produced (post `reapply_overrides`) so
-/// the webview can splice it into its table in place instead of calling
-/// `refresh_library` on every event -- see C-4: that command re-walks the
-/// music folder and re-reads the cache for every track, which is wasted work
-/// for an update that only ever touches the one track just analyzed.
 #[derive(serde::Serialize, Clone)]
 struct AnalysisProgress {
     done: usize,
@@ -8709,10 +7218,6 @@ struct AnalysisProgress {
     row: TrackRow,
 }
 
-/// Re-apply this track's stored corrections onto a just-written cache entry.
-///
-/// Skips hashing entirely when no corrections are stored, so the common case
-/// costs nothing on top of the analysis run.
 fn reapply_overrides(
     path: &std::path::Path,
     cache_dir: &std::path::Path,
@@ -8736,37 +7241,8 @@ fn reapply_overrides(
     }
 }
 
-/// Longest the analysis worker will hold off waiting for playback to get
-/// going. Only a bound on a phase that should never stick: if the first track
-/// somehow never produces sound, analysing the rest of the folder is still
-/// better than analysing nothing.
 const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Block while Start / loader work should own decode CPU and disk.
-///
-/// Called by the analysis worker before each track, not once at thread entry:
-/// a worker started while Idle (refresh-before-start) would otherwise keep
-/// decoding other files after Start flips the phase to `Starting`, and steal
-/// CPU/disk from the loader. Mid-decode of the current file is not cancelled;
-/// yielding happens before the next track.
-///
-/// Waits while any of:
-/// - `Phase::Starting` — first non-silent buffer not yet reached
-/// - `Phase::Stalled` — silence; stop competing so the loader can recover
-/// - `Phase::Playing` and `YIELD_FOR_LOADER` — cover the next-slot prepare
-///   after every transition. Cleared when the cpal callback sees `next_track_path()`.
-/// - `Phase::Playing` with a fresh manual Next request — let local mix planning
-///   finish before starting another library-analysis decode.
-///
-/// The engine's loader analyses a track itself when the cache has no complete
-/// entry for it (`funkot-core` `cache::get_or_analyze`, reached from
-/// `prepare_track` and from the first track's Upgrade). That analysis is what
-/// this worker exists to do ahead of time — but overlapping it on Start is
-/// how a press of start turns into a wait for silence.
-///
-/// If the next slot never fills while still Playing (drain empty, prepare
-/// stuck, …), each subsequent track wait can use up to `STARTUP_WAIT`.
-/// Idle / Paused / Failed / Disconnected do not wait.
 fn wait_out_startup() {
     let until = std::time::Instant::now() + STARTUP_WAIT;
     while std::time::Instant::now() < until {
@@ -8784,12 +7260,6 @@ fn wait_out_startup() {
     }
 }
 
-/// Spawn the single background analysis thread, if one is not already running.
-///
-/// Deliberately serial, not parallelised across tracks: this runs on a phone,
-/// and analysing more than one file at a time would mean more heat and battery
-/// drain for no benefit the user can perceive (the worker already runs
-/// unattended in the background).
 fn spawn_analysis_worker(
     app: tauri::AppHandle,
     paths: Vec<PathBuf>,
@@ -8799,8 +7269,6 @@ fn spawn_analysis_worker(
     history: store::History,
 ) {
     if ANALYZING.swap(true, Ordering::SeqCst) {
-        // Already running; refresh_library's caller will see progress events
-        // from the run already in flight.
         return;
     }
 
@@ -8811,18 +7279,10 @@ fn spawn_analysis_worker(
 
             let total = paths.len();
             for (i, path) in paths.iter().enumerate() {
-                // Let playback preparation or a manual Next plan run before
-                // starting another library decode. See `wait_out_startup`.
                 wait_out_startup();
 
                 let name = file_name_str(path);
 
-                // Re-checked here, not just when the list was built: the
-                // engine's loader analyses whatever it prepares, so by the
-                // time this worker reaches a track the loader may already
-                // have done it. `fill_missing` would notice too, but only
-                // after a full decode — and it is the decode, tens of MB and
-                // seconds of CPU, that is worth not repeating on a phone.
                 let hash = funkot_core::cache::content_hash(path).ok();
                 if hash
                     .as_deref()
@@ -8859,9 +7319,6 @@ fn spawn_analysis_worker(
                     continue;
                 }
 
-                // Close the race between the wait and claiming the decoder:
-                // Next can arrive in that gap. A running decode finishes before
-                // dispatch; no subsequent library decode begins during a plan.
                 loop {
                     LIBRARY_ANALYSIS_BUSY.store(true, Ordering::Release);
                     let manual_plan = manual_next_owns_analysis(
@@ -8878,9 +7335,6 @@ fn spawn_analysis_worker(
                         } else {
                             reapply_overrides(path, &cache_dir, &data_dir);
                         }
-                        // `buffer` drops here, before the next track is decoded,
-                        // so only one track's worth of samples (tens of MB) is
-                        // ever resident at once.
                     }
                     Err(e) => {
                         log::warn!("decode failed for {}: {e}", path.display());
@@ -8889,8 +7343,6 @@ fn spawn_analysis_worker(
 
                 LIBRARY_ANALYSIS_BUSY.store(false, Ordering::Release);
 
-                // Built after `reapply_overrides` so a successful run's row
-                // reflects the corrected numbers, not the analyzer's raw ones.
                 let row = {
                     let _saving = SAVE_LOCK
                         .lock()
@@ -8960,7 +7412,6 @@ pub extern "C" fn JNI_OnLoad(
         Ok(())
     });
     if let Err(e) = result {
-        // android_logger is not up yet; this lands in the RustStdoutStderr tag.
         eprintln!("JNI_OnLoad: failed to initialise ndk-context: {e}");
     }
     jni::sys::JNI_VERSION_1_6
@@ -9035,18 +7486,12 @@ fn service_set_running(running: bool) {
     service_call(if running { "startFrom" } else { "stopFrom" });
 }
 
-/// Nudge the service to re-read the paused flag.
-///
-/// The notification and the in-app buttons are two views of one flag; without
-/// this, pausing from the app leaves the notification showing the old label
-/// until something else touches it.
 fn service_sync_state() {
     if SERVICE_RUNNING.load(Ordering::Relaxed) {
         service_call("syncFrom");
     }
 }
 
-/// `android.os.Build.MODEL` (device marketing name).
 #[cfg(target_os = "android")]
 fn android_device_model() -> String {
     use jni::objects::JString;
@@ -9067,19 +7512,12 @@ fn android_device_model() -> String {
             return Err(jni::errors::Error::NullPtr("Build.MODEL"));
         }
         let s = unsafe { JString::from_raw(env, model_obj.into_raw()) };
-        // Bound to a local on purpose: the MUTF8Chars view borrows `s`, and
-        // returning the expression directly drops them in the wrong order
-        // (same as `android_cache_dir` / `platform_dirs`).
         let model = String::from(s.mutf8_chars(env)?);
         Ok(model)
     })
     .unwrap_or_else(|_| "android".into())
 }
 
-/// `Context.getCacheDir()` absolute path (FileProvider `<cache-path>` root).
-///
-/// Distinct from [`AppDirs::cache_dir`] (`filesDir/funkot-cache`), which is
-/// outside the provider paths in `file_paths.xml`.
 #[cfg(target_os = "android")]
 fn android_cache_dir() -> Result<PathBuf, String> {
     use jni::objects::{JObject, JString};
@@ -9112,9 +7550,6 @@ fn android_cache_dir() -> Result<PathBuf, String> {
                 )?
                 .l()?;
             let s = unsafe { JString::from_raw(env, obj.into_raw()) };
-            // Bound to a local on purpose: the MUTF8Chars view borrows `s`, and
-            // returning the expression directly drops them in the wrong order
-            // (same as `platform_dirs` / `absolute_path`).
             let path = String::from(s.mutf8_chars(env)?);
             Ok(path)
         })
@@ -9122,10 +7557,6 @@ fn android_cache_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(path))
 }
 
-/// Open the system share sheet for a staged ZIP via `FeedbackShare.shareFrom`.
-///
-/// Same classloader routing as [`service_call`]: this runs on Tauri's blocking
-/// pool, so the system classloader cannot see app classes.
 #[cfg(target_os = "android")]
 fn feedback_share(absolute_path: &str, title: &str) -> Result<(), String> {
     use jni::objects::{JClassLoader, JObject};
@@ -9166,14 +7597,6 @@ fn feedback_share(absolute_path: &str, title: &str) -> Result<(), String> {
     result.map_err(|e| format!("FeedbackShare.shareFrom: {e}"))
 }
 
-/// `Import.hasInFlight()` — whether an `Import.onIntent` copy thread is still
-/// running. See [`ImportResult::in_flight`]'s doc comment for why
-/// `take_pending_import` needs this at all, and its own call site for why the
-/// order relative to its staging-dir walk matters.
-///
-/// Same classloader routing as [`feedback_share`] / [`service_call`]: this
-/// runs on Tauri's blocking pool, so the system classloader cannot see app
-/// classes.
 #[cfg(target_os = "android")]
 fn android_import_has_in_flight() -> Result<bool, String> {
     use jni::objects::{JClassLoader, JObject};
@@ -9212,13 +7635,6 @@ fn android_import_has_in_flight() -> Result<bool, String> {
     result.map_err(|e| format!("Import.hasInFlight: {e}"))
 }
 
-/// `Import.takeFailed()` — number of URIs that failed to stage since the
-/// last call (a destructive read: the Kotlin side resets its counter to
-/// zero). Must be called *after* [`android_import_has_in_flight`] on each
-/// poll — see [`ImportResult::failed`]'s doc comment and this function's own
-/// call site in `take_pending_import` for why that order matters.
-///
-/// Same classloader routing as [`android_import_has_in_flight`].
 #[cfg(target_os = "android")]
 fn android_import_take_failed() -> Result<u32, String> {
     use jni::objects::{JClassLoader, JObject};
@@ -9259,27 +7675,17 @@ fn android_import_take_failed() -> Result<u32, String> {
         .map_err(|e| format!("Import.takeFailed: {e}"))
 }
 
-/// Outcome of the most recent notification ⚑ (`CONTROL_FLAG` = 3).
 #[cfg(target_os = "android")]
 static LAST_FLAG_OK: AtomicBool = AtomicBool::new(false);
 
-/// Called from `PlaybackService`'s notification actions. `action` is
-/// 0 = toggle play/pause, 1 = skip to next track, 2 = query only,
-/// 3 = flag last automatic transition, 4 = play, 5 = pause.
 #[cfg(target_os = "android")]
 #[no_mangle]
-/// Returns packed `paused` + `phase` *after* the action so Kotlin can keep
-/// MediaSession / notification in step (see `pack_native_control_state`).
 pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeControl(
     _env: *mut std::ffi::c_void,
     _class: *mut std::ffi::c_void,
     action: i32,
 ) -> jni::sys::jint {
-    // Flagging only needs `NOW` + `data_dir`; it must not depend on the audio
-    // thread having published `PLAYBACK` yet (and must still set LAST_FLAG_OK).
     if action == 3 {
-        // Do not touch LAST_FLAG_UNDO — the in-app toast's 取消 must keep
-        // pointing at whatever the listener himself flagged.
         let ok = match platform_dirs() {
             Ok(dirs) => flag_last_transition_impl(Path::new(&dirs.data_dir), false).is_ok(),
             Err(_) => false,
@@ -9297,7 +7703,6 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
     };
     match action {
         0 | 4 | 5 => {
-            // Audition transport is 〔再開〕 only — do not change shared pause.
             let audition = try_audition_lock();
             if audition.is_ok() && ensure_pause_allowed(
                 AUDITIONING.load(Ordering::Relaxed),
@@ -9316,17 +7721,11 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_onNativeContro
         1 => {
             let _ = request_skip_next();
         }
-        // 2 = query only, used when the app's own buttons changed the flag.
         _ => {}
     }
     pack_native_control_state(playback.paused.load(Ordering::Relaxed), get_phase())
 }
 
-/// Whether a playback session still stands behind the notification.
-///
-/// See [`playback_session_alive`]. Kotlin calls this on every service start
-/// and before re-posting the paused notification, because that notification
-/// outlives the service (and can outlive the process).
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_playbackAlive(
@@ -9336,7 +7735,6 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_playbackAlive(
     playback_session_alive(PLAYBACK.get().is_some(), get_phase()) as jni::sys::jboolean
 }
 
-/// Whether the last notification ⚑ (`onNativeControl(3)`) persisted successfully.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_lastFlagOk(
@@ -9346,7 +7744,6 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_lastFlagOk(
     LAST_FLAG_OK.load(Ordering::Relaxed) as jni::sys::jboolean
 }
 
-/// Current notification / MediaSession title (embedded tag or file name).
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentTitle<'local>(
@@ -9360,7 +7757,6 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentTitle<'
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// Current MediaSession artist (embedded tag, or empty when absent).
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentArtist<'local>(
@@ -9374,8 +7770,6 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentArtist<
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// UI language tag for `Loc.kt`'s config context, or empty to follow the
-/// device locale.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentLocaleTag<'local>(
@@ -9389,12 +7783,6 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentLocaleT
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// Reopen the desktop window at the last inner size, or leave the
-/// `tauri.conf.json` default (1024×760, wide enough for the two-pane
-/// browse layout). Android is always full-screen, so this is a no-op there.
-///
-/// Failures are `log::warn!`-only: a missing or unusable `window.json` must
-/// not block launch.
 #[cfg(not(target_os = "android"))]
 fn restore_desktop_window(app: &tauri::AppHandle, data: &Path) {
     use tauri::{LogicalSize, Manager, Size};
@@ -9429,9 +7817,6 @@ fn restore_desktop_window(app: &tauri::AppHandle, data: &Path) {
     }
 }
 
-/// Write the live inner size to `window.json`. Best-effort: no window, no
-/// [`DATA_DIR`], or a write failure is `log::warn!`-only — closing the
-/// window must not fail because the size could not be saved.
 #[cfg(not(target_os = "android"))]
 fn persist_desktop_window(app: &tauri::AppHandle) {
     use tauri::Manager;
@@ -9474,10 +7859,6 @@ fn on_desktop_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
 
 #[cfg(test)]
 mod desktop_window_default_tests {
-    /// `tauri.conf.json` width must open the two-pane browse layout on a
-    /// first desktop launch. `.browse` is a container query at 48rem, and
-    /// `body` side padding is `--space-xl` (1rem) each side; at the 16px
-    /// root used in `tokens.css` that is 768px + 32px.
     #[test]
     fn default_width_fits_two_browse_panes() {
         let conf: serde_json::Value =
@@ -9513,28 +7894,10 @@ pub fn run() {
             #[cfg(all(target_os = "windows", feature = "verified-capture"))]
             let capture_control = verified_capture_control::prepare(app.handle())
                 .map_err(std::io::Error::other)?;
-            // Optional Windows endpoint: failure must never affect launch or audio.
             #[cfg(target_os = "windows")]
             current_track_http::start(current_track_http_snapshot);
-            // Preload the queue tab before ▶ is pressed: `start_impl` is
-            // otherwise the only place the playback snapshot queue/session components
-            // get read, so without this the queue screen shows nothing until
-            // the listener starts playback at least once. `start_impl`
-            // restores again (`exists` + strict gate) and overwrites;
-            // this preload skips music-folder I/O so the GUI thread
-            // does not stall on SMB.
-            //
-            // Best-effort end to end: on Android, the JNI context
-            // `platform_dirs` needs may not be ready this early in the
-            // app's lifecycle. Any failure here is `log::warn!`-only; this
-            // must never stop the app from launching, and `start_impl`
-            // still does the same restore later regardless, so nothing
-            // about playback depends on this succeeding.
             use tauri::Manager;
             let handle = app.handle().clone();
-            // Desktop: do not call `resolve_dirs` here — its music_dir probe
-            // (`read_dir` on SMB/UNC) can freeze the GUI thread (~10s). File
-            // existence and the strict gate run later in `start_impl`.
             #[cfg(not(target_os = "android"))]
             match handle.path().app_data_dir() {
                 Ok(data) => {

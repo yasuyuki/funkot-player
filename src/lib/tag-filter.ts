@@ -14,9 +14,6 @@ export type TagIndex = {
 
 const kindOrder: Record<string, number> = { year: 0, genre: 1, custom: 2 };
 
-/** Build only from current library membership. A stale snapshot is never a
- * candidate source, and a path whose UI hash disagrees with the snapshot is
- * pending rather than assigned a potentially wrong tag set. */
 export function buildTagIndex(rows: readonly TrackRow[], snapshot: TrackTagsSnapshot | null): TagIndex {
   const tracks = new Map<string, { keys: ReadonlySet<string>; state: TrackTagState | null }>();
   const candidates = new Map<string, TagChoice & { count: number }>();
@@ -53,8 +50,6 @@ export function buildTagIndex(rows: readonly TrackRow[], snapshot: TrackTagsSnap
 export function matchesTagFilter(index: TagIndex, path: string, filter: TagFilter): boolean {
   const entry = index.tracks.get(path);
   if (!entry) return false;
-  // Duplicated selection keys do not alter every/some semantics. Avoid
-  // rebuilding a set for every row on every text keystroke.
   const selected = filter.keys;
   const tagMatch = selected.length === 0 || (filter.mode === "all"
     ? selected.every((key) => entry.keys.has(key))
@@ -63,7 +58,5 @@ export function matchesTagFilter(index: TagIndex, path: string, filter: TagFilte
   if (!filter.yearUnset) return true;
   const state = entry.state;
   if (!state || state.effective.some((tag) => tag.kind === "year")) return false;
-  // A deliberate manual unset is known even while metadata is pending. Other
-  // pending rows are not silently classified as missing; metadata errors are.
   return state.manual.year.mode === "unset" || state.metadata_status !== "pending";
 }

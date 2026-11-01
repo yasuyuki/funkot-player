@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Same image as the playlist Kani check. Without that image, Rust 1.93 on the host runs the same cargo test.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 image=funkot-player-kani:0.68.0

@@ -1,24 +1,9 @@
-// Read the three Store "what's new" paste blocks out of docs/store-submission.md.
-//
-// One parser, two callers: scripts/store-draft.mjs drives the Partner Center
-// browser, scripts/store-publish.ps1 drives msstore. The text itself lives
-// only in the document, which scripts/check-doc-claims.sh already guards, so
-// neither caller carries a copy that can go stale.
-//
-//   node scripts/store-notes.mjs          # version from src-tauri/tauri.conf.json
-//   node scripts/store-notes.mjs 0.8.0
-//
-// Prints {"version":"0.8.0","notes":{"ja":"...","en":"...","id":"..."}} and
-// exits non-zero when a heading names a different version, so a stale block
-// cannot be shipped with a new package.
-
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-// Heading -> Store listing language, with the version in the heading captured.
 const HEADINGS = {
   ja: /このバージョンの新機能（([0-9][^）]*)）/,
   en: /What's new in this version \(([0-9][^)]*)\)/,

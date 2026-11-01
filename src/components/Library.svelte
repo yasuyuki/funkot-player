@@ -35,7 +35,6 @@
   let selectedTags = $state<TagChoice[]>([]);
   let tagMode = $state<"all" | "any">("all");
   let yearUnset = $state(false);
-  // This index depends on library/snapshot changes, never the search text.
   let tagIndex = $derived(buildTagIndex(store.libraryList, store.trackTags));
   let tagFilter = $derived<TagFilterState>({ keys: selectedTags.map(tag => tag.key), mode: tagMode, yearUnset });
   function chooseTag(tag: TagChoice) {
@@ -43,14 +42,7 @@
   }
   function clearTagFilters() { selectedTags = []; yearUnset = false; }
   let busy = $state<Record<string, boolean>>({});
-  /// A mode rather than a permanent checkbox column: on a 412px phone the row
-  /// already carries title, artist, duration and the `+` button, and a
-  /// checkbox that is there for an occasional action would cost that width
-  /// every time the library is browsed.
   let selectMode = $state(false);
-  /// Keyed by path. Survives a tab swap for free -- both panes stay mounted
-  /// and are only `display:none`'d -- and is dropped when play mode unmounts
-  /// them, which is the right moment to forget it.
   let selected = $state<Set<string>>(new Set());
   let addManyBusy = $state(false);
   let openMusicBusy = $state(false);
@@ -91,18 +83,8 @@
     return sortLibraryRows(filtered, sortKey);
   });
 
-  /// Every selectable row in the pane's current sort, ignoring the search box
-  /// and the new-only filter.
-  ///
-  /// This -- not `rows` -- is the universe the bulk add works over, so typing
-  /// in the search box cannot silently make the button add nothing.
   let enqueuePaths = $derived(enqueueSelection(sortLibraryRows(store.libraryList, sortKey), selected, store.allowNonFunkot));
 
-  /// Rows currently on screen: what "select all" acts on. Scoping a bulk
-  /// action is what the search box is for; "select all 5,000" is never the
-  /// intent.
-  // Tag editing is independent of playback eligibility: a non-Funkot row is
-  // still visible, selectable, and editable when it has a resolved hash.
   let visiblePaths = $derived(rows.map((r) => r.path));
 
   let selectedCount = $derived(selected.size);
@@ -148,8 +130,6 @@
       const result = await store.doEnqueueMany(paths);
       if (result) {
         toast.notify(t.playlistAddResult(enqueueManyMessage(t, result), destination));
-        // The rows are queued or knowingly refused; leaving forty boxes
-        // ticked is worse than re-selecting. The mode stays on.
         selected = clearSelection();
       } else toast.notify(t.playlistError(store.lastError ?? "busy"));
     } finally {
@@ -176,10 +156,6 @@
     return row.analyzed && !row.is_funkot;
   }
 
-  /// The gate alone: analysed, effectively non-Funkot, and the setting is off.
-  /// Separate from [`addDisabled`] because that also folds in the per-row busy
-  /// flag, and a single add in flight must not drop the row out of a bulk
-  /// selection.
   function gated(row: TrackRow): boolean {
     return isNonFunkot(row) && !store.allowNonFunkot;
   }
@@ -224,7 +200,6 @@
 <section class="library">
   <div class="heading-line"><h2 class="heading">{t.libraryHeading}</h2><PlaylistSource compact /></div>
 
-  <!-- Sticky so search stays reachable while scrolling hundreds of rows. -->
   <div class="toolbar">
     <input
       class="search"
@@ -312,12 +287,6 @@
   {:else if libraryEmpty}
     <div class="empty">
       <p class="empty-title">{t.noTracks}</p>
-      <!-- Desktop only, same platform test as OverflowMenu's folder items:
-           Android's music folder is under `Android/data`, which no file
-           manager has been able to reach since Android 11, so `open_music_dir`
-           can only report the path there. Store requirement 10.1.2.10 is a
-           Microsoft Store rule, so hiding the button on Android costs nothing;
-           the path stays visible in ⋮ → show log (see LogView). -->
       {#if musicDirConfigurable}
         <p class="empty-hint">{t.emptyHintDesktop}</p>
         <button
@@ -331,7 +300,6 @@
       {/if}
     </div>
   {:else}
-    <!-- Rows grow to fit compact tags and identity status without overlap. -->
     <ul class="list">
       {#each rows as row (row.path)}
         <li
@@ -344,8 +312,6 @@
           oncontextmenu={(e) => press.context(e, row.path)}
         >
           {#if selectMode}
-            <!-- Queue selection remains available; tag eligibility is checked
-                 independently against the committed tag snapshot. -->
             <input
               type="checkbox"
               class="pick"
@@ -372,7 +338,6 @@
           </div>
           {#if !selectMode}
             <FavoriteButton path={row.path} contentHash={row.content_hash} title={row.title} />
-            <!-- Unanalysed tracks can still be enqueued (legacy behaviour). -->
             <button
               type="button"
               class="add primary icon-button"
@@ -407,22 +372,15 @@
 
   .toolbar {
     position: sticky;
-    /* Same calc as body padding-top in tokens.css: sticky `top: 0` would
-       park under the Android status bar / cutout once the toolbar sticks. */
     top: calc(var(--space-xl) + env(safe-area-inset-top, 3rem));
     z-index: 5;
     display: flex;
-    /* The selection bar is a full-width flex item, so it wraps onto a second
-       line here instead of being a second sticky element with its own copy of
-       the safe-area calc above. */
     flex-wrap: wrap;
     gap: var(--space-sm);
     padding: var(--space-sm) 0;
     background: var(--color-bg);
   }
 
-  /* Not `width: auto` from the global button rule -- a checkbox is not a
-     button -- but it does need a fixed footprint so rows stay aligned. */
   .pick {
     flex: 0 0 auto;
     width: 1.2rem;
@@ -576,7 +534,5 @@
     color: var(--color-transport-disabled-text);
   }
 
-  /* An expanded filter must scroll with the page when its controls would
-     otherwise leave no usable height for tracks or a software keyboard. */
   .toolbar:has(:global(.tag-filter)) { position: static; }
 </style>

@@ -1,20 +1,4 @@
 #!/bin/sh
-# Install a build's APK onto the device that role is pinned to.
-#
-# debug and release are signed with different keys, so each role is pinned to
-# its own phone: installing the wrong role over the other fails with
-# INSTALL_FAILED_UPDATE_INCOMPATIBLE, and the only way out is `adb uninstall`,
-# which wipes the app's data (queue, analysis cache, hand-corrected bar counts)
-# with it. This script exists to make that mix-up impossible rather than merely
-# documented.
-#
-# Which phone is in which role is a property of the machine, not of this
-# repository, so it is not recorded here -- `adb-device` owns that table and
-# this script asks it by role. Nothing about anyone's hardware belongs in a
-# public repo. Install adb-device from the android-device skill.
-#
-# The identity checked is the serial (ro.serialno). Wireless debugging's
-# IP:port changes every time it is re-enabled; the serial does not.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -54,14 +38,11 @@ case "$ROLE" in
         BUILD_CMD="./dev.sh npx tauri android build --target aarch64"
         ;;
     *)
-        # adb-device's table can name roles this project has no build for.
         echo "no APK in this project for role '$ROLE' (expected debug or release)" >&2
         exit 1
         ;;
 esac
 
-# Check the APK before hunting for the device: a missing build is the common
-# mistake, and finding a phone first can cost minutes.
 if [ ! -f "$APK" ]; then
     echo "no $ROLE APK at $APK" >&2
     echo "build it first: $BUILD_CMD" >&2
@@ -72,20 +53,6 @@ if [ -z "$ADDR" ]; then
     ADDR=$(adb-device "$ROLE") || exit 1
 fi
 
-# One ./dev.sh call for connect + serial check + install. ADB=1 uses the
-# persistent adb server (funkot-player-adb); connect here is idempotent and
-# ensures ADDR is on that server's device list (wireless debugging's IP:port
-# changes when re-enabled), not because each invocation used to wipe the
-# server.
-#
-# The serial is re-checked here even though adb-device already matched it,
-# because an address given by hand skips that resolution entirely -- and this
-# check is the one thing standing between a slip of the finger and a wiped
-# phone.
-#
-# The block below is deliberately single-quoted: it is a script for the
-# container's shell, and $1..$5 there are its own positional params (bound
-# from the `-- "$ADDR" ...` after the closing quote), not this shell's.
 # shellcheck disable=SC2016
 ADB=1 ./dev.sh sh -c '
     set -eu
