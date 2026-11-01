@@ -84,6 +84,16 @@ jobs:
           name: source-switch-proof
           path: ${{ runner.temp }}/source-switch-proof
           if-no-files-found: error
+      - name: Check transition audition model and counterexamples
+        working-directory: funkot-player
+        run: python3 -B verification/check_audition.py --output "$RUNNER_TEMP/audition-proof"
+      - name: Preserve transition audition proof results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: audition-proof
+          path: ${{ runner.temp }}/audition-proof
+          if-no-files-found: error
 
   invariants:
     name: Release-only invariants

@@ -140,11 +140,12 @@ def archive_commit(root, revision, destination, label):
         raise RuntimeError(f"cannot archive the resolved {label} commit")
 
 
-def run_tlc(tree, out, java, jar, label, cfg, started, violation=None):
+def run_tlc(tree, out, java, jar, label, cfg, started, violation=None,
+            spec="verification/source_switch/SourceSwitch.tla"):
     remaining = 15 * 60 - (time.monotonic() - started)
     if remaining <= 0:
         raise RuntimeError(label + ": total verification deadline exceeded")
-    directory = tree / "verification/source_switch"
+    directory = (tree / spec).parent
     config = directory / (label + ".cfg")
     config.write_text(cfg)
     command = [
@@ -164,7 +165,7 @@ def run_tlc(tree, out, java, jar, label, cfg, started, violation=None):
         config.name,
         "-metadir",
         str(tree / ("states-" + label)),
-        "SourceSwitch.tla",
+        Path(spec).name,
     ]
     log_path = out / (label + ".log")
     with log_path.open("w") as log:
