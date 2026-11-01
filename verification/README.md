@@ -267,9 +267,14 @@ does not introduce a fallible operation after a successful rename.
 | `Rename`, `PersistFailure` | `PlaybackStore::update`/`persist_snapshot`, then `abort_future_update` on error. `source_switch_persist_failure_aborts_the_real_fence_without_retargeting_future` and stage-2 retry in `moving_a_registered_normal_future_retires_its_persisted_reservation` check complete rollback. |
 | `Publish`, `CoreCommit` | Publish exact queue/catalog/session candidate, cancel affected claims, advance service epoch, commit prepared source. `real_source_switch_cancels_all_future_claims_and_retains_normal_order` checks their connection. |
 | `Receipt`, `Reply`, `Retry`, stale target rejection | `command_with` receipt lookup, fingerprint and target checks. `request_receipt_replays_only_the_identical_source_and_revision_command` covers same request, changed payload/target and post-restart receipt loss. Rejection preservation is measured after reconciliation. |
+| Favorite commands | `SetFavorite(false)` resolves a content hash to the unique Favorites entry, then follows `Remove` for an active list. `active_favorites_use_the_existing_source_fence_and_keep_started_membership` checks save failure, retry and cancellation of that future. `SetFavorite(true)` uses the existing append transaction, which is outside this finite model. Native tests cover hash uniqueness, missing-file removal, receipt replay and persistence; this model does not prove favorite membership or append-after-exhaustion. |
 | `Crash`, `RestartProcess`, `NormalizeStartup`, `NormalizeFailure` | Real subprocess cuts before and after rename in `source_switch_crash_cuts_recover_the_durable_current_without_silent_consumption`; `restore_saved_queue` from synchronous preload and again before Play. `failed_startup_restore_then_select_preserves_the_durable_normal_tail` checks failed preload followed by an accepted command. OFF retains a valid saved normal/playlist current via `failed_startup_restore_then_idle_off_retains_saved_current_before_play`; offline Move/OFF regressions check reservation retirement across reopening. `online_idle_off_before_first_loader_next_retains_playlist_current` covers configured control before the loader selects its first restore. |
 
 ### Finite scope and limits
+
+The Favorites adapter correspondence was reviewed at player commit
+`71bc6c7f6741aa1e3f9604db2746fc0f390fcfdd`. The transition steps, properties,
+bounds and four expected counterexamples remain unchanged.
 
 The complete reachable graph has two sources, two initial occurrence identities
 per source, one additional fresh normal identity, two transaction attempts, one
