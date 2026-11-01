@@ -874,6 +874,7 @@ pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
     fs::write(dir.join(FLAGS_FILE), json)
 }
 
+/// Source of truth for the Funkot label; [`BarOverride::funkot`] mirrors this one-way.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrackLabel {
     pub verdict: bool,
