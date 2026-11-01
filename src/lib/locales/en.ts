@@ -27,6 +27,16 @@ export const en = {
   pauseLabel: "Pause",
   nextTrackLabel: "Next track",
 
+  playbackRecoveryTitle: "Choose the current queue",
+  playbackRecoverySummary: "Two saved queue orders differ. Choose one before starting playback.",
+  playbackRecoveryReview: "Review saved queues",
+  playbackRecoveryDialog: "Choose the current queue",
+  playbackRecoveryExplain: "We cannot tell which saved queue is newer. Choose the order that should become the current queue.",
+  playbackRecoveryQueueFile: (count: number) => `Player queue (${count} ${count === 1 ? "item" : "items"})`,
+  playbackRecoveryCatalogNormal: (count: number) => `Playlist-saved queue (${count} ${count === 1 ? "item" : "items"})`,
+  playbackRecoveryPreserved: "Both original saved queues are preserved.",
+  playbackRecoveryFailed: "Could not save that choice. Review the queues and try again.",
+
   // --- Now playing ---
   phaseIdle: "Idle",
   phaseStarting: "Starting",
@@ -102,6 +112,9 @@ export const en = {
   queueErrOriginBoundary: "Manual and automatic tracks cannot be reordered across each other",
   queueErrGeneric: "Could not update the queue",
   playlistNormal: "Queue",
+  favoritesTitle: "Favorites",
+  favoriteAddLabel: (title: string) => `Add ${title} to Favorites`,
+  favoriteRemoveLabel: (title: string) => `Remove ${title} from Favorites`,
   playlistLoading: "Loading playlist…",
   playlistTrackCount: (count: number) => `${count} ${count === 1 ? "track" : "tracks"}`,
   playlistDestination: (name: string) => `Adding to: ${name}`,
@@ -351,6 +364,10 @@ export const en = {
   clearPlayCountsFailed: "Could not clear per-song play counts",
   sendFeedback: "Send feedback",
   languageItem: (name: string) => `Language: ${name}`,
+  themePreferenceLabel: "Theme",
+  themeDark: "Dark",
+  themeLight: "Light",
+  themeSystem: "System",
 
   editImmediate: "Changes apply immediately",
   playlistEditing: "Editing playlist",

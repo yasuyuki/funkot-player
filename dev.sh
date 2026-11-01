@@ -2,7 +2,7 @@
 # Run a command inside the build container.
 #
 # This repo and the sibling funkot-autodj-for-ui checkout are mounted under
-# /work/by-core… so each host worktree gets a distinct container path (PackageId)
+# /work/by-core... with distinct paths for each host worktree,
 # while ../../funkot-autodj-for-ui from src-tauri still resolves to the core mount.
 #
 # funkot-autodj-for-ui is a second checkout of the funkot-autodj repo. Official
@@ -96,12 +96,11 @@ FUNKOT_CARGO_TARGET_EXPLICIT=0
 FUNKOT_CARGO_TARGET=${FUNKOT_CARGO_TARGET:-funkot-player-cargo-target}
 export FUNKOT_CARGO_TARGET_EXPLICIT
 
-# Host realpaths -> one path segment each (no hash). Core path is keyed by the
-# core checkout, so two player worktrees that share a core share CORE_MOUNT.
+# Core paths shared by player checkouts keep the same container path.
 core_host=$(CDPATH= cd "$CORE_DIR" && pwd -P)
 player_host=$(pwd -P)
-core_seg=$(printf '%s' "$core_host" | tr '/' '_')
-player_seg=$(printf '%s' "$player_host" | tr '/' '_')
+core_seg=$(printf '%s' "$core_host" | sha256sum | cut -d ' ' -f 1)
+player_seg=$(printf '%s' "$player_host" | sha256sum | cut -d ' ' -f 1)
 bind_parent=/work/by-core${core_seg}
 PLAYER_MOUNT=${bind_parent}/${player_seg}
 CORE_MOUNT=${bind_parent}/funkot-autodj-for-ui
@@ -244,7 +243,7 @@ if [ "$MANAGED_OWNER" != 1 ]; then
     -e GIT_CONFIG_VALUE_0="$CORE_MOUNT" \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
-    "$IMAGE" sh -c '"$@"; status=$?; '"$CHOWN"'; exit $status' -- "$@"
+    "$IMAGE" sh -c 'core=$1; shift; python3 scripts/dev_source_guard.py --source-root "$PWD" --source-root "$PWD/src-tauri" --source-root "$core" -- "$@"; status=$?; '"$CHOWN"'; exit $status' -- "$CORE_MOUNT" "$@"
 fi
 
 # Managed failures still must remove empty Docker-created mountpoint dirs.
@@ -281,7 +280,7 @@ docker run --rm -i $NET $GUI_ARGS $CANDIDATE_ENV \
     -e GIT_CONFIG_VALUE_0="$CORE_MOUNT" \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
-    "$IMAGE" sh -c '"$@"; status=$?; '"$CHOWN"'; exit $status' -- "$@"
+    "$IMAGE" sh -c 'core=$1; shift; python3 scripts/dev_source_guard.py --source-root "$PWD" --source-root "$PWD/src-tauri" --source-root "$core" -- "$@"; status=$?; '"$CHOWN"'; exit $status' -- "$CORE_MOUNT" "$@"
 status=$?
 set -e
 if [ "$MANAGED_OWNER" = 1 ]; then

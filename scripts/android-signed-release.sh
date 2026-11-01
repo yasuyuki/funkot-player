@@ -6,8 +6,7 @@
 # comes back through a group-writable drop directory.
 #
 #   prepare  — agent source tree: write bundle + Windows launcher
-#   build    — owner (yasuyuki): sync, signed build, drop APK, install if a
-#              matching phone is already on adb
+#   build    — owner (yasuyuki): sync, signed build, and drop APK
 #   install  — either user: verify cert and adb install -r
 #   pair / connect / status / plan / owner-set
 #
@@ -41,6 +40,8 @@ require_official_core() {
 
 usage() {
     echo "usage: $0 prepare|build|install|pair|connect|status|plan|owner-set [args]" >&2
+    echo "  build                               signed build and handoff only; no device access" >&2
+    echo "  install                             verify certificate and install on adb" >&2
     echo "  pair <ip> <pair-port> <code> [connect-port]" >&2
     echo "  connect <ip:port>" >&2
     echo "  owner-set [path]" >&2
@@ -243,13 +244,8 @@ cmd_build() {
     chmod 644 "$drop"
     printf 'PLAYER_SHA=%s\nENGINE_SHA=%s\n' "$PLAYER_SHA" "$ENGINE_SHA" > "$drop.identity"
     echo "copied $drop"
-
-    if pick_addr "$player" >/dev/null; then
-        install_apk "$player" "$APK_REL"
-    else
-        echo "phone not on adb; APK is ready. pair/connect, then:"
-        echo "  $handoff/apk.sh install"
-    fi
+    echo "APK is ready. To verify and install it:"
+    echo "  $handoff/apk.sh install"
 }
 
 cmd_install() {

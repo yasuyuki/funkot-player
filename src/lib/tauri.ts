@@ -179,6 +179,35 @@ export function appDirs(): Promise<AppDirs> {
   return ipc.invoke<AppDirs>("app_dirs");
 }
 
+/// The one explicit decision required when two legacy normal-queue histories
+/// disagree. The token is opaque: clients only return it to the resolver.
+export type PlaybackRecoveryStatus =
+  | { kind: "ready" }
+  | {
+      kind: "legacy_normal_conflict";
+      token: number;
+      queue_file_items: number;
+      catalog_normal_items: number;
+    }
+  | { kind: "blocked"; reason: string };
+
+export type PlaybackRecoveryChoice = "queue_file" | "catalog_normal";
+
+export interface PlaybackRecoveryRequest {
+  token: number;
+  choice: PlaybackRecoveryChoice;
+}
+
+export function playbackRecoveryStatus(): Promise<PlaybackRecoveryStatus> {
+  return ipc.invoke<PlaybackRecoveryStatus>("playback_recovery_status");
+}
+
+export function resolvePlaybackRecovery(
+  request: PlaybackRecoveryRequest,
+): Promise<PlaybackRecoveryStatus> {
+  return ipc.invoke<PlaybackRecoveryStatus>("resolve_playback_recovery", { request });
+}
+
 /// Opens the Music folder (explorer / open / xdg-open) and returns its
 /// absolute path. Desktop only: the UI hides the menu item on Android, where
 /// the folder cannot be opened at all (see `open_music_dir` in `lib.rs`).
@@ -229,8 +258,13 @@ export function skipNext(): Promise<void> {
   return ipc.invoke<void>("skip_next");
 }
 
-export function refreshLibrary(kickAnalysis = true): Promise<TrackRow[]> {
-  return ipc.invoke<TrackRow[]>("refresh_library", { kickAnalysis });
+export interface LibraryScanResult {
+  rows: TrackRow[];
+  persistence_error: string | null;
+}
+
+export function refreshLibrary(kickAnalysis = true): Promise<LibraryScanResult> {
+  return ipc.invoke<LibraryScanResult>("refresh_library", { kickAnalysis });
 }
 
 export interface QueueItem {
@@ -273,7 +307,9 @@ export interface QueueSnapshot {
 
 export interface SourceTarget { playlist_id: string | null; generation: number; revision: number; }
 export interface PlaylistSummary { id: string; name: string; revision: number; total: number; remaining: number; }
-export interface PlaylistCatalogSnapshot { revision: number; active_id: string | null; generation: number; store_status: string; lists: PlaylistSummary[]; }
+export const FAVORITES_PLAYLIST_ID = "favorites";
+
+export interface PlaylistCatalogSnapshot { revision: number; active_id: string | null; generation: number; store_status: string; lists: PlaylistSummary[]; favorite_hashes: string[]; }
 export interface PlaylistEntryView { entry_id: string; path: string; title: string; artist: string; status: "pending" | "preparing" | "prepared" | "missing" | "unplayable" | "played" | "current"; reason: string | null; }
 export interface PlaylistDetails { id: string; name: string; revision: number; run_id: number; total: number; ended: boolean; skipped: number; rows: PlaylistEntryView[]; }
 export type PlaylistAction =
@@ -283,6 +319,7 @@ export type PlaylistAction =
   | { kind: "restart"; id: string } | { kind: "remove"; id: string; entry_id: string }
   | { kind: "undo_remove"; undo_id: string } | { kind: "move"; id: string; entry_id: string; to: number; scope: "remaining" | "all" }
   | { kind: "append"; tracks: Array<{ path: string; expected_hash: string | null }>; mode: "single" | "many" | "arrivals" }
+  | { kind: "set_favorite"; track: { path: string; expected_hash: string | null }; favorite: boolean }
   | { kind: "queue_move"; from: number; to: number; expect: QueueItem }
   | { kind: "queue_remove"; index: number; expect: QueueItem };
 export interface PlaylistCommandResult { created_id: string | null; undo_id: string | null; added: number; rejected: number; skipped: number; }
@@ -316,10 +353,6 @@ export function queueState(): Promise<QueueSnapshot> {
   return ipc.invoke<QueueSnapshot>("queue_state");
 }
 
-export function enqueue(path: string): Promise<number> {
-  return ipc.invoke<number>("enqueue", { path });
-}
-
 /// Current `settings.json` `allow_non_funkot` (also drives the live gate).
 export function getAllowNonFunkot(): Promise<boolean> {
   return ipc.invoke<boolean>("get_allow_non_funkot");
@@ -351,24 +384,6 @@ export function getLabelingMode(): Promise<boolean> {
 /// takes effect from the next engine startup, not the running session.
 export function setLabelingMode(on: boolean): Promise<boolean> {
   return ipc.invoke<boolean>("set_labeling_mode", { on });
-}
-
-// `index`/`from`/`to` below are indices into the *displayed* queue list
-// (`[reserved?] ++ pending` — index 0 is next-up `reserved` when present,
-// matching `QueueSnapshot`; the first hand-off of a run is not displayed), not just `pending`. `expect` is the item currently shown
-// at the edited position; a stale caller gets `"stale"` back rather than
-// silently acting on the wrong track.
-//
-// Rejects with one of `"too_late"` / `"stale"` / `"out_of_range"` /
-// `"origin_boundary"` / `"auditioning"` (see `queue::EditError` and `reorder`'s doc comment in
-// `src-tauri/src/lib.rs`) — this file and that one must keep the exact
-// strings in sync.
-export function dequeue(index: number, expect: QueueItem): Promise<QueueItem> {
-  return ipc.invoke<QueueItem>("dequeue", { index, expect });
-}
-
-export function reorder(from: number, to: number, expect: QueueItem): Promise<void> {
-  return ipc.invoke<void>("reorder", { from, to, expect });
 }
 
 /// Matches `FlagResult`.
@@ -520,12 +535,6 @@ export function listNewArrivals(): Promise<NewArrival[]> {
   return ipc.invoke<NewArrival[]>("list_new_arrivals");
 }
 
-/// Prepends gated new arrivals to the queue (after reserved). Returns how
-/// many tracks were actually added.
-export function queueNewArrivals(): Promise<number> {
-  return ipc.invoke<number>("queue_new_arrivals");
-}
-
 /// Matches `store::PlayLogRow`: one play, in order.
 export interface PlayLogRow {
   at_ms: number;
@@ -565,21 +574,6 @@ export interface PlayHistory {
 
 export function listPlayHistory(limit: number): Promise<PlayHistory> {
   return ipc.invoke<PlayHistory>("list_play_history", { limit });
-}
-
-/// Matches `EnqueueManyResult`. `rejected` is "the app refused it" (the
-/// non-Funkot gate), `skipped` is "it was already coming up".
-export interface EnqueueManyResult {
-  added: number;
-  rejected: number;
-  skipped: number;
-}
-
-/// Bulk counterpart of [`enqueue`]. Differs from it twice, on purpose: an
-/// already-queued path is skipped rather than duplicated, and a non-Funkot
-/// path is counted rather than rejecting the whole call.
-export function enqueueMany(paths: string[]): Promise<EnqueueManyResult> {
-  return ipc.invoke<EnqueueManyResult>("enqueue_many", { paths });
 }
 
 export function auditionTransition(

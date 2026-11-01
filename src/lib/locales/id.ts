@@ -20,6 +20,16 @@ export const id: Messages = {
   pauseLabel: "Jeda",
   nextTrackLabel: "Lagu berikutnya",
 
+  playbackRecoveryTitle: "Pilih antrean saat ini",
+  playbackRecoverySummary: "Dua urutan antrean tersimpan berbeda. Pemutaran menunggu pilihan Anda.",
+  playbackRecoveryReview: "Tinjau antrean tersimpan",
+  playbackRecoveryDialog: "Pilih antrean saat ini",
+  playbackRecoveryExplain: "Kami tidak dapat mengetahui antrean mana yang lebih baru. Pilih urutan yang menjadi antrean saat ini.",
+  playbackRecoveryQueueFile: (count) => `Antrean pemutar (${count} entri)`,
+  playbackRecoveryCatalogNormal: (count) => `Antrean tersimpan di daftar putar (${count} entri)`,
+  playbackRecoveryPreserved: "Kedua antrean tersimpan asli tetap dipertahankan.",
+  playbackRecoveryFailed: "Pilihan itu tidak dapat disimpan. Tinjau antrean dan coba lagi.",
+
   // --- Now playing ---
   phaseIdle: "Siaga",
   phaseStarting: "Menyiapkan",
@@ -93,6 +103,9 @@ export const id: Messages = {
   queueErrOriginBoundary: "Lagu manual dan otomatis tidak dapat dipindahkan melewati batasnya",
   queueErrGeneric: "Tidak dapat memperbarui antrean",
   playlistNormal: "Antrean",
+  favoritesTitle: "Favorit",
+  favoriteAddLabel: (title) => `Tambahkan ${title} ke Favorit`,
+  favoriteRemoveLabel: (title) => `Hapus ${title} dari Favorit`,
   playlistLoading: "Memuat daftar putar…",
   playlistTrackCount: (count) => `${count} lagu`,
   playlistDestination: (name) => `Tambahkan ke: ${name}`,
@@ -336,6 +349,10 @@ export const id: Messages = {
   clearPlayCountsFailed: "Tidak dapat menghapus jumlah pemutaran per lagu",
   sendFeedback: "Kirim masukan",
   languageItem: (name) => `Bahasa: ${name}`,
+  themePreferenceLabel: "Tema",
+  themeDark: "Gelap",
+  themeLight: "Terang",
+  themeSystem: "Sistem",
 
   editImmediate: "Perubahan langsung diterapkan",
   playlistEditing: "Daftar yang diedit",

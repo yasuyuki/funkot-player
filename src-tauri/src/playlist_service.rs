@@ -2,6 +2,8 @@
 //! service -> INDEX -> SAVE -> SESSION -> queue -> render. Persistence never
 //! holds render; the core future fence makes its commit reversible until save.
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::sync::atomic::Ordering;
@@ -15,9 +17,17 @@ pub struct CommandError { pub code: String, pub message: String }
 fn error(code: &str) -> CommandError { CommandError { code: code.into(), message: code.into() } }
 impl From<PlaylistError> for CommandError {
     fn from(value: PlaylistError) -> Self {
-        let json = serde_json::to_value(value).unwrap();
-        Self { code: json["code"].as_str().unwrap_or("persist_failed").into(),
-            message: json["message"].as_str().unwrap_or("").into() }
+        match value {
+            PlaylistError::StoreReadOnly { state } => Self {
+                code: "store_read_only".into(),
+                message: serde_json::to_string(&state).unwrap_or_else(|_| "io_error".into()),
+            },
+            other => {
+                let json = serde_json::to_value(other).unwrap();
+                Self { code: json["code"].as_str().unwrap_or("persist_failed").into(),
+                    message: json["message"].as_str().unwrap_or("").into() }
+            }
+        }
     }
 }
 impl From<FutureUpdateBusy> for CommandError {
@@ -30,7 +40,7 @@ impl From<FutureUpdateBusy> for CommandError {
 #[derive(Clone, serde::Serialize)]
 pub struct Summary { pub id: String, pub name: String, pub revision: u64, pub total: usize, pub remaining: usize }
 #[derive(serde::Serialize)]
-pub struct CatalogView { pub revision: u64, pub active_id: Option<String>, pub generation: u64, pub store_status: String, pub lists: Vec<Summary> }
+pub struct CatalogView { pub revision: u64, pub active_id: Option<String>, pub generation: u64, pub store_status: String, pub lists: Vec<Summary>, pub favorite_hashes: Vec<String> }
 #[derive(Clone, serde::Serialize)]
 pub struct EntryView { pub entry_id: String, pub path: String, pub title: String, pub artist: String, pub status: String, pub reason: Option<String> }
 #[derive(Clone, serde::Serialize)]
@@ -45,6 +55,7 @@ pub enum Action {
     Restart { id: String }, Remove { id: String, entry_id: String }, UndoRemove { undo_id: String },
     Move { id: String, entry_id: String, to: usize, scope: String },
     Append { tracks: Vec<TrackTarget>, mode: String },
+    SetFavorite { track: TrackTarget, favorite: bool },
     QueueMove { from: usize, to: usize, expect: QueueItem }, QueueRemove { index: usize, expect: QueueItem },
 }
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -53,7 +64,7 @@ pub struct Request { pub request_id: String, pub target: SourceTarget, pub actio
 pub struct CommandResult { pub created_id: Option<String>, pub undo_id: Option<String>, pub added: usize, pub rejected: usize, pub skipped: usize }
 
 #[derive(Clone)]
-struct Claim { source: Option<String>, run: u64, entry: Option<String>, track: TrackRef, item: QueueItem, live: bool, cancelled: bool, restoring: bool }
+struct Claim { source: Option<String>, run: u64, entry: Option<String>, track: TrackRef, item: QueueItem, live: bool, cancelled: bool, restoring: bool, admitted: bool }
 impl Claim {
     fn progress(&self, index: usize) -> Option<crate::playlist_progress::Claim<&str>> {
         Some(crate::playlist_progress::Claim {
@@ -74,6 +85,25 @@ pub struct Service {
     receipts: BTreeMap<String, (String, CommandResult)>, progress_error: bool,
     availability: BTreeMap<String, (String, String)>,
     admission_blocked: BTreeSet<(String, String)>,
+}
+
+pub struct RestoredPlayback {
+    pub session: store::Session,
+    pub settings: store::Settings,
+    pub folder_pos: Option<usize>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOCAL_CLAIM_BEFORE_ADMISSION: RefCell<Option<Box<dyn FnOnce(&QueueItem) + Send>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn on_local_claim_before_admission_once(hook: impl FnOnce(&QueueItem) + Send + 'static) {
+    LOCAL_CLAIM_BEFORE_ADMISSION.with(|slot| {
+        assert!(slot.borrow().is_none(), "local-claim admission hook is already installed");
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
 }
 
 struct NormalSource {
@@ -99,15 +129,11 @@ impl Service {
     fn new(data: &Path, cache: &Path, queue: SharedQueue) -> Self {
         let disk = PlaylistStore::load(data);
         let mut catalog = disk.snapshot().unwrap_or_default();
-        let mut restored = catalog.resume_after_restart();
-        // A normal current track is a future queue item after restart. Fold it
-        // in once so pre-start editing and saving see the same queue as Play.
-        if catalog.active_id.is_none() && restored.as_ref().is_some_and(|c| c.origin == PlaybackOrigin::Normal) {
-            let current = restored.take().unwrap();
-            let normal = catalog.normal.get_or_insert(NormalResume { items: vec![], folder_pos: None });
-            normal.items.insert(0, QueueItem::with_origin(current.track_ref.preferred_path,
-                current.queue_origin.unwrap_or(QueueOrigin::Manual)));
-        }
+        catalog.ensure_favorites();
+        let restored = catalog.resume_after_restart();
+        // When no playlist is active, the snapshot queue and session own normal
+        // restoration. `catalog.normal` is only a suspended normal source for
+        // an active playlist, so it cannot resurrect an older standalone cache.
         let ended = catalog.active_id.as_deref().is_some_and(|id| catalog.definition(id).is_ok_and(|d| !d.entries.is_empty())
             && catalog.remaining(id).is_ok_and(|r| r.is_empty())) && restored.is_none();
         Self { data: data.into(), cache: cache.into(), queue, disk, catalog, normal_source: None,
@@ -121,8 +147,12 @@ impl Service {
         if self.progress_error { return "persist_failed".into(); }
         serde_json::to_value(self.disk.load_state()).unwrap().as_str().unwrap_or("io_error").into()
     }
+    pub fn recovery_status(&self) -> crate::playback_state::PlaybackRecoveryStatus {
+        self.disk.recovery_status()
+    }
     pub fn catalog_view(&self) -> CatalogView {
         CatalogView { revision: self.catalog.revision, active_id: self.catalog.active_id.clone(), generation: self.catalog.generation,
+            favorite_hashes: self.catalog.definition(FAVORITES_ID).map(|list| list.entries.iter().map(|entry| entry.track.content_hash.clone()).collect()).unwrap_or_default(),
             store_status: self.store_status(), lists: self.catalog.definitions.iter().map(|d| Summary {
                 id: d.id.clone(), name: d.name.clone(), revision: d.revision, total: d.entries.len(),
                 remaining: self.catalog.remaining(&d.id).map_or(0, |r| r.len()) }).collect() }
@@ -137,7 +167,7 @@ impl Service {
             let status = if run.failures.contains_key(&entry.entry_id) { if reason.as_deref() == Some("missing") { "missing" } else { "unplayable" } }
                 else if claim.is_some_and(|(index, _)| Some(*index) == self.current_index) { "current" }
                 else if run.consumed.contains(&entry.entry_id) { "played" }
-                else if let Some((index, _)) = claim { if self.future_claims().first().is_some_and(|(i, _)| *i == *index)
+                else if let Some((index, claim)) = claim { if claim.admitted && self.future_claims().first().is_some_and(|(i, _)| *i == *index)
                     && crate::NEXT_PREPARED.load(Ordering::Relaxed) { "prepared" } else { "preparing" } }
                 else if let Some((state, _)) = self.availability.get(&entry.entry_id) { state.as_str() } else { "pending" };
             EntryView { entry_id: entry.entry_id, path: claim.map(|(_, c)| c.item.path.clone()).unwrap_or(entry.track.preferred_path).to_string_lossy().into(),
@@ -149,8 +179,37 @@ impl Service {
     fn future_claims(&self) -> Vec<(usize, &Claim)> {
         self.claims.iter().filter(|(i,c)| c.live && !c.cancelled && Some(**i) != self.current_index).map(|(i,c)| (*i,c)).collect()
     }
+    fn normal_future_items(&self) -> Vec<QueueItem> {
+        let mut items: Vec<_> = self.future_claims().into_iter()
+            .filter(|(_, claim)| claim.source.is_none())
+            .map(|(_, claim)| claim.item.clone()).collect();
+        if let Some(reserved) = queue::reserved_item(&self.queue) {
+            let is_current = self.current_index.and_then(|index| self.claims.get(&index))
+                .is_some_and(|claim| claim.source.is_none() && claim.item.entry_id == reserved.entry_id);
+            if !is_current && !items.iter().any(|item| item.entry_id == reserved.entry_id) {
+                items.push(reserved);
+            }
+        }
+        items
+    }
     pub fn normal_items(&self) -> Vec<QueueItem> {
         queue::pending_snapshot(&self.queue)
+    }
+    fn normal_items_for_update(&self) -> Result<Vec<QueueItem>, CommandError> {
+        let live = self.normal_items();
+        if self.normal_source.is_some() { return Ok(live); }
+        let canonical = match self.restore_normal() {
+            Some(resume) => resume.items,
+            None => {
+                let saved = crate::playback_state::PlaybackStore::open(&self.data)
+                    .snapshot().map_err(|error| CommandError {
+                        code: "persist_failed".into(),
+                        message: format!("cannot load playback state: {error:?}"),
+                    })?;
+                store::restored_pending(&saved.session.in_flight, &saved.queue)
+            }
+        };
+        Ok(merge_normal_items(canonical, live))
     }
     pub fn normal_view(&self) -> (Option<QueueItem>, Vec<QueueItem>, Vec<QueueItem>) {
         let reserved = self.future_claims().into_iter()
@@ -174,7 +233,8 @@ impl Service {
                 if valid { catalog.current = Some(CurrentOccurrence { playlist_id: claim.source.clone(), run_id: claim.run,
                     entry_id: claim.entry.clone(), track_ref: claim.track.clone(),
                     origin: if claim.source.is_some() { PlaybackOrigin::Playlist } else { PlaybackOrigin::Normal },
-                    queue_origin: claim.source.is_none().then_some(claim.item.origin) }); }
+                    queue_origin: claim.source.is_none().then_some(claim.item.origin),
+                    queue_item: claim.source.is_none().then(|| claim.item.clone()) }); }
             }
         }
         // Edits made before Play must not lose the saved audible occurrence
@@ -188,19 +248,20 @@ impl Service {
         }
     }
     fn save_progress(&mut self) {
-        let mut candidate = self.catalog.clone(); self.capture_normal(&mut candidate, None);
-        // Actual audio progress cannot be rolled back. Keep it in memory on
-        // failure; the durable older run repeats at worst, never loses entries.
-        self.catalog = candidate;
-        self.progress_error = matches!(self.disk.load_state(), LoadState::Ready | LoadState::Missing) && self.disk.persist(&self.catalog).is_err();
-    }
-    fn save_normal_queue(&mut self) {
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let pending = queue::pending_snapshot(&self.queue).into_iter().collect();
-        if let Err(error) = store::save_queue(&self.data, &pending) {
-            log::warn!("save_queue after playback start: {error}");
-            self.progress_error = true;
-        }
+        let mut candidate = self.catalog.clone();
+        self.capture_normal(&mut candidate, None);
+        let queue = queue::pending_snapshot(&self.queue);
+        let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // Current playback, normal pending work, and reservations share one
+        // commit. A failure leaves the older complete snapshot intact.
+        self.progress_error = self.disk.update(|state| {
+            state.catalog = candidate.clone();
+            state.queue = queue;
+            state.session = session;
+            Ok(())
+        }).is_err();
+        self.catalog = candidate;
     }
     fn started(&mut self, index: usize) {
         if self.current_index == Some(index) { return; }
@@ -216,10 +277,10 @@ impl Service {
         if retired { crate::retire_started_in_flight(&claim.item); }
         self.catalog.current = valid.then(|| CurrentOccurrence { playlist_id: claim.source.clone(), run_id: claim.run,
             entry_id: claim.entry, track_ref: claim.track, origin: if claim.source.is_some() { PlaybackOrigin::Playlist } else { PlaybackOrigin::Normal },
-            queue_origin: claim.source.is_none().then_some(claim.item.origin) });
+            queue_origin: claim.source.is_none().then_some(claim.item.origin),
+                    queue_item: claim.source.is_none().then(|| claim.item.clone()) });
         self.ended = false;
         self.save_progress();
-        if retired && !self.progress_error { self.save_normal_queue(); }
     }
     fn observe_started(&mut self, index: usize, playback: Option<&crate::Playback>) {
         let snapshot = playback.and_then(|p| p.observation.read());
@@ -229,18 +290,16 @@ impl Service {
         }
         // Events may lag a polling snapshot or a whole short track. Consume
         // the exact event occurrence, but never move current playback backward.
-        let mut retired = false;
         if let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled) {
             if self.current_index != Some(index) { claim.live = false; }
             self.catalog.observe_progress(claim.progress(index), Observation::Started(index), None);
             if claim.source.is_none() {
-                retired = queue::mark_started(&self.queue, &claim.item);
+                let retired = queue::mark_started(&self.queue, &claim.item);
                 if retired { crate::retire_started_in_flight(&claim.item); }
             }
         }
         if let Some(snapshot) = snapshot { self.reconcile_snapshot(snapshot); }
         self.save_progress();
-        if retired && !self.progress_error { self.save_normal_queue(); }
     }
     fn failed(&mut self, index: usize, message: &str) {
         let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled && c.live) else { return; };
@@ -306,8 +365,90 @@ impl Service {
         }
         self.details(id, true)
     }
-    pub fn restore_normal(&self) -> Option<NormalResume> { self.catalog.normal.clone() }
+    pub fn restore_saved_queue(&mut self) -> Result<RestoredPlayback, CommandError> {
+        let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (restored, pending, clear_normal_current) = self.disk.update(|state| {
+            Ok(restored_playback_from_state(state))
+        })?;
+        if clear_normal_current {
+            self.catalog.current = None;
+            self.restored = None;
+        }
+        queue::replace_pending(&self.queue, pending);
+        *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = store::Session::new();
+        Ok(restored)
+    }
+    pub fn resolve_legacy_normal_conflict(
+        &mut self,
+        token: u64,
+        choice: crate::playback_state::LegacyNormalChoice,
+    ) -> Result<RestoredPlayback, CommandError> {
+        let next_epoch = self.epoch.checked_add(1).ok_or_else(|| error("persist_failed"))?;
+        let (restored, pending, _, catalog) = self.disk.resolve_legacy_normal_conflict(
+            token,
+            choice,
+            |state| {
+                let (restored, pending, clear_normal_current) = restored_playback_from_state(state);
+                Ok((restored, pending, clear_normal_current, state.catalog.clone()))
+            },
+        )?;
+        self.catalog = catalog;
+        self.catalog.ensure_favorites();
+        self.restored = self.catalog.resume_after_restart();
+        self.normal_source = None;
+        self.claims.clear();
+        self.next_index = 0;
+        self.current_index = None;
+        self.epoch = next_epoch;
+        self.exhausted = false;
+        self.ended = self.catalog.active_id.as_deref().is_some_and(|id| {
+            self.catalog.definition(id).is_ok_and(|definition| !definition.entries.is_empty())
+                && self.catalog.remaining(id).is_ok_and(|remaining| remaining.is_empty())
+        }) && self.restored.is_none();
+        self.undo.clear();
+        self.receipts.clear();
+        self.progress_error = false;
+        self.availability.clear();
+        self.admission_blocked.clear();
+        queue::replace_pending(&self.queue, pending);
+        Ok(restored)
+    }
+    pub fn restore_normal(&self) -> Option<NormalResume> { self.catalog.active_id.as_ref().and(self.catalog.normal.clone()) }
     pub fn has_playlist(&self) -> bool { self.active().is_some() }
+}
+
+fn restored_playback_from_state(
+    state: &mut crate::playback_state::PlaybackState,
+) -> (RestoredPlayback, Vec<QueueItem>, bool) {
+    let session = state.session.clone();
+    let settings = state.settings.clone();
+    let folder_pos = state.catalog.normal.as_ref().and_then(|resume| resume.folder_pos);
+    let current = state.catalog.current.as_ref()
+        .filter(|current| current.origin == PlaybackOrigin::Normal)
+        .and_then(|current| current.queue_item.clone());
+    let active = state.catalog.active_id.is_some();
+    let pending = if active {
+        let mut pending = state.catalog.normal.as_ref().map(|normal| normal.items.clone())
+            .unwrap_or_else(|| store::restored_pending(&session.in_flight, &state.queue));
+        if let Some(current) = &current {
+            pending.retain(|item| item.entry_id != current.entry_id);
+        }
+        pending
+    } else {
+        let mut in_flight = session.in_flight.clone();
+        if let Some(current) = &current {
+            in_flight.retain(|item| item.entry_id != current.entry_id);
+            in_flight.insert(0, current.clone());
+        }
+        store::restored_pending(&in_flight, &state.queue)
+    };
+    let clear_normal_current = !active && current.is_some();
+    if clear_normal_current {
+        state.catalog.current = None;
+    }
+    state.queue = pending.clone();
+    state.session = store::Session::new();
+    (RestoredPlayback { session, settings, folder_pos }, pending, clear_normal_current)
 }
 
 pub struct ManagedSource { service: Shared, epoch: u64 }
@@ -328,12 +469,12 @@ impl TrackSource for ManagedSource {
                 let mut source = source.lock().unwrap_or_else(|e| e.into_inner());
                 (source.epoch == self.epoch).then(|| source.source.next()).flatten()
             });
-            let (claim, cache, data, queue) = {
+            let (index, claim, cache, data, queue, restore) = {
                 let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                 if owner.epoch != self.epoch {
                     return None;
                 }
-                let restored = owner.restored.take().filter(|current| {
+                let restored = owner.restored.clone().filter(|current| {
                     current.origin == PlaybackOrigin::Normal || current.playlist_id.as_deref().is_some_and(|id| {
                         owner.catalog.run(id).is_ok_and(|run| run.run_id == current.run_id)
                             && owner.catalog.definition(id).is_ok_and(|definition| {
@@ -341,7 +482,8 @@ impl TrackSource for ManagedSource {
                             })
                     })
                 });
-                let claim = if let Some(current) = restored {
+                owner.restored = restored.clone();
+                let claim = if let Some(current) = restored.as_ref() {
                     let path = if current.playlist_id.is_some() {
                         owner.lookup(&current.track_ref).ok()
                     } else {
@@ -353,18 +495,20 @@ impl TrackSource for ManagedSource {
                         let _ = owner.catalog.unavailable(id, current.run_id, entry, "missing");
                         owner.catalog.current = None;
                     }
+                    if path.is_none() { owner.restored = None; }
                     path.map(|path| Claim {
-                        source: current.playlist_id,
+                        source: current.playlist_id.clone(),
                         run: current.run_id,
-                        entry: current.entry_id,
-                        track: current.track_ref,
-                        item: QueueItem::with_origin(
+                        entry: current.entry_id.clone(),
+                        track: current.track_ref.clone(),
+                        item: current.queue_item.clone().unwrap_or_else(|| QueueItem::with_origin(
                             path,
                             current.queue_origin.unwrap_or(QueueOrigin::Manual),
-                        ),
+                        )),
                         live: true,
                         cancelled: false,
                         restoring: true,
+                        admitted: false,
                     })
                 } else {
                     None
@@ -409,6 +553,7 @@ impl TrackSource for ManagedSource {
                                 live: true,
                                 cancelled: false,
                                 restoring: false,
+                                admitted: false,
                             });
                             break;
                         }
@@ -442,6 +587,7 @@ impl TrackSource for ManagedSource {
                             live: true,
                             cancelled: false,
                             restoring: false,
+                            admitted: false,
                         })
                     }
                 };
@@ -449,8 +595,16 @@ impl TrackSource for ManagedSource {
                     owner.exhausted = true;
                     return None;
                 };
-                (claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone())
+                let restore = claim.restoring.then(|| owner.restored.clone()).flatten();
+                let index = owner.next_index;
+                owner.next_index += 1;
+                owner.claims.insert(index, claim.clone());
+                (index, claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone(), restore)
             };
+            #[cfg(test)]
+            if let Some(hook) = LOCAL_CLAIM_BEFORE_ADMISSION.with(|slot| slot.borrow_mut().take()) {
+                hook(&claim.item);
+            }
             let allow_non_funkot = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
             let admission = crate::admit_playback_path(&claim.item.path, &cache, &data, allow_non_funkot);
             log::info!("playback admission: {} allow_non_funkot={} result={:?}",
@@ -459,9 +613,12 @@ impl TrackSource for ManagedSource {
                 let rejected = admission == crate::PlaybackAdmission::Rejected;
                 let blocked_normal = {
                     let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
+                    owner.claims.remove(&index);
                     if owner.epoch != self.epoch { return None; }
+                    if claim.restoring && owner.restored.as_ref() != restore.as_ref() { return None; }
+                    if claim.restoring { owner.restored = None; }
                     let blocked_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-                        if owner.catalog.active_id.as_deref() != Some(id) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
+                        if (!claim.restoring && owner.catalog.active_id.as_deref() != Some(id)) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
                         if rejected { owner.admission_blocked.insert((id.clone(), entry.clone())); }
                         else { unavailable_this_call.insert((id.clone(), entry.clone())); }
                         owner.availability.insert(entry.clone(), ("unplayable".into(), if rejected { "non_funkot" } else { "admission_unavailable" }.into()));
@@ -491,19 +648,25 @@ impl TrackSource for ManagedSource {
                 continue;
             }
             let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
-            if owner.epoch != self.epoch { return None; }
-            if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-                if owner.catalog.active_id.as_deref() != Some(id)
-                    || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
-                    || !owner.catalog.definition(id).is_ok_and(|definition| {
+            let live = owner.claims.get(&index).is_some_and(|selected| selected.live && !selected.cancelled);
+            let source_matches = match (&claim.source, &claim.entry) {
+                (Some(id), Some(entry)) => (claim.restoring || owner.catalog.active_id.as_deref() == Some(id))
+                    && owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
+                    && owner.catalog.definition(id).is_ok_and(|definition| {
                         definition.entries.iter().any(|candidate| candidate.entry_id == *entry)
-                    }) { return None; }
+                    }),
+                (None, None) => true,
+                _ => false,
+            };
+            if owner.epoch != self.epoch || !live || !source_matches
+                || (claim.restoring && owner.restored.as_ref() != restore.as_ref()) {
+                owner.claims.remove(&index);
+                return None;
             }
+            if claim.restoring { owner.restored = None; }
             if let Some(entry) = &claim.entry { owner.availability.remove(entry); }
-            let index = owner.next_index;
-            owner.next_index += 1;
             let path = claim.item.path.clone();
-            owner.claims.insert(index, claim);
+            owner.claims.get_mut(&index).unwrap().admitted = true;
             owner.save_progress();
             return Some((index, path));
         }
@@ -523,7 +686,7 @@ pub fn reconfigure_admission(
     service: &Shared,
     allow_non_funkot: bool,
     playback: Option<&crate::Playback>,
-    persist_settings: impl FnOnce() -> Result<(), String>,
+    mut persist_settings: impl FnMut(&mut store::Settings) -> Result<(), String>,
 ) -> Result<(), CommandError> {
     let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
     let previous = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
@@ -532,7 +695,10 @@ pub fn reconfigure_admission(
     // reservations, so only an unchanged ON setting may skip the future fence.
     if previous == allow_non_funkot && allow_non_funkot {
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        return persist_settings().map_err(|message| CommandError { code: "persist_failed".into(), message });
+        return owner.disk.update(|state| {
+            persist_settings(&mut state.settings)
+                .map_err(|message| PlaylistError::PersistFailed { message })
+        }).map_err(CommandError::from);
     }
     owner.reconcile_with(playback);
     let Some(playback) = playback else {
@@ -540,57 +706,29 @@ pub fn reconfigure_admission(
             return Err(error("busy"));
         }
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous_queue = queue::pending_snapshot(&owner.queue).into_iter().collect::<std::collections::VecDeque<_>>();
-        // The setting command can arrive before queue-tab preload. Recover the
-        // same canonical normal source as startup, then append any live items
-        // that were queued after that snapshot by exact occurrence ID.
-        let canonical = match owner.restore_normal() {
-            Some(resume) => resume.items,
-            None => {
-                let session = store::load_session(&owner.data);
-                let saved = store::load_queue(&owner.data).map_err(|error| CommandError {
-                    code: "persist_failed".into(),
-                    message: format!("cannot load queue: {error}"),
-                })?;
-                store::restored_pending(&session.in_flight, &saved)
-            }
-        };
-        let mut normal = merge_normal_items(canonical, previous_queue.iter().cloned());
+        let mut normal = owner.normal_items_for_update()?;
         if !allow_non_funkot {
             let overrides = store::load_overrides(&owner.data);
             normal.retain(|item| !gated_non_funkot_for_reconfigure(&item.path, &owner.cache, &overrides)
                 || queue_transition(item.entry_id.as_str(), true, QueueEvent::AdmissionDisabled(item.entry_id.as_str())).present);
         }
-        let queue_changed = !normal.iter().eq(previous_queue.iter());
-        let previous_catalog = owner.catalog.clone();
+            let previous_catalog = owner.catalog.clone();
         let mut next_catalog = previous_catalog.clone();
-        next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: previous_catalog.normal.as_ref().and_then(|resume| resume.folder_pos) });
-        let catalog_changed = next_catalog != previous_catalog;
-        if queue_changed {
-            let updated = normal.iter().cloned().collect();
-            store::save_queue(&owner.data, &updated).map_err(|error| CommandError {
-                code: "persist_failed".into(), message: format!("cannot save queue: {error}")
-            })?;
-        }
-        if catalog_changed {
-            if let Err(error) = owner.disk.persist(&next_catalog) {
-                if queue_changed { let _ = store::save_queue(&owner.data, &previous_queue); }
-                return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save normal resume: {error:?}") });
-            }
-        }
-        if let Err(message) = persist_settings() {
-            let queue_error = queue_changed.then(|| store::save_queue(&owner.data, &previous_queue)).transpose().err();
-            let catalog_error = catalog_changed.then(|| owner.disk.persist(&previous_catalog)).transpose().err();
-            if let Some(error) = queue_error {
-                return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore queue after settings failure: {error}") });
-            }
-            if let Some(error) = catalog_error {
-                return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore normal resume after settings failure: {error:?}") });
-            }
-            return Err(CommandError { code: "persist_failed".into(), message });
-        }
-        if queue_changed { queue::restore_all(&owner.queue, normal); }
-        if catalog_changed { owner.catalog = next_catalog; owner.progress_error = false; }
+        owner.capture_normal(&mut next_catalog, Some(normal.clone()));
+            let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
+        let catalog_snapshot = next_catalog.clone();
+        let session = owner.disk.update(|state| {
+            state.queue = queue_snapshot;
+            state.catalog = catalog_snapshot;
+            state.session.in_flight.clear();
+            persist_settings(&mut state.settings)
+                .map_err(|message| PlaylistError::PersistFailed { message })?;
+            Ok(state.session.clone())
+        }).map_err(CommandError::from)?;
+        *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = session;
+        queue::restore_all(&owner.queue, normal);
+        owner.catalog = next_catalog;
+        owner.progress_error = false;
         crate::ALLOW_NON_FUNKOT.store(allow_non_funkot, Ordering::Relaxed);
         owner.admission_blocked.clear();
         owner.availability.retain(|_, value| !(value.0 == "unplayable" && value.1 == "non_funkot"));
@@ -626,19 +764,8 @@ pub fn reconfigure_admission(
     // after the core fence so a waiting loader cannot admit the old future.
     let normal_source = owner.normal_source.clone();
     let mut normal_source_guard = normal_source.as_ref().map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
-    let future = owner.future_claims();
-    let normal_claims: Vec<_> = future.iter().filter(|(_, claim)| claim.source.is_none())
-        .map(|(_, claim)| claim.item.clone()).collect();
-    let mut revoked_normal = normal_claims.clone();
-    if let Some(reserved) = queue::reserved_item(&owner.queue) {
-        let is_current = owner.current_index.and_then(|index| owner.claims.get(&index))
-            .is_some_and(|claim| claim.source.is_none() && claim.item.entry_id == reserved.entry_id);
-        if !is_current && !revoked_normal.iter().any(|claim| claim.entry_id == reserved.entry_id) {
-            revoked_normal.push(reserved);
-        }
-    }
+    let revoked_normal = owner.normal_future_items();
     let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let previous_queue = queue::pending_snapshot(&owner.queue).into_iter().collect::<std::collections::VecDeque<_>>();
     let mut normal = owner.normal_items();
     preserve_claims(&mut normal, &revoked_normal);
     if !allow_non_funkot {
@@ -646,86 +773,42 @@ pub fn reconfigure_admission(
         normal.retain(|item| !gated_non_funkot_for_reconfigure(&item.path, &owner.cache, &overrides)
             || queue_transition(item.entry_id.as_str(), true, QueueEvent::AdmissionDisabled(item.entry_id.as_str())).present);
     }
-    let queue_changed = !normal.iter().eq(previous_queue.iter());
     let previous_catalog = owner.catalog.clone();
     let mut next_catalog = previous_catalog.clone();
-    next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: Some(crate::FOLDER_POS.load(Ordering::Relaxed)) });
-    let catalog_changed = next_catalog != previous_catalog;
+    owner.capture_normal(&mut next_catalog, Some(normal.clone()));
 
-    let previous_session = if !revoked_normal.is_empty() {
-        let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = session.clone();
-        let mut updated = previous.clone();
+    let updated_session = if revoked_normal.is_empty() {
+        None
+    } else {
+        let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        let mut updated = session.clone();
         updated.in_flight.retain(|item| !revoked_normal.iter()
             .any(|claim| claim.entry_id == item.entry_id));
-        if let Err(error) = store::save_session(&owner.data, &updated) {
-            drop(session);
-            drop(_saving);
-            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-            render.engine.abort_future_update(token);
-            playback.publish_engine_observation(&render.engine);
-            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save session: {error}") });
-        }
-        *session = updated;
-        Some(previous)
-    } else {
-        None
+        Some(updated)
     };
-    if queue_changed {
-        let updated_queue = normal.iter().cloned().collect();
-        if let Err(error) = store::save_queue(&owner.data, &updated_queue) {
-            if let Some(previous) = previous_session.as_ref() {
-                let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = store::save_session(&owner.data, previous);
-                *session = previous.clone();
-            }
-            drop(_saving);
-            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-            render.engine.abort_future_update(token);
-            playback.publish_engine_observation(&render.engine);
-            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save queue: {error}") });
+    let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
+    let catalog_snapshot = next_catalog.clone();
+    let saved = owner.disk.update(|state| {
+        if let Some(session) = updated_session.clone() {
+            state.session = session;
         }
-    }
-    if catalog_changed {
-        if let Err(error) = owner.disk.persist(&next_catalog) {
-            if queue_changed { let _ = store::save_queue(&owner.data, &previous_queue); }
-            if let Some(previous) = previous_session.as_ref() {
-                let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = store::save_session(&owner.data, previous);
-                *session = previous.clone();
-            }
-            drop(_saving);
-            let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-            render.engine.abort_future_update(token);
-            playback.publish_engine_observation(&render.engine);
-            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot save normal resume: {error:?}") });
-        }
-    }
-    if let Err(message) = persist_settings() {
-        let queue_error = queue_changed.then(|| store::save_queue(&owner.data, &previous_queue)).transpose().err();
-        let catalog_error = catalog_changed.then(|| owner.disk.persist(&previous_catalog)).transpose().err();
-        let session_error = if let Some(previous) = previous_session.as_ref() {
-            let mut session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
-            let saved = store::save_session(&owner.data, previous).err();
-            *session = previous.clone();
-            saved
-        } else { None };
+        state.queue = queue_snapshot;
+        state.catalog = catalog_snapshot;
+        persist_settings(&mut state.settings)
+            .map_err(|message| PlaylistError::PersistFailed { message })
+    });
+    if let Err(error) = saved {
         drop(_saving);
         let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
         render.engine.abort_future_update(token);
         playback.publish_engine_observation(&render.engine);
-        if let Some(error) = queue_error {
-            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore queue after settings failure: {error}") });
-        }
-        if let Some(error) = catalog_error {
-            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore normal resume after settings failure: {error:?}") });
-        }
-        if let Some(error) = session_error {
-            return Err(CommandError { code: "persist_failed".into(), message: format!("cannot restore session after settings failure: {error}") });
-        }
-        return Err(CommandError { code: "persist_failed".into(), message });
+        return Err(error.into());
     }
-    if catalog_changed { owner.catalog = next_catalog; owner.progress_error = false; }
+    if let Some(session) = updated_session {
+        *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = session;
+    }
+    owner.catalog = next_catalog;
+    owner.progress_error = false;
     crate::ALLOW_NON_FUNKOT.store(allow_non_funkot, Ordering::Relaxed);
     let current_index = owner.current_index;
     for (index, claim) in owner.claims.iter_mut() {
@@ -790,6 +873,16 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     if request.request_id.trim().is_empty() { return Err(error("invalid_input")); }
     let fingerprint = serde_json::to_string(&request).unwrap();
     let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
+    match owner.recovery_status() {
+        crate::playback_state::PlaybackRecoveryStatus::Ready => {}
+        crate::playback_state::PlaybackRecoveryStatus::Blocked { reason: LoadState::Stale } => {
+            return Err(error("stale"));
+        }
+        crate::playback_state::PlaybackRecoveryStatus::LegacyNormalConflict { .. }
+        | crate::playback_state::PlaybackRecoveryStatus::Blocked { .. } => {
+            return Err(error("store_read_only"));
+        }
+    }
     if let Some((old, receipt)) = owner.receipts.get(&request.request_id) {
         return if old == &fingerprint { Ok(receipt.clone()) } else { Err(error("stale")) };
     }
@@ -800,9 +893,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     let mut normal_source_guard = normal_source.as_ref()
         .map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
     if owner.target() != request.target { return Err(error("stale")); }
-    let mut next = owner.catalog.clone(); let mut normal = owner.normal_items(); let old_normal = normal.clone();
-    let normal_only = owner.active().is_none() && matches!(&request.action, Action::Append { .. } | Action::QueueMove { .. } | Action::QueueRemove { .. });
-    let append_action = matches!(&request.action, Action::Append { .. });
+    let old_normal = owner.normal_items();
+    let mut next = owner.catalog.clone(); let mut normal = owner.normal_items_for_update()?;
+    let _normal_only = owner.active().is_none() && matches!(&request.action, Action::Append { .. } | Action::QueueMove { .. } | Action::QueueRemove { .. });
+    let append_action = matches!(&request.action, Action::Append { .. })
+        || owner.active() == Some(FAVORITES_ID) && matches!(&request.action, Action::SetFavorite { favorite: true, .. });
     let normal_append = owner.active().is_none() && append_action;
     let mut result = CommandResult::default(); let mut removed = None; let mut undo_used = None;
     let mut removed_normal = None;
@@ -830,6 +925,18 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
                 if to >= ids.len() { return Err(error("invalid_input")); } let entry = ids.remove(from); ids.insert(to, entry); next.reorder_remaining(&id, &ids)?;
             } else { return Err(error("invalid_input")); }
         }
+        Action::SetFavorite { track, favorite } => {
+            if favorite {
+                let track = owner.track_ref(&track)?;
+                result.added = next.append(FAVORITES_ID, vec![track])?.len();
+                result.skipped = usize::from(result.added == 0);
+                if result.added > 0 && owner.active() == Some(FAVORITES_ID) && owner.exhausted { force_source = true; }
+            } else {
+                let hash = track.expected_hash.as_deref().filter(|hash| !hash.is_empty()).ok_or_else(|| error("identity_unavailable"))?;
+                if let Some(entry) = next.favorite(hash).cloned() { next.remove(FAVORITES_ID, &entry.entry_id)?; }
+                else { result.skipped = 1; }
+            }
+        }
         Action::Append { tracks, mode } => {
             if !["single", "many", "arrivals"].contains(&mode.as_str()) { return Err(error("invalid_input")); }
             let mut accepted = Vec::new();
@@ -848,7 +955,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
                 }
                 result.added += 1;
             }
-            if let Some(id) = next.active_id.clone() { if !accepted.is_empty() { next.append(&id, accepted)?; } }
+            if let Some(id) = next.active_id.clone() { if !accepted.is_empty() {
+                let added = next.append(&id, accepted)?.len();
+                result.skipped += result.added - added;
+                result.added = added;
+            } }
             else if result.added > 0 { next.revision += 1; }
             if result.added > 0 && owner.exhausted { force_source = true; }
         }
@@ -868,6 +979,9 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     }
     if force_source && !append_action && owner.current_index.is_none() {
         if let Some(current) = owner.restored.as_ref().filter(|c| c.origin == PlaybackOrigin::Normal) {
+            if let Some(item) = current.queue_item.as_ref() {
+                normal.retain(|candidate| candidate.entry_id != item.entry_id);
+            }
             normal.insert(0, QueueItem::with_origin(current.track_ref.preferred_path.clone(),
                 current.queue_origin.unwrap_or(QueueOrigin::Manual)));
         } else if let Some(claim) = owner.claims.values().find(|c| c.restoring && c.source.is_none() && c.live && !c.cancelled) {
@@ -875,7 +989,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         }
     }
     let future = owner.future_claims();
-    let normal_claims: Vec<_> = future.iter().filter(|(_, c)| c.source.is_none()).map(|(_, c)| c.item.clone()).collect();
+    let normal_claims = owner.normal_future_items();
     // Preserve the established manual-priority deadline. A committed automatic
     // next track stays first; adding manual work still succeeds behind it.
     if normal_append && !normal_claims.is_empty() {
@@ -894,8 +1008,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         let actual: Vec<_> = future.iter().filter(|(_,c)|c.source.as_deref() == Some(id)).filter_map(|(_,c)|c.entry.as_deref()).collect();
         expected.get(..actual.len()) != Some(actual.as_slice())
     } else {
-        let actual: Vec<_> = future.iter().filter(|(_,c)|c.source.is_none()).map(|(_,c)|c.item.clone()).collect();
-        normal.get(..actual.len()) != Some(actual.as_slice())
+        normal.get(..normal_claims.len()) != Some(normal_claims.as_slice())
     };
     // Startup publishes the source before the audio control handle. A change
     // affecting already claimed work must wait for that handle's fence.
@@ -934,27 +1047,35 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     } else { None };
     owner.capture_normal(&mut next, Some(normal.clone()));
     if force_source && !append_action && owner.current_index.is_none() { next.current = None; }
-    // Keep deletion, the session claim, and the displayed queue in one save
-    // order. Session goes first: if the queue save fails, the older durable
-    // queue still restores the occurrence; the inverse order can resurrect a
-    // successfully deleted occurrence after a crash.
     let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let saved = (|| {
-        if let Some(item) = &removed_normal {
-            let mut session = crate::SESSION.lock().unwrap_or_else(|e|e.into_inner());
-            if session.in_flight.iter().any(|entry| entry.entry_id == item.entry_id) {
-                let mut updated = session.clone();
-                store::retire_revoked(&mut updated.in_flight, item);
-                store::save_session(&owner.data, &updated)
-                    .map_err(|e| PlaylistError::PersistFailed { message: e.to_string() })?;
-                *session = updated;
-            }
+    let offline = owner.normal_source.is_none();
+    let mut updated_session = if !offline && ((replace && !normal_claims.is_empty()) || removed_normal.is_some()) {
+        let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        let mut updated = session.clone();
+        updated.in_flight.retain(|item| {
+            !(replace && normal_claims.iter().any(|claim| claim.entry_id == item.entry_id))
+                && !removed_normal.as_ref().is_some_and(|removed| removed.entry_id == item.entry_id)
+        });
+        Some(updated)
+    } else { None };
+    let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
+    let catalog_snapshot = next.clone();
+    let saved = owner.disk.update(|state| {
+        if offline {
+            state.session.in_flight.clear();
+            updated_session = Some(state.session.clone());
+        } else if let Some(session) = updated_session.clone() {
+            state.session = session;
         }
-        if normal_only && !matches!(owner.disk.load_state(), LoadState::Ready | LoadState::Missing) {
-            store::save_queue(&owner.data, &normal.iter().cloned().collect())
-                .map_err(|e| PlaylistError::PersistFailed { message: e.to_string() })
-        } else { owner.disk.persist(&next) }
-    })();
+        state.queue = queue_snapshot;
+        state.catalog = catalog_snapshot;
+        Ok(())
+    });
+    if let Ok(()) = saved {
+        if let Some(session) = updated_session {
+            *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = session;
+        }
+    }
     if let Err(failure) = saved {
         drop(_saving);
         if let Some(token) = fence {

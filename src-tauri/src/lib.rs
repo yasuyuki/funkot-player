@@ -16,8 +16,17 @@ mod playlist_progress;
 mod playlist_service;
 mod engine_observation;
 mod playback_diagnostics;
+mod navigation_capture;
+#[cfg(all(target_os = "windows", any(test, feature = "verified-capture")))]
+mod verified_capture_control;
+mod playback_recovery;
+mod playback_state;
 #[cfg(test)]
 mod playlist_engine_contract_tests;
+#[cfg(test)]
+mod manual_plan_log_tests;
+#[cfg(test)]
+mod library_scan_tests;
 #[cfg(any(target_os = "windows", test))]
 mod current_track_http;
 
@@ -34,7 +43,7 @@ use funkot_core::engine::{
 };
 use funkot_core::EngineOptions;
 
-use queue::{DrainPolicy, HostSource, QueueEdit, QueueItem, QueueOrigin, SharedQueue};
+use queue::{DrainPolicy, HostSource, QueueItem, QueueOrigin, SharedQueue};
 
 /// Global handle to the running engine's playback controls.
 ///
@@ -79,7 +88,7 @@ static PLAYBACK: OnceLock<Playback> = OnceLock::new();
 /// it) finds this empty and just skips saving; see `persist_session`.
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Live copy of `settings.json`'s `allow_non_funkot`. Folder drain reads this
+/// Live copy of the playback snapshot's `allow_non_funkot` setting. Folder drain reads this
 /// on the loader thread; `set_allow_non_funkot` updates it without restart.
 static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 
@@ -88,9 +97,9 @@ static ALLOW_NON_FUNKOT: AtomicBool = AtomicBool::new(true);
 /// `startForegroundService` would otherwise create a ghost notification.
 static SERVICE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Live copy of `settings.json`'s `locale`, or empty when the listener has
-/// not picked one. Exists for the Android `currentLocaleTag` JNI entry, which
-/// Kotlin calls with no `AppHandle` to reach `settings.json` through — the
+/// Live copy of the playback snapshot's `locale`, or empty when the listener
+/// has not picked one. Exists for the Android `currentLocaleTag` JNI entry,
+/// which Kotlin calls with no `AppHandle` to reach the persisted setting through — the
 /// same reason `LAST_SESSION_META` exists for `currentTitle`. Empty means
 /// "follow the device locale", which is what Android resource selection does
 /// on its own.
@@ -112,7 +121,7 @@ const LABELING_HEAD_SECS: f64 = 20.0;
 /// しまわないための、唯一の実効的な関門。
 const LABELING_AVAILABLE: bool = !cfg!(target_os = "android");
 
-/// `settings.json`'s raw `labeling_mode` gated by platform availability. The
+/// The playback snapshot's raw `labeling_mode` gated by platform availability. The
 /// mode is fixed at `Engine` construction (no live switch — see
 /// `EngineOptions::head_only_secs`), so this is the one place that decides
 /// whether a session actually runs with labeling prefetch on.
@@ -495,6 +504,9 @@ fn platform_dirs(app: &tauri::AppHandle) -> Result<AppDirs, String> {
         .app_data_dir()
         .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
     let cache = base.join("funkot-cache");
+    // Rescue the preceding standalone generation before the first unified
+    // settings read can create its replacement snapshot.
+    ensure_dirs(None, &cache, &base)?;
     let configured = store::load_settings(&base).music_dir;
     let (music, unavailable, needed) = resolve_music_dir(configured.as_deref(), |p| {
         std::fs::read_dir(p).is_ok()
@@ -569,6 +581,40 @@ fn check_music_dir_shape(candidate: &Path, data_dir: &Path) -> Result<(), &'stat
         return Err("contains_app_data");
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn inspect_picked_music_dir(path: &Path, data_dir: &Path) -> Result<(), &'static str> {
+    check_music_dir_shape(path, data_dir)?;
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("not_found"),
+        Err(_) => Err("not_readable"),
+        Ok(meta) if !meta.is_dir() => Err("not_a_directory"),
+        Ok(_) => {
+            if std::fs::read_dir(path).is_err() {
+                Err("not_readable")
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn store_picked_music_dir(data_dir: &Path, path: &Path) -> Result<(), String> {
+    let _index = INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settings = store::load_settings(data_dir);
+    let path_changed = settings.music_dir.as_deref() != Some(path);
+    settings.music_dir = Some(path.to_path_buf());
+    if path_changed {
+        settings.arrivals_baseline_done = false;
+    }
+    store::save_settings(data_dir, &settings).map_err(|e| format!("cannot save settings: {e}"))
 }
 
 #[cfg(test)]
@@ -669,6 +715,104 @@ mod music_dir_tests {
             true
         });
         assert_eq!(probed.into_inner(), vec![configured.to_path_buf()]);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_rejects_a_missing_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        let data = root.path().join("data");
+        assert_eq!(
+            inspect_picked_music_dir(&missing, &data),
+            Err("not_found")
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_rejects_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("track.mp3");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            inspect_picked_music_dir(&file, &root.path().join("data")),
+            Err("not_a_directory")
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn inspect_picked_music_dir_accepts_a_readable_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        assert_eq!(
+            inspect_picked_music_dir(&music, &root.path().join("data")),
+            Ok(())
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn inspect_picked_music_dir_follows_whether_this_process_can_list_the_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        std::fs::set_permissions(&music, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&music).is_ok();
+        let result = inspect_picked_music_dir(&music, &root.path().join("data"));
+        std::fs::set_permissions(&music, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable {
+            assert_eq!(result, Ok(()));
+        } else {
+            assert_eq!(result, Err("not_readable"));
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn store_picked_music_dir_clears_the_baseline_when_the_folder_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        store::save_settings(
+            root.path(),
+            &store::Settings {
+                music_dir: Some(first),
+                arrivals_baseline_done: true,
+                ..store::Settings::default()
+            },
+        )
+        .unwrap();
+        store_picked_music_dir(root.path(), &second).unwrap();
+        let loaded = store::load_settings(root.path());
+        assert_eq!(loaded.music_dir.as_deref(), Some(second.as_path()));
+        assert!(!loaded.arrivals_baseline_done);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn store_picked_music_dir_keeps_the_baseline_for_the_same_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir(&music).unwrap();
+        store::save_settings(
+            root.path(),
+            &store::Settings {
+                music_dir: Some(music.clone()),
+                arrivals_baseline_done: true,
+                ..store::Settings::default()
+            },
+        )
+        .unwrap();
+        store_picked_music_dir(root.path(), &music).unwrap();
+        let loaded = store::load_settings(root.path());
+        assert_eq!(loaded.music_dir.as_deref(), Some(music.as_path()));
+        assert!(loaded.arrivals_baseline_done);
     }
 }
 
@@ -801,7 +945,8 @@ struct SetMusicDirResult {
 /// layer takes the string rather than holding a second, unreachable copy of
 /// it per language.
 ///
-/// Always `async`: `blocking_pick_folder` must never run on the main thread.
+/// Always `async`: `FileDialog::pick_folder` blocks, so it must never run
+/// on the main thread.
 #[tauri::command(async)]
 fn set_music_dir(
     app: tauri::AppHandle,
@@ -816,55 +961,26 @@ fn set_music_dir(
     #[cfg(not(target_os = "android"))]
     {
         use tauri::Manager;
-        use tauri_plugin_dialog::DialogExt;
 
         let dirs = resolve_dirs(&app)?;
 
-        let mut b = app.dialog().file().set_title(&title);
+        let mut dialog = rfd::FileDialog::new().set_title(&title);
         if !dirs.music_dir.is_empty() {
-            b = b.set_directory(&dirs.music_dir);
+            dialog = dialog.set_directory(&dirs.music_dir);
         }
-        if let Some(w) = app.get_webview_window("main") {
-            b = b.set_parent(&w);
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
         }
-        let picked = b.blocking_pick_folder();
-
-        let Some(fp) = picked else {
+        let Some(path) = dialog.pick_folder() else {
             return Ok(SetMusicDirResult {
                 changed: false,
                 dirs,
                 restart_required: false,
             });
         };
-        let path = fp.into_path().map_err(|_| "not_absolute".to_string())?;
-
-        check_music_dir_shape(&path, Path::new(&dirs.data_dir))?;
-        match std::fs::metadata(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("not_found".into()),
-            Err(_) => return Err("not_readable".into()),
-            Ok(m) if !m.is_dir() => return Err("not_a_directory".into()),
-            Ok(_) => {}
-        }
-        if std::fs::read_dir(&path).is_err() {
-            return Err("not_readable".into());
-        }
-
         let data = Path::new(&dirs.data_dir);
-        // Folder picker is done; take locks only for the Settings RMW.
-        let _index = INDEX_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _saving = SAVE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut settings = store::load_settings(data);
-        let path_changed = settings.music_dir.as_deref() != Some(path.as_path());
-        settings.music_dir = Some(path);
-        if path_changed {
-            settings.arrivals_baseline_done = false;
-        }
-        store::save_settings(data, &settings)
-            .map_err(|e| format!("cannot save settings: {e}"))?;
+        inspect_picked_music_dir(&path, data)?;
+        store_picked_music_dir(data, &path)?;
 
         let dirs = resolve_dirs(&app)?;
         let restart_required = *state.started.lock().unwrap();
@@ -1096,9 +1212,8 @@ fn take_pending_import(app: tauri::AppHandle) -> Result<ImportResult, String> {
 /// [`SESSION`] → queue (`src-tauri/src/queue.rs`) → render.
 static INDEX_LOCK: Mutex<()> = Mutex::new(());
 
-/// Serialises writes under `data_dir` (`queue.json`, `flags.json`,
-/// `labels.json`, `library.json`, `history.json`, `session.json`, and Settings
-/// RMW).
+/// Serialises writes under `data_dir` (the playback snapshot plus `flags.json`,
+/// `labels.json`, `library.json`, and `history.json`).
 ///
 /// The mutating commands run on Tauri's blocking threadpool, so two of them
 /// really do overlap — tapping ✕ on one row and ↑ on another in quick
@@ -2079,6 +2194,7 @@ fn now_ms() -> u64 {
 /// `onNativeControl` action 1 — go through this so the mark is never set in
 /// one place and missed in the other.
 fn request_skip_next() -> Result<(), String> {
+    navigation_capture::request_next();
     if AUDITIONING.load(Ordering::Relaxed) {
         return Err("skip is disabled while auditioning".into());
     }
@@ -2562,6 +2678,19 @@ fn record_heard(path: &Path, origin: Option<QueueOrigin>) {
     }
 }
 
+fn log_manual_plan(render: &Mutex<RenderState>) {
+    let plan = {
+        let render = render.lock().unwrap_or_else(|e| e.into_inner());
+        render.engine.last_manual_plan_diagnostic()
+    };
+    if let Some(plan) = plan {
+        log::info!("manual next plan: reason={}, simple={}, entry={}, start={}",
+            plan.reason, plan.simple, plan.entry, plan.start);
+    } else {
+        log::info!("manual next plan: no local plan (head-only or direct navigation)");
+    }
+}
+
 fn events_thread(rx: Receiver<PlaybackEvent>) {
     for ev in rx {
         match ev {
@@ -2585,13 +2714,7 @@ fn events_thread(rx: Receiver<PlaybackEvent>) {
                 let at_frames = MAIN_FRAMES.load(Ordering::Relaxed);
                 if origin == Origin::Manual {
                     if let Some(playback) = PLAYBACK.get() {
-                        let render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(plan) = render.engine.last_manual_plan_diagnostic() {
-                            log::info!("manual next plan: reason={}, simple={}, entry={}, start={}",
-                                plan.reason, plan.simple, plan.entry, plan.start);
-                        } else {
-                            log::info!("manual next plan: no local plan (head-only or direct navigation)");
-                        }
+                        log_manual_plan(&playback.render);
                     }
                 }
                 // Only an interrupt fold moves `now`; a plain TransitionStarted
@@ -2761,6 +2884,7 @@ fn open_output_stream(
     observation: Arc<engine_observation::EngineObservation>,
     diagnostics: Arc<playback_diagnostics::PlaybackDiagnostics>,
     err_log: Sender<String>,
+    capture: Option<navigation_capture::CaptureSink>,
 ) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let device = host
@@ -2780,28 +2904,58 @@ fn open_output_stream(
         sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
+    if let Some(capture) = &capture {
+        let endpoint_id = device
+            .id()
+            .map_err(|e| format!("output device id: {e}"))?
+            .id()
+            .to_owned();
+        capture
+            .open_output_stream(endpoint_id, sample_rate)
+            .map_err(|e| format!("navigation capture output-stream receipt: {e}"))?;
+    }
     let mut transport_fade = transport_fade::TransportFade::new(sample_rate);
     let mut core_diagnostics = playback_diagnostics::CoreDiagnosticsPublisher::new(&diagnostics);
+    let mut first_live_preparation_captured = false;
     let stream = device
         .build_output_stream(
             config,
-            move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 // First thing, unconditionally: this is the proof the callback is
                 // still alive at all, including while paused. See
                 // `CALLBACK_TICKS` and `CallbackWatch`.
-                CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed);
+                let sequence = CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+                let output_frames = (out.len() / 2) as u64;
+                let timestamp = capture.as_ref().map(|_| info.timestamp());
+                let record_capture = |engine_start, engine_end, paused, audition, render_lock_miss, trace_dropped| {
+                    if let (Some(capture), Some(timestamp)) = (&capture, &timestamp) {
+                        capture.record(navigation_capture::CallbackRecord {
+                            sequence, callback_qpc_100ns: (timestamp.callback.as_nanos() / 100) as u64,
+                            playback_qpc_100ns: (timestamp.playback.as_nanos() / 100) as u64,
+                            output_frames, engine_start, engine_end,
+                            paused, audition, render_lock_miss, trace_dropped,
+                        });
+                    }
+                };
+                if navigation_capture::gate_output(capture.as_ref(), out) {
+                    record_capture(None, None, true, false, false, 0);
+                    return;
+                }
                 // try_lock: never block the realtime callback on the audio
                 // thread's reopen / drop path (same idea as funkot-cli ClipPlayer).
                 let Ok(mut state) = render.try_lock() else {
+                    record_capture(None, None, paused.load(Ordering::Relaxed), false, true, 0);
                     diagnostics.record_render_lock_miss((out.len() / 2) as u64);
-                    out.fill(0.0);
+                    navigation_capture::silence_device_output(out);
                     return;
                 };
                 // Snapshot once: a control arriving during this buffer takes
                 // effect next time, continuing from the same fade level.
                 let requested_pause = paused.load(Ordering::Relaxed);
                 if requested_pause && transport_fade.is_silent() {
-                    out.fill(0.0);
+                    let frame = state.engine.render_frame();
+                    record_capture(Some(frame), Some(frame), true, state.audition.is_some(), false, state.engine.navigation_trace_dropped() as u64);
+                    navigation_capture::silence_device_output(out);
                     state.stall.reset_silence();
                     set_phase(Phase::Paused);
                     return;
@@ -2811,7 +2965,8 @@ fn open_output_stream(
                 // so the engine borrow ends before `stall` / `was_in_transition`.
                 // Stamp `audition` at send time from this buffer's engine choice.
                 let audition = state.audition.is_some();
-                let (events, in_transition, render_diagnostics) = {
+                let engine_start = state.engine.render_frame();
+                let (events, in_transition, render_diagnostics, rendered_silence) = {
                     let engine = match state.audition.as_mut() {
                         Some(aud) => aud,
                         None => &mut state.engine,
@@ -2820,6 +2975,7 @@ fn open_output_stream(
                     // engine. Its events and playhead still account for every
                     // rendered frame through the normal path below.
                     let frames = transport_fade.render(out, requested_pause, |out| engine.render(out));
+                    let rendered_silence = navigation_capture::finalize_rendered_output(capture.as_ref(), out);
                     // Only the main engine advances the playhead `player_state`
                     // reports as `position_secs` — see `MAIN_FRAMES`'s doc
                     // comment for why this must not run in the audition branch.
@@ -2853,6 +3009,15 @@ fn open_output_stream(
                     // minute at most), which is judged cheap enough for the
                     // callback.
                     let events = engine.poll_events();
+                    if !audition {
+                        if let Some(capture) = &capture {
+                            for event in &events {
+                                if let EngineEvent::TrackStarted { index, entry_frame_out, .. } = event {
+                                    capture.source_started(*index, *entry_frame_out, engine_start);
+                                }
+                            }
+                        }
+                    }
                     // Edge-detects the end of a transition from
                     // `Engine::transition_frames_into` at buffer boundaries,
                     // since the engine has no event of its own for "the overlap
@@ -2870,11 +3035,25 @@ fn open_output_stream(
                     // waiting for an end edge that will never come.
                     let in_transition = engine.transition_frames_into().is_some();
                     let render_diagnostics = (!audition).then(|| engine.render_diagnostics());
-                    (events, in_transition, render_diagnostics)
+                    (events, in_transition, render_diagnostics, rendered_silence)
                 };
                 if let Some(render_diagnostics) = render_diagnostics {
-                    core_diagnostics.observe(render_diagnostics, || MAIN_FRAMES.load(Ordering::Relaxed), &diagnostics);
+                    if let Some(snapshot) = core_diagnostics.observe(render_diagnostics, || MAIN_FRAMES.load(Ordering::Relaxed), &diagnostics) {
+                        if let Some(capture) = &capture {
+                            capture.preview_upgrade(snapshot, sequence);
+                        }
+                    }
                 }
+                if !audition && !first_live_preparation_captured {
+                    if let Some(capture) = &capture {
+                        if let Some(observation) = state.engine.first_live_replay_observation() {
+                            capture.first_live_preparation(observation, sequence);
+                            first_live_preparation_captured = true;
+                        }
+                    }
+                }
+                record_capture(Some(engine_start), Some(state.engine.render_frame()), requested_pause,
+                    audition, false, state.engine.navigation_trace_dropped() as u64);
                 // Publish the main engine before its events are sent. Audition
                 // leaves the main observation unchanged while it is frozen.
                 if !audition {
@@ -2882,7 +3061,7 @@ fn open_output_stream(
                 }
                 // Bit-exact silence is the one signal a host gets that the
                 // engine had nothing prepared for this buffer; see `StallWatch`.
-                let silent = out.iter().all(|s| *s == 0.0);
+                let silent = rendered_silence;
                 let total_frames = (out.len() / 2) as u64;
                 let phase = if !audition && state.engine.is_finished() {
                     paused.store(true, Ordering::Relaxed);
@@ -3022,6 +3201,10 @@ fn audio_thread(
     let reserved_dir = data_dir.clone();
     let folder_gate_cache = cache_dir_for_log.clone();
     let folder_gate_data = data_dir.clone();
+    let capture_inputs: Vec<PathBuf> = if std::env::var_os("FUNKOT_NAVIGATION_CAPTURE_DIR").is_some() {
+        paths.iter().cloned().chain(queue::snapshot(&queue).into_iter().map(|item| item.path))
+            .collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+    } else { Vec::new() };
     let source = HostSource::new(
         queue,
         DrainPolicy::ContinueFolder {
@@ -3113,6 +3296,7 @@ fn audio_thread(
         }));
     let source_owner = playlist_service::get(&data_dir, &playlist_cache, &queue_for_priority);
     let source = playlist_service::configure(&source_owner, source);
+    let capture_options = options.clone();
     let mut engine = match Engine::new_with_source(options, Box::new(source)) {
         Ok(e) => e,
         Err(e) => {
@@ -3123,6 +3307,14 @@ fn audio_thread(
     };
     // Never block in the audio callback.
     engine.set_realtime(true);
+    let capture = match navigation_capture::start(&mut engine, &capture_options, &capture_inputs) {
+        Ok(capture) => capture,
+        Err(error) => {
+            say!("FAIL: navigation capture preflight: {error}");
+            set_phase(Phase::Failed);
+            return;
+        }
+    };
     say!("engine created");
 
     // Grab the nav sender before `engine` moves into `RenderState`, and publish
@@ -3186,6 +3378,7 @@ fn audio_thread(
         Arc::clone(&observation),
         Arc::clone(&diagnostics),
         log.clone(),
+        capture.clone(),
     ) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -3275,6 +3468,7 @@ fn audio_thread(
                     Arc::clone(&observation),
                     Arc::clone(&diagnostics),
                     log.clone(),
+                    capture.clone(),
                 ) {
                     Ok(s) => {
                         cb_watch =
@@ -3763,9 +3957,9 @@ fn ensure_tracks_available(paths: &[PathBuf], dir: &Path) -> Result<(), String> 
 /// gated behind a `load_persisted_queue` argument, to keep cold-start
 /// audition's pending queue empty while the loader served folder tracks
 /// (`on_pending_consumed` only runs when something was actually taken from
-/// `pending`, so leaving it empty kept `queue.json` untouched). That gate is
-/// gone now: `store::restored_pending` folds `session.in_flight` in ahead of
-/// `queue.json`'s own contents, so whatever the loader pops — pending or
+/// `pending`, so leaving it empty kept its persisted snapshot component untouched).
+/// That gate is gone now: `store::restored_pending` folds `session.in_flight`
+/// in ahead of the snapshot queue component, so whatever the loader pops — pending or
 /// folder-drain alike — is recorded via `on_reserved` and survives a crash
 /// either way, and there is no longer a reason to suppress the restore.
 /// Injection still happens exactly once, here, before the loader thread
@@ -3817,67 +4011,19 @@ fn start_impl(
     // Fixed for the life of this `Engine` — there is no live labeling switch
     // (see `EngineOptions::head_only_secs`), so `effective_labeling_mode` is
     // resolved once here and carried straight into `audio_thread`.
-    let labeling_mode = {
-        let settings = store::load_settings(&data);
-        ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
-        effective_labeling_mode(settings.labeling_mode)
-    };
-
-    // Restore whatever was still mid-flight or pending from a previous run
-    // before the engine starts pulling from the queue. `in_flight` (tracks
-    // `HostSource::next` had already popped but not finished playing) goes
-    // first, then `queue.json`'s own contents — see `store::restored_pending`
-    // for why order and de-duplication both matter here. `replace_pending`
-    // overwrites rather than appends: anything queued in this process since
-    // launch was already mirrored into `queue.json` by the command that
-    // queued it, so appending would duplicate every entry queued before
-    // start was pressed.
-    let session = store::load_session(&data);
-    let saved = store::load_queue(&data).unwrap_or_else(|e| {
-        log::warn!("load_queue({}): {e}", data.display());
-        Vec::new()
-    });
-    let restored = store::restored_pending(&session.in_flight, &saved);
     let _prestart = playlist_service::lock_prestart_queue();
     let source_owner = playlist_service::get(&data, &cache, &state.queue);
-    let normal_resume = source_owner.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
-    queue::replace_pending(&state.queue, normal_resume.as_ref().map(|n| n.items.clone()).unwrap_or(restored));
+    let restored = source_owner.lock().unwrap_or_else(|e| e.into_inner())
+        .restore_saved_queue().map_err(|error| error.message)?;
     drop(_prestart);
-    // Mirror the restored queue to `queue.json` *before* clearing
-    // `SESSION.in_flight` below, not after: from here until that clear,
-    // `queue.json` still doesn't list the tracks that were `in_flight` (they
-    // only exist in memory now), while `session.json` still does. No save
-    // site can currently race in and `persist_session()` during this window —
-    // every path that reaches `flip_paused` (`toggle_pause`, the JNI
-    // callback) requires `PLAYBACK.get()` to be `Some`, and `PLAYBACK.set` only
-    // happens inside `audio_thread`, which is spawned after this function's
-    // restore runs and while `state.started`'s guard is still held — but
-    // fixing the order this way costs nothing either way, and it is the
-    // difference between "no known window" and "silently reintroduced" the
-    // next time a save site is added here. Writing `queue.json` first means
-    // every track restored this run is always findable on disk in at least
-    // one of the two files, however the process dies; on the next restore,
-    // `restored_pending`'s own de-duplication absorbs a track landing in
-    // both.
-    persist_queue(app, state);
-    // `in_flight` has now been folded back into `pending` above, so the
-    // in-memory session starts this run with none still outstanding;
-    // The loader records reservations as in-flight without retiring pending members.
-    // Start means "play": do not carry over a previous run's pause. In-process
-    // pause still goes through `flip_paused` → SESSION as before.
-    {
-        let mut s = SESSION
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        s.in_flight = Vec::new();
-        s.paused = false;
-    }
-    persist_session();
+    ALLOW_NON_FUNKOT.store(restored.settings.allow_non_funkot, Ordering::Relaxed);
+    let labeling_mode = effective_labeling_mode(restored.settings.labeling_mode);
+    let session = restored.session;
     // Where `DrainPolicy::ContinueFolder` resumes folder cycling — see
     // `store::restored_folder_pos`. Computed here, before `paths` moves into
     // `audio_thread` below, from `in_flight`'s *last* entry (the most
     // recently reserved track, whichever queue it came from).
-    let folder_pos = normal_resume.as_ref().and_then(|n| n.folder_pos).unwrap_or_else(||
+    let folder_pos = restored.folder_pos.unwrap_or_else(||
         store::restored_folder_pos(
             &paths,
             session
@@ -4860,64 +5006,6 @@ struct QueueSnapshot {
     folder_len: usize,
 }
 
-/// Save the queue's current pending contents to `queue.json`. Failure is
-/// logged, not propagated: the in-memory queue mutation already succeeded,
-/// and losing the on-disk mirror is not worth failing the caller's command
-/// over.
-fn persist_queue(app: &tauri::AppHandle, state: &AppState) {
-    let data_dir = match resolve_dirs(app) {
-        Ok(d) => PathBuf::from(d.data_dir),
-        Err(e) => {
-            log::warn!("save_queue: cannot resolve data dir: {e}");
-            return;
-        }
-    };
-    // Snapshot and write under one lock, so concurrent commands cannot write
-    // out of order; see `SAVE_LOCK`. Poisoning is not a concern: nothing under
-    // this guard can panic in a way that leaves shared state half-updated, so
-    // recovering the guard is better than taking the app down over a stale
-    // mirror.
-    let _saving = SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let pending: VecDeque<QueueItem> = queue::snapshot(&state.queue).into_iter().collect();
-    if let Err(e) = store::save_queue(&data_dir, &pending) {
-        log::warn!("save_queue({}): {e}", data_dir.display());
-    }
-}
-
-/// Append `path` to the tail of the pending queue. Returns the pending
-/// queue's length after the insert.
-///
-/// Rejects with `"non_funkot"` when the track is analysed, effectively
-/// non-Funkot, and `allow_non_funkot` is false. Unanalysed tracks always
-/// pass. Tracks already in the queue are never removed by this gate.
-#[tauri::command(async)]
-fn enqueue(path: String, app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<usize, String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    let dirs = resolve_dirs(&app)?;
-    let path_buf = PathBuf::from(&path);
-    if !ALLOW_NON_FUNKOT.load(Ordering::Relaxed)
-        && gated_non_funkot(
-            &path_buf,
-            Path::new(&dirs.cache_dir),
-            Path::new(&dirs.data_dir),
-        )
-    {
-        return Err("non_funkot".into());
-    }
-    let len = queue::enqueue(&state.queue, path_buf);
-    let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
-    let prioritized = try_prioritize_manual(&state.queue, request);
-    persist_queue(&app, &state);
-    if prioritized {
-        persist_session();
-    }
-    Ok(len)
-}
-
-/// Current `allow_non_funkot` setting (also mirrors [`ALLOW_NON_FUNKOT`]).
 #[tauri::command(async)]
 fn get_allow_non_funkot(app: tauri::AppHandle) -> Result<bool, String> {
     let dirs = resolve_dirs(&app)?;
@@ -4944,11 +5032,9 @@ fn set_allow_non_funkot(
     let service = playlist_service::existing().unwrap_or_else(|| {
         playlist_service::get(data, Path::new(&dirs.cache_dir), &state.queue)
     });
-    playlist_service::reconfigure_admission(&service, allow, PLAYBACK.get(), || {
-        let mut settings = store::load_settings(data);
+    playlist_service::reconfigure_admission(&service, allow, PLAYBACK.get(), |settings| {
         settings.allow_non_funkot = allow;
-        store::save_settings(data, &settings)
-            .map_err(|error| format!("cannot save settings: {error}"))
+        Ok(())
     }).map_err(|error| error.message)?;
     Ok(allow)
 }
@@ -5040,58 +5126,6 @@ fn with_settings_rmw_then<R>(
     Ok(after_save(&settings))
 }
 
-/// `queue::edit_displayed`'s `revoke` argument for the main engine: hands
-/// back `Engine::next_track_path`'s track, or `None` if there is nothing left
-/// to take back.
-///
-/// Holds `playback.render`'s lock only long enough to call
-/// `Engine::revoke_next` — a few microseconds. The discarded
-/// `PreparedTrack`'s actual teardown happens on a separate thread
-/// (`retire_prepared`, funkot-core `engine.rs`), specifically so this call
-/// does not have to wait on it. This is the same lock the cpal callback
-/// takes with `try_lock` (`open_output_stream`), so — exactly as with
-/// `install_audition`/`resume_autodj` swapping the audition engine in and
-/// out — it is possible, if unlikely, for one audio buffer to lose that race
-/// and render silence.
-///
-/// Returns `None` (which `edit_displayed` turns into `EditError::TooLate`)
-/// if the main engine has not started yet, or if an audition engine is
-/// currently installed: `RenderState::audition` is what the callback is
-/// actually rendering then, so the main engine's `next_track` cannot
-/// meaningfully be revoked out from under it.
-///
-/// Re-checks `AUDITIONING`/`AUDITION_PREPARING` here, after taking the render
-/// lock, rather than trusting `reorder`/`dequeue`'s own entry check: those
-/// flags and `RenderState::audition` do not flip atomically together.
-/// `install_audition` sets `AUDITIONING` *before* it takes the render lock to
-/// install the engine, so a caller that got past the entry check could still
-/// find `state.audition` empty here and revoke anyway — a harmless but
-/// unintended extra re-decode. The reverse order is also possible in
-/// principle (an audition engine landing in `RenderState` a moment before
-/// its flag is set), so both the flags and `state.audition.is_some()` are
-/// checked, and either one alone is enough to refuse.
-fn revoke_reserved() -> Option<PathBuf> {
-    let playback = PLAYBACK.get()?;
-    let mut state = playback
-        .render
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if state.audition.is_some()
-        || AUDITIONING.load(Ordering::Relaxed)
-        || AUDITION_PREPARING.load(Ordering::Relaxed)
-    {
-        return None;
-    }
-    let path = state.engine.revoke_next();
-    if path.is_some() {
-        NEXT_PREPARED.store(false, Ordering::Relaxed);
-    }
-    path
-}
-
-/// Same engine-side revoke as [`revoke_reserved`], but rechecks the manual
-/// priority deadline from the engine while holding the render lock. Atomics
-/// used by the watchdog are only a wake-up hint and may lag a buffer.
 fn revoke_reserved_for_manual_priority() -> Option<PathBuf> {
     let playback = PLAYBACK.get()?;
     let mut state = playback
@@ -5164,119 +5198,6 @@ fn try_prioritize_manual(queue: &SharedQueue, request: u64) -> bool {
     true
 }
 
-/// Move an item within the *displayed* queue list (`[displayed reserved?] ++
-/// pending`; index `0` is next-up `reserved` when present — matches `QueueSnapshot` and
-/// `queue::QueueEdit`'s doc comment). `expect` must be the path currently
-/// shown at `from`, so a caller acting on a stale view is rejected instead of
-/// moving whatever now happens to be there.
-///
-/// Errors are one of `queue::EditError::as_str`'s codes (`"too_late"` /
-/// `"stale"` / `"out_of_range"`), or `"auditioning"` while an audition is
-/// running or still preparing. `src/lib/tauri.ts` and `src/lib/state.svelte.ts`
-/// match on these exact strings to choose a Japanese toast message — keep
-/// this contract in sync on both sides; changing one without the other fails
-/// silently (an unrecognised code just falls through to a generic message).
-#[tauri::command(async)]
-fn reorder(
-    from: usize,
-    to: usize,
-    expect: QueueItem,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<(), String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
-        return Err("auditioning".into());
-    }
-    // `revoke_reserved`'s return value, captured here so it can be applied to
-    // `SESSION.in_flight` after `edit_displayed` returns and both the queue
-    // and render locks it was called under are released — see
-    // `store::retire_revoked`'s doc comment for why this matters (otherwise a
-    // restart brings the reordered-away track right back).
-    let mut revoked: Option<PathBuf> = None;
-    queue::edit_displayed(
-        &state.queue,
-        QueueEdit::Move { from, to },
-        &expect,
-        || {
-            let path = revoke_reserved();
-            revoked = path.clone();
-            path
-        },
-    )
-    .map_err(|e| e.as_str().to_string())?;
-    if let Some(path) = revoked {
-        {
-            let mut session = SESSION
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let item = QueueItem {
-                entry_id: expect.entry_id.clone(),
-                path,
-                origin: expect.origin,
-            };
-            store::retire_revoked(&mut session.in_flight, &item);
-        }
-        persist_session();
-    }
-    persist_queue(&app, &state);
-    Ok(())
-}
-
-/// Remove the item at displayed index `index` (see `reorder`'s doc comment
-/// for what "displayed" means and the error-code contract with the
-/// frontend). `expect` must be the path currently shown there.
-///
-/// Returns the removed path on success — `edit_displayed` only succeeds once
-/// it has confirmed the path at `index` equals `expect`, so `expect` itself
-/// is that path.
-#[tauri::command(async)]
-fn dequeue(
-    index: usize,
-    expect: QueueItem,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<QueueItem, String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    if AUDITIONING.load(Ordering::Relaxed) || AUDITION_PREPARING.load(Ordering::Relaxed) {
-        return Err("auditioning".into());
-    }
-    // See `reorder`'s matching comment: `revoke_reserved`'s result is applied
-    // to `SESSION.in_flight` only after `edit_displayed` returns, once the
-    // queue/render locks it ran under are released.
-    let mut revoked: Option<PathBuf> = None;
-    queue::edit_displayed(
-        &state.queue,
-        QueueEdit::Remove { index },
-        &expect,
-        || {
-            let path = revoke_reserved();
-            revoked = path.clone();
-            path
-        },
-    )
-    .map_err(|e| e.as_str().to_string())?;
-    if let Some(path) = revoked {
-        {
-            let mut session = SESSION
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let item = QueueItem {
-                entry_id: expect.entry_id.clone(),
-                path,
-                origin: expect.origin,
-            };
-            store::retire_revoked(&mut session.in_flight, &item);
-        }
-        persist_session();
-    }
-    persist_queue(&app, &state);
-    Ok(expect)
-}
-
-/// Current queue contents, for the UI to render.
 #[tauri::command(async)]
 fn queue_state(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<QueueSnapshot, String> {
     // The source owner serializes claims, progress and all destination edits.
@@ -5533,48 +5454,20 @@ fn apply_non_funkot_gate_from_index(
 fn preload_queue_tab(app: &tauri::AppHandle, data: PathBuf, cache_dir: &Path) {
     use tauri::Manager;
     let _ = DATA_DIR.set(data.clone());
-    let session = store::load_session(&data);
-    let settings = store::load_settings(&data);
-    ALLOW_NON_FUNKOT.store(settings.allow_non_funkot, Ordering::Relaxed);
-    // Earliest point settings are on hand. Seeding here rather than waiting
-    // for the UI's `get_locale` means a notification raised before the WebView
-    // has finished starting already speaks the right language.
-    *LOCALE_TAG.lock().unwrap() = settings.locale.clone().unwrap_or_default();
-    let saved = store::load_queue(&data).unwrap_or_else(|e| {
-        log::warn!("setup: load_queue({}): {e}", data.display());
-        Vec::new()
-    });
-    let restored = store::restored_pending(&session.in_flight, &saved);
     let state = app.state::<AppState>();
     let _prestart = playlist_service::lock_prestart_queue();
     let service = playlist_service::get(&data, cache_dir, &state.queue);
-    let normal = service.lock().unwrap_or_else(|e|e.into_inner()).restore_normal();
-    queue::replace_pending(&state.queue, normal.map(|n|n.items).unwrap_or(restored));
+    let restored = match service.lock().unwrap_or_else(|e| e.into_inner()).restore_saved_queue() {
+        Ok(restored) => restored,
+        Err(error) => {
+            log::warn!("setup: cannot safely recover saved playback state: {}", error.message);
+            return;
+        }
+    };
     drop(_prestart);
+    ALLOW_NON_FUNKOT.store(restored.settings.allow_non_funkot, Ordering::Relaxed);
+    *LOCALE_TAG.lock().unwrap() = restored.settings.locale.unwrap_or_default();
 
-    // The preload is not only a view: from this point the restored entries
-    // are editable as ordinary pending rows. Commit that ownership transfer
-    // before the UI can delete/reorder them, otherwise start_impl reloads the
-    // old session.json and resurrects rows the listener already removed.
-    // Write queue first, then clear session, so a crash cannot lose an
-    // in-flight track from both files. Use the already-resolved data path;
-    // persist_queue would call resolve_dirs and probe a potentially slow SMB
-    // music folder on the GUI thread.
-    let _saving = SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let pending: VecDeque<QueueItem> = queue::snapshot(&state.queue).into_iter().collect();
-    match store::save_restored_queue_and_clear_session(&data, &pending) {
-        Ok(()) => {
-            let mut live = SESSION
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *live = store::Session::new();
-        }
-        Err(e) => {
-            log::warn!("setup: cannot persist preloaded queue/session: {e}");
-        }
-    }
 }
 
 /// Build one `TrackRow` from whatever `analyzed_cache_entry` returns for `hash`.
@@ -5695,7 +5588,9 @@ mod cache_state_tests {
             frames: 48_000 * 200,
             samples: Vec::new(),
         };
-        (track, funkot_core::cache::provisional(&buffer, "track.wav"))
+        let mut analysis = funkot_core::cache::provisional(&buffer, "track.wav");
+        analysis.needs_reanalysis = false;
+        (track, analysis)
     }
 
     fn store_for(track: &Path, cache_dir: &Path, analysis: &funkot_core::TrackAnalysis) {
@@ -6044,6 +5939,58 @@ mod cache_state_tests {
 
         let out = apply_non_funkot_gate_from_index(vec![track.clone()], &cache.0, &data.0, true);
         assert_eq!(out, vec![track]);
+    }
+
+    #[test]
+    fn adopted_core_reanalyzes_v14_without_losing_player_manual_edits_or_undo() {
+        let cache = TempDir::new("v14-player-cache");
+        let data = TempDir::new("v14-player-data");
+        let (track, mut old) = track_with_analysis(&cache.0);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let cache_file = cache.0.join(format!("{hash}.json"));
+        old.version = 14;
+        old.intro_bars = 8;
+        old.outro_structure_bars = 8;
+        std::fs::write(&cache_file, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(analyzed_cache_entry(&cache.0, &hash).is_none());
+        set_bars_impl(&cache.0, &data.0, &track, Some(8), Some(8), true).unwrap();
+        let sample_rate = 8_000;
+        let frames = sample_rate * 64;
+        let mut samples = vec![0.0f32; frames * 2];
+        for beat in 0..192 {
+            let start = (beat as f64 * sample_rate as f64 / 3.0).round() as usize;
+            for offset in 0..(sample_rate * 80 / 1000).min(frames - start) {
+                let time = offset as f64 / sample_rate as f64;
+                let value = (0.8 * (-time / 0.03).exp()
+                    * (2.0 * std::f64::consts::PI * 60.0 * time).sin()) as f32;
+                samples[(start + offset) * 2] = value;
+                samples[(start + offset) * 2 + 1] = value;
+            }
+        }
+        let buffer = funkot_core::decode::AudioBuffer {
+            sample_rate: sample_rate as u32, frames: frames as u64, samples,
+        };
+        let fresh = funkot_core::cache::get_or_analyze(&track, &cache.0, &buffer).unwrap();
+        assert_eq!(fresh.version, 15);
+        assert_eq!((fresh.intro_bars, fresh.outro_structure_bars, fresh.outro_bars), (8, 8, 24));
+        std::fs::remove_file(&cache_file).unwrap();
+        let rebuilt = funkot_core::cache::get_or_analyze(&track, &cache.0, &buffer).unwrap();
+        assert!(!rebuilt.intro_bars_manual && !rebuilt.outro_structure_bars_manual);
+        reapply_overrides(&track, &cache.0, &data.0);
+        let restarted = funkot_core::cache::load(&cache.0, &hash).unwrap();
+        assert!(restarted.intro_bars_manual && restarted.outro_structure_bars_manual);
+        assert!(!restarted.outro_bars_manual);
+        assert_eq!((restarted.intro_bars, restarted.outro_structure_bars, restarted.outro_bars), (8, 8, 24));
+        assert_eq!(store::load_overrides(&data.0).get(&hash).unwrap().intro_bars, Some(8));
+        set_bars_impl(&cache.0, &data.0, &track, Some(16), Some(16), false).unwrap();
+        funkot_core::cache::purge_auto(&cache.0).unwrap();
+        let automatic = funkot_core::cache::get_or_analyze(&track, &cache.0, &buffer).unwrap();
+        reapply_overrides(&track, &cache.0, &data.0);
+        let restarted = funkot_core::cache::load(&cache.0, &hash).unwrap();
+        assert!(!restarted.intro_bars_manual && !restarted.outro_structure_bars_manual
+            && !restarted.outro_bars_manual);
+        assert!(automatic.intro_bars >= 16 && automatic.outro_structure_bars >= 16);
+        assert!(!store::load_overrides(&data.0).contains_key(&hash));
     }
 
     /// Cancel/undo with `mark_manual = false` must clear the touched side's
@@ -7462,6 +7409,38 @@ mod arrivals_settings_rmw_tests {
     }
 
     #[test]
+    fn legacy_queue_conflict_keeps_library_commit_available_and_baseline_pending() {
+        let dir = TempDir::new("library-legacy-conflict");
+        let queue = vec![QueueItem::manual(PathBuf::from("/synthetic/player.flac"))];
+        let mut catalog = playlists::Catalog::default();
+        catalog.normal = Some(playlists::NormalResume {
+            items: vec![QueueItem::manual(PathBuf::from("/synthetic/playlist.flac"))],
+            folder_pos: None,
+        });
+        let originals = [
+            ("queue.json", serde_json::to_vec(&queue).unwrap()),
+            ("playlists.json", serde_json::to_vec(&catalog).unwrap()),
+        ];
+        for (name, bytes) in &originals {
+            std::fs::write(dir.0.join(name), bytes).unwrap();
+        }
+        assert!(playback_state::PlaybackStore::open(&dir.0).snapshot().is_err());
+        commit_arrivals_after_scan(
+            &dir.0,
+            &store::HashIndex::new(),
+            store::ArrivalsCommitPlan { save_index: true, mark_baseline_done: true },
+            store::save_hash_index,
+            mark_arrivals_baseline_done,
+        ).expect("detected tracks must remain available during queue recovery");
+        assert_eq!(store::load_hash_index(&dir.0).provenance, store::HashIndexProvenance::Loaded);
+        assert!(!store::load_settings(&dir.0).arrivals_baseline_done);
+        assert!(!dir.0.join("playback-state.json").exists());
+        for (name, bytes) in originals {
+            assert_eq!(std::fs::read(dir.0.join(name)).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn baseline_flag_save_failure_makes_commit_fail() {
         let dir = TempDir::new("baseline-save-fail");
         let index = store::HashIndex::new();
@@ -7557,44 +7536,52 @@ struct LibraryScanProgress {
     done: usize,
 }
 
-/// Scan `music_dir` (recursively, subfolders included) for supported tracks
-/// and report what the analysis cache already knows about each.
-///
-/// When `kick_analysis` is true, starts a background analysis worker for any
-/// unanalyzed tracks (startup / manual 再スキャン). When false, returns the
-/// listing only — used after `analysis-done` so permanent analysis failures
-/// (e.g. silent files) cannot re-queue forever via refresh → analyze → done.
-///
-/// Holds [`INDEX_LOCK`] for the whole resolve → stamp/baseline → commit
-/// transaction. Takes [`SAVE_LOCK`] only at commit when marking the arrivals
-/// baseline done (after a successful index save).
+#[derive(serde::Serialize)]
+struct LibraryScanResult {
+    rows: Vec<TrackRow>,
+    persistence_error: Option<String>,
+}
+
+struct ScannedLibrary {
+    reply: LibraryScanResult,
+    pending_analysis: Vec<PathBuf>,
+}
+
 #[tauri::command(async)]
-fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<TrackRow>, String> {
+fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<LibraryScanResult, String> {
     use tauri::Emitter;
-
-    let _index_guard = INDEX_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
+    let _index_guard = INDEX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let dirs = resolve_dirs(&app)?;
     if dirs.music_dir_needed {
         tag_service::publish(Path::new(&dirs.data_dir), Default::default());
-        return Ok(Vec::new());
+        return Ok(LibraryScanResult { rows: Vec::new(), persistence_error: None });
     }
     let music_dir = PathBuf::from(&dirs.music_dir);
     let cache_dir = PathBuf::from(&dirs.cache_dir);
     let data_dir = PathBuf::from(&dirs.data_dir);
+    let result = scan_library_under_index_lock(&music_dir, &cache_dir, &data_dir, |progress| {
+        let _ = app.emit("library-scan", progress);
+    })?;
+    if kick_analysis {
+        analyze_these(&app, result.pending_analysis, &cache_dir, &data_dir);
+    }
+    Ok(result.reply)
+}
+
+fn scan_library_under_index_lock(
+    music_dir: &Path,
+    cache_dir: &Path,
+    data_dir: &Path,
+    mut progress: impl FnMut(LibraryScanProgress),
+) -> Result<ScannedLibrary, String> {
 
     let baseline_done = store::load_settings(&data_dir).arrivals_baseline_done;
 
-    let _ = app.emit(
-        "library-scan",
-        LibraryScanProgress {
+    progress(LibraryScanProgress {
             phase: "walking".into(),
             found: 0,
             done: 0,
-        },
-    );
+        });
 
     let (paths, complete) = scan_tracks(&music_dir)?;
     let overrides = store::load_overrides(&data_dir);
@@ -7602,22 +7589,18 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     let history = store::load_history(&data_dir);
     let loaded_index = store::load_hash_index(&data_dir);
     let provenance = loaded_index.provenance;
-    let next_added_order = store::next_added_order(&loaded_index.index)
-        .ok_or_else(|| "library addition order exhausted".to_string())?;
+    let next_added_order = store::next_added_order(&loaded_index.index);
     let mut hash_index = loaded_index.index;
     let scan_now = store::utc_rfc3339_now();
     let original_keys: std::collections::BTreeSet<String> =
         hash_index.keys().cloned().collect();
     let found = paths.len();
 
-    let _ = app.emit(
-        "library-scan",
-        LibraryScanProgress {
+    progress(LibraryScanProgress {
             phase: "hashing".into(),
             found,
             done: 0,
-        },
-    );
+        });
 
     // Explicit loop (not `.map`) so we can emit progress after each resolve.
     let mut rows: Vec<TrackRow> = Vec::with_capacity(found);
@@ -7649,7 +7632,7 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
                     .is_some_and(|prior| prior != &resolved.hash)
                 {
                     if let Some(entry) = hash_index.get_mut(&path_key) {
-                        entry.added_order = Some(next_added_order);
+                        entry.added_order = next_added_order;
                     }
                 }
                 (Some(resolved.hash), Some(tags))
@@ -7665,14 +7648,11 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
             hash.as_deref(),
             tags,
         ));
-        let _ = app.emit(
-            "library-scan",
-            LibraryScanProgress {
+        progress(LibraryScanProgress {
                 phase: "hashing".into(),
                 found,
                 done: rows.len(),
-            },
-        );
+            });
     }
 
     if complete {
@@ -7696,17 +7676,10 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
     }
 
     let plan = store::arrivals_commit_plan(kind, complete);
-    if plan.save_index {
-        store::stamp_missing_added_order(&mut hash_index, next_added_order)
-            .ok_or_else(|| "library addition order exhausted".to_string())?;
-    }
-    for row in &mut rows {
-        row.added_order = hash_index
-            .get(&row.path)
-            .and_then(|entry| entry.added_order);
-    }
+    let ordering_ready = !plan.save_index || next_added_order
+        .and_then(|order| store::stamp_missing_added_order(&mut hash_index, order)).is_some();
     let mut index_saved = false;
-    let commit_result = commit_arrivals_after_scan(
+    let commit_result = if ordering_ready { commit_arrivals_after_scan(
         &data_dir,
         &hash_index,
         plan,
@@ -7716,10 +7689,18 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
             Ok(())
         },
         mark_arrivals_baseline_done,
-    );
+    ) } else { Err("library addition order exhausted".into()) };
+
+    store_cache::with_index(data_dir, |index| {
+        for row in &mut rows {
+            row.added_order = index.get(&row.path)
+                .filter(|entry| Some(&entry.hash) == row.content_hash.as_ref())
+                .and_then(|entry| entry.added_order);
+        }
+    });
 
     // A later baseline-settings failure does not undo a successful index save.
-    // Publish that committed metadata revision before returning the error, so
+    // Publish that committed metadata revision before returning the warning, so
     // an editor cannot accept the old automatic snapshot against the new index.
     if index_saved || !plan.save_index {
       let committed = store_cache::with_index(&data_dir, |index| {
@@ -7730,28 +7711,64 @@ fn refresh_library(app: tauri::AppHandle, kick_analysis: bool) -> Result<Vec<Tra
       });
       tag_service::publish(&data_dir, committed);
     }
-    commit_result?;
-
-    if kick_analysis {
-        // Reuse what `track_row` already worked out so we do not hash every
-        // file a second time: `analyzed` is exactly
-        // `analyzed_cache_entry(...).is_some()`.
-        let pending: Vec<PathBuf> = paths
-            .iter()
-            .zip(&rows)
-            .filter(|(_, row)| !row.analyzed)
-            .map(|(path, _)| path.clone())
-            .collect();
-        analyze_these(&app, pending, &cache_dir, &data_dir);
-    }
-
-    Ok(rows)
+    let persistence_error = commit_result.err();
+    if let Some(error) = &persistence_error { log::warn!("library persistence: {error}"); }
+    let pending_analysis = paths.into_iter().zip(&rows)
+        .filter(|(_, row)| !row.analyzed).map(|(path, _)| path).collect();
+    Ok(ScannedLibrary { reply: LibraryScanResult { rows, persistence_error }, pending_analysis })
 }
 
 #[tauri::command(async)]
 fn list_track_tags(app: tauri::AppHandle) -> Result<tag_service::Snapshot, tag_service::CommandError> {
     let dirs = resolve_dirs(&app).map_err(|_| tag_service::CommandError { code: "store_read_only", message: "data directory unavailable".into() })?;
     Ok(tag_service::list(Path::new(&dirs.data_dir)))
+}
+
+#[tauri::command(async)]
+fn playback_recovery_status(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<playback_state::PlaybackRecoveryStatus, playlist_service::CommandError> {
+    let dirs = resolve_dirs(&app).map_err(|message| playlist_service::CommandError {
+        code: "store_read_only".into(), message,
+    })?;
+    let service = playlist_service::get(
+        Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue,
+    );
+    let owner = service.lock().unwrap_or_else(|error| error.into_inner());
+    Ok(owner.recovery_status())
+}
+
+#[derive(serde::Deserialize)]
+struct PlaybackRecoveryRequest {
+    token: u64,
+    choice: playback_state::LegacyNormalChoice,
+}
+
+#[tauri::command(async)]
+fn resolve_playback_recovery(
+    request: PlaybackRecoveryRequest,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<playback_state::PlaybackRecoveryStatus, playlist_service::CommandError> {
+    let started = state.started.lock().unwrap_or_else(|error| error.into_inner());
+    if *started {
+        return Err(playlist_service::CommandError { code: "busy".into(), message: "playback has started".into() });
+    }
+    let _prestart = playlist_service::lock_prestart_queue();
+    let dirs = resolve_dirs(&app).map_err(|message| playlist_service::CommandError {
+        code: "store_read_only".into(), message,
+    })?;
+    let service = playlist_service::get(
+        Path::new(&dirs.data_dir), Path::new(&dirs.cache_dir), &state.queue,
+    );
+    let mut owner = service.lock().unwrap_or_else(|error| error.into_inner());
+    let _saving = SAVE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let restored = owner.resolve_legacy_normal_conflict(request.token, request.choice)?;
+    *SESSION.lock().unwrap_or_else(|error| error.into_inner()) = store::Session::new();
+    ALLOW_NON_FUNKOT.store(restored.settings.allow_non_funkot, Ordering::Relaxed);
+    *LOCALE_TAG.lock().unwrap_or_else(|error| error.into_inner()) = restored.settings.locale.unwrap_or_default();
+    Ok(owner.recovery_status())
 }
 
 #[tauri::command(async)]
@@ -7797,7 +7814,10 @@ fn commit_arrivals_after_scan(
         save_index(data_dir, index)
             .map_err(|e| format!("cannot save hash-index.json: {e}"))?;
     }
-    if plan.mark_baseline_done {
+    if plan.mark_baseline_done
+        && playback_state::PlaybackStore::open(data_dir).load_state()
+            != playlists::LoadState::LegacyNormalConflict
+    {
         mark_baseline(data_dir)?;
     }
     Ok(())
@@ -7819,8 +7839,8 @@ fn mark_arrivals_baseline_done(data_dir: &Path) -> Result<(), String> {
 ///
 /// Only the sides present in `o` are written; the rest stay whatever the
 /// analyzer decided. Run after every fresh analysis — the analyzer has just
-/// overwritten the entry, and a `CACHE_VERSION` bump discards it entirely, so
-/// this is what makes a correction outlive an engine update.
+/// committed its result. The library copy also retains corrections independently
+/// of the cache's supported conversion window.
 fn apply_override(
     cache_dir: &std::path::Path,
     hash: &str,
@@ -8466,53 +8486,6 @@ fn list_new_arrivals_impl(data_dir: &std::path::Path) -> Result<Vec<store::NewAr
     ))
 }
 
-/// Queue every current new arrival at the front of pending (explicit action).
-///
-/// Locking / persist split: [`queue_new_arrivals_locked`] holds
-/// `INDEX_LOCK` → `SAVE_LOCK` → `SESSION` → queue, then drops all four before
-/// [`persist_queue`] (which takes `SAVE_LOCK` → queue again).
-#[tauri::command(async)]
-fn queue_new_arrivals(
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<u32, String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    let added = queue_new_arrivals_locked(&app, &state)?;
-    let mut prioritized = false;
-    if added > 0 {
-        let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
-        prioritized = try_prioritize_manual(&state.queue, request);
-    }
-    persist_queue(&app, &state);
-    if prioritized {
-        persist_session();
-    }
-    Ok(added)
-}
-
-/// Extract / gate / prepend under INDEX → SAVE → SESSION → queue, then release all
-/// guards before returning so the caller can safely call [`persist_queue`].
-fn queue_new_arrivals_locked(app: &tauri::AppHandle, state: &AppState) -> Result<u32, String> {
-    let dirs = resolve_dirs(app)?;
-    let _index = INDEX_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _saving = SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let session = SESSION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    queue_new_arrivals_under_locks(
-        Path::new(&dirs.data_dir),
-        Path::new(&dirs.cache_dir),
-        &state.queue,
-        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
-        &session.in_flight,
-    )
-}
-
 /// Testable body of [`queue_new_arrivals_locked`]: no `AppHandle`.
 ///
 /// After return, `SAVE_LOCK` and the queue lock are free (so
@@ -8604,66 +8577,6 @@ struct EnqueueManyResult {
     rejected: u32,
     /// Already reserved, pending, playing, or in flight.
     skipped: u32,
-}
-
-/// Add `paths` to the queue as manual items, in order, at the manual boundary.
-///
-/// Two things differ from single [`enqueue`], both deliberate:
-///
-/// * a path that is already reserved / pending / now-playing / in-flight is
-///   **skipped rather than duplicated** (`queue::prepend_pending_filtered`),
-///   where tapping `+` twice queues the track twice;
-/// * a non-Funkot path is **counted**, not turned into a failed call — one
-///   rejected row out of forty must not lose the other thirty-nine.
-///
-/// Empty `paths` is `Ok` with all zeros. Locking / persist split is
-/// [`queue_new_arrivals`]'s: all guards drop before [`persist_queue`].
-#[tauri::command(async)]
-fn enqueue_many(
-    paths: Vec<String>,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<EnqueueManyResult, String> {
-    let _prestart = playlist_service::lock_prestart_queue();
-    if playlist_service::existing().is_some() { return Err("source_target_required".into()); }
-    let result = enqueue_many_locked(&app, &state, &paths)?;
-    let mut prioritized = false;
-    if result.added > 0 {
-        let request = MANUAL_PRIORITY_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
-        prioritized = try_prioritize_manual(&state.queue, request);
-    }
-    persist_queue(&app, &state);
-    if prioritized {
-        persist_session();
-    }
-    Ok(result)
-}
-
-/// Gate / prepend under INDEX → SAVE → SESSION → queue, then release all
-/// guards before returning so the caller can safely call [`persist_queue`].
-fn enqueue_many_locked(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    paths: &[String],
-) -> Result<EnqueueManyResult, String> {
-    let dirs = resolve_dirs(app)?;
-    let _index = INDEX_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _saving = SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let session = SESSION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Ok(enqueue_many_under_locks(
-        Path::new(&dirs.data_dir),
-        Path::new(&dirs.cache_dir),
-        &state.queue,
-        ALLOW_NON_FUNKOT.load(Ordering::Relaxed),
-        &session.in_flight,
-        paths,
-    ))
 }
 
 /// Testable body of [`enqueue_many_locked`]: no `AppHandle`.
@@ -9553,21 +9466,17 @@ pub fn run() {
     env_logger::init();
 
     let builder = tauri::Builder::default().manage(AppState::default());
-    // Desktop-only folder-picker for `set_music_dir`. Rust calls it directly
-    // (no `invoke` from the webview), so no `capabilities/default.json`
-    // permission is needed. Not registered on Android: `set_music_dir`'s
-    // Android branch never calls it (see its `#[cfg]` split), and no
-    // folder-picker backend exists there anyway.
-    #[cfg(not(target_os = "android"))]
-    let builder = builder.plugin(tauri_plugin_dialog::init());
     builder
         .setup(|app| {
+            #[cfg(all(target_os = "windows", feature = "verified-capture"))]
+            let capture_control = verified_capture_control::prepare(app.handle())
+                .map_err(std::io::Error::other)?;
             // Optional Windows endpoint: failure must never affect launch or audio.
             #[cfg(target_os = "windows")]
             current_track_http::start(current_track_http_snapshot);
             // Preload the queue tab before ▶ is pressed: `start_impl` is
-            // otherwise the only place `queue.json` / `session.json` get
-            // read, so without this the queue screen shows nothing until
+            // otherwise the only place the playback snapshot queue/session components
+            // get read, so without this the queue screen shows nothing until
             // the listener starts playback at least once. `start_impl`
             // restores again (`exists` + strict gate) and overwrites;
             // this preload skips music-folder I/O so the GUI thread
@@ -9613,6 +9522,10 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 w.open_devtools();
             }
+            #[cfg(all(target_os = "windows", feature = "verified-capture"))]
+            if let Some(control) = capture_control {
+                verified_capture_control::start(handle, control).map_err(std::io::Error::other)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -9634,6 +9547,8 @@ pub fn run() {
             dismiss_flags,
             undo_last_dismiss,
             refresh_library,
+            playback_recovery_status,
+            resolve_playback_recovery,
             list_track_tags,
             playlist_catalog,
             playlist_entries,
@@ -9650,12 +9565,7 @@ pub fn run() {
             clear_track_play_count,
             remove_play_log_entry,
             list_new_arrivals,
-            queue_new_arrivals,
             list_play_history,
-            enqueue,
-            enqueue_many,
-            reorder,
-            dequeue,
             queue_state,
             get_allow_non_funkot,
             set_allow_non_funkot,

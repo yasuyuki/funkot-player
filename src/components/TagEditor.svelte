@@ -250,7 +250,7 @@
 
 <style>
   dialog { box-sizing: border-box; width: min(38rem, calc(100vw - 1.5rem)); max-height: calc(100dvh - 1.5rem); overflow: hidden; padding: var(--space-lg); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); color: var(--color-text); }
-  dialog::backdrop { background: #000a; }
+  dialog::backdrop { background: var(--color-backdrop); }
   form { display: flex; flex-direction: column; gap: var(--space-md); min-width: 0; max-height: calc(100dvh - 1.5rem - 2 * var(--space-lg) - 2px); }
   .fields { display: grid; gap: var(--space-md); min-height: 0; overflow-y: auto; padding: 2px; scroll-padding-block: var(--space-md); }
   h2,h3,h4,p { margin: 0; overflow-wrap: anywhere; }

@@ -133,6 +133,127 @@ Notes:
   scripts listed in `.github/workflows/checks.yml` as well. Engine changes also require its
   own workspace tests and any real-audio acceptance required by its development instructions.
 
+## Compare a captured manual Next
+
+The optional Windows diagnostic capture connects one manual Next to its exact
+Engine request, applied plan, transition and fade end. It is disabled during
+normal use. Use the existing protected test profile and process-specific
+loopback recorder. Prepare the input, endpoint, recorder and build identities
+before requesting permission to start sound.
+
+Set `FUNKOT_NAVIGATION_CAPTURE_DIR` to an existing unused private directory
+before starting the player. The capture writes `navigation-header.json`,
+`navigation.jsonl` and `callbacks.csv`. It records full input hashes and the
+actual EngineOptions. Callbacks send bounded value records. A writer thread
+serializes them. Any lost record makes the comparison incomplete.
+
+Set `FUNKOT_NAVIGATION_REQUIRE_START_SIGNAL=1` with that directory to open the
+real output stream in silence. Match the writer's `output-stream.jsonl` to an
+external process-session observation before requesting the user's sound signal.
+Only then write its matching `START.json`. The authorization schema is exercised
+in `src-tauri/src/navigation_capture.rs`. A reopened stream clears that signal.
+
+After the selected operation and required transport controls, create `STOP`
+in that directory. Keep the loopback recorder running until
+`navigation-complete.json` exists, then finalize it before closing the player.
+An abrupt player exit without the capture footer is incomplete.
+
+Use the adopted core's existing `manual_nav_acceptance` example with
+`--at-frame` from the accepted request's `active_playhead`, the recorded sample
+rate, and `--engine-options` pointing to the capture header. `--reuse-cache`
+accepts a private copy of the captured cache. Its JSON records actual trace,
+source, executable, input hashes and the WAV's Engine frame origin.
+
+Navigation generations identify events within one Engine run. Compare separate
+runs at the same active playhead and by timing relative to request acceptance;
+their generation numbers and output-frame origins can differ. A pause request
+renders the existing transport envelope before the Engine freezes.
+
+For a fresh, silent capture and replay in one process, run
+`node scripts/audio-anomaly-detector.cjs compare-live --help`. The command
+builds an isolated player and verifies the process-loopback recorder from the
+pinned [pwshDoom source](https://github.com/jasonulbright/pwshDoom/tree/68719ae9ebe1446a13ac09eb2481c8f91f859960)
+(GPL-2.0-or-later) and official PowerShell release. Its `comparison.json` can compare
+the navigation plan, but silent output cannot establish sound quality.
+
+For finite natural-end A → B180 → A cycles on Windows, run
+`node scripts/verified-live-comparison.cjs cycles recipe.json`. The recipe is:
+
+```json
+{
+  "schema": 1,
+  "mode": "silent",
+  "max_cycles": 2,
+  "deadline_ms": 1980000,
+  "retain_clean_cycles": 1,
+  "work_directory": "../cycle-output",
+  "input_manifest": "../fixed-inputs.json",
+  "calibration_file": "../calibration/calibration.json",
+  "stop_file": "../stop-cycles"
+}
+```
+
+Choose the cycle count, overall deadline and clean-data retention for the run.
+Paths resolve from the recipe. The work directory must exist, be empty and be
+outside both source checkouts. The input manifest has two `files` entries with
+`file` and whole-file `sha256`: A first, B180 second. Their directory must contain
+only those two regular files. The last A is a distinct playlist occurrence.
+Calibration uses the receipt and controls described below. Optional
+`recorder_source_directory` and `powershell_archive` reuse the pinned recorder
+downloads; altered bytes are rejected.
+
+The runner builds once, prepares the recorder once, and reuses its profile cache
+and one engine reference across cycles. It writes each result and retained
+summary before pruning clean raw cycles. An anomaly, capture fault, condition
+mismatch, missing provenance or storage failure stops the run and retains that
+cycle. Create `stop_file` or abort the `runLiveCycles` API signal to cancel;
+partial capture remains incomplete. Silent mode checks zero device PCM and
+natural playlist completion; it cannot accept sound quality.
+
+Audible mode additionally requires a current authorization for `endpoint_id`,
+`volume_percent`, `max_wall_ms` and the same `stop_file`, under
+`sound_authorization`. The runner verifies the endpoint and time bound and does
+not change the OS volume. A saved recipe does not grant authorization for a later
+audible run. Only a complete calibrated comparison with the live process witness
+can issue a fresh finite-cycle sound-quality result.
+
+The separate `compare` command reads capture and replay manifests. Without the
+same-process capture witness it cannot accept a fresh-producer comparison.
+The two manifests describe actual source, executable, input and recording files.
+The runnable fixture in `scripts/audio-anomaly-comparison.test.cjs` demonstrates
+their format. The capture manifest also binds hashed endpoint, calibration and
+fixed-input source receipts. Endpoint receipts record the before and after
+process session observations. Calibration receipts bind the calibration bytes,
+the stable endpoint route and complete negative, transient and dropout scans.
+Each control also binds its captured PCM, reference WAV, packet and callback
+records. Positive controls bind the injected PCM transformation. A missing or
+invalid calibration leaves the separately derived plan comparison available,
+but leaves sound quality incomplete.
+The source receipt supports one fixed, unique-content input sequence. Managed
+playlist scope is incomplete. Expected decisions come only from the hashed
+real-engine trace and complete all-window scan coverage.
+The comparison supports one Next and reports ambiguous or missing requests as
+incomplete. Same-rate PCM correlations are observations, not an audio-quality
+PASS. It reports comparison evidence separately from `soundQuality`. A
+no-anomaly result requires a complete clean scan, measured PCM alignment, and
+one same-condition route: the endpoint, capture engine, captured WAV, replay
+engine and replay WAV must all be 48 kHz stereo `f32`. Cross-rate timing can
+still compare the plan, but its sound quality is incomplete. A new endpoint
+needs its own calibration. Audibility outside the fixed input and hardware
+timing guarantees remain outside this comparison.
+
+For state-aware PCM inspection, use the detector's `calibrate-state` command
+with two independent negative recordings, then `scan-state` for the target and
+offline injected controls. The state descriptors bind the PCM, replay, endpoint,
+packet and callback files. Every recorded frame needs an audio comparison or a
+verified intentional-silence state. See `scripts/audio-anomaly-detector.test.cjs`
+for a runnable fixture. Unknown states and incomplete coverage stay incomplete.
+Audio coverage uses callback sequence and frame counts. Predicted playback QPC
+brackets the range; it does not define exact boundaries between callbacks.
+Residuals compare aligned PCM directly without fitting away gain or DC changes.
+An optional hashed `origin` binds a cropped negative to its raw PCM slice,
+derived packet timestamps and unchanged callback rows.
+
 ## Playlist occurrence proof
 
 [The bounded Kani check](../verification/README.md) shares the production progress
@@ -145,6 +266,16 @@ and cgroup v2:
 ```
 
 The same check runs in the independent **Playlist occurrence proof** Checks job.
+
+## Engine snapshot coherence
+
+The Loom check uses Rust 1.93 and Loom 0.7.2. It imports the production `EngineObservation` module. With Docker, it reuses the Kani image. Without Docker, it uses host `cargo +1.93.0`.
+
+```sh
+./scripts/check-engine-snapshot.sh /tmp/engine-snapshot-proof
+```
+
+Success is `"status": "PASS"` in the printed summary. That status means the four named tests ran and passed on the production module. A Cargo exit code of 0 with a filtered or missing test is a failure. The playlist proof above is a separate command.
 
 ## Common failures
 
@@ -240,8 +371,9 @@ The receiving executor must verify both full SHAs and run
 |---|---|---|
 | Core executor with existing Docker/NDK; core root | `./cross-build.sh android` | Android arm64 SDK builds with the added dependency; generated `dist/android-arm64` contains shared/static core, header and `libc++_shared.so`. No device operation. |
 | Player executor in the existing Android agent checkout; player root | `./scripts/android-signed-release.sh prepare` | Creates the existing bundle/meta handoff for the exact adopted pair. Requires the declared Windows-visible handoff destination; does not sign. |
-| Existing signing owner; owner checkout | The `build` command printed by `prepare` | Signed APK uses the same pair. This command can install on an already connected matching phone; the owner must authorize that device operation before running it. No release publication is needed. |
-| Windows/Android device executor with a disposable test profile and available test tracks | Existing desktop/device procedures in README | Cold and warm startup, first sound, next/prev/repeated navigation, edit then restart, non-Funkot fallback and supported output formats pass. Verify cache, library overrides and displayed index agree; retain existing user data. |
+| Existing signing owner; owner checkout | The `build` command printed by `prepare` | Signed Release/R8 APK uses the same pair. Build performs no device operation. Use the separate `install` command only after the owner authorizes the update and the release role and actual serial match. |
+| Windows device executor; player root with a protected test profile and test tracks | Existing Windows Release build and profile-guard procedures in README | Verify the candidate's source/core, version and artifact hash. Observe light/dark/system, native high-contrast on/off, restart and viewport changes in Release/WebView2. Check rendered background, text, menus, dialogs, inputs, selection and status. Browser forced-colors emulation is supplementary. |
+| Android device executor; existing release device or a dedicated synthetic old-profile test device | Existing signed `install` and device procedures in README | Verify the certificate, version, ABI, R8 and artifact identity before an authorized data-preserving update. Upgrade the preceding data generation with synthetic tracks and queue/settings state still present. Check the library, recovery choice, playback/Next, pause/resume and cold restart. Preserve originals; a fresh profile alone does not establish upgrade acceptance. |
 
 Keep Android dev-profile optimization, API 26 minimum, 16 KB alignment and shared
 C++ runtime. At 44.1/48 kHz record device/format, finite output, peaks/over-range

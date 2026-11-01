@@ -33,6 +33,8 @@ import {
   setLabelingMode as setLabelingModeCmd,
   getLocale as getLocaleCmd,
   setLocale as setLocaleCmd,
+  playbackRecoveryStatus as playbackRecoveryStatusCmd,
+  resolvePlaybackRecovery as resolvePlaybackRecoveryCmd,
   takePendingImport as takePendingImportCmd,
   setLabel as setLabelCmd,
   setFolderLabel as setFolderLabelCmd,
@@ -45,6 +47,7 @@ import {
   listNewArrivals as listNewArrivalsCmd,
   listPlayHistory,
   listen,
+  FAVORITES_PLAYLIST_ID,
 } from "./tauri";
 import type {
   AnalysisProgress,
@@ -53,6 +56,8 @@ import type {
   PlaylistCommandErrorCode,
   PlaylistCommandResult,
   PlaylistAction,
+  PlaybackRecoveryChoice,
+  PlaybackRecoveryStatus,
   FlaggedTrackRow,
   FlagResult,
   ImportResult,
@@ -108,6 +113,8 @@ class PlayerStore {
   player = $state<PlayerState | null>(null);
   queue = $state<QueueSnapshot | null>(null);
   catalog = $state<PlaylistCatalogSnapshot | null>(null);
+  favoriteBusy = $state<Set<string>>(new Set());
+  favoriteHashes = $derived<ReadonlySet<string>>(new Set(this.catalog?.favorite_hashes ?? []));
   browsedPlaylist = $state<import("./tauri").PlaylistDetails | null>(null);
   /// Keyed by absolute path (`TrackRow.path`), matching
   /// `PlayerState.now_playing` / `.previous` and `TransitionInfo.from` /
@@ -151,6 +158,9 @@ class PlayerStore {
   /// `settings.json` `labeling_mode`: every prepare uses a 20s head-only
   /// stretch instead of the full track, and skip becomes a hard cut.
   labelingMode = $state(false);
+  /// `null` until the one startup recovery lookup settles. Playback-affecting
+  /// writes fail closed until the host explicitly reports a ready store.
+  playbackRecovery = $state<PlaybackRecoveryStatus | null>(null);
   /// True after the persisted locale lookup finishes (success or fallback).
   /// The language button stays disabled before this so a stale startup read
   /// cannot overwrite a listener choice made while the read was in flight.
@@ -262,6 +272,10 @@ class PlayerStore {
       if (this.dirs.music_dir_needed && this.dirs.music_dir_unavailable) {
         this.lastError = i18n.t.musicDirUnavailable(this.dirs.music_dir_custom ?? "");
       }
+      // This is intentionally outside the poll loop. A legacy conflict only
+      // changes after the explicit resolver command, while library loading
+      // must keep moving independently.
+      void this.#loadPlaybackRecovery();
     } catch (e) {
       this.lastError = String(e);
     }
@@ -369,6 +383,14 @@ class PlayerStore {
     setTimeout(() => this.#poll(), POLL_INTERVAL_MS);
   }
 
+  async #loadPlaybackRecovery(): Promise<void> {
+    try {
+      this.playbackRecovery = await playbackRecoveryStatusCmd();
+    } catch (e) {
+      this.lastError = String(e);
+    }
+  }
+
   #markLibraryRefreshOwed(): void {
     this.#libraryRefreshOwed = true;
     this.#libraryRefreshOwedEpoch += 1;
@@ -416,11 +438,12 @@ class PlayerStore {
     let applied = false;
     try {
       // List only — do not re-queue analysis (would loop on permanent failures).
-      const rows = await refreshLibrary(false);
+      const { rows, persistence_error } = await refreshLibrary(false);
       if (gen !== this.#refreshGen) return;
       this.library = new Map(rows.map((r) => [r.path, r]));
+      if (persistence_error !== null) this.lastError = persistence_error;
       await this.reloadTrackTags();
-      applied = true;
+      applied = persistence_error === null;
     } catch (e) {
       // Ignore on analysis-done the same way legacy did: a stray error here
       // shouldn't disrupt the UI after the worker itself has finished.
@@ -543,7 +566,7 @@ class PlayerStore {
   /// cycles the folder, so a single file is a valid repeating playlist.
   /// `music_dir_needed` is the Store first-launch gate.
   get canStart(): boolean {
-    return !this.dirs?.music_dir_needed && this.libraryList.length >= 1;
+    return this.playbackRecovery?.kind === "ready" && !this.dirs?.music_dir_needed && this.libraryList.length >= 1;
   }
 
   /// Seconds into the current track, client-side interpolated between polls.
@@ -620,7 +643,7 @@ class PlayerStore {
   /// (`Transport`) only offers this while `phase === "idle"`, by which point
   /// `#init` has long since had time to resolve them.
   async doStart(): Promise<void> {
-    if (!this.dirs) {
+    if (!this.dirs || !this.canStart) {
       this.lastError = "app directories are not resolved yet";
       return;
     }
@@ -637,6 +660,7 @@ class PlayerStore {
   }
 
   async doTogglePause(): Promise<void> {
+    if (this.playbackRecovery?.kind !== "ready") return;
     try {
       await togglePauseCmd();
     } catch (e) {
@@ -658,6 +682,7 @@ class PlayerStore {
   }
 
   async doSkipNext(): Promise<boolean> {
+    if (this.playbackRecovery?.kind !== "ready") return false;
     const player = this.player;
     if (
       this.skipNextPending !== null ||
@@ -938,18 +963,24 @@ class PlayerStore {
   }
 
   async #command(action: PlaylistAction, target = this.#target()): Promise<PlaylistCommandResult | null> {
+    if (this.playbackRecovery?.kind !== "ready") {
+      this.lastError = "playback_recovery_required";
+      return null;
+    }
     if (!target) { this.lastError = "busy"; return null; }
     try {
       const result = await playlistCommandCmd({ request_id: this.#requestId(), target, action });
       await this.#refreshQueueNow();
+      if (action.kind === "set_favorite") await this.#refreshCatalog();
       if (action.kind === "delete" && this.browsedPlaylist?.id === action.id) this.closeBrowsedPlaylist();
-      else if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
+      else if (this.browsedPlaylist && ((action.kind === "set_favorite" && this.browsedPlaylist.id === FAVORITES_PLAYLIST_ID) || action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
         await this.browsePlaylist(this.browsedPlaylist.id);
       return result;
     } catch (e) {
       this.lastError = this.#errorCode(e);
       await this.#refreshQueueNow();
-      if (this.browsedPlaylist && (action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
+      if (action.kind === "set_favorite") await this.#refreshCatalog();
+      if (this.browsedPlaylist && ((action.kind === "set_favorite" && this.browsedPlaylist.id === FAVORITES_PLAYLIST_ID) || action.kind === "undo_remove" || ("id" in action && action.id === this.browsedPlaylist.id) || (action.kind === "append" && target.playlist_id === this.browsedPlaylist.id)))
         await this.browsePlaylist(this.browsedPlaylist.id);
       return null;
     }
@@ -960,22 +991,42 @@ class PlayerStore {
     const id = this.queue?.source?.playlist_id;
     if (id === undefined) return i18n.t.playlistLoading;
     if (id === null) return i18n.t.playlistNormal;
-    return (this.activePlaylist?.id === id ? this.activePlaylist.name : null)
-      ?? this.catalog?.lists.find((list) => list.id === id)?.name
-      ?? i18n.t.playlistLoading;
+    const name = (this.activePlaylist?.id === id ? this.activePlaylist.name : null)
+      ?? this.catalog?.lists.find((list) => list.id === id)?.name;
+    return name ? this.playlistName(id, name) : i18n.t.playlistLoading;
+  }
+  playlistName(id: string, name: string): string {
+    return id === FAVORITES_PLAYLIST_ID ? i18n.t.favoritesTitle : name;
+  }
+  isFavorite(contentHash: string | null): boolean { return contentHash !== null && this.favoriteHashes.has(contentHash); }
+  isFavoriteBusy(path: string, contentHash: string | null): boolean {
+    return this.favoriteBusy.has(contentHash ?? path);
   }
   get destinationLabel() { return this.destinationName; }
   get playlistStoreStatus() { return this.queue?.playlist_store_status ?? this.catalog?.store_status ?? "ready"; }
-  get canPlaylistMutate() { return this.queue?.source !== undefined && ["ready", "missing", "persist_failed"].includes(this.playlistStoreStatus); }
+  get canPlaylistMutate() { return this.playbackRecovery?.kind === "ready" && this.queue?.source !== undefined && ["ready", "missing", "persist_failed"].includes(this.playlistStoreStatus); }
   get canAddToSource() {
     const id = this.queue?.source?.playlist_id;
-    return id === null || (id !== undefined && this.canPlaylistMutate && (this.activePlaylist?.id === id || !!this.catalog?.lists.some((list) => list.id === id)));
+    return this.playbackRecovery?.kind === "ready" && (id === null || (id !== undefined && this.canPlaylistMutate && (this.activePlaylist?.id === id || !!this.catalog?.lists.some((list) => list.id === id))));
   }
+  get canFavoriteMutate() { return this.catalog !== null && this.canPlaylistMutate; }
 
   async doPlaylist(action: PlaylistAction): Promise<PlaylistCommandResult | null> {
     const anchored = ["rename", "duplicate", "delete", "move", "remove"].includes(action.kind)
       && "id" in action && action.id === this.browsedPlaylist?.id;
     return this.#command(action, anchored ? this.#browseTarget : this.#target());
+  }
+  async doSetFavorite(path: string, favorite: boolean, expectedHash: string | null): Promise<PlaylistCommandResult | null> {
+    const key = expectedHash ?? path;
+    if (this.favoriteBusy.has(key)) return null;
+    this.favoriteBusy = new Set(this.favoriteBusy).add(key);
+    try {
+      return await this.#command({ kind: "set_favorite", track: { path, expected_hash: expectedHash }, favorite });
+    } finally {
+      const next = new Set(this.favoriteBusy);
+      next.delete(key);
+      this.favoriteBusy = next;
+    }
   }
   closeBrowsedPlaylist(): void { ++this.#browseGen; this.browsedPlaylist = null; this.#browseTarget = null; }
   async browsePlaylist(id: string): Promise<void> {
@@ -1055,12 +1106,44 @@ class PlayerStore {
     }
   }
 
+  /// Resolve only the host-reported legacy conflict. The response becomes the
+  /// new recovery state directly so no second status request is needed.
+  async resolvePlaybackRecovery(choice: PlaybackRecoveryChoice): Promise<boolean> {
+    const current = this.playbackRecovery;
+    if (!current || current.kind !== "legacy_normal_conflict") return false;
+    try {
+      const status = await resolvePlaybackRecoveryCmd({ token: current.token, choice });
+      this.playbackRecovery = status;
+      if (status.kind !== "ready") return false;
+
+      await this.#loadLocale();
+      try {
+        this.allowNonFunkot = await getAllowNonFunkotCmd();
+      } catch (e) {
+        this.lastError = String(e);
+      }
+      try {
+        this.labelingMode = await getLabelingModeCmd();
+      } catch (e) {
+        this.lastError = String(e);
+      }
+      await this.#refreshQueueNow();
+      await this.#refreshCatalog();
+      const refreshed = await this.doRefreshLibrary();
+      if (!refreshed.ok && "busy" in refreshed) await this.reloadTrackTags();
+      return true;
+    } catch (e) {
+      this.lastError = String(e);
+      return false;
+    }
+  }
+
   /// Switch the UI language and persist it. Applied locally first so the
   /// screen turns over on the tap rather than after the round-trip; a failed
   /// save leaves the new language up for this run and reverts on restart,
   /// which is the harmless direction to fail in.
   async doSetLocale(locale: Locale): Promise<void> {
-    if (!this.localeReady) return;
+    if (!this.localeReady || this.playbackRecovery?.kind !== "ready") return;
     i18n.setLocale(locale);
     try {
       await setLocaleCmd(locale);
@@ -1070,6 +1153,7 @@ class PlayerStore {
   }
 
   async doSetAllowNonFunkot(allow: boolean): Promise<boolean> {
+    if (this.playbackRecovery?.kind !== "ready") return false;
     try {
       this.allowNonFunkot = await setAllowNonFunkotCmd(allow);
       return true;
@@ -1080,6 +1164,7 @@ class PlayerStore {
   }
 
   async doSetLabelingMode(on: boolean): Promise<void> {
+    if (this.playbackRecovery?.kind !== "ready") return;
     try {
       this.labelingMode = await setLabelingModeCmd(on);
     } catch (e) {
@@ -1126,7 +1211,7 @@ class PlayerStore {
     const owedEpoch = this.#libraryRefreshOwedEpoch;
     const gen = ++this.#refreshGen;
     try {
-      const rows = await refreshLibrary();
+      const { rows, persistence_error } = await refreshLibrary();
       if (gen !== this.#refreshGen) {
         attempt = "stale";
         this.#libraryRefreshOwed = nextLibraryRefreshOwed(
@@ -1139,16 +1224,17 @@ class PlayerStore {
         return { ok: false, error: "stale" };
       }
       this.library = new Map(rows.map((r) => [r.path, r]));
+      if (persistence_error !== null) this.lastError = persistence_error;
       await this.reloadTrackTags();
-      attempt = "success";
+      attempt = persistence_error === null ? "success" : "error";
       this.#libraryRefreshOwed = nextLibraryRefreshOwed(
         this.#libraryRefreshOwed,
-        "success",
+        attempt,
         consume,
         owedEpoch,
         this.#libraryRefreshOwedEpoch,
       );
-      this.#requestArrivalsPull();
+      if (persistence_error === null) this.#requestArrivalsPull();
       return { ok: true, count: rows.length };
     } catch (e) {
       const error = String(e);
@@ -1339,6 +1425,7 @@ class PlayerStore {
   }
 
   async doAuditionTransition(fromPath: string, toPath: string): Promise<boolean> {
+    if (this.playbackRecovery?.kind !== "ready") return false;
     if (!this.dirs) {
       this.lastError = "app directories are not resolved yet";
       return false;
@@ -1359,6 +1446,7 @@ class PlayerStore {
   }
 
   async doAuditionAgain(): Promise<boolean> {
+    if (this.playbackRecovery?.kind !== "ready") return false;
     if (!this.dirs) {
       this.lastError = "app directories are not resolved yet";
       return false;
@@ -1392,6 +1480,9 @@ class PlayerStore {
   async doSetMusicDir(): Promise<
     { ok: true; changed: boolean; restartRequired: boolean } | { ok: false; error: string }
   > {
+    if (this.playbackRecovery?.kind !== "ready") {
+      return { ok: false, error: "playback_recovery_required" };
+    }
     try {
       const result = await setMusicDirCmd(i18n.t.pickMusicFolder);
       this.dirs = result.dirs;
