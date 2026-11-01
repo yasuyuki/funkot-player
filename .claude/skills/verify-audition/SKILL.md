@@ -93,6 +93,8 @@ the flags above, add it as its own action. Rerun the check, read the result with
 Bounds: two audition requests that may repeat, repeated resume and pause presses,
 both initial pause states. The main engine already exists. A cold start is the same
 as a queue the listener has not asked to play. The model leaves out title parking
-in `AuditionSession`, stale audition events in `events_thread`, skip, Android
-notification transport beyond the pause lock, and output-device loss. A pass covers
-the model, not the audio callback or the UI polling.
+in `AuditionSession`, stale audition events in `events_thread`, skip, and
+output-device loss. The Android `onNativeControl` pause actions take the same lock
+but are not separate model actions. The audio callback's pause store when the main
+engine finishes is outside the lock and outside the model. A pass covers the model,
+not the audio callback or the UI polling.
