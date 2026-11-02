@@ -4,6 +4,11 @@ description: Verify Funkot Player's transition audition (試聴, もう一度聴
 ---
 # Verify transition audition
 
+Use an explicitly selected `funkot-player` working-set member. The editing
+source is `agent-rules/skills/verify-audition/SKILL.md`; the player's tracked
+`.claude/skills/verify-audition/SKILL.md` is its byte-identical distribution.
+Update the source and distribution together.
+
 ## What is verified
 
 Three rules, checked by TLC over every interleaving of two audition requests,
@@ -18,7 +23,9 @@ the 〔再開〕 banner and the in-app pause button:
   that refuses pause and skip, or an audition that plays with no banner.
 
 The model is `verification/audition/Audition.tla`. Each action is one store or one
-locked section in `src-tauri/src/lib.rs`, and its comment names the line.
+locked section in `src-tauri/src/lib.rs`. Its source comments bind a line or span
+to an expected code fragment. The runner checks those references against the
+archived revision before TLC runs.
 
 ## When to use
 
@@ -32,8 +39,8 @@ changes when the banner shows, when `src/lib/transportMode.ts` changes
 `primaryMode`, or when `verification/audition` or `verification/check_audition.py`
 changes.
 
-Sync commit: `a6475a7bd91c06d2bee53086a6622506f2259c8d`. The model was last confirmed against the code at that
-commit. Run `git diff a6475a7bd91c06d2bee53086a6622506f2259c8d -- src-tauri/src/lib.rs src/App.svelte
+Sync commit: `a3d5bf276870006dfa0809f337a997283fe1dfce`. The model was last confirmed against the code at that
+commit. Run `git diff a3d5bf276870006dfa0809f337a997283fe1dfce -- src-tauri/src/lib.rs src/App.svelte
 src/lib/transportMode.ts` and read every hunk that touches the names above. Move
 the sync commit forward only after you confirm that every model action and line
 comment still describes the code at the new commit.
@@ -44,6 +51,7 @@ From the player root on Linux with Python 3.12+ and Java 21, on a clean committe
 checkout (the runner archives `HEAD`, so uncommitted edits are not checked):
 
 ```sh
+python3 -B -m unittest discover -s verification -p 'test_audition_source.py'
 python3 -B verification/check_source_switch.py --setup
 python3 -B verification/check_audition.py --output "$(mktemp -d)/audition-proof"
 cargo +1.93.0 test --manifest-path src-tauri/Cargo.toml --locked --lib audition
@@ -74,6 +82,10 @@ violations the fix removes.
   `RestoreOnFailure = FALSE`) breaks it again.
 - `sensitivity edit no longer matches`: `Audition.cfg` changed shape; update the
   edits in `MUTATIONS`.
+- A source-reference failure names the model line and cited source span. Read
+  the actual source before updating the citation or fragment. A moved line with
+  unchanged behavior needs a citation update. Changed behavior needs an action
+  audit before the check can pass.
 
 The two Rust tests are the code-level half of the check.
 `failed_audition_prepare_restores_the_listeners_pause` fails if a failed prepare
@@ -85,7 +97,9 @@ cannot see such a code change, because the model is written by hand.
 
 Change the code, then the matching model action and its line comment, in the same
 task. If the change adds a step that releases or takes the lock, or writes one of
-the flags above, add it as its own action. Rerun the check, read the result with
+the flags above, add it as its own action. After changing the source-reference
+check, insert a line above a cited source line in an isolated committed copy and
+confirm that the normal runner fails before TLC. Rerun the check, read the result with
 `/statechart`, and move the sync commit.
 
 ## Scope
@@ -98,3 +112,6 @@ output-device loss. The Android `onNativeControl` pause actions take the same lo
 but are not separate model actions. The audio callback's pause store when the main
 engine finishes is outside the lock and outside the model. A pass covers the model,
 not the audio callback or the UI polling.
+Source-reference validation checks text at the declared lines. It cannot prove
+that a model action has the same semantics as the code, or detect a new write
+outside the declared references. Keep the manual action audit.
