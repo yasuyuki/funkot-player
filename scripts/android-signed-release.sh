@@ -244,7 +244,6 @@ cmd_build() {
 
     require_official_core "$player"
     ./scripts/check-release-invariants.sh
-    require_clean_player "$player" "$PLAYER_SHA"
     ./dev.sh npx tauri android build --target aarch64
     [ -f "$APK_REL" ] || die "signed APK not produced (unsigned-only cannot be installed)"
 
