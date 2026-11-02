@@ -6,6 +6,7 @@ if [[ ${1:-} == --setup ]]; then
     exec "$root/scripts/check-playlist-progress.sh" --setup
 fi
 if (( $# > 1 )); then echo "usage: $0 [--setup | evidence-directory]" >&2; exit 2; fi
+python3 "$root/verification/engine_snapshot/check.py" --self-test
 out=${1:-$(mktemp -d "${TMPDIR:-/tmp}/engine-snapshot.XXXXXXXX")}
 mkdir -p -- "$out"
 out=$(cd -- "$out" && pwd)
