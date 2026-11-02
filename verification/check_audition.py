@@ -47,6 +47,49 @@ MUTATIONS = (
         "Invariant QueueFollowsListener is violated",
     ),
 )
+SOURCE_FILES = {
+    "lib.rs": "src-tauri/src/lib.rs",
+    "App.svelte": "src/App.svelte",
+    "transportMode.ts": "src/lib/transportMode.ts",
+}
+SOURCE_REFERENCE_COUNT = 21
+SOURCE_REFERENCE = re.compile(
+    r"\\\*\s+(?P<source>[^\s:]+):(?P<start>\d+)(?:-(?P<end>\d+))?(?:\s+\|\s+(?P<fragment>.+))?\s*$"
+)
+
+
+def validate_source_references(tree, expected_count=SOURCE_REFERENCE_COUNT):
+    model = tree / SPEC
+    references = 0
+    for line_number, line in enumerate(model.read_text().splitlines(), start=1):
+        match = SOURCE_REFERENCE.search(line)
+        if match is None:
+            continue
+        source = match["source"]
+        start = int(match["start"])
+        end = int(match["end"] or start)
+        reference = source + ":" + match["start"]
+        if match["end"] is not None:
+            reference += "-" + match["end"]
+        location = f"Audition.tla:{line_number} ({reference})"
+        if source not in SOURCE_FILES:
+            raise RuntimeError(f"source reference {location} names an unsupported source")
+        fragment = match["fragment"]
+        if fragment is None:
+            raise RuntimeError(f"source reference {location} is missing expected fragment")
+        source_lines = (tree / SOURCE_FILES[source]).read_text().splitlines()
+        if start < 1 or end < start or end > len(source_lines):
+            raise RuntimeError(f"source reference {location} is out of range")
+        if fragment not in "\n".join(source_lines[start - 1 : end]):
+            raise RuntimeError(
+                f"source reference {location} does not contain expected fragment {fragment!r}"
+            )
+        references += 1
+    if references != expected_count:
+        raise RuntimeError(
+            f"Audition.tla: expected {expected_count} source references but found {references}"
+        )
+    return references
 
 
 def main():
@@ -74,23 +117,24 @@ def main():
     try:
         revision = shared.source_revision(player_root, "player")
         summary["revision"] = revision
-        jar = args.jar.resolve(strict=True)
-        if shared.sha256(jar) != shared.TLC_SHA256:
-            raise RuntimeError("TLC jar does not match the fixed hash")
-        java_version = subprocess.check_output(
-            [args.java, "-version"], stderr=subprocess.STDOUT, text=True
-        )
-        if re.search(r'version "21[."]', java_version) is None:
-            raise RuntimeError("Java 21 is required")
-        summary["tools"] = {
-            "tlc": "1.7.4",
-            "jar_sha256": shared.TLC_SHA256,
-            "java": java_version.splitlines()[0],
-        }
         with tempfile.TemporaryDirectory(prefix="audition-player-") as temporary:
             tree = Path(temporary)
             shared.archive_commit(player_root, revision, tree, "player")
+            validate_source_references(tree)
             summary["sources"] = {name: shared.sha256(tree / name) for name in PLAYER_SOURCES}
+            jar = args.jar.resolve(strict=True)
+            if shared.sha256(jar) != shared.TLC_SHA256:
+                raise RuntimeError("TLC jar does not match the fixed hash")
+            java_version = subprocess.check_output(
+                [args.java, "-version"], stderr=subprocess.STDOUT, text=True
+            )
+            if re.search(r'version "21[."]', java_version) is None:
+                raise RuntimeError("Java 21 is required")
+            summary["tools"] = {
+                "tlc": "1.7.4",
+                "jar_sha256": shared.TLC_SHA256,
+                "java": java_version.splitlines()[0],
+            }
             cfg = (tree / CONFIG).read_text()
             summary["model"] = shared.run_tlc(
                 tree, out, args.java, jar, "baseline", cfg, started, spec=SPEC

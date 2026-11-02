@@ -84,6 +84,9 @@ jobs:
           name: source-switch-proof
           path: ${{ runner.temp }}/source-switch-proof
           if-no-files-found: error
+      - name: Test transition audition source references
+        working-directory: funkot-player
+        run: python3 -B -m unittest discover -s verification -p 'test_audition_source.py'
       - name: Check transition audition model and counterexamples
         working-directory: funkot-player
         run: python3 -B verification/check_audition.py --output "$RUNNER_TEMP/audition-proof"

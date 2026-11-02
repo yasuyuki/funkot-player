@@ -31,7 +31,10 @@ class AuditionSourceTests(unittest.TestCase):
         )
 
     def validate(self):
-        return CHECK.validate_source_references(self.tree)
+        return CHECK.validate_source_references(self.tree, expected_count=1)
+
+    def test_valid_reference_validates(self):
+        self.assertEqual(self.validate(), 1)
 
     def test_current_model_references_validate(self):
         player_root = Path(__file__).resolve().parents[1]
@@ -57,6 +60,11 @@ class AuditionSourceTests(unittest.TestCase):
                 self.model.write_text("Action == /\\ TRUE  \\* " + metadata + "\n")
                 with self.assertRaisesRegex(RuntimeError, r"Audition.tla:1"):
                     self.validate()
+
+    def test_missing_all_reference_metadata_is_rejected(self):
+        self.model.write_text("Action == /\\ TRUE\n")
+        with self.assertRaisesRegex(RuntimeError, r"Audition.tla.*expected 1"):
+            self.validate()
 
     def test_runner_rejects_bad_reference_before_tlc(self):
         self.model.write_text("Action == /\\ TRUE  \\* lib.rs:4 | AUDITION_LOCK.lock()?;\n")
