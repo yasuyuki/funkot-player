@@ -12,6 +12,35 @@ APK_REL=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-univer
 
 die() { echo "$*" >&2; exit 1; }
 
+require_clean_player() (
+    CDPATH= cd "$1" || die "cannot enter player checkout: $1"
+    expected=${2:-}
+    actual=$(git rev-parse 'HEAD^{commit}') || die "cannot resolve player HEAD"
+    [ -z "$expected" ] || [ "$actual" = "$expected" ] ||
+        die "player HEAD is $actual, expected $expected"
+
+    for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply sequencer BISECT_START; do
+        marker_path=$(git rev-parse --git-path "$marker") ||
+            die "cannot resolve player Git operation state: $marker"
+        [ ! -e "$marker_path" ] || die "player has an unfinished Git operation: $marker"
+    done
+
+    player_status=$(git --no-optional-locks status --porcelain=v1 --untracked-files=all) ||
+        die "cannot inspect player checkout"
+    [ -z "$player_status" ] || die "player checkout is dirty; signed builds require a clean commit"
+
+    verify_dir=$(mktemp -d) || die "cannot create temporary player index directory"
+    trap 'rm -f "$verify_dir/index" "$verify_dir/index.lock"; rmdir "$verify_dir"' EXIT
+    GIT_INDEX_FILE=$verify_dir/index
+    export GIT_INDEX_FILE
+    git -c core.splitIndex=false -c core.fsmonitor=false -c core.ignoreStat=false \
+        read-tree "$actual" || die "cannot read player commit"
+    player_contents=$(git --no-optional-locks \
+        -c core.splitIndex=false -c core.fsmonitor=false -c core.ignoreStat=false \
+        status --porcelain=v1 --untracked-files=all) || die "cannot verify player checkout contents"
+    [ -z "$player_contents" ] || die "player checkout contents differ from its commit"
+)
+
 require_official_core() {
     player=$1
     [ -z "${FUNKOT_CORE_CANDIDATE_SHA:-}" ] ||
@@ -157,6 +186,9 @@ cmd_prepare() {
     CDPATH= cd "$player"
     [ "$(id -un)" = "funkot-agent" ] || echo "warning: prepare is meant to run in the agent tree" >&2
 
+    player_sha=$(git rev-parse 'HEAD^{commit}') || die "cannot resolve player HEAD"
+    require_clean_player "$player" "$player_sha"
+
     core=$player/../funkot-autodj-for-ui
     [ -e "$core/.git" ] || die "missing sibling funkot-autodj-for-ui at $core"
 
@@ -167,7 +199,6 @@ cmd_prepare() {
     mkdir -p "$handoff" "$(dirname "$drop")"
     chmod 2775 "$(dirname "$drop")" 2>/dev/null || true
 
-    player_sha=$(git rev-parse HEAD)
     engine_sha=$(git -C "$core" rev-parse HEAD)
     git bundle create "$handoff/p.bundle" HEAD
     printf 'PLAYER_SHA=%s\nENGINE_SHA=%s\n' "$player_sha" "$engine_sha" > "$handoff/p.meta"
@@ -179,7 +210,7 @@ exec "$(dirname "$0")/android-signed-release.sh" "$@"
 EOF
     chmod 755 "$handoff/apk.sh"
 
-    echo "bundle $(git rev-parse --short HEAD) engine $(git -C "$core" rev-parse --short HEAD)"
+    echo "bundle $(git rev-parse --short "$player_sha") engine $(git -C "$core" rev-parse --short HEAD)"
     echo "owner (success: copied / cert ok / Success):"
     echo "  $handoff/apk.sh build"
 }
@@ -199,11 +230,11 @@ cmd_build() {
     handoff=$(handoff_dir)
     [ -f "$handoff/p.bundle" ] || die "missing $handoff/p.bundle — agent must run prepare"
 
+    require_clean_player "$player"
     echo "sync player $(printf '%.12s' "$PLAYER_SHA")"
     git fetch "$handoff/p.bundle" HEAD
     git merge --ff-only FETCH_HEAD
-    [ "$(git rev-parse HEAD)" = "$PLAYER_SHA" ] \
-        || die "HEAD is $(git rev-parse HEAD), expected $PLAYER_SHA"
+    require_clean_player "$player" "$PLAYER_SHA"
 
     core=$player/../funkot-autodj-for-ui
     [ -e "$core/.git" ] || die "missing $core — clone funkot-autodj as funkot-autodj-for-ui"
@@ -213,6 +244,7 @@ cmd_build() {
 
     require_official_core "$player"
     ./scripts/check-release-invariants.sh
+    require_clean_player "$player" "$PLAYER_SHA"
     ./dev.sh npx tauri android build --target aarch64
     [ -f "$APK_REL" ] || die "signed APK not produced (unsigned-only cannot be installed)"
 
