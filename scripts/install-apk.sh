@@ -26,7 +26,11 @@ if ! command -v adb-device >/dev/null 2>&1; then
 fi
 
 MODEL=$(adb-device --model "$ROLE") || { usage; exit 1; }
-SERIAL=$(adb-device --serial "$ROLE")
+SERIAL=$(adb-device --serial "$ROLE") || { usage; exit 1; }
+[ -n "$SERIAL" ] || {
+    echo "adb-device returned no serial for role '$ROLE'" >&2
+    exit 1
+}
 
 case "$ROLE" in
     debug)
@@ -64,7 +68,11 @@ ADB=1 ./dev.sh sh -c '
 
     adb connect "$addr"
 
-    actual_serial=$(adb -s "$addr" shell getprop ro.serialno | tr -d "\r")
+    actual_serial=$(adb -s "$addr" shell getprop ro.serialno) || {
+        echo "refusing to install: cannot read serial for $addr" >&2
+        exit 1
+    }
+    actual_serial=$(printf '%s' "$actual_serial" | tr -d "\r")
     actual_model=$(adb -s "$addr" shell getprop ro.product.model | tr -d "\r")
 
     if [ "$actual_serial" != "$expected_serial" ]; then

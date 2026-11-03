@@ -4,7 +4,6 @@
 #   FUNKOT_APK_DROP     signed APK destination
 #   FUNKOT_OWNER_PLAYER owner funkot-player checkout, else handoff owner.path
 #   FUNKOT_ADB_ADDR     adb selector (skip model search)
-#   FUNKOT_RELEASE_MODEL  adb devices -l model: token (default Pixel_10_Pro)
 set -eu
 
 EXPECTED_CERT_SHA256=b02a1ea592bb55da0502c37fa9d6d26870e05d2fd3b6ab79d8aad1c56a01a9e3
@@ -152,33 +151,11 @@ verify_cert() {
     echo "cert ok ($EXPECTED_CERT_SHA256)"
 }
 
-pick_addr() {
-    player=$1
-    if [ -n "${FUNKOT_ADB_ADDR:-}" ]; then
-        printf '%s\n' "$FUNKOT_ADB_ADDR"
-        return
-    fi
-    model=${FUNKOT_RELEASE_MODEL:-Pixel_10_Pro}
-    addr=$(adb_do "$player" devices -l | awk -v m="model:$model" '
-        $2 == "device" && index($0, m) { print $1; exit }
-    ')
-    [ -n "$addr" ] || return 1
-    printf '%s\n' "$addr"
-}
-
 install_apk() {
     player=$1
     apk=$2
     verify_cert "$player" "$apk"
-    addr=$(pick_addr "$player") || {
-        adb_do "$player" devices -l >&2 || true
-        die "no ${FUNKOT_RELEASE_MODEL:-Pixel_10_Pro} on adb. pair/connect, then: $0 install"
-    }
-    model=$(adb_do "$player" -s "$addr" shell getprop ro.product.model | tr -d '\r')
-    echo "installing on $model ($addr)"
-    adb_do "$player" -s "$addr" install -r "$apk"
-    adb_do "$player" -s "$addr" shell dumpsys package jp.hatsuboshi.funkotplayer \
-        | grep -E 'versionName=|versionCode=' | head -2
+    (CDPATH= cd "$player" && ./scripts/install-apk.sh release)
 }
 
 cmd_prepare() {
