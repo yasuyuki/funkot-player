@@ -40,6 +40,7 @@ mkdir -p "$tmp/bin" "$seed/src" "$seed/src-tauri" "$seed/scripts"
 printf 'fn main() {}\n' > "$seed/src/main.rs"
 printf '%s\n' '/.secrets/' '/src-tauri/gen/android/' > "$seed/.gitignore"
 cp "$script" "$seed/scripts/android-signed-release.sh"
+cp "$root/scripts/install-apk.sh" "$seed/scripts/install-apk.sh"
 
 cat > "$tmp/bin/id" << 'EOF'
 #!/bin/sh
@@ -70,6 +71,84 @@ exec "$FUNKOT_TEST_REAL_GIT" -C "$repo" "$@"
 EOF
 chmod +x "$tmp/bin/git"
 
+cat > "$tmp/bin/adb-device" << 'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FUNKOT_TEST_ADB_DEVICE_CALLS"
+[ "${FUNKOT_TEST_ROLE_REGISTERED:-1}" = 1 ] || exit 1
+case "${1:-}" in
+    --model)
+        [ "${2:-}" = release ] || exit 1
+        printf '%s\n' Pixel_10_Pro
+        ;;
+    --serial)
+        [ "${2:-}" = release ] || exit 1
+        [ "${FUNKOT_TEST_EXPECTED_SERIAL_STATUS:-ok}" = ok ] || exit 1
+        printf '%s\n' "${FUNKOT_TEST_EXPECTED_SERIAL-release-serial}"
+        ;;
+    release)
+        [ "${FUNKOT_TEST_ROLE_RESOLVABLE:-1}" = 1 ] || exit 1
+        printf '%s\n' "${FUNKOT_TEST_ROLE_ADDR:-10.0.0.9:5555}"
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$tmp/bin/adb-device"
+
+cat > "$tmp/bin/adb" << 'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FUNKOT_TEST_ADB_CALLS"
+case "${1:-}" in
+    connect)
+        exit 0
+        ;;
+    devices)
+        printf '%s\n' \
+            '10.0.0.2:5555 device product:wrong model:Pixel_10_Pro' \
+            '10.0.0.9:5555 device product:release model:Pixel_10_Pro'
+        exit 0
+        ;;
+esac
+[ "${1:-}" = -s ] || exit 1
+addr=$2
+shift 2
+case "${1:-}" in
+    shell)
+        case "${2:-}" in
+            getprop)
+                case "${3:-}" in
+                    ro.serialno)
+                        case "${FUNKOT_TEST_ACTUAL_SERIAL_STATUS:-ok}" in
+                            fail)
+                                exit 1
+                                ;;
+                            matching-output-fails)
+                                printf '%s\n' "${FUNKOT_TEST_ACTUAL_SERIAL-release-serial}"
+                                exit 1
+                                ;;
+                        esac
+                        printf '%s\n' "${FUNKOT_TEST_ACTUAL_SERIAL-release-serial}"
+                        ;;
+                    ro.product.model)
+                        printf '%s\n' Pixel_10_Pro
+                        ;;
+                esac
+                ;;
+        esac
+        ;;
+    install)
+        if [ -n "${FUNKOT_TEST_INSTALL_MARKER:-}" ]; then
+            : > "$FUNKOT_TEST_INSTALL_MARKER"
+            printf '%s\n' "$addr" > "$FUNKOT_TEST_INSTALL_ADDR"
+        fi
+        ;;
+esac
+EOF
+chmod +x "$tmp/bin/adb"
+
 cat > "$seed/dev.sh" << 'EOF'
 #!/bin/sh
 set -eu
@@ -80,18 +159,24 @@ case "${1:-}" in
         : > src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
         ;;
     sh)
-        if [ "${FUNKOT_TEST_CERT:-valid}" = invalid ]; then
-            printf '%s\n' 'SHA-256 digest: invalid'
-        else
-            printf '%s\n' 'SHA-256 digest: b02a1ea592bb55da0502c37fa9d6d26870e05d2fd3b6ab79d8aad1c56a01a9e3'
-        fi
-        ;;
-    adb)
-        case "${2:-}" in
-            devices)
-                printf '%s\n' '10.0.0.2:5555 device product:fake model:Pixel_10_Pro'
+        case "${3:-}" in
+            *apksigner*)
+                if [ "${FUNKOT_TEST_CERT:-valid}" = invalid ]; then
+                    printf '%s\n' 'SHA-256 digest: invalid'
+                else
+                    printf '%s\n' 'SHA-256 digest: b02a1ea592bb55da0502c37fa9d6d26870e05d2fd3b6ab79d8aad1c56a01a9e3'
+                fi
+                ;;
+            *)
+                shell=$3
+                shift 4
+                sh -c "$shell" -- "$@"
                 ;;
         esac
+        ;;
+    adb)
+        shift
+        exec adb "$@"
         ;;
 esac
 EOF
@@ -128,6 +213,8 @@ new_fixture() {
     handoff=$case_dir/handoff
     calls=$case_dir/calls
     git_calls=$case_dir/git-calls
+    adb_calls=$case_dir/adb-calls
+    adb_device_calls=$case_dir/adb-device-calls
     mkdir -p "$case_dir/owner" "$core/.git" "$handoff" "$case_dir/drop"
     "$real_git" clone -q --no-hardlinks "$seed" "$player"
     "$real_git" -C "$player" config core.hooksPath .git/hooks
@@ -136,6 +223,8 @@ new_fixture() {
     : > "$player/.secrets/upload-keystore.jks"
     : > "$calls"
     : > "$git_calls"
+    : > "$adb_calls"
+    : > "$adb_device_calls"
     printf 'PLAYER_SHA=%s\nENGINE_SHA=%s\n' "$player_sha" "$engine_sha" > "$handoff/p.meta"
     "$real_git" -C "$seed" bundle create "$handoff/p.bundle" HEAD
 }
@@ -147,6 +236,8 @@ run_release() {
         FUNKOT_TEST_REAL_GIT="$real_git" \
         FUNKOT_TEST_CORE="$core" \
         FUNKOT_TEST_ENGINE_SHA="$engine_sha" \
+        FUNKOT_TEST_ADB_CALLS="$adb_calls" \
+        FUNKOT_TEST_ADB_DEVICE_CALLS="$adb_device_calls" \
         FUNKOT_OWNER_PLAYER="$player" \
         FUNKOT_HANDOFF_DIR="$handoff" \
         FUNKOT_APK_DROP="$case_dir/drop/app.apk" \
@@ -173,8 +264,9 @@ must_have "^ENGINE_SHA=$engine_sha$" "$case_dir/drop/app.apk.identity" 'build di
 : > "$calls"
 run_release install
 must_have '^sh ' "$calls" 'install did not verify the APK certificate'
-must_have '^adb devices -l$' "$calls" 'install did not select a connected device'
-must_have '^adb -s 10.0.0.2:5555 install -r ' "$calls" 'install did not use adb install'
+must_not_have '^adb ' "$calls" 'install bypassed the role-aware installer'
+must_have '^release$' "$adb_device_calls" 'install did not resolve the release role'
+must_have '^-s 10.0.0.9:5555 install -r ' "$adb_calls" 'install did not use the release role address'
 
 : > "$calls"
 if FUNKOT_TEST_CERT=invalid run_release install >/dev/null 2>"$tmp/invalid-cert.err"; then
@@ -184,6 +276,93 @@ must_have '^sh ' "$calls" 'invalid certificate was not checked'
 must_not_have '^adb ' "$calls" 'invalid certificate reached adb'
 
 echo 'PASS clean fixed-SHA prepare/build, build/install separation and invalid certificate'
+
+role_install_fixture() {
+    new_fixture "$1"
+    : > "$case_dir/drop/app.apk"
+    : > "$case_dir/adb-calls"
+    : > "$case_dir/adb-device-calls"
+    install_marker=$case_dir/install-ran
+    install_addr=$case_dir/install-addr
+}
+
+run_role_install() {
+    PATH="$tmp/bin:$PATH" \
+        FUNKOT_TEST_ADB_CALLS="$case_dir/adb-calls" \
+        FUNKOT_TEST_ADB_DEVICE_CALLS="$case_dir/adb-device-calls" \
+        FUNKOT_TEST_INSTALL_MARKER="$install_marker" \
+        FUNKOT_TEST_INSTALL_ADDR="$install_addr" \
+        "$@"
+}
+
+role_install_accepts_matching_serial() {
+    role_install_fixture matching-role
+    run_role_install run_release install > "$case_dir/release.log" 2>&1
+    [ -f "$install_marker" ] || {
+        cat "$case_dir/release.log" >&2
+        fail 'matching release serial did not install'
+    }
+    [ "$(cat "$install_addr")" = 10.0.0.9:5555 ] ||
+        fail "matching role installed on $(cat "$install_addr") instead of the release device"
+    must_have '^release$' "$case_dir/adb-device-calls" 'install did not resolve the release role'
+    must_not_have '^adb devices -l$' "$calls" 'install selected the first matching model instead of the release role'
+    echo 'PASS install uses the release role serial instead of the first matching model'
+}
+
+role_install_rejects() {
+    label=$1
+    role_install_fixture "$label"
+    status=0
+    (
+        case "$label" in
+            direct-address-mismatch)
+                export FUNKOT_ADB_ADDR=10.0.0.2:5555
+                export FUNKOT_TEST_ACTUAL_SERIAL=wrong-serial
+                ;;
+            unregistered-role)
+                export FUNKOT_TEST_ROLE_REGISTERED=0
+                ;;
+            expected-serial-unavailable)
+                export FUNKOT_TEST_EXPECTED_SERIAL_STATUS=fail
+                ;;
+            empty-expected-serial)
+                export FUNKOT_TEST_EXPECTED_SERIAL=
+                ;;
+            actual-serial-unavailable)
+                export FUNKOT_TEST_ACTUAL_SERIAL_STATUS=fail
+                ;;
+            matching-serial-command-fails)
+                export FUNKOT_TEST_ACTUAL_SERIAL_STATUS=matching-output-fails
+                ;;
+            empty-actual-serial)
+                export FUNKOT_TEST_ACTUAL_SERIAL=
+                ;;
+            ambiguous-role-candidates)
+                export FUNKOT_TEST_ROLE_RESOLVABLE=0
+                ;;
+        esac
+        run_role_install run_release install
+    ) > "$case_dir/release.log" 2>&1 || status=$?
+    [ "$status" -ne 0 ] || {
+        cat "$case_dir/release.log" >&2
+        if [ -e "$install_marker" ]; then
+            fail "$label installed on $(cat "$install_addr")"
+        fi
+        fail "$label unexpectedly succeeded"
+    }
+    [ ! -e "$install_marker" ] || fail "$label reached adb install"
+    echo "PASS install refuses $label"
+}
+
+role_install_accepts_matching_serial
+role_install_rejects direct-address-mismatch
+role_install_rejects unregistered-role
+role_install_rejects expected-serial-unavailable
+role_install_rejects empty-expected-serial
+role_install_rejects actual-serial-unavailable
+role_install_rejects matching-serial-command-fails
+role_install_rejects empty-actual-serial
+role_install_rejects ambiguous-role-candidates
 
 refuse_changed_player() {
     mode=$1
