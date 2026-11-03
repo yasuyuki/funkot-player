@@ -1576,6 +1576,147 @@ mod tests {
         assert_eq!(loaded["bbb"].intro_bars, None);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn save_non_regenerable_json_write_failure_preserves_existing_files() {
+        const CHILD_DIR: &str = "FUNKOT_OVERRIDE_WRITE_LIMIT_DIR";
+
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            let dir = PathBuf::from(dir);
+            let mut oversized = Overrides::new();
+            let mut flags = Flags::new();
+            let mut labels = Labels::new();
+            let mut history = History::new();
+            let mut dismissed = Dismissed::new();
+            for index in 0..16 {
+                let key = format!("track-{index}-{}", "x".repeat(128));
+                oversized.insert(
+                    key.clone(),
+                    BarOverride {
+                        intro_bars: Some(32),
+                        outro_structure_bars: Some(16),
+                        funkot: Some(true),
+                    },
+                );
+                flags.insert(
+                    key.clone(),
+                    TransitionFlag {
+                        count: index,
+                        last_flagged_ms: u64::from(index),
+                    },
+                );
+                labels.insert(
+                    key.clone(),
+                    TrackLabel {
+                        verdict: index % 2 == 0,
+                        labeled_at_ms: u64::from(index),
+                    },
+                );
+                history.insert(
+                    key.clone(),
+                    PlayRecord {
+                        count: index,
+                        last_played_ms: u64::from(index),
+                    },
+                );
+                dismissed.insert(key);
+            }
+            assert!(save_overrides(&dir, &oversized).is_err());
+            assert!(save_flags(&dir, &flags).is_err());
+            assert!(save_labels(&dir, &labels).is_err());
+            assert!(save_history(&dir, &history).is_err());
+            assert!(save_dismissed(&dir, &dismissed).is_err());
+            return;
+        }
+
+        let dir = TempDir::new("non-regenerable-write-limit");
+        let mut original_overrides = Overrides::new();
+        original_overrides.insert(
+            "saved-track".into(),
+            BarOverride {
+                intro_bars: Some(8),
+                ..Default::default()
+            },
+        );
+        let mut original_flags = Flags::new();
+        original_flags.insert(
+            "saved-track".into(),
+            TransitionFlag {
+                count: 1,
+                last_flagged_ms: 1,
+            },
+        );
+        let mut original_labels = Labels::new();
+        original_labels.insert(
+            "saved-track".into(),
+            TrackLabel {
+                verdict: true,
+                labeled_at_ms: 1,
+            },
+        );
+        let mut original_history = History::new();
+        original_history.insert(
+            "saved-track".into(),
+            PlayRecord {
+                count: 1,
+                last_played_ms: 1,
+            },
+        );
+        let original_dismissed = Dismissed::from(["saved-track".to_string()]);
+        save_overrides(&dir.0, &original_overrides).unwrap();
+        save_flags(&dir.0, &original_flags).unwrap();
+        save_labels(&dir.0, &original_labels).unwrap();
+        save_history(&dir.0, &original_history).unwrap();
+        save_dismissed(&dir.0, &original_dismissed).unwrap();
+        let before = [
+            (LIBRARY_FILE, fs::read(dir.0.join(LIBRARY_FILE)).unwrap()),
+            (FLAGS_FILE, fs::read(dir.0.join(FLAGS_FILE)).unwrap()),
+            (LABELS_FILE, fs::read(dir.0.join(LABELS_FILE)).unwrap()),
+            (HISTORY_FILE, fs::read(dir.0.join(HISTORY_FILE)).unwrap()),
+            (DISMISSED_FILE, fs::read(dir.0.join(DISMISSED_FILE)).unwrap()),
+        ];
+        assert!(before.iter().all(|(_, bytes)| bytes.len() < 512));
+
+        let status = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap '' XFSZ; ulimit -f 1; exec \"$@\"",
+                "overrides-write-limit",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::tests::save_non_regenerable_json_write_failure_preserves_existing_files",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, &dir.0)
+            .status()
+            .unwrap();
+        assert!(status.success(), "child did not observe a write error: {status}");
+
+        let changed: Vec<_> = before
+            .iter()
+            .filter_map(|(file, expected)| {
+                (fs::read(dir.0.join(file)).unwrap() != *expected).then_some(*file)
+            })
+            .collect();
+        assert!(
+            changed.is_empty(),
+            "files changed after a failed save: {changed:?}"
+        );
+        assert_eq!(load_overrides(&dir.0), original_overrides);
+        assert_eq!(load_flags(&dir.0), original_flags);
+        assert_eq!(load_labels(&dir.0), original_labels);
+        assert_eq!(load_history(&dir.0), original_history);
+        assert_eq!(load_dismissed(&dir.0), original_dismissed);
+        let leftovers: Vec<_> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".part"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp left behind: {leftovers:?}");
+    }
+
     #[test]
     fn missing_overrides_file_is_empty() {
         let dir = TempDir::new("overrides-missing");
