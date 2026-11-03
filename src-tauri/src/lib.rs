@@ -4369,6 +4369,21 @@ mod cache_state_tests {
         funkot_core::cache::store(cache_dir, &hash, analysis).unwrap();
     }
 
+    fn block_store_replacement(data_dir: &Path, name: &str) -> PathBuf {
+        let destination = data_dir.join(name);
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("sentinel"), b"old user data").unwrap();
+        destination
+    }
+
+    fn assert_store_blocker_intact(destination: &Path) {
+        assert!(destination.is_dir());
+        assert_eq!(
+            std::fs::read(destination.join("sentinel")).unwrap(),
+            b"old user data"
+        );
+    }
+
     #[test]
     fn no_cache_entry_reads_as_unanalyzed() {
         let dir = TempDir::new("none");
@@ -4823,6 +4838,37 @@ mod cache_state_tests {
     }
 
     #[test]
+    fn set_bars_impl_returns_error_when_library_replacement_fails() {
+        let cache = TempDir::new("set-bars-persist-failure-cache");
+        let data = TempDir::new("set-bars-persist-failure-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+        let mut history = store::History::new();
+        history.insert(
+            "unrelated".into(),
+            store::PlayRecord {
+                count: 1,
+                last_played_ms: 2,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+        let library = block_store_replacement(&data.0, "library.json");
+
+        assert!(set_bars_impl(
+            &cache.0,
+            &data.0,
+            &track,
+            Some(analysis.intro_bars + 4),
+            None,
+            true,
+        )
+        .is_err());
+
+        assert_store_blocker_intact(&library);
+        assert_eq!(store::load_history(&data.0), history);
+    }
+
+    #[test]
     fn reapply_overrides_does_not_resurrect_a_worker_start_override_after_undo() {
         let cache = TempDir::new("reapply-undo-cache");
         let data = TempDir::new("reapply-undo-data");
@@ -4943,6 +4989,31 @@ mod cache_state_tests {
                 .and_then(|o| o.funkot),
             Some(true)
         );
+    }
+
+    #[test]
+    fn set_label_impl_returns_error_when_label_and_library_replacements_fail() {
+        let cache = TempDir::new("label-persist-failure-cache");
+        let data = TempDir::new("label-persist-failure-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+        let mut history = store::History::new();
+        history.insert(
+            "unrelated".into(),
+            store::PlayRecord {
+                count: 1,
+                last_played_ms: 2,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+        let labels = block_store_replacement(&data.0, "labels.json");
+        let library = block_store_replacement(&data.0, "library.json");
+
+        assert!(set_label_impl(&cache.0, &data.0, &track, Some(true)).is_err());
+
+        assert_store_blocker_intact(&labels);
+        assert_store_blocker_intact(&library);
+        assert_eq!(store::load_history(&data.0), history);
     }
 
     #[test]
@@ -5744,6 +5815,30 @@ mod cache_state_tests {
         assert_eq!(undo.len(), 3);
         assert_eq!(store::load_labels(&data.0).len(), 3);
         assert!(store::load_labels(&data.0).values().all(|l| l.verdict));
+    }
+
+    #[test]
+    fn set_folder_label_impl_returns_error_when_label_and_library_replacements_fail() {
+        let data = TempDir::new("folder-label-persist-failure-data");
+        let music = TempDir::new("folder-label-persist-failure-music");
+        std::fs::write(music.0.join("track.wav"), vec![0u8; 4096]).unwrap();
+        let mut history = store::History::new();
+        history.insert(
+            "unrelated".into(),
+            store::PlayRecord {
+                count: 1,
+                last_played_ms: 2,
+            },
+        );
+        store::save_history(&data.0, &history).unwrap();
+        let labels = block_store_replacement(&data.0, "labels.json");
+        let library = block_store_replacement(&data.0, "library.json");
+
+        assert!(set_folder_label_impl(&data.0, &music.0, true).is_err());
+
+        assert_store_blocker_intact(&labels);
+        assert_store_blocker_intact(&library);
+        assert_eq!(store::load_history(&data.0), history);
     }
 
     #[test]
