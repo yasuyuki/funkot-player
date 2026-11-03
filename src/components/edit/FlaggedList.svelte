@@ -26,7 +26,6 @@
     busyKey = key;
     try {
       const n = await store.doDismissFlags(row.track_hash, row.role);
-      // Legacy: toast only when dismiss actually recorded a new key (`n` truthy).
       if (n) {
         toast.show(t.deleted, () => store.doUndoLastDismiss());
       }

@@ -39,7 +39,6 @@
 
   onMount(() => {
     expectedRevision = revision;
-    // Opening data is deliberately frozen. Only explicit reload replaces it.
     displayed = initialStates;
     dialog.showModal();
     dialog.querySelector<HTMLElement>("select, input")?.focus();
@@ -58,7 +57,7 @@
   }
   function addTag() {
     if (!value.trim()) return;
-    queueAdd({ kind, value }); // Backend performs normalization and validation.
+    queueAdd({ kind, value });
     value = "";
   }
   function toggleRemove(tag: Tag) {
@@ -73,8 +72,6 @@
   }
   function close() { if (!busy) onclose(); }
   function stopShortcut(event: KeyboardEvent) {
-    // Native dialog owns Tab/Enter/Escape. Player F/J/Space shortcuts must not
-    // label or skip a track when the focus is on a dialog button.
     if (["f", "F", "j", "J", " "].includes(event.key)) event.stopPropagation();
     if (event.key === "Tab") {
       const controls = [...dialog.querySelectorAll<HTMLElement>("input:enabled,button:enabled,select:enabled,summary")]
@@ -96,7 +93,6 @@
     }
     const year: TagYear | undefined = mode === "unchanged" ? undefined
       : mode === "set" ? { mode, value: yearValue! } : { mode };
-    // Save also includes text still in the add field; it never silently loses it.
     const additions = value.trim() ? [...add, { kind, value }] : add;
     saving = true;
     try {

@@ -47,7 +47,7 @@ test("all-tracks compares duplicate names and continues editing without losing t
     const rows = Array.from({ length: 24 }, (_, i) => ({ ...store.libraryList[i % 6],
       path: `/fixture/music/track-${i + 1}.mp3`, content_hash: String(i + 1).padStart(64, "0") }));
     store.library = new Map(rows.map(row => [row.path, row]));
-    window.__uiFixture.setReply("refresh_library", rows);
+    window.__uiFixture.setReply("refresh_library", { rows, persistence_error: null });
   });
   await page.getByRole("tab", { name: "All tracks", exact: true }).click();
   const narrow = testInfo.project.name === "narrow";

@@ -10,6 +10,175 @@ async function chooseTheme(page, value) {
   return trigger;
 }
 
+test("short library pages paint the full viewport without padding overflow", async ({ page }) => {
+  await page.goto("/tests/ui/");
+  await page.getByRole("button", { name: "menu", exact: true }).waitFor({ state: "visible" });
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.library = new Map();
+    window.__uiFixture.setReply("refresh_library", { rows: [], persistence_error: null });
+  });
+  await expect(page.locator("section.library li.row")).toHaveCount(0);
+  for (const preference of ["light", "dark"]) {
+    await chooseTheme(page, preference);
+    await page.keyboard.press("Escape");
+    const geometry = await page.evaluate(() => ({
+      bodyHeight: document.body.getBoundingClientRect().height,
+      viewportHeight: innerHeight,
+      scrollHeight: document.documentElement.scrollHeight,
+    }));
+    expect(geometry.bodyHeight, `${preference} body covers the viewport`).toBeGreaterThanOrEqual(geometry.viewportHeight);
+    expect(geometry.scrollHeight, `${preference} padding does not add scrolling`).toBe(geometry.viewportHeight);
+  }
+});
+
+function assertContrast(value, label, minimum) {
+  expect(value.ratio, `${label} ${JSON.stringify(value)}`).toBeGreaterThanOrEqual(minimum);
+}
+
+test("selected queue titles remain readable while hovered", async ({ page }, testInfo) => {
+  await page.goto("/tests/ui/");
+  await page.getByRole("button", { name: "menu", exact: true }).waitFor({ state: "visible" });
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Up next", exact: true }).click();
+  const selected = page.locator("section.queue .row-select").first();
+  await selected.click();
+  for (const preference of ["light", "dark"]) {
+    await chooseTheme(page, preference);
+    await page.keyboard.press("Escape");
+    await selected.hover();
+    const contrast = await new AxeBuilder({ page }).include("section.queue .row.selected").withRules(["color-contrast"]).analyze();
+    expect(contrast.violations, `${preference} selected queue text`).toEqual([]);
+    expect(contrast.incomplete, `${preference} selected queue text incomplete`).toEqual([]);
+    const titleContrast = await new AxeBuilder({ page }).include("section.queue .row.selected .title").withRules(["color-contrast-enhanced"]).analyze();
+    expect(titleContrast.violations, `${preference} selected queue title 7:1`).toEqual([]);
+    expect(titleContrast.incomplete, `${preference} selected queue title incomplete`).toEqual([]);
+  }
+});
+
+async function measureNormalThemeSurfaces(page) {
+  return page.evaluate(() => {
+    const color = (value) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext("2d");
+      context.fillStyle = value;
+      context.fillRect(0, 0, 1, 1);
+      const rgba = Array.from(context.getImageData(0, 0, 1, 1).data);
+      if (rgba[3] !== 255) throw new Error(`Expected opaque color: ${value}`);
+      return rgba.slice(0, 3);
+    };
+    const luminance = (value) => {
+      const linear = color(value).map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+    };
+    const contrast = (foreground, background) => {
+      const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+      return { foreground, background, ratio: (lighter + 0.05) / (darker + 0.05) };
+    };
+    const style = (selector) => getComputedStyle(document.querySelector(selector));
+    const body = style("body");
+    const menu = style(".overflow > .menu");
+    const input = style("input.search");
+    const selected = style("section.queue .row.selected");
+    const root = getComputedStyle(document.documentElement);
+    return {
+      root: {
+        theme: document.documentElement.dataset.theme,
+        dark: document.documentElement.classList.contains("dark"),
+        colorScheme: root.colorScheme,
+        forced: matchMedia("(forced-colors: active)").matches,
+        forcedColorAdjust: root.forcedColorAdjust,
+        gray1: root.getPropertyValue("--gray-1").trim(),
+        gray12: root.getPropertyValue("--gray-12").trim(),
+      },
+      body: contrast(body.color, body.backgroundColor),
+      title: contrast(style("section.library .title-text").color, body.backgroundColor),
+      heading: contrast(style("section.library .heading").color, body.backgroundColor),
+      menu: contrast(style(".overflow > .menu .theme-control").color, menu.backgroundColor),
+      input: {
+        text: contrast(input.color, input.backgroundColor),
+        border: contrast(input.borderColor, body.backgroundColor),
+      },
+      selection: contrast(selected.outlineColor, body.backgroundColor),
+      status: contrast(style("section.queue .badge").color, body.backgroundColor),
+    };
+  });
+}
+
+async function measureNormalThemeDialog(page) {
+  return page.locator("section.queue dialog").evaluate((element) => {
+    const color = (value) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext("2d");
+      context.fillStyle = value;
+      context.fillRect(0, 0, 1, 1);
+      const rgba = Array.from(context.getImageData(0, 0, 1, 1).data);
+      if (rgba[3] !== 255) throw new Error(`Expected opaque color: ${value}`);
+      return rgba.slice(0, 3);
+    };
+    const luminance = (value) => {
+      const linear = color(value).map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+    };
+    const contrast = (foreground, background) => {
+      const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+      return { foreground, background, ratio: (lighter + 0.05) / (darker + 0.05) };
+    };
+    const dialog = getComputedStyle(element);
+    const heading = getComputedStyle(element.querySelector("h3"));
+    const label = getComputedStyle(element.querySelector("label"));
+    const input = getComputedStyle(element.querySelector("input"));
+    return {
+      heading: contrast(heading.color, dialog.backgroundColor),
+      label: contrast(label.color, dialog.backgroundColor),
+      input: {
+        text: contrast(input.color, input.backgroundColor),
+        border: contrast(input.borderColor, dialog.backgroundColor),
+      },
+    };
+  });
+}
+
+async function captureBodyCanvas(page) {
+  const viewport = page.viewportSize();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  return page.screenshot({
+    clip: { x: 4, y: viewport.height - 12, width: 8, height: 8 },
+    animations: "disabled",
+  });
+}
+
+async function setSystemLightTheme(page) {
+  await page.emulateMedia({ forcedColors: "none", contrast: "no-preference", colorScheme: "light" });
+  await chooseTheme(page, "system");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".overflow > .menu")).toHaveCount(0);
+}
+
+async function normalAndReleasedBodyCanvases(page) {
+  await page.goto("/tests/ui/");
+  await setSystemLightTheme(page);
+  const baseline = await captureBodyCanvas(page);
+  const repeat = await captureBodyCanvas(page);
+
+  await page.emulateMedia({ forcedColors: "active", contrast: "more" });
+  await expect.poll(() => page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+  await page.reload();
+  await page.emulateMedia({ forcedColors: "none", contrast: "no-preference", colorScheme: "light" });
+  await expect.poll(() => page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(false);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  const released = await captureBodyCanvas(page);
+  return { baseline, repeat, released };
+}
+
 test("theme choice persists, system follows the OS, and manual choice wins", async ({ page }) => {
   await page.goto("/tests/ui/");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -220,18 +389,109 @@ test("hover, pressed, focus, and Windows high contrast keep visible states", asy
   await queue.getByRole("button", { name: "Select Pulse" }).first().click();
   const selected = queue.locator(".row.selected");
   await expect(selected).toBeVisible();
+  await selected.locator(".row-select").hover();
   const colors = await selected.evaluate((element) => {
     const row = getComputedStyle(element);
     const button = getComputedStyle(element.querySelector("button"));
-    return { forced: matchMedia("(forced-colors: active)").matches, outline: row.outlineStyle, width: parseFloat(row.outlineWidth), buttonColor: button.color, buttonBackground: button.backgroundColor };
+    const probe = document.createElement("span");
+    probe.style.cssText = "color:ButtonText;background:ButtonFace";
+    element.append(probe);
+    const system = getComputedStyle(probe);
+    const result = { forced: matchMedia("(forced-colors: active)").matches, outline: row.outlineStyle, width: parseFloat(row.outlineWidth), buttonColor: button.color, buttonBackground: button.backgroundColor, systemColor: system.color, systemBackground: system.backgroundColor };
+    probe.remove();
+    return result;
   });
   expect(colors.forced).toBe(true);
   expect(colors.outline).toBe("solid");
   expect(colors.width).toBeGreaterThanOrEqual(2);
   expect(colors.buttonColor).not.toBe(colors.buttonBackground);
+  expect(colors.buttonColor).toBe(colors.systemColor);
+  expect(colors.buttonBackground).toBe(colors.systemBackground);
   const path = testInfo.outputPath(`${testInfo.project.name}-forced-colors.png`);
   await page.screenshot({ path, animations: "disabled" });
   await testInfo.attach("forced-colors", { path, contentType: "image/png" });
+});
+
+test("forced colors release restores readable dark, light, and system surfaces", async ({ page }, testInfo) => {
+  await page.goto("/tests/ui/");
+  await chooseTheme(page, "light");
+  await page.emulateMedia({ forcedColors: "active", contrast: "more" });
+  await expect.poll(() => page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+  await page.reload();
+  await page.emulateMedia({ forcedColors: "none", contrast: "no-preference" });
+  await expect.poll(() => page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(false);
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.queue = {
+      ...store.queue,
+      source: { playlist_id: null, generation: 3, revision: 5 },
+      playlist: null,
+      reserved: { entry_id: "theme-reserved", path: "/fixture/music/track-1.mp3", origin: "manual" },
+      pending: [{ entry_id: "theme-pending", path: "/fixture/music/track-2.mp3", origin: "automatic" }],
+      reserved_prepared: false,
+    };
+    window.__uiFixture.setReply("queue_state", store.queue);
+  });
+
+  const queue = page.locator("section.queue");
+  const themes = [
+    { preference: "dark", systemColorScheme: "dark" },
+    { preference: "light", systemColorScheme: "light" },
+    { preference: "system", systemColorScheme: "dark" },
+    { preference: "system", systemColorScheme: "light" },
+  ];
+  for (const { preference, systemColorScheme } of themes) {
+    await page.emulateMedia({ forcedColors: "none", contrast: "no-preference", colorScheme: systemColorScheme });
+    await chooseTheme(page, preference);
+    const expectedTheme = preference === "system" ? systemColorScheme : preference;
+    await expect(page.locator("html")).toHaveAttribute("data-theme", expectedTheme);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".overflow > .menu")).toHaveCount(0);
+    if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Up next" }).click();
+    await queue.getByRole("button", { name: "Select Pulse" }).click();
+    await page.getByRole("button", { name: "menu" }).click();
+    const surfaces = await measureNormalThemeSurfaces(page);
+    expect(surfaces.root).toMatchObject({
+      theme: expectedTheme,
+      dark: expectedTheme === "dark",
+      colorScheme: expectedTheme,
+      forced: false,
+      forcedColorAdjust: "auto",
+    });
+    assertContrast(surfaces.body, `${expectedTheme} body`, 7);
+    assertContrast(surfaces.title, `${expectedTheme} library title`, 7);
+    assertContrast(surfaces.heading, `${expectedTheme} library heading`, 7);
+    assertContrast(surfaces.menu, `${expectedTheme} theme menu`, 7);
+    assertContrast(surfaces.input.text, `${expectedTheme} search input`, 7);
+    assertContrast(surfaces.input.border, `${expectedTheme} search border`, 3);
+    assertContrast(surfaces.selection, `${expectedTheme} selected queue row`, 3);
+    assertContrast(surfaces.status, `${expectedTheme} queue status`, 4.5);
+
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".overflow > .menu")).toHaveCount(0);
+    await queue.getByRole("button", { name: "Playlist actions" }).click();
+    await queue.getByRole("button", { name: "Save queue as playlist" }).click();
+    const dialog = queue.getByRole("dialog", { name: "Save queue as playlist" });
+    await expect(dialog).toBeVisible();
+    const dialogColors = await measureNormalThemeDialog(page);
+    assertContrast(dialogColors.heading, `${expectedTheme} dialog heading`, 7);
+    assertContrast(dialogColors.label, `${expectedTheme} dialog label`, 7);
+    assertContrast(dialogColors.input.text, `${expectedTheme} dialog input`, 7);
+    assertContrast(dialogColors.input.border, `${expectedTheme} dialog input border`, 3);
+    const path = testInfo.outputPath(`${testInfo.project.name}-forced-colors-off-${preference}-${systemColorScheme}.png`);
+    await page.screenshot({ path, animations: "disabled" });
+    await testInfo.attach(`forced-colors-off-${preference}-${systemColorScheme}`, { path, contentType: "image/png" });
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+  }
+});
+
+test("forced colors release preserves the system-light body canvas", async ({ page }, testInfo) => {
+  const { baseline, repeat, released } = await normalAndReleasedBodyCanvases(page);
+  await testInfo.attach("system-light-body-canvas-baseline", { body: baseline, contentType: "image/png" });
+  await testInfo.attach("system-light-body-canvas-released", { body: released, contentType: "image/png" });
+  expect(Buffer.compare(repeat, baseline), "normal system-light canvas must be deterministic").toBe(0);
+  expect(Buffer.compare(released, baseline), "forced-colors release must restore the system-light body canvas").toBe(0);
 });
 
 

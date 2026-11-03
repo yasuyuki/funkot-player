@@ -1,6 +1,3 @@
-// Browser acceptance against the real Svelte application with synthetic IPC.
-// Prepare the optional test tool with `npm install --no-save --package-lock=false playwright@1.63.0`.
-// This does not install or launch a native player, access music, or test audio.
 import assert from "node:assert/strict";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -58,8 +55,6 @@ try {
   const open = async title => {
     const row = page.getByText(`Synthetic ${title}`, { exact: true });
     await row.scrollIntoViewIfNeeded();
-    // The existing row menu closes on scroll. Let the intentional scroll
-    // settle before opening it, as a user opening a stationary row would.
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     await row.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Edit tags", exact: true }).click();
@@ -120,7 +115,6 @@ try {
   await library.getByRole("searchbox").fill("Alpha");
   await library.getByRole("button", {name:/Edit visible selected/}).click();
   await dialog.getByRole("textbox", {name:"Tag",exact:true}).fill("Visible only");
-  // Underlying filter changes while the modal is open cannot change its targets.
   await library.getByRole("searchbox").evaluate(el => { el.value="Beta";el.dispatchEvent(new Event("input",{bubbles:true})); });
   await save();
   assert.deepEqual((await lastRequest()).targets,[{path:"/synthetic/Alpha.mp3",expected_hash:"a"}]);

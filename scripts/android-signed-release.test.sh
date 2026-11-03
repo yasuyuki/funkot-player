@@ -89,7 +89,6 @@ grep -q 'adb pair' "$tmp/pair.err" && {
     exit 1
 }
 
-# --- owner-set ---
 rm -f "$tmp/handoff/owner.path"
 
 if env -u FUNKOT_OWNER_PLAYER \

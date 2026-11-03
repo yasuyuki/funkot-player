@@ -43,41 +43,82 @@ jobs:
       - id: core
         run: echo "sha=$(tr -d '\r\n' < funkot-core.commit)" >> "$GITHUB_OUTPUT"
 
+  source-switch-model:
+    name: Source switch model
+    runs-on: ubuntu-latest
+    needs: core-pin
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - uses: actions/checkout@v7
+        with:
+          repository: yasuyuki/funkot-autodj
+          ref: ${{ needs.core-pin.outputs.sha }}
+          path: funkot-autodj-for-ui
+      - name: Verify the official core selection
+        working-directory: funkot-player
+        run: ./scripts/check-funkot-core-commit.sh
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/funkot-verification
+          key: tlc-1.7.4-936a2620
+      - name: Test result and source validation
+        working-directory: funkot-player
+        run: python3 -B -m unittest discover -s verification -p 'test_source_switch_result.py'
+      - name: Prepare pinned TLC
+        working-directory: funkot-player
+        run: python3 -B verification/check_source_switch.py --setup
+      - name: Check source switch model and counterexamples
+        working-directory: funkot-player
+        run: python3 -B verification/check_source_switch.py --output "$RUNNER_TEMP/source-switch-proof"
+      - name: Preserve source switch proof results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-switch-proof
+          path: ${{ runner.temp }}/source-switch-proof
+          if-no-files-found: error
+      - name: Test transition audition source references
+        working-directory: funkot-player
+        run: python3 -B -m unittest discover -s verification -p 'test_audition_source.py'
+      - name: Check transition audition model and counterexamples
+        working-directory: funkot-player
+        run: python3 -B verification/check_audition.py --output "$RUNNER_TEMP/audition-proof"
+      - name: Preserve transition audition proof results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: audition-proof
+          path: ${{ runner.temp }}/audition-proof
+          if-no-files-found: error
+
   invariants:
     name: Release-only invariants
     runs-on: ubuntu-latest
     steps:
-      # No `path:` and no sibling checkout: unlike the Windows workflows this
-      # job builds nothing, so it needs neither funkot-core nor a toolchain.
       - uses: actions/checkout@v7
 
       - name: Test repeatable music transfer
         run: python3 -B -m unittest discover -s scripts -p test_adb_push_music_list.py
 
-      # Checks that need no toolchain live in one script, so that the same
-      # command runs here and on a developer's machine. Keep this job free of
-      # builds -- the moment it needs the Android SDK it stops being cheap
-      # enough to run on every push, and it will get restricted to tags, which
-      # is far too late for a release-only invariant.
       - name: Check release-only invariants
         run: ./scripts/check-release-invariants.sh
 
-      # Eight files spell out the version and nothing links them, so drift is
-      # silent until a package ships with a label that disagrees with its
-      # contents. Same script a developer runs; also needs no toolchain.
       - name: Check the version is consistent
         run: ./scripts/set-version.sh --check
 
-      # UI locales live in TS JSON-like catalogues, not MRT resources, so the
-      # Store only sees languages listed in Package.appxmanifest. Fail if that
-      # list drifts from src/lib/locale.ts LOCALES.
       - name: Check MSIX package languages match UI locales
         run: ./scripts/check-msix-languages.sh
 
-      # Plan-phase citations rot silently: a line number that was true when
-      # written becomes a lie that later phases copy. Same script a developer
-      # runs; also needs no toolchain. Sibling repos are not checked out here,
-      # so symbol resolution against them is deferred and counted, never silent.
       - name: Check doc claims
         run: ./scripts/check-doc-claims.sh
 
@@ -132,8 +173,8 @@ jobs:
           path: ${{ runner.temp }}/engine-snapshot-proof
           if-no-files-found: error
 
-  build-and-test:
-    name: Frontend and native library
+  docker-toolchain:
+    name: Docker toolchain versions
     runs-on: ubuntu-latest
     needs: core-pin
     outputs:
@@ -157,7 +198,6 @@ jobs:
           load: true
           tags: funkot-player-dev
           cache-from: type=gha,scope=player-dev
-          cache-to: type=gha,mode=max,scope=player-dev
       - name: Record the actual Docker toolchain
         id: versions
         working-directory: funkot-player
@@ -165,15 +205,42 @@ jobs:
           ./dev.sh sh -c 'printf "rust=%s\nnode=%s\nnpm=%s\n" "$(rustc --version | cut -d " " -f2)" "$(node -p process.versions.node)" "$(npm --version)"' | tee versions.txt
           grep -E '^(rust|node|npm)=' versions.txt >> "$GITHUB_OUTPUT"
           cat versions.txt >> "$GITHUB_STEP_SUMMARY"
+
+  build-and-test:
+    name: Frontend and native library
+    runs-on: ubuntu-latest
+    needs: core-pin
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - uses: actions/checkout@v7
+        with:
+          repository: yasuyuki/funkot-autodj
+          ref: ${{ needs.core-pin.outputs.sha }}
+          path: funkot-autodj-for-ui
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the normal development image
+        uses: docker/build-push-action@v7
+        with:
+          context: funkot-player
+          load: true
+          tags: funkot-player-dev
+          cache-from: type=gha,scope=player-dev
+          cache-to: type=gha,mode=max,scope=player-dev
       - name: Test frontend and release native library in the normal Docker toolchain
         working-directory: funkot-player
         run: |
-          ./dev.sh sh -ec 'npm ci; npm test; npm run check; npm run build; cargo test --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol --lib'
+          ./dev.sh sh -ec 'npm ci; npm test; npm run check; npm run build; cargo test --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol,verified-capture --lib --examples'
+
+      - name: Verify Cargo source attribution through dev.sh
+        working-directory: funkot-player
+        run: python3 scripts/test-dev-source-attribution.py
 
   windows-build-and-test:
     name: Windows frontend and native library
     runs-on: windows-latest
-    needs: [core-pin, build-and-test]
+    needs: [core-pin, docker-toolchain]
     defaults:
       run:
         working-directory: funkot-player
@@ -188,16 +255,20 @@ jobs:
           path: funkot-autodj-for-ui
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ needs.build-and-test.outputs.node }}
+          node-version: ${{ needs.docker-toolchain.outputs.node }}
           cache: npm
           cache-dependency-path: funkot-player/package-lock.json
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ needs.build-and-test.outputs.rust }}
+          toolchain: ${{ needs.docker-toolchain.outputs.rust }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: funkot-player/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Match Docker npm and record Windows toolchain
         shell: bash
         env:
-          DOCKER_NPM: ${{ needs.build-and-test.outputs.npm }}
+          DOCKER_NPM: ${{ needs.docker-toolchain.outputs.npm }}
         run: |
           npm install --global "npm@$DOCKER_NPM"
           { rustc --version; node --version; npm --version; } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -225,9 +296,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol --lib
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol,verified-capture --lib --examples
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check library availability and rendered theme transitions
+        shell: pwsh
+        run: |
+          npx --no-install playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run ui:capture -- tests/ui/library-scan.spec.mjs tests/ui/theme-contrast.spec.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   dependency-policy:

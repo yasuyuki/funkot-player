@@ -1,5 +1,3 @@
-//! Queue membership for one occurrence. Audio paths are not occurrence IDs.
-
 #[derive(Clone, Copy, Debug)]
 pub enum Event<I> {
     UserAdd(I),

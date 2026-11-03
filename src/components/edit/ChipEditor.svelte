@@ -1,7 +1,6 @@
 <script lang="ts">
   import { i18n } from "../../lib/i18n.svelte";
 
-  /// Shared intro/outro step set (legacy INTRO_STEPS / OUTRO_STEPS).
   const STEPS = [16, 32, 48, 64, 80];
 
   interface Props {
@@ -9,7 +8,6 @@
     current: number | null;
     manual: boolean;
     disabled?: boolean;
-    /// Called with the newly picked bar count. Parent runs `set_bars`.
     onPick: (value: number) => Promise<void>;
   }
 
@@ -21,8 +19,6 @@
     current === null || current === undefined ? null : Number(current),
   );
 
-  /// Current value is included even when it is outside the default steps
-  /// (legacy `chipValues`).
   let values = $derived.by(() => {
     const set = new Set(STEPS);
     if (cur !== null) set.add(cur);
@@ -34,7 +30,6 @@
   let hint = $derived(kind === "outro" ? t.outroHint : t.introHint);
 
   async function pick(v: number) {
-    // Re-tapping the current chip is a no-op (legacy).
     if (cur === v || busy || disabled) return;
     busy = true;
     try {

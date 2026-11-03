@@ -1,6 +1,5 @@
 import { installIpcForTesting, type TrackRow, type TrackTagsSnapshot, type TauriIpc } from "../../src/lib/tauri";
 
-// Synthetic identities only: these files never exist and no native IPC is used.
 const titles = ["Pulse", "Midnight on the coast — extended festival reconstruction with a very long title", "Dawn", "Afterglow", "帰り道のリミックス", "Last train"];
 const artists = ["DJ Example", "The extraordinarily long artist name featuring Another Imaginary Producer", "A", "Studio Example", "架空のアーティスト", "Guest"];
 const rows: TrackRow[] = titles.map((title, i) => ({
@@ -58,12 +57,12 @@ const replies: Record<string, unknown> = {
   get_allow_non_funkot: false, set_allow_non_funkot: true, get_labeling_mode: false,
   player_state: { phase: "idle", paused: false, now_playing: null, previous: null, last_transition: null, auditioning: false, audition_from: null, audition_to: null, position_secs: null, duration_secs: null, history_revision: 0, playback_started_frames: null },
   queue_state: { reserved: null, pending: [], in_flight: [], reserved_swappable: false, reserved_prepared: false, transition_in_secs: null, folder_pos: 0, folder_len: 0, source: { playlist_id: "night", generation: 2, revision: 4 }, catalog_revision: 4, playlist_store_status: "ready", playlist: { id: "night", name: "Night set with an intentionally very long name", revision: 4, run_id: 2, total: 5, ended: false, skipped: 0, rows: [{ entry_id: "a", path: rows[0].path, title: rows[0].title, artist: rows[0].artist, status: "prepared", reason: null }, { entry_id: "a-again", path: rows[0].path, title: rows[0].title, artist: rows[0].artist, status: "pending", reason: null }] } },
-  playlist_catalog: { revision: 4, active_id: "night", generation: 2, store_status: "ready", lists: [{ id: "night", name: "Night set with an intentionally very long name", revision: 4, total: 5, remaining: 2 }, { id: "empty", name: "Empty list", revision: 1, total: 0, remaining: 0 }] },
+  playlist_catalog: { revision: 4, active_id: "night", generation: 2, store_status: "ready", favorite_hashes: [], lists: [{ id: "favorites", name: "Favorites", revision: 1, total: 0, remaining: 0 }, { id: "night", name: "Night set with an intentionally very long name", revision: 4, total: 5, remaining: 2 }, { id: "empty", name: "Empty list", revision: 1, total: 0, remaining: 0 }] },
   playlist_command: { created_id: null, undo_id: "undo-1", added: 1, rejected: 0, skipped: 0 },
   playlist_entries: { id: "night", name: "Night set with an intentionally very long name", revision: 4, run_id: 2, total: 5, ended: false, skipped: 1, rows: [{ entry_id: "played", path: rows[1].path, title: rows[1].title, artist: rows[1].artist, status: "played", reason: null }, { entry_id: "current", path: rows[2].path, title: rows[2].title, artist: rows[2].artist, status: "current", reason: null }, { entry_id: "missing", path: rows[3].path, title: rows[3].title, artist: rows[3].artist, status: "missing", reason: "missing" }, { entry_id: "a", path: rows[0].path, title: rows[0].title, artist: rows[0].artist, status: "pending", reason: null }, { entry_id: "a-again", path: rows[0].path, title: rows[0].title, artist: rows[0].artist, status: "prepared", reason: null }] },
-  refresh_library: rows, list_track_tags: snapshot, list_new_arrivals: [], list_flagged_tracks: flaggedRows,
+  refresh_library: { rows, persistence_error: null }, list_track_tags: snapshot, list_new_arrivals: [], list_flagged_tracks: flaggedRows,
   set_bars: null, dismiss_flags: 1, undo_last_dismiss: null, audition_transition: null, audition_again: null,
-  list_play_history: { log: [], tracks: [], log_total: 0 },
+  list_play_history: { log: [], tracks: [], log_total: 0 }, poll_log: [],
 };
 const calls: Array<{ command: string; args: unknown }> = [];
 const delayed = new Set<string>();
@@ -82,7 +81,6 @@ const ipc: TauriIpc = {
   async invoke<T>(command: string, args?: unknown): Promise<T> {
     calls.push({ command, args: args === undefined ? undefined : JSON.parse(JSON.stringify(args)) });
     if (!Object.prototype.hasOwnProperty.call(replies, command)) {
-      // Fail visibly even when the production store catches the rejection.
       console.error(`Unsupported UI fixture command: ${command}`);
       throw new Error(`Unsupported UI fixture command: ${command}`);
     }
@@ -94,7 +92,7 @@ const ipc: TauriIpc = {
     });
     if (command === "set_bars") {
       const request = args as { path: string; introBars: number | null; outroStructureBars: number | null; markManual?: boolean };
-      const source = (replies.refresh_library as TrackRow[]).find((row) => row.path === request.path);
+      const source = (replies.refresh_library as { rows: TrackRow[] }).rows.find((row) => row.path === request.path);
       if (!source) throw new Error("fixture set_bars target missing");
       const updated = {
         ...source,
@@ -113,10 +111,10 @@ const ipc: TauriIpc = {
       return structuredClone(updated) as T;
     }
     if (command === "playlist_entries" && (args as { id?: string } | undefined)?.id === "empty") return structuredClone(replies.playlist_entries_empty ?? { id: "empty", name: "Empty list", revision: 1, run_id: 1, total: 0, ended: false, skipped: 0, rows: [] }) as T;
+    if (command === "playlist_entries" && (args as { id?: string } | undefined)?.id === "favorites") return structuredClone(replies.playlist_entries_favorites ?? { id: "favorites", name: "Favorites", revision: 1, run_id: 1, total: 0, ended: false, skipped: 0, rows: [] }) as T;
     return structuredClone(replies[command]) as T;
   },
   async listen() { return () => {}; },
 };
 installIpcForTesting(ipc);
-// App's singleton store starts IPC on import; install the seam first.
 await import("../../src/main");

@@ -1,5 +1,3 @@
-//! Pending entries remain members until user deletion or accepted playback.
-//! Reservations and rejection markers do not remove membership.
 //! Lock order is INDEX_LOCK, SAVE_LOCK, SESSION, queue, render. Loader
 //! observers run after releasing the queue lock; the audio callback never
 //! acquires this mutex.
@@ -12,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 use funkot_core::engine::TrackSource;
 
-/// How a track entered the playback queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueOrigin {
@@ -20,7 +17,6 @@ pub enum QueueOrigin {
     Automatic,
 }
 
-/// A queued path together with the policy that controls its priority.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueItem {
     #[serde(default = "new_entry_id")]
@@ -88,11 +84,8 @@ impl QueueState {
     }
 }
 
-/// Shared handle to the host-owned queue. Cheap to clone; every clone points
-/// at the same underlying [`QueueState`].
 pub type SharedQueue = Arc<Mutex<QueueState>>;
 
-/// A fresh, empty queue with nothing reserved.
 pub fn new_shared_queue() -> SharedQueue {
     Arc::new(Mutex::new(QueueState {
         pending: VecDeque::new(),
@@ -102,8 +95,6 @@ pub fn new_shared_queue() -> SharedQueue {
     }))
 }
 
-/// Append `path` to the tail of the pending queue. Returns the pending
-/// queue's length after the insert.
 pub fn enqueue(queue: &SharedQueue, path: PathBuf) -> usize {
     let mut q = queue.lock().unwrap();
     let at = q
@@ -152,8 +143,6 @@ pub(crate) fn mark_started(queue: &SharedQueue, item: &QueueItem) -> bool {
     true
 }
 
-/// Remove this exact queued occurrence after an effective non-Funkot verdict
-/// while the admission setting is off. Decode/cache failures never use this.
 pub(crate) fn remove_admission_disabled(queue: &SharedQueue, item: &QueueItem) -> bool {
     let mut q = queue.lock().unwrap();
     let Some(index) = q.pending.iter().position(|entry| entry.entry_id == item.entry_id) else { return false; };
@@ -175,7 +164,6 @@ pub(crate) fn block_reserved(queue: &SharedQueue, item: &QueueItem) -> bool {
     true
 }
 
-/// Restore persisted membership after old engine claims have been fenced.
 pub(crate) fn restore_all(queue: &SharedQueue, items: Vec<QueueItem>) {
     let mut q = queue.lock().unwrap();
     q.pending = items.into();
@@ -229,36 +217,17 @@ pub fn prepend_pending_filtered(
     n
 }
 
-/// An edit to pending membership, including reserved occurrences.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueEdit {
-    /// Move the item at `from` to `to` (both displayed-list indices).
     Move { from: usize, to: usize },
-    /// Remove the item at `index` (a displayed-list index).
     Remove { index: usize },
 }
 
-/// Why [`edit_displayed`] refused an edit. Machine-readable so the frontend
-/// can pick a message without parsing prose; kept in sync with the
-/// `reorder`/`dequeue` Tauri commands (`src-tauri/src/lib.rs`), which return
-/// [`EditError::as_str`] verbatim as their error string, and with
-/// `src/lib/tauri.ts`, which matches on those same strings. Changing the
-/// strings on one side without the other breaks that contract silently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditError {
-    /// The edit reached into the reserved slot, but `revoke` reported
-    /// nothing to take back — the engine already consumed it into a
-    /// transition, or (per the caller's `revoke`) an audition engine is
-    /// currently loaded. The queue is left exactly as it was.
     TooLate,
-    /// The path at the edit's subject index (`Move::from` / `Remove::index`)
-    /// no longer matches `expect`: the caller's view of the list is older
-    /// than what is here now. The queue is left exactly as it was.
     Stale,
-    /// An index in the edit is outside the displayed list's current bounds.
-    /// The queue is left exactly as it was.
     OutOfRange,
-    /// A move attempted to cross the manual/automatic priority boundary.
     OriginBoundary,
 }
 
@@ -301,7 +270,6 @@ pub fn edit_displayed(
     let affected: Vec<_> = (subject.min(end)..=subject.max(end))
         .filter_map(|i| q.reservations.contains(&q.pending[i].entry_id).then(|| q.pending[i].clone())).collect();
     if !affected.is_empty() {
-        // This compatibility entry point can revoke only one prepared slot.
         if affected.len() != 1 || revoke().as_ref() != Some(&affected[0].path) { return Err(EditError::TooLate); }
         q.cancel(&affected[0].entry_id);
     }
@@ -320,12 +288,10 @@ pub fn edit_displayed(
     Ok(())
 }
 
-/// Snapshot of the pending queue's current contents, for `state()`.
 pub fn snapshot(queue: &SharedQueue) -> Vec<QueueItem> {
     queue.lock().unwrap().pending.iter().cloned().collect()
 }
 
-/// Pending owns every row; reservation metadata must not duplicate it.
 pub fn state_snapshot(queue: &SharedQueue) -> (Option<QueueItem>, Vec<QueueItem>) {
     (None, pending_snapshot(queue))
 }
@@ -350,33 +316,18 @@ pub fn prioritize_manual(queue: &SharedQueue, revoke: impl FnOnce() -> Option<Pa
     Some(item)
 }
 
-/// What to play once the host-managed pending queue runs dry.
 pub enum DrainPolicy {
-    /// BGM use case: keep cycling through the source folder's tracks in
-    /// order, wrapping back to the start once the end is reached.
     ContinueFolder { tracks: Vec<PathBuf>, pos: usize },
 }
 
 pub type PendingObserver = Box<dyn FnMut(&[QueueItem]) + Send>;
 
-/// Called with the track [`HostSource::next`] is about to hand back, every
-/// time it is called, regardless of whether the track came from the pending
-/// queue or the folder-drain fallback. See [`HostSource::on_reserved`].
 pub type ReservedObserver = Box<dyn FnMut(&QueueItem) + Send>;
 
 pub type FolderPosObserver = Box<dyn FnMut(usize) + Send>;
 
-/// Called for each folder-drain candidate; return `true` to skip that path
-/// and try the next. See [`HostSource::skip_folder_entry`].
 pub type FolderSkip = Box<dyn FnMut(&Path) -> bool + Send>;
 
-/// `TrackSource` backed by a [`SharedQueue`] instead of a fixed playlist, so a
-/// host can append/reorder/remove tracks while the engine is already running.
-///
-/// `index` handed back to the engine (and echoed verbatim in
-/// [`funkot_core::engine::EngineEvent::TrackStarted`]) is just this source's
-/// own call count; nothing outside this module currently depends on its
-/// values being contiguous or matching queue positions.
 pub struct HostSource {
     queue: SharedQueue,
     policy: DrainPolicy,
@@ -400,16 +351,11 @@ impl HostSource {
         }
     }
 
-    /// Skip folder-drain candidates for which `skip` returns `true` (e.g.
-    /// analysed non-Funkot while the gate is on). Pending-queue entries are
-    /// never filtered. If every folder entry is skipped in one full cycle,
-    /// [`TrackSource::next`] returns `None` (exhausted).
     pub fn skip_folder_entry(mut self, skip: FolderSkip) -> Self {
         self.folder_skip = Some(skip);
         self
     }
 
-    /// Notify the host after automatic fill changes pending membership.
     pub fn on_pending_consumed(mut self, observer: PendingObserver) -> Self {
         self.on_pending_consumed = Some(observer);
         self
@@ -428,8 +374,6 @@ impl HostSource {
 
 impl TrackSource for HostSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
-        // Take the skip callback out so `pick_folder_track` can borrow
-        // `self.policy` and the callback at the same time.
         let mut folder_skip = self.folder_skip.take();
         let result = self.next_with_skip(&mut folder_skip);
         self.folder_skip = folder_skip;
@@ -464,12 +408,11 @@ impl HostSource {
             }
             let mut q = self.queue.lock().unwrap();
             if q.usable().is_some() { continue; }
-            // Rejection may have arrived while the folder predicate ran.
             if q.pending.iter().any(|item| item.path == path && q.blocked.contains(&item.entry_id)) { continue; }
             let item = QueueItem::automatic(path);
             if !transition(item.entry_id.as_str(), false, Event::AutomaticFill {
                 entry: item.entry_id.as_str(), source_request: true, unreserved_usable: false,
-                admitted: true, // pick_folder_track already applied the folder predicate
+                admitted: true,
             }).present { return None; }
             q.pending.push_back(item.clone());
             q.reservations.insert(item.entry_id.clone());
@@ -490,9 +433,6 @@ impl HostSource {
         Some((index, item.path))
     }
 
-    /// Next folder-drain path that `folder_skip` does not reject, advancing
-    /// `pos` for every considered entry (skipped or not). `None` when the
-    /// folder list is empty or every entry is skipped in one full cycle.
     fn pick_folder_track(
         policy: &mut DrainPolicy,
         folder_skip: &mut Option<FolderSkip>,
@@ -501,11 +441,6 @@ impl HostSource {
         if tracks.is_empty() {
             return None;
         }
-        // Wrap before indexing, not just after: `pos` is a public
-        // field, so a caller can hand us one that is already past
-        // the end. Panicking here would kill the loader thread and
-        // stop playback with no way back (see the module docs on
-        // the `loader_exhausted` latch).
         if *pos >= tracks.len() {
             *pos = 0;
         }
@@ -588,7 +523,6 @@ mod tests {
         let mut source = HostSource::new(Arc::clone(&q), folder_policy(&["f1"]))
             .skip_folder_entry(Box::new(|_| true));
         assert_eq!(source.next(), Some((0, p("pending-non-funkot"))));
-        // Folder has only skippable entries left → exhausted.
         assert_eq!(source.next(), None);
     }
 
@@ -599,7 +533,6 @@ mod tests {
         assert_eq!(source.next(), Some((0, p("f1"))));
         enqueue(&q, p("priority"));
         assert_eq!(source.next(), Some((1, p("priority"))));
-        // Folder resumes from where it left off (f2), not from the start.
         assert_eq!(source.next(), Some((2, p("f2"))));
         assert_eq!(source.next(), Some((3, p("f3"))));
     }

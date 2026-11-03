@@ -1,11 +1,4 @@
 #!/bin/sh
-# Persistent adb server for wireless debugging.
-#
-# ADB=1 ./dev.sh (and other host-network clients) talk to this container's
-# server on port 5037, so `adb connect` survives across invocations.
-#
-# Usage:
-#   ./scripts/adb-server.sh start|stop|status|restart
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -66,7 +59,6 @@ create_or_start() {
         docker start "$NAME" >/dev/null
         return 0
     fi
-    # Parallel cold starts can race on --name; if create loses, start the winner.
     if ! docker run -d --name "$NAME" \
         --network host \
         -v "$ANDROID_HOME_VOL":/root/.android \
@@ -102,7 +94,6 @@ do_stop() {
 do_status() {
     if container_running; then
         echo "Running"
-        # Server already holds 5037, so this client will not spawn another.
         docker run --rm --network host \
             -v "$ANDROID_HOME_VOL":/root/.android \
             "$IMAGE" adb devices -l || true

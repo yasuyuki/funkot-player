@@ -1,12 +1,4 @@
 <script lang="ts">
-  // The row menu: pick Funkot or 非Funkot for one track, from wherever the
-  // track is listed. Opened by right-click or long press (`createLongPress`
-  // in the panes), so it is drawn at the pointer rather than under a button.
-  //
-  // What it writes is the *human* label — the same `set_label` the now-playing
-  // badge and the edit pane's label column write, with the same undo toast.
-  // The label also moves `is_funkot`, which is what greys a library row out
-  // and what the non-Funkot gate reads, so the answer is visible immediately.
   import { untrack } from "svelte";
   import { store } from "../lib/state.svelte";
   import { toast } from "../lib/toast.svelte";
@@ -38,12 +30,7 @@
   let title = $derived(explicitTitle ?? (path ? store.titleForPath(path) : ""));
   let busy = $state(false);
   let menuEl = $state<HTMLDivElement | null>(null);
-  /// Null until the popup has been measured — its size depends on the track
-  /// title, so where it fits cannot be worked out before it is in the DOM.
-  /// Hidden rather than mispositioned for that one frame.
   let pos = $state<{ left: number; top: number } | null>(null);
-  // Capture before this popup covers the source row. Its menu item is removed
-  // on opening the editor and cannot be the focus-return target.
   const sourceElement = untrack(() => document.elementFromPoint(at.x, at.y)?.closest<HTMLElement>("li")
     ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null));
   function editTags() {
@@ -81,8 +68,6 @@
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onclose();
     };
-    // Fixed to the viewport: after a scroll it would be hanging over an
-    // unrelated row, still holding the first row's path.
     const onScroll = () => onclose();
     document.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("keydown", onKey);
@@ -97,7 +82,6 @@
   async function pick(verdict: boolean) {
     if (busy || !path) return;
     busy = true;
-    // Read before the await: `row` follows the store, which this call moves.
     const previous = row?.label ?? null;
     try {
       const updated = await store.doSetLabel(path, verdict);
@@ -144,8 +128,6 @@
   style:top={`${pos?.top ?? at.y}px`}
   style:visibility={pos === null ? "hidden" : "visible"}
 >
-  <!-- Which track this is about. The menu covers whatever it is drawn over,
-       including the row it came from. -->
   <p class="for">{title}</p>
   {#if path}
     <button type="button" role="menuitem" disabled={busy || !tagReady} title={!tagReady ? t.tagIdentityUnavailable : undefined} onclick={editTags}>{t.tagEdit}</button>
@@ -200,8 +182,6 @@
 </div>
 
 <style>
-  /* Fixed, not absolute: the coordinates come from a pointer event, and the
-     panes it is opened from are inside the centred `#app` column. */
   .menu {
     position: fixed;
     z-index: 20;
@@ -225,8 +205,6 @@
     text-overflow: ellipsis;
   }
 
-  /* Same item shape as OverflowMenu's, including the `:active` fill that
-     stands in for tokens.css's brightness filter on a transparent button. */
   .menu button {
     display: flex;
     align-items: center;
@@ -240,7 +218,6 @@
     background: var(--color-transport-secondary-bg);
   }
 
-  /* Fixed width so both items' text starts at the same place, ticked or not. */
   .tick {
     flex: 0 0 auto;
     width: 1rem;

@@ -1,19 +1,5 @@
-// Host codes → catalogue text.
-//
-// These live here rather than in the components because more than one screen
-// asks the same question: `set_music_dir` errors are surfaced by both the
-// library empty state and the ⋮ menu, and a flagged row's role is shown in
-// both the list and the detail. Two copies of a switch like this is how one
-// of them ends up untranslated.
-//
-// Each takes the catalogue explicitly instead of reaching for `i18n`, so this
-// stays a plain `.ts` (no runes) and the mapping can be tested on its own.
 import type { Messages } from "./locales/en";
 
-/// `set_music_dir` rejection code → toast text. The codes are the contract
-/// documented on `set_music_dir` in `src-tauri/src/lib.rs` and mirrored in
-/// `src/lib/tauri.ts`; an unknown one falls through to the generic message
-/// rather than showing the raw code.
 export function musicDirErrorMessage(t: Messages, code: string): string {
   switch (code) {
     case "not_absolute":
@@ -33,7 +19,6 @@ export function musicDirErrorMessage(t: Messages, code: string): string {
   }
 }
 
-/// `queue::EditError` code (`reorder` / `dequeue`) → toast text.
 export function queueErrorMessage(t: Messages, code: string): string {
   switch (code) {
     case "too_late":
@@ -49,13 +34,6 @@ export function queueErrorMessage(t: Messages, code: string): string {
   }
 }
 
-///
-/// The two ways a path can fail mean different things, so they are reported
-/// separately rather than as one "some were not added": `skipped` is "already
-/// coming up", which is fine, while `rejected` means the app refused the
-/// track. A rejection should normally be impossible — the checkbox is
-/// disabled for gated rows — so seeing one means analysis finished between
-/// render and tap, and saying so beats staying silent.
 export function enqueueManyMessage(
   t: Messages,
   result: { added: number; rejected: number; skipped: number },
@@ -67,9 +45,6 @@ export function enqueueManyMessage(
   return notes.length === 0 ? added : `${added}${t.enqueueManyNotes(notes.join(t.listSeparator))}`;
 }
 
-/// `PlayerState.phase` → badge text. An unrecognised phase shows as-is: it
-/// can only come from a host newer than this bundle, and the raw
-/// discriminant is more useful to whoever is looking than a blank badge.
 export function phaseLabel(t: Messages, phase: string): string {
   switch (phase) {
     case "idle":
@@ -91,16 +66,10 @@ export function phaseLabel(t: Messages, phase: string): string {
   }
 }
 
-/// `FlaggedTrackRow.role` → text. Anything that is not `"outgoing"` reads as
-/// incoming, matching `aggregate_flags`, which only ever emits the two.
 export function roleLabel(t: Messages, role: string): string {
   return role === "outgoing" ? t.roleOutgoing : t.roleIncoming;
 }
 
-/// Title for a flagged row or partner. The host sends an empty title with
-/// `missing: true` for a track that has left the library (see
-/// `MISSING_TITLE` in `src-tauri/src/store.rs`); the stand-in wording is
-/// here so it is translated like everything else.
 export function flaggedTitle(t: Messages, title: string, missing: boolean): string {
   return missing && !title ? t.missingTrack : title;
 }

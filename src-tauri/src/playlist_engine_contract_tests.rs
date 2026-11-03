@@ -36,8 +36,6 @@ fn adopted_core_drops_finite_source_on_none_and_cannot_observe_late_append() {
         queue: pending.clone(), calls: tx,
     })).unwrap();
     assert!(!rx.recv_timeout(Duration::from_secs(5)).unwrap());
-    // Disconnection proves the source/loader ended; this is not a timing-based
-    // assertion that a slow decoder failed to call us soon enough.
     assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Err(mpsc::RecvTimeoutError::Disconnected)));
     pending.lock().unwrap().push_back((1, PathBuf::from("late.wav")));
     let mut out = [0.0; 128];

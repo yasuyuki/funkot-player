@@ -11,14 +11,6 @@
   let lines = $state<string[]>([]);
   let arrivalsInspect = $derived(store.arrivalsInspect);
 
-  // This poll loop is owned by this component, not `state.svelte.ts`: the
-  // log is diagnostic output, not playback state, and unlike `player_state`
-  // there is no reason to keep fetching it while nobody has the panel open.
-  // Self-rescheduling `setTimeout`, same reasoning as the store's own poll
-  // loop (see its doc comment): an in-flight `poll_log` must not get a
-  // second one stacked on top of it, and the effect's cleanup must be able
-  // to stop it for good rather than leaking a timer past `logOpen` going
-  // false.
   $effect(() => {
     if (!ui.logOpen) return;
     let cancelled = false;
@@ -42,11 +34,6 @@
     };
   });
 
-  // Closing the log acknowledges whatever error is in it. Without this
-  // `lastError` is never cleared -- nothing assigns null to it -- so one
-  // transient invoke failure would leave NowCard's show-log link up
-  // forever, long after polling recovered. Cleared on close rather than on
-  // open so the error is still readable while the panel is up.
   function onClose() {
     ui.logOpen = false;
     store.lastError = null;
@@ -60,12 +47,6 @@
       <button type="button" class="close" onclick={onClose}>{t.close}</button>
     </div>
     {#if store.dirs}
-      <!-- Same paths legacy/index.html printed at startup -- lets a tester
-           confirm the app is reading/writing where they expect. On Android
-           this is also the only place the music folder's path appears (the
-           ⋮ menu has no "open" item there), and it is what someone about to
-           copy files over MTP needs to read, hence spelled-out labels rather
-           than the bare `music:` / `cache:` keys. -->
       <div class="dirs">
         <div>{t.musicFolderLabel}: {store.dirs.music_dir}</div>
         <div>{t.cacheLabel}: {store.dirs.cache_dir}</div>
@@ -118,9 +99,6 @@
     font-size: var(--font-size-sm);
     color: var(--color-text-dim);
     margin-bottom: var(--space-sm);
-    /* The Android music path is one long unbroken token and runs off the
-       right edge without this -- the page body must never scroll
-       sideways. */
     overflow-wrap: anywhere;
   }
   .error {

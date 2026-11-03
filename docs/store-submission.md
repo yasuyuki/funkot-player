@@ -269,7 +269,7 @@ intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
 ```
 
-**このバージョンの新機能（0.9.0）:**
+**このバージョンの新機能（0.9.1）:**
 ```text
 「次の曲」のつなぎを改善し、拍を合わせられる位置を探してから切り替えるようにしました。非Funkotの再生をオフにすると、判定済みの非Funkot曲を再生待ちから除きます。再生待ちの自動補充とボタンのマウスオーバー表示も改善しました。
 ```
@@ -317,7 +317,7 @@ Adjust intro / outro
 Flag a bad transition and keep a feedback ZIP
 ```
 
-**What's new in this version (0.9.0):**
+**What's new in this version (0.9.1):**
 ```text
 Next track now searches for a suitable beat-aligned transition point before switching. Turning off non-Funkot playback removes identified non-Funkot tracks from the queue. Automatic queue refill and button hover states have also been improved.
 ```
@@ -365,7 +365,7 @@ Sesuaikan intro / outro
 Tandai transisi yang tidak pas dan simpan ZIP masukan
 ```
 
-**Yang baru di versi ini (0.9.0):**
+**Yang baru di versi ini (0.9.1):**
 ```text
 Tombol Lagu berikutnya kini mencari titik transisi yang sesuai dengan ketukan sebelum beralih. Saat pemutaran lagu non-Funkot dimatikan, lagu yang telah teridentifikasi sebagai non-Funkot dihapus dari antrean. Pengisian antrean otomatis dan tampilan tombol saat kursor diarahkan juga diperbaiki.
 ```

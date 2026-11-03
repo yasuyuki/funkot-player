@@ -1,21 +1,4 @@
 #!/bin/sh
-# Check that documentation citations still point at something real.
-#
-# Line numbers rot: a `lib.rs:2394` that was true when written becomes a lie
-# that later phases copy. Symbol citations (`symbol`（`path`）) rot when the
-# symbol is renamed or the file moves. Either way the document keeps looking
-# authoritative while teaching the wrong place to look.
-#
-# CI runs this on every push (.github/workflows/checks.yml). It needs nothing
-# but a POSIX shell -- no Docker, no toolchain, no sibling checkout. Keep it
-# that way. Sibling-repo paths are deferred and counted, never silently skipped.
-#
-# POLICY: when a doc claim turns out to be rotten and has already spread a
-# false pointer into later phases, do not just fix the prose -- add a check
-# here that would have caught it. A rule that lives only in a comment gets
-# skipped by the next person who writes a phase file; one that lives here
-# cannot be. New checks go in as a `check_*` function, called from the list
-# at the bottom.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -26,10 +9,6 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 status=0
 
-# Directories whose Markdown makes claims about the code. A phase document is
-# deleted once its acceptance condition passes, so .claude/plan-phases is empty
-# -- or absent -- whenever nothing is open; probe each directory instead of
-# handing a missing path to find under `set -e`.
 DOC_CLAIM_DIRS="docs .claude/plan-phases"
 
 collect_md_files() {
@@ -41,21 +20,15 @@ collect_md_files() {
     sort -o "$TMP/md_files" "$TMP/md_files"
 }
 
-# Detection is extension:[digits]; the path stem is included so -o reports the
-# full citation (lib.rs:2394), not a bare .rs:2394.
 LINE_CITE_RE='[[:alnum:]_./-]*(\.gitignore|\.(rs|ts|svelte|toml|sh|py|json|md)):[0-9]+'
 FILE_PATH_RE='(\.gitignore|\.(rs|ts|svelte|toml|sh|py|json|md))(:[0-9].*)?$'
-# Separators are :: (Rust path) or . (field); lead examples include both.
 SYMBOL_IDENT_RE='^[A-Za-z_][A-Za-z0-9_]*((::|\.)[A-Za-z_][A-Za-z0-9_]*)*[!]?$'
 SYMBOL_FILE_RE='^[A-Za-z0-9_.-]+\.(rs|ts|svelte|toml|sh|py|json|md)$'
 
-# path:NNN / path:NNN-MMM citations. Line numbers are a rotting field; banning
-# them is the fix (see doc-claim-checks README).
 check_no_line_citations() {
     failed=0
     collect_md_files
     while IFS= read -r f; do
-        # grep exits 1 on no match under set -e; keep going.
         grep -nEo "$LINE_CITE_RE" "$f" > "$TMP/hits" 2>/dev/null || true
         while IFS= read -r hit; do
             [ -n "$hit" ] || continue
@@ -83,8 +56,6 @@ is_resolvable_symbol() {
     return 1
 }
 
-# Resolve path to an absolute file. Prints the path on success.
-# Exit 0 = found, 1 = missing (FAIL), 2 = sibling dir absent (defer).
 resolve_citation_file() {
     path=$1
     case "$path" in
@@ -138,8 +109,6 @@ resolve_citation_file() {
     esac
 }
 
-# Collect `A` / `B` / `C` sharing one （`path`）. Writes symbols to $TMP/syms,
-# one per line; last symbol is the one glued to （`path`）.
 collect_chain_symbols() {
     match=$1
     line=$2
@@ -161,8 +130,6 @@ collect_chain_symbols() {
     printf '%s\n' "$last" >> "$TMP/syms"
 }
 
-# `symbol`（`path`） citations: path exists and contains symbol. Citations whose
-# symbol form cannot be extracted are reported as unchecked.
 check_symbols_resolve() {
     failed=0
     deferred=0
@@ -171,7 +138,6 @@ check_symbols_resolve() {
         lineno=0
         while IFS= read -r line || [ -n "$line" ]; do
             lineno=$((lineno + 1))
-            # Fullwidth paren U+FF08 / U+FF09.
             printf '%s\n' "$line" | grep -o '`[^`]*`（`[^`]*`）' > "$TMP/cites" 2>/dev/null || true
             while IFS= read -r cite; do
                 [ -n "$cite" ] || continue
@@ -215,10 +181,6 @@ check_symbols_resolve() {
     [ "$failed" = 0 ]
 }
 
-# Partner Center "what's new" paste blocks. The Store listing is a Windows
-# audience; Android-only notes belong in the GitHub Release body (which ships
-# the APK). Headings must include the version so the F-5 audience rule, which
-# names Android on purpose, is not scanned.
 check_store_whats_new_is_windows_audience() {
     f=docs/store-submission.md
     if [ ! -f "$f" ]; then

@@ -37,7 +37,6 @@ KEY_ALIAS=$(sed -n 's/^keyAlias=//p' "$PROPS")
 
 PASS=${BACKUP_PASS:-$STORE_PASS}
 STAMP=$(date +%Y%m%d)
-# Outside the git repo by default: sibling of the project directory.
 OUT=${OUT:-"$REPO/../funkot-player-signing-backup-$STAMP.7z"}
 
 STAGE=$(mktemp -d)
@@ -92,10 +91,8 @@ archive off the build machine (password manager attachment, encrypted USB, etc.)
 EOF
 
 # -mhe=on encrypts the header (file names) as well as contents.
-# -sdel is NOT used; we delete the stage via trap.
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
-# 7z reads password from -p; do not echo it.
 7z a -t7z -m0=lzma2 -mx=9 -mhe=on -p"$PASS" "$OUT" "$PKG" >/dev/null
 
 chmod 600 "$OUT"

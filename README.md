@@ -250,8 +250,8 @@ the owner builds and the APK comes back through a drop directory:
 ```sh
 ./scripts/android-signed-release.sh plan       # next=prepare|build|reuse
 ./scripts/android-signed-release.sh prepare    # this tree, when plan says prepare
-# then the one-liner it prints, as the owner (sync + signed build + install)
-./scripts/android-signed-release.sh install    # if the phone was not on adb yet
+# then the one-liner it prints, as the owner (sync + signed build + handoff)
+./scripts/android-signed-release.sh install    # explicit, separately authorized device update
 ```
 
 `plan` reads `FUNKOT_OWNER_PLAYER` or `owner.path` in the handoff directory.

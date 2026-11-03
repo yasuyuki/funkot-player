@@ -1,14 +1,8 @@
-# Build container for funkot-player: Rust + Android NDK/SDK + Node.
-#
-# Everything the Android build needs lives in here so the host stays clean.
-# Prefer ./dev.sh over calling docker directly.
 FROM rust:1.93-slim-trixie
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # C++ toolchain and libclang for signalsmith-stretch (cc + bindgen)
     g++ \
     libclang-dev \
-    # ALSA for cpal when building the desktop target
     pkg-config \
     libasound2-dev \
     openjdk-21-jdk-headless nodejs npm python3 \
@@ -17,7 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 
-# --- Android NDK ---------------------------------------------------------
 ARG NDK_VERSION=r27c
 RUN curl -fsSL -o /tmp/ndk.zip \
       "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" \
@@ -42,7 +35,6 @@ ENV BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$NDK_SYSROOT"
 # would override anything set at this level. The alignment flag is emitted from
 # src-tauri/build.rs instead, which is additive.
 
-# --- Android SDK ---------------------------------------------------------
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 
@@ -55,36 +47,18 @@ RUN mkdir -p "$ANDROID_HOME/cmdline-tools" \
 
 ENV PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 
-# Tauri's generated Gradle project targets compileSdk/targetSdk 36.
 RUN yes | sdkmanager --licenses >/dev/null \
  && sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null
 
-# clippy is not bundled with the slim rustup default profile; add it so
-# `cargo clippy` has somewhere to run instead of failing with
-# "'cargo-clippy' is not installed for the toolchain".
 RUN rustup component add clippy
 RUN rustup target add aarch64-linux-android
 
-# --- Host target ---------------------------------------------------------
-# What Tauri needs to build for Linux itself, as opposed to cross-compiling to
-# Android. Without these the crate cannot be built for the host at all, which
-# means `cargo test` has nowhere to run: the unit tests in src/queue.rs and
-# src/store.rs live inside the lib crate, so linking them pulls in all of Tauri
-# even though neither module touches it.
-#
-# Kept as its own layer, after the Android SDK/NDK rather than merged into the
-# apt-get at the top, so that touching this list does not invalidate those and
-# re-download ~1 GB of toolchain.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libwebkit2gtk-4.1-dev \
     libgtk-3-dev \
     librsvg2-dev \
     libxdo-dev \
     libssl-dev \
-    # Running the desktop build (GUI=1 ./dev.sh, see dev.sh): cpal speaks ALSA
-    # on Linux and there is no sound card in the container, so the pulse plugin
-    # below forwards to WSLg's PulseAudio. xdotool and imagemagick are how the
-    # window gets driven and captured from a second container.
     libasound2-plugins \
     pulseaudio-utils \
     xdotool \
@@ -93,9 +67,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # zenity. The portal is not in this container; without zenity the
     # dialog never appears and the UI only toasts 「変更しませんでした」.
     zenity \
-    # The UI's text is Japanese. Android ships CJK fonts; this container did
-    # not, so every label came out as tofu and a desktop screenshot could not
-    # be read.
     fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 

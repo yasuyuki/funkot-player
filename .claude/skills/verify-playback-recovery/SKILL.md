@@ -12,14 +12,14 @@ durable current identity or silently select one of two divergent saved queues.
 
 ## Coverage record
 
-`sync_commit` is `b927829bc4ffd04424367e5bb67eb50a1d78a586`.
+`sync_commit` is `c702f87024049cf65d9aa5baddac552056669b33`.
 
 `source_sha256` is
 `5665267d99787f396f81fde8022ee4935c63d5ee2c16f542a1475e413033d3b8` for
 `src-tauri/src/playback_recovery.rs` at that commit.
 
 `playback_state_sha256` is
-`b0875b44ec7d8cb7fc0321d79fb05529828068ea665708f6a150d62c82ff5056` for
+`821f06bc47955de7f22ae0d3f7718b684853743b683ee4c49854174c0463692f` for
 `src-tauri/src/playback_state.rs` at that commit.
 
 Production `playback_state.rs` calls `classify_legacy_normal` while reading

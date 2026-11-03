@@ -1,8 +1,3 @@
-//! Manual track tags kept separately from disposable analysis metadata.
-//!
-//! The store is deliberately the only read-modify-write owner of
-//! `track-tags.json`.  It never touches audio files or the analysis cache.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -88,7 +83,6 @@ pub enum StoreError { ReadOnly(LoadState), Conflict, Busy, InvalidPatch, Io(Stri
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct TrackTagPatch {
-    /// `None` is intentionally different from `Some(YearState::Auto)`.
     pub year_change: Option<YearState>,
     pub add: Vec<Tag>,
     pub remove: Vec<Tag>,
@@ -109,8 +103,6 @@ pub enum TagOrigin { Embedded, Manual, Both }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveTag { pub tag: Tag, pub origin: TagOrigin }
 
-/// Resolves the effective tag set without I/O. Embedded values come from the
-/// metadata index; manual values never need to be copied into that index.
 pub fn effective_tags(auto: &[Tag], manual: &TrackManualState) -> Vec<EffectiveTag> {
     let suppressed: BTreeSet<_> = manual.suppressed_auto_tags.iter().map(Tag::key).collect();
     let mut tags: BTreeMap<TagKey, EffectiveTag> = BTreeMap::new();
@@ -154,8 +146,6 @@ impl TrackTagsStore {
         Ok(snapshot_of(doc))
     }
 
-    /// Explicitly re-read after a conflict. Normal listing stays memory-only;
-    /// callers choose this refresh rather than silently replaying stale input.
     pub fn reload(&self) -> Result<Snapshot, StoreError> {
         let mut state = self.state.lock().expect("track tag state mutex poisoned");
         match read_document(&self.dir) {
@@ -183,8 +173,6 @@ impl TrackTagsStore {
         self.apply_patch_with_auto(hashes, expected_revision, patch, &BTreeMap::new())
     }
 
-    /// Validates the result against a caller-owned point-in-time embedded-tag
-    /// map. Automatic values are never retained or persisted by this module.
     pub fn apply_patch_with_auto(&self, hashes: &[String], expected_revision: &str, patch: &TrackTagPatch, auto_by_hash: &BTreeMap<String, Vec<Tag>>) -> Result<ApplyResult, StoreError> {
         validate_patch(patch)?;
         if hashes.iter().any(String::is_empty) { return Err(StoreError::InvalidPatch); }
@@ -215,8 +203,6 @@ impl TrackTagsStore {
         Ok(ApplyResult { changed, no_op: hashes.len() - changed, revision })
     }
 
-    /// Returns a clone of one manual record. Absence is `year:auto` and no
-    /// tag changes; callers never receive a mutable view of store state.
     pub fn record(&self, hash: &str) -> Result<TrackManualState, StoreError> {
         let state = self.state.lock().expect("track tag state mutex poisoned");
         let StoreState::Ready { document: doc, .. } = &*state else { return Err(read_only_error(&state)); };
@@ -373,7 +359,7 @@ mod tests {
         assert_eq!(s.snapshot().unwrap(), before);
         let r = s.apply_patch(&["a".into(), "b".into()], &before.revision, &TrackTagPatch::default()).unwrap();
         assert_eq!((r.changed, r.no_op), (0, 2)); assert_eq!(r.revision, before.revision);
-        assert_eq!(SUCCESSFUL_PERSISTS.with(Cell::get), 1); // Invalid/no-op requests did not save again.
+        assert_eq!(SUCCESSFUL_PERSISTS.with(Cell::get), 1);
         eprintln!("tag-store batch: unique_hashes=2 successful_json_replacements=1 invalid_and_noop_additional_saves=0");
     }
 

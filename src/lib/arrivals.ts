@@ -1,9 +1,5 @@
-// Pure new-arrival helpers (no Svelte). Gate matches library rows:
-// `analyzed && !is_funkot && !allowNonFunkot` → excluded. Unanalysed rows
-// pass (TrackRow.is_funkot is true until analysis finishes).
 import type { NewArrival, TrackRow } from "./tauri";
 
-/// Badge / "new only" filter — gate-independent.
 export function arrivalPathSet(arrivals: NewArrival[]): Set<string> {
   return new Set(arrivals.map((a) => a.path));
 }
@@ -17,7 +13,6 @@ function passesGate(
   return true;
 }
 
-/// Gate-applied arrivals (still includes now-playing / queue members).
 export function gatedArrivals(
   arrivals: NewArrival[],
   library: ReadonlyMap<string, TrackRow>,
@@ -26,13 +21,6 @@ export function gatedArrivals(
   return arrivals.filter((a) => passesGate(library.get(a.path), allowNonFunkot));
 }
 
-/// Banner count: gated, then drop everything already playing or queued.
-///
-/// `inFlight` is the stable record of everything handed to the engine, while
-/// `reserved` closes the short gap between the loader updating the queue slot
-/// and persisting that hand-off. When the active source is a playlist,
-/// `activePlaylistPaths` also excludes its unstarted and prepared occurrences;
-/// another playlist never supplies this list.
 export function actionableArrivals(
   arrivals: NewArrival[],
   library: ReadonlyMap<string, TrackRow>,
@@ -56,12 +44,6 @@ export function actionableArrivals(
 
 export type RefreshAttempt = "success" | "busy" | "error" | "stale";
 
-/**
- * Auto-refresh owed. Busy / error / stale keep `owed`. Success clears only
- * when this attempt started as the owed consumer (`consume`) and the owed
- * epoch did not bump mid-walk (a newer music-dir / import / startup mark).
- * Manual ⋮ success therefore cannot erase a concurrent owed.
- */
 export function nextLibraryRefreshOwed(
   owed: boolean,
   attempt: RefreshAttempt,
@@ -79,7 +61,6 @@ export type ArrivalsPullApply =
   | { apply: true; processedRevision: number }
   | { apply: false };
 
-/** Stale gen or failure → do not apply / do not advance revision. */
 export function arrivalsPullDecision(
   responseGen: number,
   currentGen: number,

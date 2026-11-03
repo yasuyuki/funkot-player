@@ -27,12 +27,6 @@
 
   let musicDirNeeded = $derived(!!store.dirs?.music_dir_needed);
   let musicDirConfigurable = $derived(!!store.dirs?.music_dir_configurable);
-  // Labeling mode is fixed at engine construction (no live switch — see
-  // `EngineOptions::head_only_secs`), so a toggle only takes effect the next
-  // time ▶ is pressed (`doStart`), not merely "while a session happens to be
-  // running" -- a session already running WITH the current setting must not
-  // show this. Compare against `activeLabelingMode` (captured at the running
-  // session's own `doStart`), not just `sessionActive`.
   let labelingModePending = $derived(
     sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false) &&
       store.activeLabelingMode !== null &&
@@ -63,7 +57,6 @@
     ui.menuOpen = false;
     try {
       const result = await store.doRefreshLibrary();
-      // Check `ok` first so the busy/error arms narrow cleanly (both are `ok: false`).
       if (result.ok) {
         toast.notify(t.scanFound(result.count));
       } else if ("busy" in result) {
@@ -82,9 +75,6 @@
     ui.menuOpen = false;
     try {
       const path = await openMusicDir();
-      // The file manager is already up by now; the toast rides on top of it
-      // so Windows Store users can confirm where files go. Desktop only —
-      // see the guard on the menu item.
       toast.notify(path);
     } catch (err) {
       toast.notify(String(err));
@@ -216,9 +206,6 @@
     }
   }
 
-  // Mirrors legacy/index.html's menu: a click anywhere in the document
-  // closes it, and a click inside the menu itself must not (stopPropagation
-  // there stops it from bubbling up to this listener).
   $effect(() => {
     if (!ui.menuOpen) return;
     const onDocClick = () => {
@@ -242,9 +229,6 @@
 <div class="overflow">
   <button type="button" class="menu-btn" bind:this={menuButton} aria-label="menu" aria-expanded={ui.menuOpen} onclick={toggleMenu}>⋮</button>
   {#if ui.menuOpen}
-    <!-- Not a keyboard-interactive element itself -- it only exists to stop
-         a tap inside the menu from bubbling to the document listener below
-         that closes it; every actual action here is one of its buttons. -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="menu" onclick={(event) => event.stopPropagation()}>
@@ -267,10 +251,6 @@
       <button class="menu-item" type="button" onclick={onToggleAllowNonFunkot} disabled={allowNonFunkotBusy}>
         {t.allowNonFunkotItem(store.allowNonFunkot)}
       </button>
-      <!-- Desktop only, same platform test as the folder items above: labeling
-           mode prefetches a dozen stretched head buffers at once (~115 MB), which
-           is not an Android budget. The authority is `LABELING_AVAILABLE` in
-           src-tauri/src/lib.rs -- this only hides the button. -->
       {#if musicDirConfigurable}
         <button class="menu-item" type="button" onclick={onToggleLabelingMode} disabled={labelingModeBusy}>
           {t.labelingModeItem(store.labelingMode, labelingModePending)}

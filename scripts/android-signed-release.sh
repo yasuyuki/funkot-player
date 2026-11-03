@@ -1,36 +1,44 @@
 #!/bin/sh
-# Signed Android release across two Unix users.
-#
-# The signing checkout cannot see the agent tree, and the agent must not see
-# signing material. Source moves over a Windows-side git bundle; the APK
-# comes back through a group-writable drop directory.
-#
-#   prepare  — agent source tree: write bundle + Windows launcher
-#   build    — owner (yasuyuki): sync, signed build, drop APK, install if a
-#              matching phone is already on adb
-#   install  — either user: verify cert and adb install -r
-#   pair / connect / status / plan / owner-set
-#
-# `plan` prints the next stage from the handoff and drop already on disk.
-# It does not search for a checkout, probe adb, or call GitHub.
-# Pairing on a host without adb is `apk.sh pair` as the owner.
-# `owner-set` records the signing checkout path in handoff owner.path.
-#
-# Human leftovers: wireless-debug pairing (code is only on the phone), and
-# running `build` as the owner so Gradle can read the keystore in that tree.
-#
 # Host paths default to this machine and are overridable:
 #   FUNKOT_HANDOFF_DIR  Windows-visible dir (bundle + apk.sh + owner.path)
 #   FUNKOT_APK_DROP     signed APK destination
 #   FUNKOT_OWNER_PLAYER owner funkot-player checkout, else handoff owner.path
 #   FUNKOT_ADB_ADDR     adb selector (skip model search)
-#   FUNKOT_RELEASE_MODEL  adb devices -l model: token (default Pixel_10_Pro)
 set -eu
 
 EXPECTED_CERT_SHA256=b02a1ea592bb55da0502c37fa9d6d26870e05d2fd3b6ab79d8aad1c56a01a9e3
 APK_REL=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 
 die() { echo "$*" >&2; exit 1; }
+
+require_clean_player() (
+    CDPATH= cd "$1" || die "cannot enter player checkout: $1"
+    expected=${2:-}
+    actual=$(git rev-parse 'HEAD^{commit}') || die "cannot resolve player HEAD"
+    [ -z "$expected" ] || [ "$actual" = "$expected" ] ||
+        die "player HEAD is $actual, expected $expected"
+
+    for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply sequencer BISECT_START; do
+        marker_path=$(git rev-parse --git-path "$marker") ||
+            die "cannot resolve player Git operation state: $marker"
+        [ ! -e "$marker_path" ] || die "player has an unfinished Git operation: $marker"
+    done
+
+    player_status=$(git --no-optional-locks status --porcelain=v1 --untracked-files=all) ||
+        die "cannot inspect player checkout"
+    [ -z "$player_status" ] || die "player checkout is dirty; signed builds require a clean commit"
+
+    verify_dir=$(mktemp -d) || die "cannot create temporary player index directory"
+    trap 'rm -f "$verify_dir/index" "$verify_dir/index.lock"; rmdir "$verify_dir"' EXIT
+    GIT_INDEX_FILE=$verify_dir/index
+    export GIT_INDEX_FILE
+    git -c core.splitIndex=false -c core.fsmonitor=false -c core.ignoreStat=false \
+        read-tree "$actual" || die "cannot read player commit"
+    player_contents=$(git --no-optional-locks \
+        -c core.splitIndex=false -c core.fsmonitor=false -c core.ignoreStat=false \
+        status --porcelain=v1 --untracked-files=all) || die "cannot verify player checkout contents"
+    [ -z "$player_contents" ] || die "player checkout contents differ from its commit"
+)
 
 require_official_core() {
     player=$1
@@ -41,6 +49,8 @@ require_official_core() {
 
 usage() {
     echo "usage: $0 prepare|build|install|pair|connect|status|plan|owner-set [args]" >&2
+    echo "  build                               signed build and handoff only; no device access" >&2
+    echo "  install                             verify certificate and install on adb" >&2
     echo "  pair <ip> <pair-port> <code> [connect-port]" >&2
     echo "  connect <ip:port>" >&2
     echo "  owner-set [path]" >&2
@@ -70,7 +80,6 @@ owner_path_file() {
     printf '%s\n' "$(handoff_dir)/owner.path"
 }
 
-# funkot-player identity: ./dev.sh and src-tauri/Cargo.toml.
 player_checkout_ok() {
     [ -f "$1/dev.sh" ] && [ -f "$1/src-tauri/Cargo.toml" ]
 }
@@ -91,8 +100,6 @@ owner_player() {
     die "owner checkout missing or invalid; re-run owner-set (or apk.sh owner-set)"
 }
 
-# Source tree that has ./dev.sh. prepare uses the checkout we were started from
-# when this file lives in scripts/; otherwise cwd if it looks like the player.
 player_root() {
     d=$(CDPATH= cd "$(dirname "$0")" && pwd)
     if player_checkout_ok "$d/.."; then
@@ -144,39 +151,20 @@ verify_cert() {
     echo "cert ok ($EXPECTED_CERT_SHA256)"
 }
 
-pick_addr() {
-    player=$1
-    if [ -n "${FUNKOT_ADB_ADDR:-}" ]; then
-        printf '%s\n' "$FUNKOT_ADB_ADDR"
-        return
-    fi
-    model=${FUNKOT_RELEASE_MODEL:-Pixel_10_Pro}
-    addr=$(adb_do "$player" devices -l | awk -v m="model:$model" '
-        $2 == "device" && index($0, m) { print $1; exit }
-    ')
-    [ -n "$addr" ] || return 1
-    printf '%s\n' "$addr"
-}
-
 install_apk() {
     player=$1
     apk=$2
     verify_cert "$player" "$apk"
-    addr=$(pick_addr "$player") || {
-        adb_do "$player" devices -l >&2 || true
-        die "no ${FUNKOT_RELEASE_MODEL:-Pixel_10_Pro} on adb. pair/connect, then: $0 install"
-    }
-    model=$(adb_do "$player" -s "$addr" shell getprop ro.product.model | tr -d '\r')
-    echo "installing on $model ($addr)"
-    adb_do "$player" -s "$addr" install -r "$apk"
-    adb_do "$player" -s "$addr" shell dumpsys package jp.hatsuboshi.funkotplayer \
-        | grep -E 'versionName=|versionCode=' | head -2
+    (CDPATH= cd "$player" && ./scripts/install-apk.sh release)
 }
 
 cmd_prepare() {
     player=$(player_root)
     CDPATH= cd "$player"
     [ "$(id -un)" = "funkot-agent" ] || echo "warning: prepare is meant to run in the agent tree" >&2
+
+    player_sha=$(git rev-parse 'HEAD^{commit}') || die "cannot resolve player HEAD"
+    require_clean_player "$player" "$player_sha"
 
     core=$player/../funkot-autodj-for-ui
     [ -e "$core/.git" ] || die "missing sibling funkot-autodj-for-ui at $core"
@@ -188,7 +176,6 @@ cmd_prepare() {
     mkdir -p "$handoff" "$(dirname "$drop")"
     chmod 2775 "$(dirname "$drop")" 2>/dev/null || true
 
-    player_sha=$(git rev-parse HEAD)
     engine_sha=$(git -C "$core" rev-parse HEAD)
     git bundle create "$handoff/p.bundle" HEAD
     printf 'PLAYER_SHA=%s\nENGINE_SHA=%s\n' "$player_sha" "$engine_sha" > "$handoff/p.meta"
@@ -200,7 +187,7 @@ exec "$(dirname "$0")/android-signed-release.sh" "$@"
 EOF
     chmod 755 "$handoff/apk.sh"
 
-    echo "bundle $(git rev-parse --short HEAD) engine $(git -C "$core" rev-parse --short HEAD)"
+    echo "bundle $(git rev-parse --short "$player_sha") engine $(git -C "$core" rev-parse --short HEAD)"
     echo "owner (success: copied / cert ok / Success):"
     echo "  $handoff/apk.sh build"
 }
@@ -220,11 +207,11 @@ cmd_build() {
     handoff=$(handoff_dir)
     [ -f "$handoff/p.bundle" ] || die "missing $handoff/p.bundle — agent must run prepare"
 
+    require_clean_player "$player"
     echo "sync player $(printf '%.12s' "$PLAYER_SHA")"
     git fetch "$handoff/p.bundle" HEAD
     git merge --ff-only FETCH_HEAD
-    [ "$(git rev-parse HEAD)" = "$PLAYER_SHA" ] \
-        || die "HEAD is $(git rev-parse HEAD), expected $PLAYER_SHA"
+    require_clean_player "$player" "$PLAYER_SHA"
 
     core=$player/../funkot-autodj-for-ui
     [ -e "$core/.git" ] || die "missing $core — clone funkot-autodj as funkot-autodj-for-ui"
@@ -243,13 +230,8 @@ cmd_build() {
     chmod 644 "$drop"
     printf 'PLAYER_SHA=%s\nENGINE_SHA=%s\n' "$PLAYER_SHA" "$ENGINE_SHA" > "$drop.identity"
     echo "copied $drop"
-
-    if pick_addr "$player" >/dev/null; then
-        install_apk "$player" "$APK_REL"
-    else
-        echo "phone not on adb; APK is ready. pair/connect, then:"
-        echo "  $handoff/apk.sh install"
-    fi
+    echo "APK is ready. To verify and install it:"
+    echo "  $handoff/apk.sh install"
 }
 
 cmd_install() {

@@ -1,4 +1,3 @@
-//! The driver imports the same transition used by production.
 #[path = "../src-tauri/src/queue_progress.rs"]
 mod queue_progress;
 

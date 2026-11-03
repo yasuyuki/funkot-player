@@ -26,7 +26,6 @@ PROOFS = {
 }
 started = time.monotonic()
 result = Path("/results")
-# The container limit covers the compiler, verifier and all solver processes.
 limit = int(Path("/sys/fs/cgroup/memory.max").read_text())
 assert 0 < limit <= 8 * 1024**3, "verification requires a total 8 GiB cgroup limit"
 summary = {"status": "FAIL", "limit_bytes": limit, "proofs": {}}

@@ -1,4 +1,3 @@
-// Synthetic IPC fixture for browser acceptance only; native tests verify persistence.
 import { installIpcForTesting } from '/src/lib/tauri.ts';
 const copy=value=>value==null?value:JSON.parse(JSON.stringify(value));
 const row=(name,hash,extra={})=>({path:`/synthetic/${name}.mp3`,content_hash:hash,title:`Synthetic ${name}`,artist:'Fixture Artist',duration_secs:180,analyzed:true,is_funkot:true,label:null,intro_bars:16,outro_bars:16,outro_structure_bars:16,intro_manual:false,outro_manual:false,intro_low_confidence:false,outro_low_confidence:false,played_at_ms:null,added_order:1,...extra});

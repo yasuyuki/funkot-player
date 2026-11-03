@@ -32,8 +32,6 @@ test("engine hand-off keeps an arrival excluded while reserved advances", () => 
   );
   assert.deepEqual(afterManualEnqueue.map((a) => a.path), ["/music/new-b.wav"]);
 
-  // Starting playback consumes new-a from pending. The durable hand-off list
-  // keeps it excluded even after `reserved` advances to another track.
   const afterPlaybackStarts = actionableArrivals(
     arrivals,
     library,
@@ -93,8 +91,6 @@ test("active playlist occurrences are excluded without borrowing another playlis
   );
   assert.deepEqual(normal.map((a) => a.path), ["/music/new-a.wav", "/music/new-b.wav"]);
 
-  // Only the active source supplies this list. A matching entry in another
-  // playlist must not make this source's banner disappear.
   const activePlaylist = actionableArrivals(
     arrivals,
     library,

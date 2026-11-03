@@ -1,5 +1,3 @@
-// Native Windows smoke: launch the actual compiled application with an empty CI user profile.
-// This checks the real listener lifecycle, not real music playback or capture.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';

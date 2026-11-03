@@ -2,6 +2,8 @@
 //! service -> INDEX -> SAVE -> SESSION -> queue -> render. Persistence never
 //! holds render; the core future fence makes its commit reversible until save.
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::sync::atomic::Ordering;
@@ -38,7 +40,7 @@ impl From<FutureUpdateBusy> for CommandError {
 #[derive(Clone, serde::Serialize)]
 pub struct Summary { pub id: String, pub name: String, pub revision: u64, pub total: usize, pub remaining: usize }
 #[derive(serde::Serialize)]
-pub struct CatalogView { pub revision: u64, pub active_id: Option<String>, pub generation: u64, pub store_status: String, pub lists: Vec<Summary> }
+pub struct CatalogView { pub revision: u64, pub active_id: Option<String>, pub generation: u64, pub store_status: String, pub lists: Vec<Summary>, pub favorite_hashes: Vec<String> }
 #[derive(Clone, serde::Serialize)]
 pub struct EntryView { pub entry_id: String, pub path: String, pub title: String, pub artist: String, pub status: String, pub reason: Option<String> }
 #[derive(Clone, serde::Serialize)]
@@ -53,6 +55,7 @@ pub enum Action {
     Restart { id: String }, Remove { id: String, entry_id: String }, UndoRemove { undo_id: String },
     Move { id: String, entry_id: String, to: usize, scope: String },
     Append { tracks: Vec<TrackTarget>, mode: String },
+    SetFavorite { track: TrackTarget, favorite: bool },
     QueueMove { from: usize, to: usize, expect: QueueItem }, QueueRemove { index: usize, expect: QueueItem },
 }
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -61,7 +64,7 @@ pub struct Request { pub request_id: String, pub target: SourceTarget, pub actio
 pub struct CommandResult { pub created_id: Option<String>, pub undo_id: Option<String>, pub added: usize, pub rejected: usize, pub skipped: usize }
 
 #[derive(Clone)]
-struct Claim { source: Option<String>, run: u64, entry: Option<String>, track: TrackRef, item: QueueItem, live: bool, cancelled: bool, restoring: bool }
+struct Claim { source: Option<String>, run: u64, entry: Option<String>, track: TrackRef, item: QueueItem, live: bool, cancelled: bool, restoring: bool, admitted: bool }
 impl Claim {
     fn progress(&self, index: usize) -> Option<crate::playlist_progress::Claim<&str>> {
         Some(crate::playlist_progress::Claim {
@@ -90,6 +93,19 @@ pub struct RestoredPlayback {
     pub folder_pos: Option<usize>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static LOCAL_CLAIM_BEFORE_ADMISSION: RefCell<Option<Box<dyn FnOnce(&QueueItem) + Send>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn on_local_claim_before_admission_once(hook: impl FnOnce(&QueueItem) + Send + 'static) {
+    LOCAL_CLAIM_BEFORE_ADMISSION.with(|slot| {
+        assert!(slot.borrow().is_none(), "local-claim admission hook is already installed");
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
 struct NormalSource {
     epoch: u64,
     source: HostSource,
@@ -97,9 +113,6 @@ struct NormalSource {
 
 type Shared = Arc<Mutex<Service>>;
 static SERVICE: OnceLock<Shared> = OnceLock::new();
-// Serializes pre-playback queue commands with service creation. Otherwise a
-// command that checked `existing()` just before OFF creates the service could
-// mutate the queue after OFF has captured its canonical normal snapshot.
 static PRESTART_QUEUE_GATE: Mutex<()> = Mutex::new(());
 pub fn lock_prestart_queue() -> MutexGuard<'static, ()> {
     PRESTART_QUEUE_GATE.lock().unwrap_or_else(|e| e.into_inner())
@@ -113,10 +126,8 @@ impl Service {
     fn new(data: &Path, cache: &Path, queue: SharedQueue) -> Self {
         let disk = PlaylistStore::load(data);
         let mut catalog = disk.snapshot().unwrap_or_default();
+        catalog.ensure_favorites();
         let restored = catalog.resume_after_restart();
-        // When no playlist is active, the snapshot queue and session own normal
-        // restoration. `catalog.normal` is only a suspended normal source for
-        // an active playlist, so it cannot resurrect an older standalone cache.
         let ended = catalog.active_id.as_deref().is_some_and(|id| catalog.definition(id).is_ok_and(|d| !d.entries.is_empty())
             && catalog.remaining(id).is_ok_and(|r| r.is_empty())) && restored.is_none();
         Self { data: data.into(), cache: cache.into(), queue, disk, catalog, normal_source: None,
@@ -135,6 +146,7 @@ impl Service {
     }
     pub fn catalog_view(&self) -> CatalogView {
         CatalogView { revision: self.catalog.revision, active_id: self.catalog.active_id.clone(), generation: self.catalog.generation,
+            favorite_hashes: self.catalog.definition(FAVORITES_ID).map(|list| list.entries.iter().map(|entry| entry.track.content_hash.clone()).collect()).unwrap_or_default(),
             store_status: self.store_status(), lists: self.catalog.definitions.iter().map(|d| Summary {
                 id: d.id.clone(), name: d.name.clone(), revision: d.revision, total: d.entries.len(),
                 remaining: self.catalog.remaining(&d.id).map_or(0, |r| r.len()) }).collect() }
@@ -149,7 +161,7 @@ impl Service {
             let status = if run.failures.contains_key(&entry.entry_id) { if reason.as_deref() == Some("missing") { "missing" } else { "unplayable" } }
                 else if claim.is_some_and(|(index, _)| Some(*index) == self.current_index) { "current" }
                 else if run.consumed.contains(&entry.entry_id) { "played" }
-                else if let Some((index, _)) = claim { if self.future_claims().first().is_some_and(|(i, _)| *i == *index)
+                else if let Some((index, claim)) = claim { if claim.admitted && self.future_claims().first().is_some_and(|(i, _)| *i == *index)
                     && crate::NEXT_PREPARED.load(Ordering::Relaxed) { "prepared" } else { "preparing" } }
                 else if let Some((state, _)) = self.availability.get(&entry.entry_id) { state.as_str() } else { "pending" };
             EntryView { entry_id: entry.entry_id, path: claim.map(|(_, c)| c.item.path.clone()).unwrap_or(entry.track.preferred_path).to_string_lossy().into(),
@@ -161,8 +173,37 @@ impl Service {
     fn future_claims(&self) -> Vec<(usize, &Claim)> {
         self.claims.iter().filter(|(i,c)| c.live && !c.cancelled && Some(**i) != self.current_index).map(|(i,c)| (*i,c)).collect()
     }
+    fn normal_future_items(&self) -> Vec<QueueItem> {
+        let mut items: Vec<_> = self.future_claims().into_iter()
+            .filter(|(_, claim)| claim.source.is_none())
+            .map(|(_, claim)| claim.item.clone()).collect();
+        if let Some(reserved) = queue::reserved_item(&self.queue) {
+            let is_current = self.current_index.and_then(|index| self.claims.get(&index))
+                .is_some_and(|claim| claim.source.is_none() && claim.item.entry_id == reserved.entry_id);
+            if !is_current && !items.iter().any(|item| item.entry_id == reserved.entry_id) {
+                items.push(reserved);
+            }
+        }
+        items
+    }
     pub fn normal_items(&self) -> Vec<QueueItem> {
         queue::pending_snapshot(&self.queue)
+    }
+    fn normal_items_for_update(&self) -> Result<Vec<QueueItem>, CommandError> {
+        let live = self.normal_items();
+        if self.normal_source.is_some() { return Ok(live); }
+        let canonical = match self.restore_normal() {
+            Some(resume) => resume.items,
+            None => {
+                let saved = crate::playback_state::PlaybackStore::open(&self.data)
+                    .snapshot().map_err(|error| CommandError {
+                        code: "persist_failed".into(),
+                        message: format!("cannot load playback state: {error:?}"),
+                    })?;
+                store::restored_pending(&saved.session.in_flight, &saved.queue)
+            }
+        };
+        Ok(merge_normal_items(canonical, live))
     }
     pub fn normal_view(&self) -> (Option<QueueItem>, Vec<QueueItem>, Vec<QueueItem>) {
         let reserved = self.future_claims().into_iter()
@@ -190,8 +231,6 @@ impl Service {
                     queue_item: claim.source.is_none().then(|| claim.item.clone()) }); }
             }
         }
-        // Edits made before Play must not lose the saved audible occurrence
-        // from a different source, even across another application restart.
         if self.current_index.is_none() && catalog.current.is_none() {
             if let Some(current) = self.restored.as_ref().filter(|c| c.origin == PlaybackOrigin::Normal
                 || c.playlist_id.as_deref().is_some_and(|id| catalog.run(id).is_ok_and(|r| r.run_id == c.run_id)
@@ -206,8 +245,6 @@ impl Service {
         self.capture_normal(&mut candidate, None);
         let queue = queue::pending_snapshot(&self.queue);
         let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        // Current playback, normal pending work, and reservations share one
-        // commit. A failure leaves the older complete snapshot intact.
         self.progress_error = self.disk.update(|state| {
             state.catalog = candidate.clone();
             state.queue = queue;
@@ -241,8 +278,6 @@ impl Service {
             self.started(index);
             return;
         }
-        // Events may lag a polling snapshot or a whole short track. Consume
-        // the exact event occurrence, but never move current playback backward.
         if let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled) {
             if self.current_index != Some(index) { claim.live = false; }
             self.catalog.observe_progress(claim.progress(index), Observation::Started(index), None);
@@ -256,7 +291,6 @@ impl Service {
     }
     fn failed(&mut self, index: usize, message: &str) {
         let Some(claim) = self.claims.get_mut(&index).filter(|c| !c.cancelled && c.live) else { return; };
-        // An empty failure is not a reason to discard an unplayed occurrence.
         if message.trim().is_empty() { return; }
         self.catalog.observe_progress(claim.progress(index),
             Observation::Failed { index, reason_present: false }, Some(message));
@@ -275,8 +309,6 @@ impl Service {
         if finished {
             let had_current = self.current_index.take();
             if let Some(old) = had_current.and_then(|i| self.claims.get_mut(&i)) { old.live = false; }
-            // A newly selected/restarted/appended source may have pending work
-            // while the old finite engine waits for explicit Play.
             self.ended = self.active().is_some_and(|id| self.catalog.definition(id).is_ok_and(|d| !d.entries.is_empty())
                 && self.catalog.remaining(id).is_ok_and(|r| r.is_empty()));
             if had_current.is_some() || self.catalog.current.is_some() {
@@ -289,8 +321,6 @@ impl Service {
         let index = store::load_hash_index(&self.data).index;
         let matches = |path: &Path, entry: &store::HashIndexEntry| entry.hash == track.content_hash && store::fingerprint_matches(path, entry);
         if index.get(track.preferred_path.to_string_lossy().as_ref()).is_some_and(|e| matches(&track.preferred_path, e)) { return Ok(track.preferred_path.clone()); }
-        // Resolve only this referenced file if its fingerprint changed; never
-        // rehash the whole library for a playlist operation.
         if track.preferred_path.is_file() && funkot_core::cache::content_hash(&track.preferred_path).is_ok_and(|h| h == track.content_hash) {
             return Ok(track.preferred_path.clone());
         }
@@ -346,6 +376,7 @@ impl Service {
             },
         )?;
         self.catalog = catalog;
+        self.catalog.ensure_favorites();
         self.restored = self.catalog.resume_after_restart();
         self.normal_source = None;
         self.claims.clear();
@@ -408,8 +439,6 @@ impl TrackSource for ManagedSource {
     fn next(&mut self) -> Option<(usize, PathBuf)> {
         let mut unavailable_this_call = BTreeSet::new();
         loop {
-            // Folder admission can decode an unanalysed track. Keep the
-            // service mutex available to UI commands while that work runs.
             let normal_source = {
                 let owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                 if owner.epoch != self.epoch { return None; }
@@ -421,7 +450,7 @@ impl TrackSource for ManagedSource {
                 let mut source = source.lock().unwrap_or_else(|e| e.into_inner());
                 (source.epoch == self.epoch).then(|| source.source.next()).flatten()
             });
-            let (claim, cache, data, queue, restore) = {
+            let (index, claim, cache, data, queue, restore) = {
                 let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
                 if owner.epoch != self.epoch {
                     return None;
@@ -460,6 +489,7 @@ impl TrackSource for ManagedSource {
                         live: true,
                         cancelled: false,
                         restoring: true,
+                        admitted: false,
                     })
                 } else {
                     None
@@ -504,6 +534,7 @@ impl TrackSource for ManagedSource {
                                 live: true,
                                 cancelled: false,
                                 restoring: false,
+                                admitted: false,
                             });
                             break;
                         }
@@ -519,8 +550,6 @@ impl TrackSource for ManagedSource {
                             owner.exhausted = true;
                             return None;
                         };
-                        // A queue edit may have revoked the reservation while
-                        // folder analysis ran without the service mutex.
                         let Some(item) = queue::reserved_item(&owner.queue)
                             .filter(|item| item.path == path) else { continue; };
                         Some(Claim {
@@ -537,6 +566,7 @@ impl TrackSource for ManagedSource {
                             live: true,
                             cancelled: false,
                             restoring: false,
+                            admitted: false,
                         })
                     }
                 };
@@ -545,8 +575,15 @@ impl TrackSource for ManagedSource {
                     return None;
                 };
                 let restore = claim.restoring.then(|| owner.restored.clone()).flatten();
-                (claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone(), restore)
+                let index = owner.next_index;
+                owner.next_index += 1;
+                owner.claims.insert(index, claim.clone());
+                (index, claim, owner.cache.clone(), owner.data.clone(), owner.queue.clone(), restore)
             };
+            #[cfg(test)]
+            if let Some(hook) = LOCAL_CLAIM_BEFORE_ADMISSION.with(|slot| slot.borrow_mut().take()) {
+                hook(&claim.item);
+            }
             let allow_non_funkot = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
             let admission = crate::admit_playback_path(&claim.item.path, &cache, &data, allow_non_funkot);
             log::info!("playback admission: {} allow_non_funkot={} result={:?}",
@@ -555,11 +592,12 @@ impl TrackSource for ManagedSource {
                 let rejected = admission == crate::PlaybackAdmission::Rejected;
                 let blocked_normal = {
                     let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
+                    owner.claims.remove(&index);
                     if owner.epoch != self.epoch { return None; }
                     if claim.restoring && owner.restored.as_ref() != restore.as_ref() { return None; }
                     if claim.restoring { owner.restored = None; }
                     let blocked_normal = if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-                        if owner.catalog.active_id.as_deref() != Some(id) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
+                        if (!claim.restoring && owner.catalog.active_id.as_deref() != Some(id)) || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run) || !owner.catalog.definition(id).is_ok_and(|definition| definition.entries.iter().any(|candidate| candidate.entry_id == *entry)) { return None; }
                         if rejected { owner.admission_blocked.insert((id.clone(), entry.clone())); }
                         else { unavailable_this_call.insert((id.clone(), entry.clone())); }
                         owner.availability.insert(entry.clone(), ("unplayable".into(), if rejected { "non_funkot" } else { "admission_unavailable" }.into()));
@@ -589,21 +627,25 @@ impl TrackSource for ManagedSource {
                 continue;
             }
             let mut owner = self.service.lock().unwrap_or_else(|e| e.into_inner());
-            if owner.epoch != self.epoch { return None; }
-            if let (Some(id), Some(entry)) = (&claim.source, &claim.entry) {
-                if owner.catalog.active_id.as_deref() != Some(id)
-                    || !owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
-                    || !owner.catalog.definition(id).is_ok_and(|definition| {
+            let live = owner.claims.get(&index).is_some_and(|selected| selected.live && !selected.cancelled);
+            let source_matches = match (&claim.source, &claim.entry) {
+                (Some(id), Some(entry)) => (claim.restoring || owner.catalog.active_id.as_deref() == Some(id))
+                    && owner.catalog.run(id).is_ok_and(|run| run.run_id == claim.run)
+                    && owner.catalog.definition(id).is_ok_and(|definition| {
                         definition.entries.iter().any(|candidate| candidate.entry_id == *entry)
-                    }) { return None; }
+                    }),
+                (None, None) => true,
+                _ => false,
+            };
+            if owner.epoch != self.epoch || !live || !source_matches
+                || (claim.restoring && owner.restored.as_ref() != restore.as_ref()) {
+                owner.claims.remove(&index);
+                return None;
             }
-            if claim.restoring && owner.restored.as_ref() != restore.as_ref() { return None; }
             if claim.restoring { owner.restored = None; }
             if let Some(entry) = &claim.entry { owner.availability.remove(entry); }
-            let index = owner.next_index;
-            owner.next_index += 1;
             let path = claim.item.path.clone();
-            owner.claims.insert(index, claim);
+            owner.claims.get_mut(&index).unwrap().admitted = true;
             owner.save_progress();
             return Some((index, path));
         }
@@ -616,9 +658,6 @@ pub fn configure(service: &Shared, normal: HostSource) -> ManagedSource {
 }
 
 
-/// Persist an admission switch only after the core has accepted a future-source
-/// fence. The old source's normal reservation path is held quiescent while the
-/// epoch changes, so it cannot write a stale session claim after restoration.
 pub fn reconfigure_admission(
     service: &Shared,
     allow_non_funkot: bool,
@@ -627,9 +666,6 @@ pub fn reconfigure_admission(
 ) -> Result<(), CommandError> {
     let mut owner = service.lock().unwrap_or_else(|e| e.into_inner());
     let previous = crate::ALLOW_NON_FUNKOT.load(Ordering::Relaxed);
-    // OFF is a cleanup operation as well as a setting change. The atomic can
-    // already be false while an older source still has admitted normal
-    // reservations, so only an unchanged ON setting may skip the future fence.
     if previous == allow_non_funkot && allow_non_funkot {
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         return owner.disk.update(|state| {
@@ -643,22 +679,7 @@ pub fn reconfigure_admission(
             return Err(error("busy"));
         }
         let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous_queue = queue::pending_snapshot(&owner.queue).into_iter().collect::<std::collections::VecDeque<_>>();
-        // The setting command can arrive before queue-tab preload. Recover the
-        // same canonical normal source as startup, then append any live items
-        // that were queued after that snapshot by exact occurrence ID.
-        let canonical = match owner.restore_normal() {
-            Some(resume) => resume.items,
-            None => {
-                let session = store::load_session(&owner.data);
-                let saved = store::load_queue(&owner.data).map_err(|error| CommandError {
-                    code: "persist_failed".into(),
-                    message: format!("cannot load queue: {error}"),
-                })?;
-                store::restored_pending(&session.in_flight, &saved)
-            }
-        };
-        let mut normal = merge_normal_items(canonical, previous_queue.iter().cloned());
+        let mut normal = owner.normal_items_for_update()?;
         if !allow_non_funkot {
             let overrides = store::load_overrides(&owner.data);
             normal.retain(|item| !gated_non_funkot_for_reconfigure(&item.path, &owner.cache, &overrides)
@@ -666,15 +687,18 @@ pub fn reconfigure_admission(
         }
             let previous_catalog = owner.catalog.clone();
         let mut next_catalog = previous_catalog.clone();
-        next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: previous_catalog.normal.as_ref().and_then(|resume| resume.folder_pos) });
+        owner.capture_normal(&mut next_catalog, Some(normal.clone()));
             let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
         let catalog_snapshot = next_catalog.clone();
-        owner.disk.update(|state| {
+        let session = owner.disk.update(|state| {
             state.queue = queue_snapshot;
             state.catalog = catalog_snapshot;
+            state.session.in_flight.clear();
             persist_settings(&mut state.settings)
-                .map_err(|message| PlaylistError::PersistFailed { message })
+                .map_err(|message| PlaylistError::PersistFailed { message })?;
+            Ok(state.session.clone())
         }).map_err(CommandError::from)?;
+        *crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()) = session;
         queue::restore_all(&owner.queue, normal);
         owner.catalog = next_catalog;
         owner.progress_error = false;
@@ -688,8 +712,6 @@ pub fn reconfigure_admission(
     let prepared = PreparedSourceReplacement::new(Box::new(ManagedSource {
         service: service.clone(), epoch: next_epoch,
     })).map_err(|_| error("busy"))?;
-    // Freeze the core future before waiting for a loader already in
-    // HostSource::next. Do not hold render while taking normal_source.
     let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
     let token = if crate::AUDITIONING.load(Ordering::Relaxed)
         || crate::AUDITION_PREPARING.load(Ordering::Relaxed)
@@ -709,21 +731,9 @@ pub fn reconfigure_admission(
     }
     drop(render);
 
-    // ManagedSource releases service while HostSource reserves. Quiesce it
-    // after the core fence so a waiting loader cannot admit the old future.
     let normal_source = owner.normal_source.clone();
     let mut normal_source_guard = normal_source.as_ref().map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
-    let future = owner.future_claims();
-    let normal_claims: Vec<_> = future.iter().filter(|(_, claim)| claim.source.is_none())
-        .map(|(_, claim)| claim.item.clone()).collect();
-    let mut revoked_normal = normal_claims.clone();
-    if let Some(reserved) = queue::reserved_item(&owner.queue) {
-        let is_current = owner.current_index.and_then(|index| owner.claims.get(&index))
-            .is_some_and(|claim| claim.source.is_none() && claim.item.entry_id == reserved.entry_id);
-        if !is_current && !revoked_normal.iter().any(|claim| claim.entry_id == reserved.entry_id) {
-            revoked_normal.push(reserved);
-        }
-    }
+    let revoked_normal = owner.normal_future_items();
     let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut normal = owner.normal_items();
     preserve_claims(&mut normal, &revoked_normal);
@@ -734,7 +744,7 @@ pub fn reconfigure_admission(
     }
     let previous_catalog = owner.catalog.clone();
     let mut next_catalog = previous_catalog.clone();
-    next_catalog.normal = Some(NormalResume { items: normal.clone(), folder_pos: Some(crate::FOLDER_POS.load(Ordering::Relaxed)) });
+    owner.capture_normal(&mut next_catalog, Some(normal.clone()));
 
     let updated_session = if revoked_normal.is_empty() {
         None
@@ -799,8 +809,6 @@ pub fn reconfigure_admission(
     };
     crate::NEXT_PREPARED.store(false, Ordering::Relaxed);
     crate::YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
-    // The retired loader may still be waiting to re-enter ManagedSource::next.
-    // It observes the new epoch only after it acquires this service lock.
     drop(owner);
     drop(retired);
     Ok(())
@@ -846,15 +854,15 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         return if old == &fingerprint { Ok(receipt.clone()) } else { Err(error("stale")) };
     }
     owner.reconcile_with(playback);
-    // A source replacement must snapshot normal work only after the old
-    // HostSource has stopped reserving it. Keep this guard through publication.
     let normal_source = owner.normal_source.clone();
     let mut normal_source_guard = normal_source.as_ref()
         .map(|source| source.lock().unwrap_or_else(|e| e.into_inner()));
     if owner.target() != request.target { return Err(error("stale")); }
-    let mut next = owner.catalog.clone(); let mut normal = owner.normal_items(); let old_normal = normal.clone();
+    let old_normal = owner.normal_items();
+    let mut next = owner.catalog.clone(); let mut normal = owner.normal_items_for_update()?;
     let _normal_only = owner.active().is_none() && matches!(&request.action, Action::Append { .. } | Action::QueueMove { .. } | Action::QueueRemove { .. });
-    let append_action = matches!(&request.action, Action::Append { .. });
+    let append_action = matches!(&request.action, Action::Append { .. })
+        || owner.active() == Some(FAVORITES_ID) && matches!(&request.action, Action::SetFavorite { favorite: true, .. });
     let normal_append = owner.active().is_none() && append_action;
     let mut result = CommandResult::default(); let mut removed = None; let mut undo_used = None;
     let mut removed_normal = None;
@@ -882,6 +890,18 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
                 if to >= ids.len() { return Err(error("invalid_input")); } let entry = ids.remove(from); ids.insert(to, entry); next.reorder_remaining(&id, &ids)?;
             } else { return Err(error("invalid_input")); }
         }
+        Action::SetFavorite { track, favorite } => {
+            if favorite {
+                let track = owner.track_ref(&track)?;
+                result.added = next.append(FAVORITES_ID, vec![track])?.len();
+                result.skipped = usize::from(result.added == 0);
+                if result.added > 0 && owner.active() == Some(FAVORITES_ID) && owner.exhausted { force_source = true; }
+            } else {
+                let hash = track.expected_hash.as_deref().filter(|hash| !hash.is_empty()).ok_or_else(|| error("identity_unavailable"))?;
+                if let Some(entry) = next.favorite(hash).cloned() { next.remove(FAVORITES_ID, &entry.entry_id)?; }
+                else { result.skipped = 1; }
+            }
+        }
         Action::Append { tracks, mode } => {
             if !["single", "many", "arrivals"].contains(&mode.as_str()) { return Err(error("invalid_input")); }
             let mut accepted = Vec::new();
@@ -900,7 +920,11 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
                 }
                 result.added += 1;
             }
-            if let Some(id) = next.active_id.clone() { if !accepted.is_empty() { next.append(&id, accepted)?; } }
+            if let Some(id) = next.active_id.clone() { if !accepted.is_empty() {
+                let added = next.append(&id, accepted)?.len();
+                result.skipped += result.added - added;
+                result.added = added;
+            } }
             else if result.added > 0 { next.revision += 1; }
             if result.added > 0 && owner.exhausted { force_source = true; }
         }
@@ -920,6 +944,9 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     }
     if force_source && !append_action && owner.current_index.is_none() {
         if let Some(current) = owner.restored.as_ref().filter(|c| c.origin == PlaybackOrigin::Normal) {
+            if let Some(item) = current.queue_item.as_ref() {
+                normal.retain(|candidate| candidate.entry_id != item.entry_id);
+            }
             normal.insert(0, QueueItem::with_origin(current.track_ref.preferred_path.clone(),
                 current.queue_origin.unwrap_or(QueueOrigin::Manual)));
         } else if let Some(claim) = owner.claims.values().find(|c| c.restoring && c.source.is_none() && c.live && !c.cancelled) {
@@ -927,9 +954,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         }
     }
     let future = owner.future_claims();
-    let normal_claims: Vec<_> = future.iter().filter(|(_, c)| c.source.is_none()).map(|(_, c)| c.item.clone()).collect();
-    // Preserve the established manual-priority deadline. A committed automatic
-    // next track stays first; adding manual work still succeeds behind it.
+    let normal_claims = owner.normal_future_items();
     if normal_append && !normal_claims.is_empty() {
         if let Some(playback) = playback {
             let render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
@@ -946,11 +971,8 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         let actual: Vec<_> = future.iter().filter(|(_,c)|c.source.as_deref() == Some(id)).filter_map(|(_,c)|c.entry.as_deref()).collect();
         expected.get(..actual.len()) != Some(actual.as_slice())
     } else {
-        let actual: Vec<_> = future.iter().filter(|(_,c)|c.source.is_none()).map(|(_,c)|c.item.clone()).collect();
-        normal.get(..actual.len()) != Some(actual.as_slice())
+        normal.get(..normal_claims.len()) != Some(normal_claims.as_slice())
     };
-    // Startup publishes the source before the audio control handle. A change
-    // affecting already claimed work must wait for that handle's fence.
     if playback.is_none() && owner.normal_source.is_some() && (force_source || invalidates_claim) {
         return Err(error("busy"));
     }
@@ -969,8 +991,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         }) };
         match token {
             Ok(token) => {
-                // A callback may have started a track since reconcile. Fail
-                // before save instead of editing a different displayed row.
                 if token.current_index() != owner.current_index {
                     render.engine.abort_future_update(token);
                     playback.publish_engine_observation(&render.engine);
@@ -987,19 +1007,23 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     owner.capture_normal(&mut next, Some(normal.clone()));
     if force_source && !append_action && owner.current_index.is_none() { next.current = None; }
     let _saving = crate::SAVE_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    let mut updated_session = None;
-    if let Some(item) = &removed_normal {
+    let offline = owner.normal_source.is_none();
+    let mut updated_session = if !offline && ((replace && !normal_claims.is_empty()) || removed_normal.is_some()) {
         let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner());
-        if session.in_flight.iter().any(|entry| entry.entry_id == item.entry_id) {
-            let mut updated = session.clone();
-            store::retire_revoked(&mut updated.in_flight, item);
-            updated_session = Some(updated);
-        }
-    }
+        let mut updated = session.clone();
+        updated.in_flight.retain(|item| {
+            !(replace && normal_claims.iter().any(|claim| claim.entry_id == item.entry_id))
+                && !removed_normal.as_ref().is_some_and(|removed| removed.entry_id == item.entry_id)
+        });
+        Some(updated)
+    } else { None };
     let queue_snapshot = normal.iter().cloned().collect::<Vec<_>>();
     let catalog_snapshot = next.clone();
     let saved = owner.disk.update(|state| {
-        if let Some(session) = updated_session.clone() {
+        if offline {
+            state.session.in_flight.clear();
+            updated_session = Some(state.session.clone());
+        } else if let Some(session) = updated_session.clone() {
             state.session = session;
         }
         state.queue = queue_snapshot;
@@ -1026,8 +1050,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     if let Some(removed) = removed { owner.undo.insert(request.request_id.clone(), removed); }
     if let Some(id) = undo_used { owner.undo.remove(&id); }
     if replace {
-        // Waking this same finite source must replay an interrupted restore
-        // claim before its appended tail. A source choice intentionally clears it.
         if append_action && owner.current_index.is_none()
             && owner.claims.values().any(|c| c.restoring && c.live && !c.cancelled) {
             owner.restored = owner.catalog.current.clone();
@@ -1054,11 +1076,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         drop(normal_source_guard);
         drop(_saving);
     }
-    // Appending to an ended list makes new pending work, but core remains
-    // naturally stopped until the existing Play control explicitly resumes.
     if force_source && playback.is_none() { owner.ended = false; }
-    // A reopened terminal list has no exhausted source yet, but new pending
-    // entries still replace the ended display after their save succeeds.
     if append_action && result.added > 0 && owner.active().is_some() { owner.ended = false; }
     owner.receipts.insert(request.request_id, (fingerprint, result.clone()));
     drop(owner);
@@ -1066,9 +1084,6 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
     Ok(result)
 }
 
-/// This destructive removal path uses the same full content hash as final
-/// admission. It must not trust the index fingerprint: a replacement can keep
-/// its length and mtime while changing content. Unreadable paths stay queued.
 fn gated_non_funkot_for_reconfigure(
     path: &Path,
     cache: &Path,
@@ -1080,8 +1095,6 @@ fn gated_non_funkot_for_reconfigure(
     !store::effective_is_funkot(analysis.is_funkot, override_funkot)
 }
 
-/// Merge the startup-normal snapshot with items added to the live queue
-/// after that snapshot. Matching occurrence IDs retain canonical order.
 fn merge_normal_items(
     mut canonical: Vec<QueueItem>,
     live: impl IntoIterator<Item = QueueItem>,
@@ -1095,8 +1108,6 @@ fn merge_normal_items(
     canonical
 }
 
-/// Keep the uncancellable future once, with new manual entries at the head of
-/// pending. Equal paths with different origins remain distinct queue items.
 fn preserve_claims(normal: &mut Vec<QueueItem>, claims: &[QueueItem]) {
     for claim in claims { if let Some(at) = normal.iter().position(|item| item == claim) { normal.remove(at); } }
     normal.splice(..0, claims.iter().cloned());

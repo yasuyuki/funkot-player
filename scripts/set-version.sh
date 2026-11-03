@@ -1,50 +1,8 @@
 #!/bin/sh
-# Set the app version in every place a machine can set it, and check that they
-# all still agree.
-#
-# The version is spelled out in eight files in three shapes -- semver, the
-# 4-part MSIX form, and a filename embedded in prose -- and nothing links them.
-# Bumping by hand has already produced mismatches: pack-msix.ps1 carries its
-# own $PackageVersion and never reads Package.appxmanifest, so editing the
-# manifest alone packs an MSIX labelled with one version from another version's
-# sources. A wrong label is invisible until someone asks which binary a bug
-# report came from, which is far too late.
-#
-# Usage (from anywhere):
-#   ./scripts/set-version.sh 0.1.4     write 0.1.4 everywhere, then verify
-#   ./scripts/set-version.sh --check   exit non-zero unless every spot agrees
-#   ./scripts/set-version.sh           print every spot and its current value
-#
-# Needs nothing but a POSIX shell -- no npm, no cargo, no Docker -- which is
-# what makes --check cheap enough for CI to run on every push
-# (.github/workflows/checks.yml). Keep it that way.
-#
-# Android has no entry of its own. gen/android/app/tauri.properties holds
-# versionName / versionCode, but it is generated from tauri.conf.json by the
-# Tauri android build, is gitignored, and is marked DO NOT EDIT. This script
-# reports it and never writes it. versionCode is
-# major*1000000 + minor*1000 + patch -- the same formula src-tauri/build.rs
-# uses for FUNKOT_VERSION_CODE, so the running app and the APK agree by
-# construction.
-#
-# Deliberately NOT touched:
-#   docs/store-submission.md  listing copy is what to paste, not what
-#                             set-version.sh writes. First-time Partner Center
-#                             onboarding is docs/store-first-submission.md
-#   engine refs (player/v0.1.1 in the workflows and README) -- those version
-#                             funkot-autodj, not this app
-#   src-tauri/src/store.rs    the 0.1.0 there is a test fixture
-#
-# POLICY: when a new file starts spelling out the version, add it to SEMVER_SPOTS
-# or MSIX_SPOTS and to both read_spot and write_spot. Anchor the pattern tightly
-# enough that no other version-looking string in that file can match -- the
-# manifest's MinVersion and the workflows' engine refs are both one loose regex
-# away from being clobbered.
 set -eu
 
 cd "$(dirname "$0")/.."
 
-# Written as plain semver: 0.1.4
 SEMVER_SPOTS="package.json
 package-lock.json
 src-tauri/Cargo.toml
@@ -59,13 +17,8 @@ packaging/msix/README.md"
 
 ANDROID_PROPS=src-tauri/gen/android/app/tauri.properties
 
-# tauri.conf.json is the reference: it feeds the Windows bundle and, through
-# tauri.properties, the whole Android side.
 REFERENCE=src-tauri/tauri.conf.json
 
-# Print every version this file spells out, one per line. More than one distinct
-# line means the file disagrees with itself; none means the anchor stopped
-# matching and needs fixing here.
 read_spot() {
     case $1 in
     package.json)
@@ -79,22 +32,17 @@ read_spot() {
     src-tauri/tauri.conf.json)
         sed -n '1,10s/^  "version": "\([^"]*\)",$/\1/p' "$1" ;;
     packaging/msix/Package.appxmanifest)
-        # Anchored to a line that is *only* Version=, so MinVersion and
-        # MaxVersionTested a few lines below cannot match.
         sed -n 's/^ *Version="\([0-9][^"]*\)"$/\1/p' "$1" ;;
     packaging/msix/scripts/pack-msix.ps1)
         sed -n 's/^\$PackageVersion = "\([^"]*\)"$/\1/p' "$1"
         sed -n 's/.*Funkot_\([0-9][0-9.]*\)_x64.*/\1/p' "$1" ;;
     packaging/msix/README.md)
-        # Sideload instructions name the packed file by hand; a stale name here
-        # is a copy-paste command that unzips a file that does not exist.
         sed -n 's/.*Funkot_\([0-9][0-9.]*\)_x64.*/\1/p' "$1" ;;
     *)
         echo "set-version.sh: no reader for $1" >&2; return 1 ;;
     esac
 }
 
-# Rewrite $1 in place, putting $2 wherever read_spot looks.
 write_spot() {
     case $1 in
     package.json)
@@ -119,8 +67,8 @@ s/Funkot_[0-9][0-9.]*_x64/Funkot_'"$2"'_x64/g' ;;
     esac
 }
 
-# `sed -i` is a GNU extension and would also reset the mode on a fresh inode;
-# writing back through the existing file keeps both portable and unchanged.
+# `sed -i` is not POSIX and replaces the file with a new inode; write back
+# through the existing file instead.
 edit() {
     tmp=$(mktemp)
     sed "$2" "$1" > "$tmp"
@@ -128,7 +76,6 @@ edit() {
     rm -f "$tmp"
 }
 
-# The distinct values in $1, space separated; empty if the anchor matched nothing.
 value_of() {
     read_spot "$1" | sort -u | tr '\n' ' ' | sed 's/ *$//'
 }

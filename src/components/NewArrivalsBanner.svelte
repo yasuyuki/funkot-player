@@ -6,10 +6,6 @@
 
   let t = $derived(i18n.t);
 
-  // Internal re-entry guard only — the button is never `disabled`. Queuing an
-  // unanalysed arrival can stall playback (loader may analyse synchronously);
-  // kick-less paths (quiet reload / after clearing history) do not start
-  // background analysis.
   let busy = $state(false);
 
   let count = $derived(store.actionableNewArrivalCount);

@@ -638,7 +638,6 @@ def _reclaim(path: Path, record: dict) -> dict:
     try:
         result = reclamation.remove_tree(root, manifest, root_identity, record["reclaim_progress"], persist)
     except Exception:
-        # The durable pending state and progress are intentionally retained for resume.
         raise
     record["state"] = "reclaimed"
     record["reclaim_result"] = result

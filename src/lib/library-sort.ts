@@ -43,15 +43,10 @@ export function nextLibrarySortKey(
   return "recent";
 }
 
-/// Analysis and edit commands do not rescan the hash index. Keep the
-/// authoritative addition order already present in the library row when such
-/// a partial replacement carries `null`.
 export function preserveLibraryAddedOrder(
   previous: TrackRow | undefined,
   incoming: TrackRow,
 ): TrackRow {
-  // Partial analysis/edit replies cannot introduce a different file identity.
-  // Only a committed library refresh may replace the path's content hash.
   if (previous && previous.content_hash !== incoming.content_hash) return previous;
   if (incoming.added_order !== null || previous?.added_order == null) {
     return incoming;
@@ -69,7 +64,6 @@ export function applyAnalysisProgress(
 } {
   const nextLibrary = new Map(library);
   const previous = nextLibrary.get(progress.row.path);
-  // A late event for a removed/root-switched path must not resurrect the row.
   if (previous) {
     nextLibrary.set(
       progress.row.path,

@@ -8,8 +8,6 @@
 
   let from = $derived(store.player?.audition_from ?? null);
   let to = $derived(store.player?.audition_to ?? null);
-  // Same wording as legacy/index.html: raw file names from player_state,
-  // not library-resolved titles.
   let label = $derived(from && to ? t.auditioning(from, to) : t.autoplayInterrupted);
 
   async function onResume() {

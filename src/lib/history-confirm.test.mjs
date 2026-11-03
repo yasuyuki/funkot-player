@@ -4,8 +4,6 @@ import test from "node:test";
 import { parse } from "svelte/compiler";
 import { transformWithEsbuild } from "vite";
 
-// Execute the component's actual handlers with synthetic data and a stubbed
-// confirmation dialog. No native IPC or real history is used.
 const source = await readFile(new URL("../components/History.svelte", import.meta.url), "utf8");
 const ast = parse(source);
 const handlers = ast.instance.content.body.filter((node) =>

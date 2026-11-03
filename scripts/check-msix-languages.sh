@@ -10,10 +10,6 @@
 #   https://learn.microsoft.com/windows/apps/publish/publish-your-app/msix/app-package-requirements#supported-languages
 # Add a row here when adding a locale, and a <Resource Language="..."/> in
 # Package.appxmanifest. The first Resource is the package default language.
-#
-# Usage (from anywhere):
-#   ./scripts/check-msix-languages.sh              # source manifest vs locale.ts
-#   ./scripts/check-msix-languages.sh path/to.msix  # also inspect the packed file
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -34,15 +30,12 @@ bcp47_for() {
     esac
 }
 
-# LOCALES = ["en", "ja", "id"] as const;  -- keep the parser tight so a
-# comment that happens to mention a locale cannot match.
 ui_locales() {
     sed -n 's/^export const LOCALES = \[\(.*\)\] as const;$/\1/p' "$LOCALE_TS" |
         tr -d '" ' | tr ',' '\n' | grep -v '^$'
 }
 
 manifest_languages() {
-    # From a file path or stdin. Canonical form is language-REGION.
     sed -n 's/^[[:space:]]*<Resource Language="\([^"]*\)"[[:space:]]*\/>[[:space:]]*$/\1/p' "$1"
 }
 
@@ -52,7 +45,6 @@ sorted_lower() {
 }
 
 compare_sets() {
-    # $1 expected newline list, $2 got newline list, $3 label for got
     expected_norm=$(printf '%s\n' "$1" | sorted_lower)
     got_norm=$(printf '%s\n' "$2" | sorted_lower)
     if [ "$expected_norm" = "$got_norm" ]; then
@@ -67,7 +59,6 @@ compare_sets() {
 }
 
 require_canonical() {
-    # $1 newline list of tags that must already be language-REGION
     st=0
     for tag in $1; do
         lang=${tag%%-*}

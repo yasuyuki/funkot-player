@@ -1,7 +1,5 @@
 import type { TagUpdateRequest, TagUpdateResult, TrackTagsSnapshot } from "./tauri";
 
-// One writer and generation-guarded reads. A scan can finish while an editor
-// saves; its requested reload runs after the write, never over its response.
 export class TrackTagsClient {
   #generation = 0;
   #saving = false;

@@ -14,7 +14,6 @@ const moduleUrl = `data:text/javascript;base64,${Buffer.from(transformed.code).t
 const { calendarDaysAgo, groupPlaysByDay, playedOnly, selectablePaths } =
   await import(moduleUrl);
 
-/// Local time, so the assertions do not depend on the runner's zone.
 function at(y, m, d, hh, mm) {
   return new Date(y, m - 1, d, hh, mm).getTime();
 }
@@ -36,7 +35,6 @@ test("groupPlaysByDay splits on the local day boundary", () => {
 });
 
 test("groupPlaysByDay keeps the order it was given", () => {
-  // The host sorts; a second opinion here is how the two drift apart.
   const rows = [row(at(2026, 9, 3, 9, 0)), row(at(2026, 9, 3, 10, 0))];
   const [day] = groupPlaysByDay(rows);
   assert.deepEqual(day.rows.map((r) => r.at_ms), rows.map((r) => r.at_ms));
@@ -47,7 +45,6 @@ test("groupPlaysByDay on nothing is no days", () => {
 });
 
 test("calendarDaysAgo counts days, not elapsed hours", () => {
-  // Two minutes apart on the clock, but a day apart to a reader.
   assert.equal(
     calendarDaysAgo(at(2026, 9, 2, 23, 59), at(2026, 9, 3, 0, 1)),
     1,

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -332,6 +333,62 @@ def self_test(verbose=False):
         print("unrelated UI file: not required")
         print("lock deletion beside a publish: required")
         print("filtered and zero-test logs: rejected")
+        git_cli_output = applicability_cli_regression()
+        print(f"clean committed change without --base: {git_cli_output}")
+
+
+def applicability_cli_regression():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        checker = root / "verification" / "engine_snapshot" / "check.py"
+        production = root / "src-tauri" / "src" / "engine_observation.rs"
+        unrelated = root / "src" / "App.tsx"
+        checker.parent.mkdir(parents=True)
+        production.parent.mkdir(parents=True)
+        unrelated.parent.mkdir(parents=True)
+        checker.write_text(Path(__file__).read_text())
+        production.write_text("fn snapshot() {}\n")
+        unrelated.write_text("export const view = 1;\n")
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
+
+        def check_applies(args, returncode, proof_required, error=None):
+            result = subprocess.run(
+                [sys.executable, str(checker), "--applies", *args],
+                cwd=root, check=False, capture_output=True, text=True)
+            assert result.returncode == returncode, result.stdout + result.stderr
+            decision = json.loads(result.stdout)
+            assert decision["proof_required"] is proof_required, decision
+            if error is not None:
+                assert error in decision["error"], decision
+            return result.stdout.strip()
+
+        git("init", "--quiet")
+        git("config", "user.email", "snapshot@example.test")
+        git("config", "user.name", "Snapshot Test")
+        git("add", ".")
+        git("commit", "--quiet", "-m", "baseline")
+        production.write_text("fn snapshot() { let changed = true; }\n")
+        git("add", production.relative_to(root).as_posix())
+        git("commit", "--quiet", "-m", "proof-relevant change")
+
+        clean_without_base = check_applies([], 1, True, "--base <revision>")
+        check_applies(["--base", "HEAD~1"], 0, True)
+        check_applies(["--base", "HEAD"], 3, False)
+
+        production.write_text("fn snapshot() { let dirty = true; }\n")
+        check_applies([], 0, True)
+        git("add", production.relative_to(root).as_posix())
+        check_applies([], 0, True)
+        git("restore", "--staged", production.relative_to(root).as_posix())
+        git("restore", production.relative_to(root).as_posix())
+
+        unrelated.write_text("export const view = 2;\n")
+        check_applies([], 3, False)
+        git("restore", unrelated.relative_to(root).as_posix())
+        check_applies(["--base", "HEAD"], 3, False)
+    return clean_without_base
 
 
 def git_text(args):
@@ -349,7 +406,7 @@ def show_file(rev, path):
 
 
 def applies():
-    base = "HEAD"
+    base = None
     if "--base" in sys.argv:
         index = sys.argv.index("--base")
         if index + 1 >= len(sys.argv):
@@ -363,7 +420,7 @@ def applies():
         ["diff", "-U0", "-M"],
         ["diff", "--cached", "-U0", "-M"],
     ]
-    if base != "HEAD":
+    if base is not None:
         diffs.extend([
             ["diff", "--name-status", "-M", f"{base}...HEAD"],
             ["diff", "-U0", "-M", f"{base}...HEAD"],
@@ -375,6 +432,9 @@ def applies():
         else:
             chunks.append(text)
     untracked = git_text(["ls-files", "--others", "--exclude-standard"])
+    if base is None and not any(name_parts) and not untracked:
+        raise RuntimeError(
+            "clean worktree has no comparison range; rerun with --base <revision>")
     extra_names = []
     for path in untracked.splitlines():
         extra_names.append(f"??\t{path}")
@@ -388,11 +448,11 @@ def applies():
         file_path = ROOT / path
         if file_path.is_file():
             files[path] = file_path.read_text(errors="replace")
-        elif base != "HEAD":
+        elif base is not None:
             current = show_file("HEAD", path)
             if current is not None:
                 files[path] = current
-        previous = show_file(base if base != "HEAD" else "HEAD", path)
+        previous = show_file(base if base is not None else "HEAD", path)
         if previous is not None:
             old_files[path] = previous
     decision = decide("\n".join(name_parts + extra_names), "\n".join(chunks), files, old_files)

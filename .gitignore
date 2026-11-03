@@ -1,39 +1,27 @@
-# Rust / Tauri build output
 /src-tauri/target/
 /src-tauri/gen/schemas/
 
-# Node
 /node_modules/
 
-# Vite build output (frontendDist); legacy/index.html is the pre-Vite copy
-# kept for reference, not this.
 /dist/
 
-# Local music and analysis cache used for testing
 /testdata/
 
-# Session handoff / deferred issues (local, not for publication)
 /HANDOFF.md
 /ISSUES.md
 
-# Local stamp from scripts/win-run.sh (host fingerprint)
 /.win-run.stamp
 
-# OS / editor noise
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 
-# Desktop run data (GUI=1 ./dev.sh): music dropped in by hand + analysis cache
 /.desktop-data/
 
-# MSIX pack intermediates / output
 /packaging/msix/out/
 /packaging/msix/staging/
 
-# Release signing keys (host-only, never commit)
 /.secrets/
 
-# Local UI review evidence (not screenshot baselines)
 /artifacts/ui-review/

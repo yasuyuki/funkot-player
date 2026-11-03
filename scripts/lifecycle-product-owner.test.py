@@ -192,7 +192,6 @@ def main():
         check("funkot-player-gradle" not in [str(e) for e in fake.events], "shared Gradle cache was touched")
         check("funkot-player-android-home" not in [str(e) for e in fake.events], "shared Android home was touched")
 
-        # A receipt with a live container is refused before volume rm.
         fake.containers.add("container")
         fake.volumes[volume] = intent["volume"] | {"Name": volume, "CreatedAt": intent["volume"]["created_at"], "Labels": intent["volume"]["labels"]}
         complete["state"] = "reclaim-pending"
@@ -238,7 +237,6 @@ def mountpoint_recovery_tests():
             intent = root / "intent.json"
             owner.atomic_json(intent, {})
 
-            # A real child exits after prepare has durably recorded every identity.
             child = os.fork()
             if child == 0:
                 owner.prepare_mountpoints(intent, owner.read_json(intent), root)
@@ -248,7 +246,6 @@ def mountpoint_recovery_tests():
             prepared = owner.read_json(intent)
             owner.prepare_mountpoints(intent, prepared, root)
 
-            # Kill after unlink but before any later state write; durable intent permits retry.
             child = os.fork()
             if child == 0:
                 owner._checkpoint = lambda event, path: os._exit(74) if event == "after-mountpoint-remove" else None
@@ -260,8 +257,6 @@ def mountpoint_recovery_tests():
             check(not any(path.exists() or path.is_symlink() for path, _kind in targets.values()),
                   "cleanup retry left a mountpoint")
 
-            # A normal prepare after a kill at quarantine must finish deleting
-            # the old inode before journaling a new incarnation.
             owner.prepare_mountpoints(intent, owner.read_json(intent), root)
             child = os.fork()
             if child == 0:
@@ -284,13 +279,11 @@ def mountpoint_recovery_tests():
             owner.cleanup_mountpoints(intent, owner.read_json(intent))
             check(not any(parent.glob(".*.owner-*")), "cleanup left an owner tombstone")
 
-            # Deletion intent permits a new, separately journaled incarnation for the next run.
             resumed = owner.read_json(intent)
             owner.prepare_mountpoints(intent, resumed, root)
             check(all(path.exists() for path, _kind in targets.values()), "next invocation did not recreate mountpoints")
             owner.cleanup_mountpoints(intent, owner.read_json(intent))
 
-            # A create-to-journal crash is held as unknown rather than adopted.
             owner.atomic_json(intent, {})
             child = os.fork()
             if child == 0:
@@ -309,7 +302,6 @@ def mountpoint_recovery_tests():
                 if path.is_dir() and not path.is_symlink(): path.rmdir()
                 elif path.exists() or path.is_symlink(): path.unlink()
 
-            # Unknown preexisting paths and links are never claimed.
             targets["file"][0].write_text("unknown")
             for expected in ("unproved",):
                 try: owner.prepare_mountpoints(intent, {}, root)
@@ -322,7 +314,6 @@ def mountpoint_recovery_tests():
             else: raise AssertionError("preexisting link was adopted")
             targets["file"][0].unlink()
 
-            # Replacement, unexpected bytes, and external hardlinks all stop cleanup.
             owner.atomic_json(intent, {})
             record = owner.read_json(intent); owner.prepare_mountpoints(intent, record, root)
             targets["file"][0].unlink(); targets["file"][0].touch()
@@ -333,7 +324,6 @@ def mountpoint_recovery_tests():
                   "replacement refusal removed another mountpoint")
             targets["file"][0].unlink()
             targets["dir"][0].rmdir()
-            # Restore the proved inode only by starting an isolated test record.
             owner.atomic_json(intent, {}); owner.prepare_mountpoints(intent, owner.read_json(intent), root)
             targets["dir"][0].joinpath("bytes").write_text("x")
             try: owner.cleanup_mountpoints(intent, owner.read_json(intent))
@@ -347,7 +337,6 @@ def mountpoint_recovery_tests():
             (parent / "outside-link").unlink()
             owner.cleanup_mountpoints(intent, owner.read_json(intent))
 
-            # A replacement installed after quarantine is retained with the proved tombstone.
             owner.prepare_mountpoints(intent, owner.read_json(intent), root)
             def replace_after_quarantine(event, value):
                 if event == "after-mountpoint-quarantine" and value.endswith("placeholder"):
@@ -374,8 +363,6 @@ def mountpoint_recovery_tests():
             intent = root / "intent.json"; owner.atomic_json(intent, {})
             owner.prepare_mountpoints(intent, owner.read_json(intent), root)
             saved = owner.read_json(intent)
-            # Raw mount IDs matter within one mount session, but are deliberately
-            # ignored after a simulated reboot/namespace change.
             changed_session = json.loads(json.dumps(saved))
             changed_session["host_mountpoints"]["file"]["mount_session"] = ["other", 1]
             changed_session["host_mountpoints"]["file"]["mount_id"] += 1000
@@ -417,7 +404,6 @@ def mountpoint_recovery_tests():
 
 
 def fifo_refusal_tests():
-    # Keep blocking regressions in bounded children, never in the test owner process.
     child = r"""
 import importlib.util, os, stat, sys
 from pathlib import Path

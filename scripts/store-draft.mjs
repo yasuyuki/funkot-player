@@ -1,24 +1,3 @@
-// Stage a Microsoft Store submission draft through the Partner Center UI.
-//
-// The Partner Center APIs want Entra ID credentials this account does not
-// have, so the automation drives the browser the owner already signs into.
-// Playwright is already this repo's browser dependency; nothing new is added.
-//
-// No password is ever handled here. The sign-in happens once, by hand, in a
-// dedicated browser profile that lives outside the repo (see PROFILE below).
-// That profile holds a live Microsoft session: treat it like a credential.
-//
-//   node scripts/store-draft.mjs setup              # record the page URLs (per submission)
-//   node scripts/store-draft.mjs probe              # dump those pages for selector work
-//   node scripts/store-draft.mjs stage --msix <path> [--version x.y.z] [--dry]
-//
-// `stage` uploads the package and writes the three "what's new" texts, then
-// stops. Submit for certification stays a human click.
-//
-// Partner Center is a moving UI: every step fails loudly with a screenshot and
-// an element dump rather than guessing, so a broken run is diagnosable from
-// the artifacts instead of a rerun.
-
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
@@ -56,8 +35,6 @@ async function readConfig() {
 }
 
 async function open({ headless = false } = {}) {
-  // Loaded here rather than at the top so --dry and the notes checks work in
-  // a checkout that has not run npm ci.
   const { chromium } = await import('@playwright/test');
   await mkdir(PROFILE, { recursive: true });
   const context = await chromium.launchPersistentContext(PROFILE, {
@@ -69,8 +46,6 @@ async function open({ headless = false } = {}) {
   return { context, page };
 }
 
-// What the page offers right now: enough to write a locator against, and the
-// first thing to look at when a step stops matching.
 async function describe(page) {
   return page.evaluate(() => {
     const label = (el) =>
@@ -122,11 +97,6 @@ async function fail(page, step, message) {
   );
 }
 
-// --- setup ------------------------------------------------------------------
-
-// The URLs are recorded rather than constructed: Partner Center's paths carry
-// ids this script has no other way to learn, and a recorded URL cannot be
-// wrong about a product the owner is looking at.
 async function setup() {
   const { context, page } = await open();
   try {
@@ -134,8 +104,6 @@ async function setup() {
     console.log('Sign in if asked. This profile keeps the session, so this is a one-time step.');
     await ask('\nSigned in? Press Enter... ');
 
-    // These URLs carry the submission id, so they are re-recorded per release.
-    // Four Enter presses beats hunting for the ids from the outside.
     const config = { listings: {} };
     await ask('Open the product\'s Packages page for this submission, then press Enter... ');
     config.packagesUrl = page.url();
@@ -156,8 +124,6 @@ async function setup() {
   }
 }
 
-// --- probe ------------------------------------------------------------------
-
 async function probe() {
   const config = await readConfig();
   const dir = path.join(STATE, `probe-${new Date().toISOString().replace(/[:.]/g, '-')}`);
@@ -165,7 +131,7 @@ async function probe() {
   try {
     for (const [name, url] of Object.entries({ packages: config.packagesUrl, ...config.listings })) {
       await page.goto(url, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(4000); // Partner Center fills the page after load
+      await page.waitForTimeout(4000);
       await dump(page, dir, name);
       console.log(`probed ${name}`);
     }
@@ -174,8 +140,6 @@ async function probe() {
   }
   console.log(`\nOK: ${dir}`);
 }
-
-// --- stage ------------------------------------------------------------------
 
 async function stage({ msix, version, dry }) {
   version ??= await configuredVersion();
@@ -250,8 +214,6 @@ async function save(page, step) {
   await button.click();
   await page.waitForTimeout(3000);
 }
-
-// --- entry ------------------------------------------------------------------
 
 const [command, ...rest] = process.argv.slice(2);
 const flag = (name) => {

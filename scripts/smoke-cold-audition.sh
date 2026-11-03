@@ -1,5 +1,4 @@
 #!/bin/sh
-# Cold-start audition smoke on device. Usage: smoke-cold-audition.sh <adb-addr>
 set -eu
 S="${1:?adb address}"
 adb connect "$S" >/dev/null
@@ -68,7 +67,6 @@ show_texts
 
 echo "== listen =="
 tap_pred listen
-# prepare + stretch can take tens of seconds on device
 i=0
 while [ "$i" -lt 40 ]; do
   sleep 3
@@ -94,14 +92,11 @@ xml=open("/tmp/uidump.xml",encoding="utf-8",errors="replace").read()
 texts=[t for t in re.findall(r'text="([^"]+)"', xml) if t.strip()]
 top=" | ".join(texts[:12])
 print("TOP:", top)
-# Failure signature from HANDOFF: title blank / position --:-- after resume
 if "〔再開〕" in top or "試聴中" in "".join(texts[:8]):
     print("VERDICT: still in audition UI")
 elif texts[:4] == ["Funkot", "待機中", "--:--", "--:--"] or (
     len(texts) >= 4 and texts[1] in ("待機中",) and texts[2] == "--:--" and texts[3] == "--:--"
 ):
-    # cold start: after resume main may briefly idle then TrackStarted fills title.
-    # If still empty after 4s sleep, likely the bug.
     print("VERDICT: FAIL? now card still empty (待機中/--:--)")
 elif any(t == "--:--" for t in texts[1:6]) and not any(
     len(t) > 2 and t not in ("Funkot", "開始", "一時停止", "再開", "次の曲", "⏭ 次の曲", "⏸ 一時停止", "▶ 再開", "待機中", "--:--")

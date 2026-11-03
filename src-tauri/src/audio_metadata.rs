@@ -1,7 +1,3 @@
-//! Read-only extraction of the small, stable subset of embedded audio metadata
-//! used by the library index.  This module deliberately does not decide how
-//! metadata is persisted or how manual tags override it.
-
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -19,7 +15,6 @@ use symphonia::{
     default::get_probe,
 };
 
-/// The meaning of a date candidate, in decreasing automatic-year priority.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum YearSemantic {
@@ -45,7 +40,6 @@ impl YearSemantic {
     }
 }
 
-/// A source value retained so a future resolver can explain its decision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct YearCandidate {
     pub raw_key: String,
@@ -60,7 +54,6 @@ impl YearCandidate {
     }
 }
 
-/// The time-dependent outcome of selecting an automatic year.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum YearResolution {
@@ -77,21 +70,15 @@ impl Default for YearResolution {
     }
 }
 
-/// Data obtained from an audio file without mutating it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Metadata {
     pub title: Option<String>,
     pub artist: Option<String>,
-    /// Native genre values. They are intentionally neither split nor deduplicated.
-    /// The tag-store adapter validates and normalizes each value independently.
     pub genres: Vec<String>,
     pub year_candidates: Vec<YearCandidate>,
-    /// Non-fatal extraction observations, deduplicated by their message.
     pub diagnostics: Vec<String>,
 }
 
-/// Probe all Symphonia metadata revisions (media and per-track) without decoding
-/// audio. A successful probe with no usable tags returns `Metadata::default()`.
 pub fn probe(path: &Path) -> Result<Metadata, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -149,9 +136,6 @@ fn collect_tag(tag: &Tag, metadata: &mut Metadata) {
     }
 }
 
-/// A defensive per-field budget. RIFF INFO text is ordinary metadata, never
-/// audio payload; oversized in-bounds fields are skipped without failing a
-/// probe, while malformed lengths still fail the probe.
 const MAX_RIFF_INFO_VALUE_BYTES: u64 = 1024 * 1024;
 
 /// Symphonia 0.6's `WavReader` parses local RIFF INFO but discards it when it
@@ -319,14 +303,11 @@ fn year_semantic(tag: &Tag, raw_key: &str) -> Option<YearSemantic> {
     }
 }
 
-/// Select the best available embedded year. Original dates stay diagnostic-only.
-/// A present but invalid/conflicting/future higher priority is not hidden by fallback.
 pub fn resolve_year(candidates: &[YearCandidate], current_year: u16) -> YearResolution {
     let Some(best_rank) = candidates.iter().filter(|c| c.semantic.is_auto_year())
         .map(|c| c.semantic.rank()).min() else {
         return YearResolution::Missing;
     };
-    // The persisted rank is diagnostic; derive priority from the semantic enum.
     let best_candidates: Vec<_> = candidates.iter()
         .filter(|c| c.semantic.rank() == best_rank).cloned().collect();
     // Symphonia RawValue::StringList serializes with newline separators. Resolve
@@ -450,7 +431,7 @@ mod tests {
         assert_eq!(parse_year("2024-02-29T23:59:59Z"), Some(2024));
         assert_eq!(parse_year("2024-02-29T23"), Some(2024));
         assert_eq!(parse_year("2023-02-29"), None);
-        assert_eq!(parse_year("1806"), Some(1806)); // only a permitted year key decides this.
+        assert_eq!(parse_year("1806"), Some(1806));
         assert_eq!(parse_year("2024-13"), None);
         assert_eq!(parse_year("2024-01-01T24:00"), None);
         assert_eq!(parse_year("2024T12:00"), None);
@@ -471,7 +452,7 @@ mod tests {
     fn priority_and_protections_apply_to_release_fallback() {
         for semantic in [YearSemantic::Recording, YearSemantic::Generic] {
             let mut higher = candidate("2023", semantic);
-            higher.rank = 99; // serialized rank cannot change precedence.
+            higher.rank = 99;
             let mut lower = candidate("2024", YearSemantic::Release);
             lower.rank = 0;
             assert_eq!(resolve_year(&[lower.clone(), higher], 2026),
@@ -607,7 +588,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("funkot-malformed-riff-info-{}.wav", std::process::id()));
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&24_u32.to_le_bytes()); // file length is 8 + 24.
+        bytes.extend_from_slice(&24_u32.to_le_bytes());
         bytes.extend_from_slice(b"WAVE");
         bytes.extend_from_slice(b"LIST");
         bytes.extend_from_slice(&12_u32.to_le_bytes());
