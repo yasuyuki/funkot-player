@@ -419,7 +419,7 @@ pub fn load_overrides(dir: &Path) -> Overrides {
 pub fn save_overrides(dir: &Path, overrides: &Overrides) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(overrides)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(LIBRARY_FILE), json)
+    write_atomic(&dir.join(LIBRARY_FILE), &json)
 }
 
 pub const METADATA_VERSION: u32 = 1;
@@ -871,7 +871,7 @@ pub fn load_flags(dir: &Path) -> Flags {
 pub fn save_flags(dir: &Path, flags: &Flags) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(flags)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(FLAGS_FILE), json)
+    write_atomic(&dir.join(FLAGS_FILE), &json)
 }
 
 /// Source of truth for the Funkot label; [`BarOverride::funkot`] mirrors this one-way.
@@ -900,7 +900,7 @@ pub fn load_labels(dir: &Path) -> Labels {
 pub fn save_labels(dir: &Path, labels: &Labels) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(labels)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(LABELS_FILE), json)
+    write_atomic(&dir.join(LABELS_FILE), &json)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -928,7 +928,7 @@ pub fn load_history(dir: &Path) -> History {
 pub fn save_history(dir: &Path, history: &History) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(history)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(HISTORY_FILE), json)
+    write_atomic(&dir.join(HISTORY_FILE), &json)
 }
 
 pub fn record_play(history: &mut History, hash: &str, now_ms: u64) {
@@ -1234,7 +1234,7 @@ pub fn load_dismissed(dir: &Path) -> Dismissed {
 pub fn save_dismissed(dir: &Path, dismissed: &Dismissed) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(dismissed)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(dir.join(DISMISSED_FILE), json)
+    write_atomic(&dir.join(DISMISSED_FILE), &json)
 }
 
 #[derive(Debug, Clone)]
