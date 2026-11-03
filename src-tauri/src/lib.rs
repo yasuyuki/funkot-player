@@ -4866,6 +4866,25 @@ mod cache_state_tests {
 
         assert_store_blocker_intact(&library);
         assert_eq!(store::load_history(&data.0), history);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let edited = funkot_core::cache::load(&cache.0, &hash).unwrap();
+        assert_eq!(edited.intro_bars, analysis.intro_bars + 4);
+        assert!(edited.intro_bars_manual);
+        let disk_overrides = store::load_overrides(&data.0);
+        let disk_labels = store::load_labels(&data.0);
+        let disk_history = store::load_history(&data.0);
+        assert!(disk_overrides.is_empty());
+        let row = track_row(
+            &track,
+            &cache.0,
+            &disk_overrides,
+            &disk_labels,
+            &disk_history,
+            Some(&hash),
+            None,
+        );
+        assert_eq!(row.intro_bars, Some(analysis.intro_bars + 4));
+        assert!(row.intro_manual);
     }
 
     #[test]
@@ -5014,6 +5033,69 @@ mod cache_state_tests {
         assert_store_blocker_intact(&labels);
         assert_store_blocker_intact(&library);
         assert_eq!(store::load_history(&data.0), history);
+    }
+
+    #[test]
+    fn set_label_impl_returns_error_when_label_replacement_fails_without_mirror_write() {
+        let cache = TempDir::new("label-only-persist-failure-cache");
+        let data = TempDir::new("label-only-persist-failure-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash.clone(),
+            store::BarOverride {
+                intro_bars: Some(8),
+                funkot: Some(true),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+        let library_before = std::fs::read(data.0.join("library.json")).unwrap();
+        let labels = block_store_replacement(&data.0, "labels.json");
+
+        let error = set_label_impl(&cache.0, &data.0, &track, Some(false))
+            .err().expect("failed label replacement must reject");
+
+        assert!(error.contains("cannot persist labels"));
+        assert_store_blocker_intact(&labels);
+        assert_eq!(
+            std::fs::read(data.0.join("library.json")).unwrap(),
+            library_before
+        );
+        assert_eq!(
+            store::load_overrides(&data.0)
+                .get(&hash)
+                .and_then(|entry| entry.intro_bars),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn set_label_impl_returns_error_when_mirror_replacement_fails_after_clearing_label() {
+        let cache = TempDir::new("label-mirror-persist-failure-cache");
+        let data = TempDir::new("label-mirror-persist-failure-data");
+        let (track, analysis) = track_with_analysis(&cache.0);
+        store_for(&track, &cache.0, &analysis);
+        let hash = funkot_core::cache::content_hash(&track).unwrap();
+        let mut labels = store::Labels::new();
+        labels.insert(
+            hash.clone(),
+            store::TrackLabel {
+                verdict: true,
+                labeled_at_ms: 1,
+            },
+        );
+        store::save_labels(&data.0, &labels).unwrap();
+        let library = block_store_replacement(&data.0, "library.json");
+
+        let error = set_label_impl(&cache.0, &data.0, &track, None)
+            .err().expect("failed mirror replacement must reject");
+
+        assert!(error.contains("label saved, but playback override could not be saved"));
+        assert!(store::load_labels(&data.0).is_empty());
+        assert_store_blocker_intact(&library);
     }
 
     #[test]
@@ -5839,6 +5921,72 @@ mod cache_state_tests {
         assert_store_blocker_intact(&labels);
         assert_store_blocker_intact(&library);
         assert_eq!(store::load_history(&data.0), history);
+    }
+
+    #[test]
+    fn set_folder_label_impl_returns_error_when_label_replacement_fails_without_mirror_write() {
+        let data = TempDir::new("folder-label-only-persist-failure-data");
+        let music = TempDir::new("folder-label-only-persist-failure-music");
+        let track = music.0.join("track.wav");
+        std::fs::write(&track, vec![0u8; 4096]).unwrap();
+        let hash = store::resolve_content_hash(&track, &mut store::HashIndex::new()).unwrap();
+        let mut overrides = store::Overrides::new();
+        overrides.insert(
+            hash.clone(),
+            store::BarOverride {
+                intro_bars: Some(8),
+                funkot: Some(true),
+                ..Default::default()
+            },
+        );
+        store::save_overrides(&data.0, &overrides).unwrap();
+        let library_before = std::fs::read(data.0.join("library.json")).unwrap();
+        let labels = block_store_replacement(&data.0, "labels.json");
+
+        let error = set_folder_label_impl(&data.0, &music.0, false).unwrap_err();
+
+        assert!(error.contains("cannot persist labels"));
+        assert_store_blocker_intact(&labels);
+        assert_eq!(
+            std::fs::read(data.0.join("library.json")).unwrap(),
+            library_before
+        );
+        assert_eq!(
+            store::load_overrides(&data.0)
+                .get(&hash)
+                .and_then(|entry| entry.intro_bars),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn set_folder_label_impl_returns_error_when_mirror_replacement_fails_after_label_save() {
+        let data = TempDir::new("folder-label-mirror-persist-failure-data");
+        let music = TempDir::new("folder-label-mirror-persist-failure-music");
+        let track = music.0.join("track.wav");
+        std::fs::write(&track, vec![0u8; 4096]).unwrap();
+        let hash = store::resolve_content_hash(&track, &mut store::HashIndex::new()).unwrap();
+        let mut labels = store::Labels::new();
+        labels.insert(
+            hash.clone(),
+            store::TrackLabel {
+                verdict: true,
+                labeled_at_ms: 1,
+            },
+        );
+        store::save_labels(&data.0, &labels).unwrap();
+        let library = block_store_replacement(&data.0, "library.json");
+
+        let error = set_folder_label_impl(&data.0, &music.0, false).unwrap_err();
+
+        assert!(error.contains("labels saved, but playback override could not be saved"));
+        assert_eq!(
+            store::load_labels(&data.0)
+                .get(&hash)
+                .map(|entry| entry.verdict),
+            Some(false)
+        );
+        assert_store_blocker_intact(&library);
     }
 
     #[test]
@@ -6719,9 +6867,8 @@ fn set_bars_impl(
             overrides.remove(&hash);
         }
     }
-    if let Err(e) = store::save_overrides(data_dir, &overrides) {
-        log::warn!("cannot persist manual bars: {e}");
-    }
+    store::save_overrides(data_dir, &overrides)
+        .map_err(|e| format!("cannot persist manual bars: {e}"))?;
 
     let labels = store::load_labels(data_dir);
     let history = store::load_history(data_dir);
@@ -6775,9 +6922,8 @@ fn set_label_impl(
             labels.remove(&hash);
         }
     }
-    if let Err(e) = store::save_labels(data_dir, &labels) {
-        log::warn!("cannot persist labels: {e}");
-    }
+    store::save_labels(data_dir, &labels)
+        .map_err(|e| format!("cannot persist labels: {e}"))?;
 
     let mut overrides = store::load_overrides(data_dir);
     match verdict {
@@ -6796,9 +6942,9 @@ fn set_label_impl(
             }
         }
     }
-    if let Err(e) = store::save_overrides(data_dir, &overrides) {
-        log::warn!("cannot persist manual bars: {e}");
-    }
+    store::save_overrides(data_dir, &overrides).map_err(|e| {
+        format!("label saved, but playback override could not be saved: {e}")
+    })?;
 
     let history = store::load_history(data_dir);
     Ok(track_row(
@@ -6866,12 +7012,11 @@ fn set_folder_label_impl(
         count += 1;
     }
 
-    if let Err(e) = store::save_labels(data_dir, &labels) {
-        log::warn!("cannot persist labels: {e}");
-    }
-    if let Err(e) = store::save_overrides(data_dir, &overrides) {
-        log::warn!("cannot persist manual bars: {e}");
-    }
+    store::save_labels(data_dir, &labels)
+        .map_err(|e| format!("cannot persist labels: {e}"))?;
+    store::save_overrides(data_dir, &overrides).map_err(|e| {
+        format!("labels saved, but playback override could not be saved: {e}")
+    })?;
     Ok((count, undo))
 }
 

@@ -134,6 +134,7 @@ class PlayerStore {
   #importPending = false;
   #libraryRefreshOwed = false;
   #libraryRefreshOwedEpoch = 0;
+  #pendingLibraryMutationError: string | null = null;
   #refreshGen = 0;
   #queueGen = 0;
   #catalogGen = 0;
@@ -279,7 +280,7 @@ class PlayerStore {
     }
   }
 
-  async #reloadLibraryQuiet(): Promise<void> {
+  async #reloadLibraryQuiet(refreshFlaggedBars = false): Promise<void> {
     if (this.#libraryBusy) return;
     this.#libraryBusy = true;
     const gen = ++this.#refreshGen;
@@ -289,6 +290,9 @@ class PlayerStore {
       const { rows, persistence_error } = await refreshLibrary(false);
       if (gen !== this.#refreshGen) return;
       this.library = new Map(rows.map((r) => [r.path, r]));
+      if (refreshFlaggedBars) {
+        for (const row of rows) this.#applyFlaggedBarUpdate(row);
+      }
       if (persistence_error !== null) this.lastError = persistence_error;
       await this.reloadTrackTags();
       applied = persistence_error === null;
@@ -298,10 +302,24 @@ class PlayerStore {
       this.libraryScan = null;
       this.#libraryBusy = false;
       if (applied) this.#requestArrivalsPull();
-      if (this.#libraryRefreshOwed) {
+      const mutationError = this.#pendingLibraryMutationError;
+      this.#pendingLibraryMutationError = null;
+      if (mutationError !== null) {
+        queueMicrotask(() => void this.#reloadLibraryAfterMutationFailure(mutationError));
+      } else if (this.#libraryRefreshOwed) {
         queueMicrotask(() => void this.doRefreshLibrary());
       }
     }
+  }
+
+  async #reloadLibraryAfterMutationFailure(error: string): Promise<void> {
+    if (this.#libraryBusy) {
+      this.#pendingLibraryMutationError = error;
+      this.lastError = error;
+      return;
+    }
+    await this.#reloadLibraryQuiet(true);
+    this.lastError = error;
   }
 
   #replaceLibraryRow(row: TrackRow): void {
@@ -548,8 +566,9 @@ class PlayerStore {
       this.#replaceLibraryRow(updated);
       return updated;
     } catch (e) {
-      if (prev) this.#replaceLibraryRow(prev);
-      this.lastError = String(e);
+      const error = String(e);
+      await this.#reloadLibraryAfterMutationFailure(error);
+      toast.notify(error);
       return null;
     }
   }
@@ -634,9 +653,10 @@ class PlayerStore {
       this.#folderLabelUndoRows = prevRows;
       return count;
     } catch (e) {
-      this.#restoreLibraryRows(prevRows);
       this.#folderLabelUndoRows = null;
-      this.lastError = String(e);
+      const error = String(e);
+      await this.#reloadLibraryAfterMutationFailure(error);
+      toast.notify(error);
       return null;
     }
   }
@@ -963,7 +983,11 @@ class PlayerStore {
     } finally {
       this.libraryScan = null;
       this.#libraryBusy = false;
-      if (attempt !== "error" && this.#libraryRefreshOwed) {
+      const mutationError = this.#pendingLibraryMutationError;
+      this.#pendingLibraryMutationError = null;
+      if (mutationError !== null) {
+        queueMicrotask(() => void this.#reloadLibraryAfterMutationFailure(mutationError));
+      } else if (attempt !== "error" && this.#libraryRefreshOwed) {
         queueMicrotask(() => void this.doRefreshLibrary());
       }
     }
@@ -1048,7 +1072,9 @@ class PlayerStore {
       this.#applyFlaggedBarUpdate(updated);
       return updated;
     } catch (e) {
-      this.lastError = String(e);
+      const error = String(e);
+      await this.#reloadLibraryAfterMutationFailure(error);
+      toast.notify(error);
       return null;
     }
   }
