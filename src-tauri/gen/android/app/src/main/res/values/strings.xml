@@ -10,4 +10,7 @@
     <string name="notification_output_disconnected">Output disconnected</string>
     <string name="notification_paused">Paused</string>
     <string name="notification_playing">Playing</string>
+    <string name="notification_favorite_add">Add to favorites</string>
+    <string name="notification_favorite_saved">Added to favorites</string>
+    <string name="notification_favorite_failed">Could not add to favorites</string>
 </resources>

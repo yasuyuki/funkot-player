@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.drawable.Icon
+import android.net.Uri
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -21,6 +22,7 @@ import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import java.util.Locale
+import org.json.JSONObject
 
 /** MediaSession advertises toggle and dedicated play/pause transport callbacks with these bits. */
 internal val MEDIA_SESSION_ACTIONS: Long =
@@ -72,6 +74,8 @@ class PlaybackService : Service() {
         private const val ACTION_PLAY = "jp.hatsuboshi.funkotplayer.action.PLAY"
         private const val ACTION_PAUSE = "jp.hatsuboshi.funkotplayer.action.PAUSE"
         private const val ACTION_NEXT = "jp.hatsuboshi.funkotplayer.action.NEXT"
+        private const val ACTION_FAVORITE = "jp.hatsuboshi.funkotplayer.action.FAVORITE"
+        private const val EXTRA_FAVORITE_TARGET = "favorite_target"
         private const val ACTION_FLAG = "jp.hatsuboshi.funkotplayer.action.FLAG"
         private const val ACTION_SYNC = "jp.hatsuboshi.funkotplayer.action.SYNC"
 
@@ -86,7 +90,7 @@ class PlaybackService : Service() {
         /** Must match Rust `Phase::Disconnected as u8`. */
         private const val PHASE_DISCONNECTED = 6
 
-        private const val FLAG_FEEDBACK_MS = 4_000L
+        private const val ACTION_FEEDBACK_MS = 4_000L
 
         init {
             // Same native library the rest of the app loads (see generated
@@ -172,16 +176,13 @@ class PlaybackService : Service() {
                             onNativeControl(CONTROL_NEXT)
                         }
                     }
-                    // Android 13+ media controls read PlaybackState custom
-                    // actions, not Notification.Action. ACTION_FLAG is that
-                    // custom action.
                     override fun onCustomAction(action: String, extras: Bundle?) {
-                        if (action != ACTION_FLAG) return
+                        if (action != ACTION_FLAG && action != ACTION_FAVORITE) return
                         val svc = instance
                         if (svc == null) {
-                            // Let the started service do the flag, so it also
-                            // gets to show the ⚑ feedback it owns.
-                            startService(app, ACTION_FLAG)
+                            startService(app, action, extras)
+                        } else if (action == ACTION_FAVORITE) {
+                            svc.saveFavorite(extras?.getString(EXTRA_FAVORITE_TARGET))
                         } else {
                             onNativeControl(CONTROL_FLAG)
                             svc.showFlagFeedback(lastFlagOk())
@@ -214,9 +215,10 @@ class PlaybackService : Service() {
             session = null
         }
 
-        private fun startService(context: Context, action: String?) {
+        private fun startService(context: Context, action: String?, extras: Bundle? = null) {
             val intent = Intent(context, PlaybackService::class.java)
             if (action != null) intent.action = action
+            if (extras != null) intent.putExtras(extras)
             try {
                 androidx.core.content.ContextCompat.startForegroundService(context, intent)
             } catch (e: Exception) {
@@ -249,31 +251,24 @@ class PlaybackService : Service() {
         @JvmStatic
         external fun lastFlagOk(): Boolean
 
-        /** Resolved track title for the notification / MediaSession. */
         @JvmStatic
-        external fun currentTitle(): String
+        external fun currentTrack(): String
 
-        /** Resolved track artist for MediaSession (empty when absent). */
         @JvmStatic
-        external fun currentArtist(): String
+        external fun addFavorite(target: String): Boolean
 
         /** Stored UI locale, or empty to follow the device locale. */
         @JvmStatic
         external fun currentLocaleTag(): String
     }
 
-    /**
-     * Transient feedback after tapping ⚑; cleared after [FLAG_FEEDBACK_MS].
-     * Android 13+ media UI ignores [Notification.Builder.setSubText], so we
-     * also flash it via MediaMetadata artist + a Toast.
-     */
-    private var flagFeedback: String? = null
+    private var actionFeedback: String? = null
 
     /** Whether [startForeground] currently holds, so we detach exactly once. */
     private var isForeground = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var clearFlagFeedback: Runnable? = null
+    private var clearActionFeedback: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -291,7 +286,8 @@ class PlaybackService : Service() {
         super.onCreate()
         instance = this
         ensureSession(this)
-        setSessionMetadata(currentTitle(), currentArtist())
+        val track = JSONObject(currentTrack())
+        setSessionMetadata(track.getString("title"), track.getString("artist"))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -309,6 +305,9 @@ class PlaybackService : Service() {
             ACTION_PLAY -> onNativeControl(CONTROL_PLAY)
             ACTION_PAUSE -> onNativeControl(CONTROL_PAUSE)
             ACTION_NEXT -> onNativeControl(CONTROL_NEXT)
+            ACTION_FAVORITE -> onNativeControl(CONTROL_QUERY).also {
+                saveFavorite(intent.getStringExtra(EXTRA_FAVORITE_TARGET))
+            }
             ACTION_FLAG -> onNativeControl(CONTROL_FLAG).also {
                 showFlagFeedback(lastFlagOk())
             }
@@ -325,8 +324,8 @@ class PlaybackService : Service() {
     }
 
     override fun onDestroy() {
-        clearFlagFeedback?.let { mainHandler.removeCallbacks(it) }
-        clearFlagFeedback = null
+        clearActionFeedback?.let { mainHandler.removeCallbacks(it) }
+        clearActionFeedback = null
         instance = null
         // Android destroys this service about a minute after it leaves the
         // foreground, which for us means "the listener paused a while ago".
@@ -355,12 +354,13 @@ class PlaybackService : Service() {
     private fun publishState(packed: Int, fromStart: Boolean = false) {
         val paused = (packed and 1) != 0
         val phase = packed ushr 1
-        val title = currentTitle()
+        val track = JSONObject(currentTrack())
+        val title = track.getString("title")
 
         ensureChannel()
-        setPlaybackState(paused, phase)
-        setSessionMetadata(title, currentArtist())
-        val notification = buildNotification(paused, phase, title)
+        setPlaybackState(paused, phase, track)
+        setSessionMetadata(title, track.getString("artist"))
+        val notification = buildNotification(paused, phase, track)
 
         if (!paused) {
             enterForeground(notification)
@@ -425,37 +425,44 @@ class PlaybackService : Service() {
      */
     private fun retireStaleNotification() {
         ensureChannel()
-        enterForeground(buildNotification(true, 0, currentTitle()))
+        enterForeground(buildNotification(true, 0, JSONObject(currentTrack())))
         leaveForeground(remove = true)
         releaseSession()
         stopSelf()
     }
 
     private fun showFlagFeedback(ok: Boolean) {
-        val msg = text(if (ok) R.string.notification_flag_saved else R.string.notification_flag_failed)
-        flagFeedback = msg
-        Log.i("funkot", "flag feedback: $msg")
+        showFeedback(if (ok) R.string.notification_flag_saved else R.string.notification_flag_failed)
+    }
+
+    private fun saveFavorite(target: String?) {
+        val ok = target != null && addFavorite(target)
+        showFeedback(if (ok) R.string.notification_favorite_saved else R.string.notification_favorite_failed)
+    }
+
+    private fun showFeedback(resourceId: Int) {
+        val msg = text(resourceId)
+        actionFeedback = msg
+        Log.i("funkot", "notification feedback: $msg")
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
-        clearFlagFeedback?.let { mainHandler.removeCallbacks(it) }
-        // Publish now; callers may also refresh — setSessionMetadata keeps
-        // flagFeedback on the artist line until the timer clears it.
+        clearActionFeedback?.let { mainHandler.removeCallbacks(it) }
         val packed = onNativeControl(CONTROL_QUERY)
         applyControlState(packed)
 
         val clear = Runnable {
-            flagFeedback = null
-            clearFlagFeedback = null
+            actionFeedback = null
+            clearActionFeedback = null
             applyControlState(onNativeControl(CONTROL_QUERY))
         }
-        clearFlagFeedback = clear
-        mainHandler.postDelayed(clear, FLAG_FEEDBACK_MS)
+        clearActionFeedback = clear
+        mainHandler.postDelayed(clear, ACTION_FEEDBACK_MS)
     }
 
     private fun setSessionMetadata(title: String, artist: String) {
         // Android 13+ media UI ignores Notification.setSubText; while feedback
         // is active, surface it on the artist line the controls already show.
-        val displayArtist = flagFeedback ?: artist
+        val displayArtist = actionFeedback ?: artist
         val session = session ?: return
         session.setMetadata(
             MediaMetadata.Builder()
@@ -465,28 +472,33 @@ class PlaybackService : Service() {
         )
     }
 
-    private fun setPlaybackState(paused: Boolean, phase: Int) {
+    private fun setPlaybackState(paused: Boolean, phase: Int, track: JSONObject) {
         val state = when {
             phase == PHASE_DISCONNECTED -> PlaybackState.STATE_BUFFERING
             paused -> PlaybackState.STATE_PAUSED
             else -> PlaybackState.STATE_PLAYING
         }
-        // Android 13+ derives media-control buttons from PlaybackState, not
-        // from Notification.Action. With PLAY_PAUSE + SKIP_TO_NEXT and no
-        // SKIP_TO_PREVIOUS, the custom ⚑ fills compact slot 2 (pause | ⚑ | next).
         val session = session ?: return
+        val builder = PlaybackState.Builder().setActions(MEDIA_SESSION_ACTIONS)
+        track.optJSONObject("target")?.let { target ->
+            builder.addCustomAction(
+                PlaybackState.CustomAction.Builder(
+                    ACTION_FAVORITE,
+                    text(if (track.getBoolean("favorite")) R.string.notification_favorite_saved else R.string.notification_favorite_add),
+                    if (track.getBoolean("favorite")) R.drawable.ic_favorite else R.drawable.ic_favorite_border,
+                ).setExtras(Bundle().apply {
+                    putString(EXTRA_FAVORITE_TARGET, target.toString())
+                }).build(),
+            )
+        }
         session.setPlaybackState(
-            PlaybackState.Builder()
-                .setActions(
-                    MEDIA_SESSION_ACTIONS,
-                )
-                .addCustomAction(
-                    PlaybackState.CustomAction.Builder(
-                        ACTION_FLAG,
-                        "⚑",
-                        R.drawable.ic_flag,
-                    ).build(),
-                )
+            builder.addCustomAction(
+                PlaybackState.CustomAction.Builder(
+                    ACTION_FLAG,
+                    "⚑",
+                    R.drawable.ic_flag,
+                ).build(),
+            )
                 .setState(
                     state,
                     PlaybackState.PLAYBACK_POSITION_UNKNOWN,
@@ -517,15 +529,22 @@ class PlaybackService : Service() {
      * service is what the tap is allowed to do — [onStartCommand] holds up
      * its end by calling startForeground on every path.
      */
-    private fun selfIntent(action: String, requestCode: Int): PendingIntent =
+    private fun selfIntent(action: String, requestCode: Int, target: JSONObject? = null): PendingIntent =
         PendingIntent.getForegroundService(
             this,
             requestCode,
-            Intent(this, PlaybackService::class.java).setAction(action),
+            Intent(this, PlaybackService::class.java).setAction(action).apply {
+                if (target != null) {
+                    data = Uri.Builder().scheme("funkot-favorite").authority("track")
+                        .appendPath(target.getString("expected_hash"))
+                        .appendPath(target.getString("path")).build()
+                    putExtra(EXTRA_FAVORITE_TARGET, target.toString())
+                }
+            },
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-    private fun buildNotification(paused: Boolean, phase: Int, title: String): Notification {
+    private fun buildNotification(paused: Boolean, phase: Int, track: JSONObject): Notification {
         val contentIntent = PendingIntent.getActivity(
             this,
             0,
@@ -534,11 +553,6 @@ class PlaybackService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-        // Own drawables rather than android.R.drawable.*: a framework resource
-        // id handed out under this app's package name is a mismatch the system
-        // UI has to resolve, and it is not worth the risk for three tiny paths.
-        // Pre-Android 13 still paints these Notification.Actions; 13+ uses the
-        // PlaybackState custom action instead (see setPlaybackState).
         val toggle = Notification.Action.Builder(
             Icon.createWithResource(this, if (paused) R.drawable.ic_play else R.drawable.ic_pause),
             text(if (paused) R.string.notification_play else R.string.notification_pause),
@@ -561,12 +575,20 @@ class PlaybackService : Service() {
             else -> text(R.string.notification_playing)
         }
 
+        val target = track.optJSONObject("target")
+        val favorite = target?.let {
+            Notification.Action.Builder(
+                Icon.createWithResource(this, if (track.getBoolean("favorite")) R.drawable.ic_favorite else R.drawable.ic_favorite_border),
+                text(if (track.getBoolean("favorite")) R.string.notification_favorite_saved else R.string.notification_favorite_add),
+                selfIntent(ACTION_FAVORITE, 3, it),
+            ).build()
+        }
         val style = Notification.MediaStyle().setShowActionsInCompactView(0, 1, 2)
         session?.let { style.setMediaSession(it.sessionToken) }
 
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_play)
-            .setContentTitle(title)
+            .setContentTitle(track.getString("title"))
             .setContentText(contentText)
             // Ongoing only while playing: paused, this is no longer a
             // foreground-service notification and may outlive the process, so
@@ -577,9 +599,9 @@ class PlaybackService : Service() {
             .setContentIntent(contentIntent)
             .addAction(toggle)
             .addAction(next)
-            .addAction(flag)
-            .setStyle(style)
-        flagFeedback?.let { builder.setSubText(it) }
+        favorite?.let { builder.addAction(it) }
+        builder.addAction(flag).setStyle(style)
+        actionFeedback?.let { builder.setSubText(it) }
         return builder.build()
     }
 }

@@ -1869,28 +1869,6 @@ fn cached_tags_for(path: &Path) -> CachedTags {
     }
 }
 
-static LAST_SESSION_META: Mutex<(Option<PathBuf>, String, String)> =
-    Mutex::new((None, String::new(), String::new()));
-
-fn session_metadata() -> (String, String) {
-    let now = NOW.lock().unwrap().now.clone();
-    {
-        let last = LAST_SESSION_META.lock().unwrap();
-        if last.0 == now {
-            return (last.1.clone(), last.2.clone());
-        }
-    }
-    let meta = match now.as_ref() {
-        None => session_metadata_for(None, &CachedTags::default()),
-        Some(path) => {
-            let tags = cached_tags_for(path);
-            session_metadata_for(Some(path.as_path()), &tags)
-        }
-    };
-    *LAST_SESSION_META.lock().unwrap() = (now, meta.0.clone(), meta.1.clone());
-    meta
-}
-
 #[cfg(any(target_os = "windows", test))]
 fn current_track_http_snapshot() -> current_track_http::CurrentTrackSnapshot {
     let (path, auditioning) = {
@@ -1913,14 +1891,34 @@ fn current_track_http_snapshot() -> current_track_http::CurrentTrackSnapshot {
     )
 }
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn notification_title() -> String {
-    session_metadata().0
+#[cfg(target_os = "android")]
+#[derive(serde::Serialize)]
+struct NotificationTrack {
+    title: String,
+    artist: String,
+    target: Option<playlist_service::TrackTarget>,
+    favorite: bool,
 }
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn notification_artist() -> String {
-    session_metadata().1
+#[cfg(target_os = "android")]
+fn notification_track() -> NotificationTrack {
+    let path = NOW.lock().unwrap_or_else(|e| e.into_inner()).now.clone();
+    let (title, artist) = match path.as_deref() {
+        Some(path) => session_metadata_for(Some(path), &cached_tags_for(path)),
+        None => session_metadata_for(None, &CachedTags::default()),
+    };
+    let target = path.and_then(|path| {
+        let hash = funkot_core::cache::content_hash(&path).ok()?;
+        Some(playlist_service::TrackTarget {
+            path: path.to_string_lossy().into_owned(), expected_hash: Some(hash),
+        })
+    });
+    let favorite = target.as_ref().and_then(|track| track.expected_hash.as_ref()).is_some_and(|hash| {
+        playlist_service::existing().is_some_and(|service| {
+            service.lock().unwrap_or_else(|e| e.into_inner()).catalog_view().favorite_hashes.contains(hash)
+        })
+    });
+    NotificationTrack { title, artist, target, favorite }
 }
 
 #[cfg(test)]
@@ -7987,26 +7985,30 @@ pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_lastFlagOk(
 
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentTitle<'local>(
+pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentTrack<'local>(
     mut env: jni::EnvUnowned<'local>,
     _class: jni::objects::JClass<'local>,
 ) -> jni::sys::jstring {
-    let title = notification_title();
+    let track = serde_json::to_string(&notification_track()).unwrap();
     env.with_env(|env| {
-        Ok::<_, jni::errors::Error>(env.new_string(&title)?.into_raw())
+        Ok::<_, jni::errors::Error>(env.new_string(&track)?.into_raw())
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_currentArtist<'local>(
+pub extern "C" fn Java_jp_hatsuboshi_funkotplayer_PlaybackService_addFavorite<'local>(
     mut env: jni::EnvUnowned<'local>,
     _class: jni::objects::JClass<'local>,
-) -> jni::sys::jstring {
-    let artist = notification_artist();
+    target: jni::objects::JString<'local>,
+) -> jni::sys::jboolean {
     env.with_env(|env| {
-        Ok::<_, jni::errors::Error>(env.new_string(&artist)?.into_raw())
+        let json = String::from(target.mutf8_chars(env)?);
+        let ok = serde_json::from_str::<playlist_service::TrackTarget>(&json).ok()
+            .zip(playlist_service::existing())
+            .is_some_and(|(track, service)| playlist_service::add_notification_favorite(&service, track).is_ok());
+        Ok::<_, jni::errors::Error>(ok as jni::sys::jboolean)
     })
     .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

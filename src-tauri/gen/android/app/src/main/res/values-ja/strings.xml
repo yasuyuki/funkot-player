@@ -8,4 +8,7 @@
     <string name="notification_output_disconnected">出力切断中</string>
     <string name="notification_paused">一時停止中</string>
     <string name="notification_playing">再生中</string>
+    <string name="notification_favorite_add">お気に入りに追加</string>
+    <string name="notification_favorite_saved">お気に入りに追加しました</string>
+    <string name="notification_favorite_failed">お気に入りに追加できませんでした</string>
 </resources>

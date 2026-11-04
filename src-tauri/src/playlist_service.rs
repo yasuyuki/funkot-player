@@ -833,6 +833,19 @@ pub fn current_queue_origin() -> Option<QueueOrigin> {
 pub fn failed(index: usize, message: &str) { if let Some(s) = existing() { s.lock().unwrap_or_else(|e|e.into_inner()).failed(index, message); } }
 pub fn finished() { if let Some(s) = existing() { s.lock().unwrap_or_else(|e|e.into_inner()).reconcile(); } }
 
+pub fn add_notification_favorite(service: &Shared, track: TrackTarget) -> Result<CommandResult, CommandError> {
+    static REQUEST_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if track.expected_hash.as_deref().is_none_or(str::is_empty) {
+        return Err(error("identity_unavailable"));
+    }
+    let target = service.lock().unwrap_or_else(|e| e.into_inner()).target();
+    command(service, Request {
+        request_id: format!("notification-favorite-{}", REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)),
+        target,
+        action: Action::SetFavorite { track, favorite: true },
+    })
+}
+
 pub fn command(service: &Shared, request: Request) -> Result<CommandResult, CommandError> {
     command_with(service, request, crate::PLAYBACK.get())
 }
