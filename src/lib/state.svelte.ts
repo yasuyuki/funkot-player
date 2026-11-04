@@ -313,9 +313,9 @@ class PlayerStore {
   }
 
   async #reloadLibraryAfterMutationFailure(error: string): Promise<void> {
+    this.lastError = error;
     if (this.#libraryBusy) {
       this.#pendingLibraryMutationError = error;
-      this.lastError = error;
       return;
     }
     await this.#reloadLibraryQuiet(true);
@@ -567,8 +567,8 @@ class PlayerStore {
       return updated;
     } catch (e) {
       const error = String(e);
-      await this.#reloadLibraryAfterMutationFailure(error);
       toast.notify(error);
+      await this.#reloadLibraryAfterMutationFailure(error);
       return null;
     }
   }
@@ -655,8 +655,8 @@ class PlayerStore {
     } catch (e) {
       this.#folderLabelUndoRows = null;
       const error = String(e);
-      await this.#reloadLibraryAfterMutationFailure(error);
       toast.notify(error);
+      await this.#reloadLibraryAfterMutationFailure(error);
       return null;
     }
   }
@@ -1073,8 +1073,8 @@ class PlayerStore {
       return updated;
     } catch (e) {
       const error = String(e);
-      await this.#reloadLibraryAfterMutationFailure(error);
       toast.notify(error);
+      await this.#reloadLibraryAfterMutationFailure(error);
       return null;
     }
   }
