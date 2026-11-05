@@ -300,12 +300,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Check library availability and rendered theme transitions
+      - name: Check browser UI regressions
         shell: pwsh
         run: |
           npx --no-install playwright install chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run ui:capture -- tests/ui/library-scan.spec.mjs tests/ui/theme-contrast.spec.mjs tests/ui/edit.spec.mjs
+          npm run ui:capture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   dependency-policy:
