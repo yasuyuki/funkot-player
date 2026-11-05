@@ -6,6 +6,18 @@ use std::sync::{Arc, Mutex};
 
 struct Fixture { data: tempfile::TempDir, cache: tempfile::TempDir, queue: SharedQueue, service: Shared }
 
+#[test]
+fn isolated_source_fixture_keeps_relative_cache_outside_checkout() {
+    let parent = isolated_source_fixture("playlist_service::tests::isolated_source_fixture_keeps_relative_cache_outside_checkout");
+    let cache = Path::new("funkot-cache/isolation-regression");
+    if parent {
+        assert!(!cache.exists(), "fixture child wrote its relative cache into the checkout");
+    } else {
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(cache, b"synthetic cache").unwrap();
+    }
+}
+
 fn isolated_source_fixture(name: &str) -> bool {
     use std::io::{BufRead, Read, Write};
     use std::process::{Command, Stdio};
@@ -14,8 +26,10 @@ fn isolated_source_fixture(name: &str) -> bool {
         std::io::stdout().flush().unwrap();
         return false;
     }
+    let directory = tempfile::tempdir().unwrap();
     let stores = crate::playback_state::process_spawn_guard();
     let mut child = Command::new(std::env::current_exe().unwrap())
+        .current_dir(directory.path())
         .args(["--exact", name, "--nocapture", "--test-threads=1"])
         .env("FUNKOT_ISOLATED_SOURCE_FIXTURE", name)
         .stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
@@ -30,6 +44,7 @@ fn isolated_source_fixture(name: &str) -> bool {
     drop(stores);
     output.read_to_string(&mut captured).unwrap();
     let status = child.wait().unwrap();
+    directory.close().expect("remove child fixture working directory");
     assert!(status.success() && captured.contains("running 1 test")
         && captured.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
         "isolated source fixture failed: {name}\n{captured}");
