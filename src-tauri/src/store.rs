@@ -1677,6 +1677,7 @@ mod tests {
         ];
         assert!(before.iter().all(|(_, bytes)| bytes.len() < 512));
 
+        let _stores = crate::playback_state::process_spawn_guard();
         let status = std::process::Command::new("/bin/sh")
             .args([
                 "-c",
