@@ -1,5 +1,8 @@
 const phase = (v, i) => {
-  if (v.parent[i] === 'released') return v.scratch[i] ? 'Leaked scratch' : 'Scratch removed';
+  if (v.parent[i] === 'released') {
+    if (v.scratch[i]) return 'Leaked scratch';
+    return v.child[i] === 'exited' ? 'Scratch removed' : 'Scratch removed before child exit';
+  }
   if (v.child[i] === 'exited') return 'Child exited';
   if (!v.scratch[i] && v.child[i] !== 'absent') return 'Child lost its scratch';
   if (v.child[i] === 'returned') return 'Test returned; loader may still write';

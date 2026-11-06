@@ -31,4 +31,4 @@ When a change touches `src-tauri/src/playback_recovery.rs`, its call sites in `p
 
 When a change touches source-switch or startup transaction ordering in `src-tauri/src/playlist_service.rs`, queue/session publication, or `verification/source_switch`, use [verification/source_switch/SKILL.md](verification/source_switch/SKILL.md).
 
-When a change touches `isolated_source_fixture` or `verification/cache_lifecycle`, use [verification/cache_lifecycle/SKILL.md](verification/cache_lifecycle/SKILL.md).
+When a change touches `isolated_source_fixture`, `funkot-core.commit`, or `verification/cache_lifecycle`, use [verification/cache_lifecycle/SKILL.md](verification/cache_lifecycle/SKILL.md).

@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -14,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--setup", action="store_true", help="prepare the existing fixed TLC jar")
     parser.add_argument("--jar", type=Path, default=Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "funkot-verification/tla2tools-1.7.4.jar")
-    parser.add_argument("--java", default="java", help="Java executable")
+    parser.add_argument("--java", default="java", help="Java 21 executable")
     parser.add_argument("--output", type=Path, help="new or empty evidence directory")
     args = parser.parse_args()
     if args.setup:
@@ -27,21 +28,27 @@ def main():
     summary = {"status": "FAIL"}
     started = time.monotonic()
     try:
-        revision = tlc.source_revision(root, "player")
+        core_root = tlc.selected_core_root(root)
+        revision, core_revision = tlc.source_provenance(root, core_root)
         jar = args.jar.resolve(strict=True)
         if tlc.sha256(jar) != tlc.TLC_SHA256:
             raise RuntimeError("TLC jar does not match the fixed hash")
-        summary.update(revision=revision, tlc="1.7.4", jar_sha256=tlc.TLC_SHA256)
-        summary["java"] = subprocess.check_output([args.java, "-version"], stderr=subprocess.STDOUT, text=True).splitlines()[0]
+        summary.update(revision=revision, core_revision=core_revision, tlc="1.7.4", jar_sha256=tlc.TLC_SHA256)
+        java_version = subprocess.check_output([args.java, "-version"], stderr=subprocess.STDOUT, text=True)
+        if re.search(r'version "21[.\"]', java_version) is None:
+            raise RuntimeError("Java 21 is required")
+        summary["java"] = java_version.splitlines()[0]
         with tempfile.TemporaryDirectory(prefix="cache-lifecycle-model-") as temporary:
             tree = Path(temporary)
             tlc.archive_commit(root, revision, tree, "player")
+            tlc.archive_commit(core_root, core_revision, tree / "core", "core")
             spec = "verification/cache_lifecycle/CacheLifecycle.tla"
             cfg = (tree / spec).with_suffix(".cfg").read_text()
             summary["source_sha256"] = {name: tlc.sha256(tree / name) for name in (
-                "src-tauri/src/playlist_service/tests.rs", spec,
+                "funkot-core.commit", "src-tauri/src/playlist_service/tests.rs", spec,
                 "verification/cache_lifecycle/CacheLifecycle.cfg",
                 "verification/check_cache_lifecycle.py", "verification/check_source_switch.py",
+                "core/funkot-core/src/engine.rs", "core/funkot-core/src/lib.rs",
             )}
             results = {}
             results["ownership"] = tlc.run_tlc(tree, out, args.java, jar, "ownership", cfg, started, spec=spec)

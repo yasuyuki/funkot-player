@@ -1,6 +1,6 @@
 ---
 name: verify-funkot-test-cache
-description: Verify Funkot Player native child-test cache isolation after changes to isolated_source_fixture, child working directories, wait/cleanup ordering, or verification/cache_lifecycle.
+description: Verify Funkot Player native child-test cache isolation after changes to isolated_source_fixture, the adopted core, child working directories, wait/cleanup ordering, or verification/cache_lifecycle.
 ---
 # Verify native test cache ownership
 
@@ -25,7 +25,9 @@ python3 -B verification/check_cache_lifecycle.py --setup
 python3 -B verification/check_cache_lifecycle.py
 ```
 
-The ordinary check archives the clean committed revision. It reuses the existing
+The ordinary check archives the clean committed player and selected adopted core.
+It rejects a dirty or mismatched core and records both revisions and source hashes.
+It reuses the existing
 TLC 1.7.4 hash, runner deadline and result validator. Read `summary.json` and all
 three logs. Ownership must pass; inherited-cwd and early-cleanup variants must
 produce `CacheOwnership` counterexamples. A timeout, compiler/tool failure,
@@ -50,6 +52,8 @@ the directory. `ReturnFromTest` permits a detached loader to write after the
 test body returns. Process exit terminates those threads; Engine drop alone
 does not. The adopted core's `EngineOptions::default`, `loader_main_mode`,
 `prepare_first_live`, and `Engine::drop` supply those adapter facts.
+Those core facts were checked at `a5fa36a399c9f09ecbd7638ce4f144b016d059f7`.
+Recheck them when `funkot-core.commit` changes.
 
 The bound is two simultaneous child fixtures, distinct temporary directories,
 one possible cache write per child, and every ordering of body return, write,
