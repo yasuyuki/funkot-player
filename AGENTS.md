@@ -30,3 +30,5 @@ When a change touches transition audition, `resume_autodj`, pause transport or `
 When a change touches `src-tauri/src/playback_recovery.rs`, its call sites in `playback_state.rs`, `verification/playback_recovery.rs`, `verification/check.py`, or `.claude/skills/verify-playback-recovery/`, use [.claude/skills/verify-playback-recovery/SKILL.md](.claude/skills/verify-playback-recovery/SKILL.md).
 
 When a change touches source-switch or startup transaction ordering in `src-tauri/src/playlist_service.rs`, queue/session publication, or `verification/source_switch`, use [verification/source_switch/SKILL.md](verification/source_switch/SKILL.md).
+
+When a change touches `isolated_source_fixture` or `verification/cache_lifecycle`, use [verification/cache_lifecycle/SKILL.md](verification/cache_lifecycle/SKILL.md).
