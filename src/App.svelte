@@ -182,7 +182,7 @@
   .panes > .pane:not(.active) { display: none; }
 
   /* Below two panes the selected mode names itself through its tabs, so only the way out is shown. */
-  @container shell (max-width: 47.99rem) {
+  @container shell not (min-width: 48rem) {
     .mode.active { display: none; }
   }
 

@@ -103,6 +103,17 @@ test("every pane and the add target stay reachable across the column boundaries"
   }
 });
 
+test("a fractional width just below the two-column boundary is still one column with every tab", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "Widths are set explicitly");
+  await page.setViewportSize({ width: 768, height: 900 });
+  await dense(page);
+  await page.locator("#app").evaluate(el => el.style.width = "767.9px");
+  expect((await page.locator(".panes").evaluate(el => getComputedStyle(el).gridTemplateColumns.split(" "))).length).toBe(1);
+  await expect(tab(page, "Up next")).toBeVisible();
+  await expect(tab(page, "Go to playback mode")).toBeHidden();
+  await expect(page.locator("section.library .choose")).toBeVisible();
+});
+
 test("a pane keeps its scroll position while another tab is shown", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "narrow", "Tabs replace panes only below two columns");
   await dense(page);

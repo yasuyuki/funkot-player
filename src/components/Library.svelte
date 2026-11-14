@@ -385,7 +385,7 @@
   .dest :global(.destination) { display: none; }
   .dest :global(.choose)::before { content: "+ → "; color: var(--color-text-dim); }
 
-  @container shell (max-width: 47.99rem) {
+  @container shell not (min-width: 48rem) {
     .heading { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
     .dest { display: block; }
     .secondary { display: none; order: 4; flex-basis: 100%; }
