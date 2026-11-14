@@ -136,51 +136,22 @@ rekordbox 書き出しはいずれもその出力口であり、それ自体が�
 
 判断の根拠。数字は Pixel 8 Pro（412×916 CSS px）換算。
 
-### 再生画面のクロムは約 290px、予約された min-height がその過半である
+### リストは画面の上端近くから始まる（#141 で改修済み）
 
-| 帯 | 高さ |
-|---|---|
-| body padding-top（`env(safe-area-inset-top)` fallback 3rem） | 64px |
-| ヘッダ（再生/編集 segmented + ⋮） | 54px |
-| NowCard（うち予約 min-height 43px） | 106px |
-| Transport 行（**ボタン** ▶/⏸・⏭・⚑） | 46px |
-| TransitionStrip（1行。予約 min-height 23px） | 23px |
+24 曲の fixture を Chromium で測った値である（`tests/ui/density.spec.mjs`）。Pixel 8 Pro 実機では測っていない。
 
-**ボタンは 46px の1行、予約された min-height が 66px。** 予約は 500ms ポーリングで値が
-遅れて届いてもレイアウトが跳ねないためにある（`nowTitle` / `nowArtist`（`src/components/NowCard.svelte`）、
-`fromTitle` / `toTitle`（`src/components/TransitionStrip.svelte`）の予約領域）。**残る削減余地は
-NowCard の予約 43px であり、ボタンではない。**
+| 幅 | Library の開始位置 | 見える行 | 改修前 |
+|---|---|---|---|
+| desktop 1280×900 | 88px | 19 行 | 474px、6 行 |
+| narrow 412×915 | 116px | 14 行 | 544px、5 行 |
 
-ライブラリ1行目は画面上端から約 492px に出る見込みである。**この行だけは実測ではなく、
-1行化した TransitionStrip の高さ（`--font-size-md` × 1.5）と削れた flag-row から引いた算出値で、
-Pixel 8 Pro 実機での再測が要る。** 上の表の残りは改修前の実測（412×916 CSS px 換算）に、
-変更した帯だけを同じ方法で置き換えたものである。
+画面は上端のナビ 1 行、pane ごとにスクロールする作業領域、下端の再生バーでできている
+（`src/App.svelte`、`src/components/PlaybackBar.svelte`）。再生バーは再生モードと編集モードの
+両方に出るので、開始・一時停止・次の曲・フラグはどの画面からも 1 回で押せる。
+操作部の寸法は入力の種類で決まり、マウスで 28px、指で 44px である（`docs/adr/0001-control-size-follows-input-kind.md`）。
 
-### base button 規則が全コンポーネントに波及している
-
-`src/tokens.css:105-116`:
-
-```css
-button { font-size: var(--font-size-lg);   /* 1.2rem */
-         padding: var(--space-lg) 1.6rem;  /* .8rem 1.6rem */
-         width: 100%; ... }
-```
-
-素の button が 54.4px 高・全幅になる。これを打ち消す `width: auto` が
-**22 箇所・15 ファイル**に散っている（`git grep -c "width: auto" -- src` で再取得できる。
-19 箇所と書いていたのは古い）。単発では base 規則の修正が最大の効果。
-
-### 再生クロムは play モードだけが描く（改修済み）
-
-`src/App.svelte` は NowCard / Transport / TransitionStrip を
-`{#if ui.mode === "play"}` の内側に置く。編集モードで残るのは AuditionBanner
-（試聴は FlaggedDetail から始まるので両モードで描く）と MiniBar だけで、**つなぎ修正画面は
-ヘッダの直下から始まる。**
-
-モード切替は `.header` の再生/編集 segmented control（`src/App.svelte`）である。編集モードでは
-Transport ごと消えるので、切替をそこへ置くことはできない。**両モードの一段目はこの segmented
-control、二段目はそれぞれの subtabs、FlaggedDetail からの戻りは `backToList` で、
-どの画面からも上位へ返る道がある。**
+モード切替はナビの左端、モード内のタブはその隣にある。FlaggedDetail からの戻りは `backToList` で、
+どの画面からも上位へ返る道がある。
 
 ### 項目8/9 はエンジン案件
 
@@ -262,9 +233,7 @@ control、二段目はそれぞれの subtabs、FlaggedDetail からの戻りは
 ### Phase 0 — 判断（§7 の4問。実装ほぼ無し）
 
 ### Phase 1 — 回収レートを上げる（Android / 共通 UI）
-- `tokens.css` の base button 規則を直し、散った `width: auto` を消す（§6 に件数）
-- NowCard / TransitionStrip の予約 min-height を、跳ねない別手段
-  （固定スロットかスケルトン）に置き換える
+- ~~`tokens.css` の base button 規則を直す。再生画面のクロムを詰める~~（済。§6、#141）
 - ~~編集モードで再生クロムを描かない。ナビゲーションを新設する~~（済。§6）
 - funkot 判定の手動 override UI（`BarOverride.funkot` を UI から書けるようにする）
 - 回収の計器 — 手直しが何件溜まっているか、いつ送ったか

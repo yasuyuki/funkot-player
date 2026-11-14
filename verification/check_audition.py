@@ -17,7 +17,7 @@ SPEC = "verification/audition/Audition.tla"
 CONFIG = "verification/audition/Audition.cfg"
 PLAYER_SOURCES = (
     "src-tauri/src/lib.rs",
-    "src/App.svelte",
+    "src/components/PlaybackBar.svelte",
     "src/lib/transportMode.ts",
     SPEC,
     CONFIG,
@@ -49,7 +49,7 @@ MUTATIONS = (
 )
 SOURCE_FILES = {
     "lib.rs": "src-tauri/src/lib.rs",
-    "App.svelte": "src/App.svelte",
+    "PlaybackBar.svelte": "src/components/PlaybackBar.svelte",
     "transportMode.ts": "src/lib/transportMode.ts",
 }
 SOURCE_REFERENCE_COUNT = 21

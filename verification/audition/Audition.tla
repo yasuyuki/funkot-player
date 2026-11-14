@@ -94,7 +94,7 @@ EndPreparing(r) ==
 
 PressResume ==
     /\ rpc = "idle"
-    /\ BannerShown                      \* App.svelte:131 | {#if store.player?.auditioning}
+    /\ BannerShown                      \* PlaybackBar.svelte:124 | {#if auditioning}
     /\ IF Serialize THEN ~LockHeld      \* lib.rs:3267 | let _audition = try_audition_lock()?;
                     ELSE ~preparing     \* the pre-#115 AUDITION_PREPARING guard
     /\ rpc' = "checked"
