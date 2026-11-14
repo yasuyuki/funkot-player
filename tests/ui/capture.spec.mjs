@@ -10,7 +10,7 @@ test("Library and tag review states", async ({ page }, testInfo) => {
   await expect(library.locator("li.row")).toHaveCount(6, { timeout: 15000 });
   await expect(library.locator(".tag-summary")).toHaveCount(5);
   await expect(library.locator(".tag-summary button")).toHaveCount(0);
-  const toggle = library.getByRole("button", { name: /^Tags/ });
+  const toggle = library.getByRole("button", { name: /^Filter/ });
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
   await expect(library.getByLabel("Match selected tags", { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready);
@@ -159,7 +159,7 @@ test("Library and tag review states", async ({ page }, testInfo) => {
   await expect(library.locator("li.row")).toHaveCount(5);
   await capture("tag-filter");
   await toggle.click();
-  await expect(toggle).toHaveText("Tags (1)");
+  await expect(toggle).toHaveText("Filter (1)");
   await expect(library.getByLabel("Tag candidate", { exact: true })).toHaveCount(0);
   await expect(library.locator("li.row")).toHaveCount(5);
   await toggle.click();

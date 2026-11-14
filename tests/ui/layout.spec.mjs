@@ -3,15 +3,18 @@ import { test, expect } from "@playwright/test";
 async function controlIssues(page, scope = "body") {
   return page.locator(scope).evaluate(root => {
     const css = getComputedStyle(document.documentElement);
-    const font = parseFloat(css.fontSize) * parseFloat(css.getPropertyValue("--font-size-md"));
+    const coarse = matchMedia("(pointer: coarse)").matches;
+    const font = parseFloat(css.fontSize) * parseFloat(css.getPropertyValue(coarse ? "--font-size-md" : "--font-size-sm"));
+    const target = coarse ? 44 : 28;
     return [...root.querySelectorAll('button, input:not([type="checkbox"]):not([type="radio"]), select')]
       .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== "hidden")
       .flatMap(el => {
         const s = getComputedStyle(el), b = el.getBoundingClientRect();
         const failures = [];
+        const row = el.matches(".row-select");
         if (Math.abs(parseFloat(s.fontSize) - font) > 0.01) failures.push(`font=${s.fontSize}`);
-        if (Math.abs(parseFloat(s.lineHeight) - font * 1.5) > 0.01) failures.push(`line=${s.lineHeight}`);
-        if (b.height < 44 || b.width < 44) failures.push(`target=${b.width}x${b.height}`);
+        if (!row && Math.abs(parseFloat(s.lineHeight) - font * 1.5) > 0.01) failures.push(`line=${s.lineHeight}`);
+        if (b.height < target || b.width < target) failures.push(`target=${b.width}x${b.height}`);
         return failures.length ? [{ control: el.getAttribute("aria-label") || el.textContent.trim(), failures }] : [];
       });
   });
@@ -34,11 +37,14 @@ test("shared controls, dense browsing, history and playback retain readable targ
     window.__uiFixture.setReply("refresh_library", { rows, persistence_error: null });
     store.playHistory = { log: [], log_total: 0, tracks: rows.map((row, i) => ({ ...row, track_hash: row.content_hash, count: i + 1, last_played_ms: 1767225600000, missing: false })) };
     window.__uiFixture.setReply("list_play_history", store.playHistory);
-    store.player = { ...store.player, phase: "playing", now_playing: rows[1].path, playback_started_frames: 48000, duration_secs: 257, position_secs: 60 };
+    store.player = { ...store.player, phase: "playing", now_playing: rows[1].path, playback_started_frames: 48000, duration_secs: 257, position_secs: 60, last_transition: { from: rows[0].path, to: rows[1].path, seconds_ago: 42 } };
     window.__uiFixture.setReply("player_state", store.player);
   });
   await expect(page.locator("section.library li.row")).toHaveCount(24);
   expect(await controlIssues(page)).toEqual([]);
+  const narrow = testInfo.project.name === "narrow";
+  expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(narrow);
+  expect((await page.locator("section.library .add").first().boundingBox()).height).toBe(narrow ? 44 : 28);
   await capture(page, testInfo, "dense-library");
   const add = page.locator("section.library .add").first();
   await add.evaluate(el => el.style.fontSize = "30px");
@@ -50,15 +56,15 @@ test("shared controls, dense browsing, history and playback retain readable targ
   expect(await controlIssues(page)).toEqual([]);
   await capture(page, testInfo, "dense-history");
   await page.locator("section.history li.row").last().scrollIntoViewIfNeeded();
-  await expect(page.locator(".minibar")).toBeInViewport();
-  for (const button of await page.locator(".minibar button").all()) {
+  await expect(page.locator(".playback-bar")).toBeInViewport();
+  for (const button of await page.locator(".playback-bar button").all()) {
     await expect(button).toBeInViewport({ ratio: 1 });
     await button.click({ trial: true });
   }
-  expect(await controlIssues(page, ".minibar")).toEqual([]);
-  await capture(page, testInfo, "playing-minibar");
+  expect(await controlIssues(page, ".playback-bar")).toEqual([]);
+  await capture(page, testInfo, "playing-bar");
   await page.evaluate(() => document.documentElement.style.fontSize = "200%");
-  expect(await controlIssues(page, ".minibar")).toEqual([]);
+  expect(await controlIssues(page, ".playback-bar")).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await capture(page, testInfo, "text-enlarged");
   await page.evaluate(() => document.documentElement.style.removeProperty("font-size"));
@@ -67,25 +73,12 @@ test("shared controls, dense browsing, history and playback retain readable targ
   const queue = page.locator("section.queue");
   await expect(queue).toBeVisible();
   const footer = queue.locator(".edit-footer");
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { bottom: 0 } });
-  await page.evaluate(() => {
-    document.documentElement.style.setProperty("--playback-dock-height", "0px");
-    document.documentElement.style.setProperty("--toast-height", "0px");
-  });
   await queue.getByRole("button", { name: "Select Pulse", exact: true }).first().click();
-  await expect(footer).toBeVisible();
-  await expect.poll(() => footer.evaluate(element => getComputedStyle(element).bottom)).toBe("0px");
-  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { bottom: 34 } });
-  await expect.poll(() => footer.evaluate(element => getComputedStyle(element).bottom)).toBe("34px");
-  await page.evaluate(() => {
-    document.documentElement.style.setProperty("--playback-dock-height", "90px");
-    document.documentElement.style.setProperty("--toast-height", "50px");
-  });
-  await expect.poll(() => footer.evaluate(element => getComputedStyle(element).bottom)).toBe("140px");
+  await expect(footer).toBeInViewport({ ratio: 1 });
+  const footerBox = await footer.boundingBox(), barBox = await page.locator(".playback-bar").boundingBox();
+  expect(footerBox.y + footerBox.height).toBeLessThanOrEqual(barBox.y);
   expect(await controlIssues(page, "section.queue .edit-footer")).toEqual([]);
-  await capture(page, testInfo, "queue-footer-safe-area");
-  await cdp.detach();
+  await capture(page, testInfo, "queue-footer");
 });
 
 test("ja/en/id browsing and tag controls stay reachable with a short viewport", async ({ page }, testInfo) => {
@@ -99,10 +92,10 @@ test("ja/en/id browsing and tag controls stay reachable with a short viewport", 
   }
   await page.evaluate(async () => (await import("/src/lib/i18n.svelte.ts")).i18n.setLocale("en"));
   const library = page.locator("section.library");
-  await library.getByRole("button", { name: "Tags", exact: true }).click();
+  await library.getByRole("button", { name: "Filter", exact: true }).click();
   expect(await controlIssues(page, "section.library")).toEqual([]);
   await capture(page, testInfo, "tag-filter-controls");
-  await library.getByRole("button", { name: "Tags", exact: true }).click();
+  await library.getByRole("button", { name: "Filter", exact: true }).click();
   await library.getByRole("button", { name: "Select several tracks" }).click();
   await library.getByLabel("Select Pulse", { exact: true }).check();
   await library.getByRole("button", { name: "Edit visible selected (1)" }).click();

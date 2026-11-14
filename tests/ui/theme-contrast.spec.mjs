@@ -207,13 +207,13 @@ test("theme choice persists, system follows the OS, and manual choice wins", asy
 
   await expect.poll(() => page.evaluate(async () => (await import("/src/lib/state.svelte.ts")).store.localeReady)).toBe(true);
   await page.evaluate(async () => (await import("/src/lib/i18n.svelte.ts")).i18n.setLocale("ja"));
-  await expect(page.getByRole("tab", { name: "再生モードへ" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "編集モードへ" })).toBeVisible();
   await page.getByRole("button", { name: "menu" }).click();
   await expect(page.getByLabel("テーマ")).toBeVisible();
   await expect(page.getByRole("option", { name: "システム" })).toHaveCount(1);
   await page.keyboard.press("Escape");
   await page.evaluate(async () => (await import("/src/lib/i18n.svelte.ts")).i18n.setLocale("id"));
-  await expect(page.getByRole("tab", { name: "Ke mode pemutaran" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Ke mode penyuntingan" })).toBeVisible();
   await page.getByRole("button", { name: "menu" }).click();
   await expect(page.getByLabel("Tema")).toBeVisible();
   await expect(page.getByRole("option", { name: "Sistem" })).toHaveCount(1);
@@ -322,7 +322,7 @@ test("hover, pressed, focus, and Windows high contrast keep visible states", asy
       store.player = player;
       window.__uiFixture.setReply("player_state", player);
     });
-    const flag = page.locator(".transport .flag");
+    const flag = page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: /This transition is wrong/ });
     await expect(flag).toBeEnabled();
     const flagContrast = () => flag.evaluate((element) => {
       const style = getComputedStyle(element);

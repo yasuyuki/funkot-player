@@ -60,8 +60,7 @@
   --color-menu-border: var(--color-input-border);
   --color-link: var(--indigo-11);
   --color-queue-reserved-bg: var(--green-3);
-  --color-minibar-bg: var(--gray-2);
-  --minibar-height: calc(2.75rem + 2 * var(--space-sm) + 1px);
+  --color-playback-bar-bg: var(--gray-2);
   --color-tab-bg: var(--gray-3);
   --color-tab-text: var(--gray-11);
   --color-tab-active-bg: var(--color-accent-bg);
@@ -73,14 +72,6 @@
   --color-chip-current-text: var(--color-accent-text);
   --color-flagged-warn: var(--amber-11);
   --color-log-bg: var(--gray-1);
-  --library-row-height: 3.4rem;
-  --queue-row-height: 3.2rem;
-
-  --shell-max-width: 1200px;
-
-  /* App.svelte's @container breakpoints (48rem, 70.5rem) are derived from
-   * these by hand: var() is not valid in a container query condition. */
-  --browse-col-min: 360px;
   --browse-gutter: 1.5rem;
 
   --space-xs: 0.3rem;
@@ -96,8 +87,13 @@
   --font-size-md: 0.95rem;
   --font-size-lg: 1.2rem;
 
-  --control-target: max(44px, 2.75rem);
+  --control-target: max(28px, 1.75rem);
+  --control-font: var(--font-size-sm);
+  --control-pad-block: 0.15rem;
+  --control-pad-inline: 0.5rem;
   --control-line-height: 1.5;
+  --row-min: 2.5rem;
+  --shell-pad: 0.75rem;
 
 }
 
@@ -122,6 +118,25 @@
   --color-tap-highlight: rgba(62, 99, 221, 0.2);
 }
 
+:root[data-density="touch"] {
+  --control-target: max(44px, 2.75rem);
+  --control-font: var(--font-size-md);
+  --control-pad-block: var(--space-sm);
+  --control-pad-inline: var(--space-md);
+  --row-min: 3rem;
+  --shell-pad: 0.5rem;
+}
+@media (pointer: coarse) {
+  :root:not([data-density="mouse"]) {
+    --control-target: max(44px, 2.75rem);
+    --control-font: var(--font-size-md);
+    --control-pad-block: var(--space-sm);
+    --control-pad-inline: var(--space-md);
+    --row-min: 3rem;
+    --shell-pad: 0.5rem;
+  }
+}
+
 @media (prefers-contrast: more) {
   :root {
     --color-text-dim: var(--gray-12);
@@ -133,28 +148,35 @@
 html { background: var(--color-bg); }
 body {
   box-sizing: border-box;
-  min-height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   font: 16px/1.5 system-ui, sans-serif;
   margin: 0;
   /* Tauri on Android draws edge-to-edge: without this the first control sits
      under the status bar / cutout and the system eats the touch. */
-  padding: calc(var(--space-xl) + env(safe-area-inset-top, 3rem)) var(--space-xl)
-    calc(var(--space-xl) + env(safe-area-inset-bottom, 2rem));
+  padding: calc(var(--shell-pad) + env(safe-area-inset-top, 0px)) 0 0;
   background: var(--color-bg);
   color: var(--color-text);
 }
 
 #app {
-  max-width: var(--shell-max-width);
-  margin-inline: auto;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  container-type: inline-size;
+  container-name: shell;
+  display: flex;
+  flex-direction: column;
 }
 
 button, input:not([type="checkbox"]):not([type="radio"]), select, textarea {
   box-sizing: border-box;
   font: inherit;
-  font-size: var(--font-size-md);
+  font-size: var(--control-font);
   line-height: var(--control-line-height);
-  padding: var(--space-sm) var(--space-md);
+  padding: var(--control-pad-block) var(--control-pad-inline);
   min-height: var(--control-target);
   min-width: var(--control-target);
   max-width: 100%;
@@ -229,13 +251,13 @@ dialog, [role="dialog"] { color: var(--color-text); }
 summary {
   box-sizing: border-box;
   min-height: var(--control-target);
-  padding: var(--space-sm) var(--space-md);
-  font-size: var(--font-size-md);
+  padding: var(--control-pad-block) var(--control-pad-inline);
+  font-size: var(--control-font);
   cursor: pointer;
 }
 .edit-footer {
   position: sticky;
-  bottom: max(env(safe-area-inset-bottom, 0px), calc(var(--playback-dock-height, 0px) + var(--toast-height, 0px)));
+  bottom: 0;
   z-index: 6;
   display: flex;
   flex-wrap: wrap;
@@ -251,4 +273,14 @@ summary {
   button:disabled { color: GrayText; border-color: GrayText; }
   :where(button, input, select, textarea, summary):focus-visible { outline: 2px solid Highlight; }
   .row.selected, [aria-selected="true"] { outline: 2px solid Highlight; }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }

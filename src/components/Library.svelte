@@ -198,9 +198,8 @@
 </script>
 
 <section class="library">
-  <div class="heading-line"><h2 class="heading">{t.libraryHeading}</h2><PlaylistSource compact /></div>
-
   <div class="toolbar">
+    <h2 class="heading">{t.libraryHeading}</h2>
     <input
       class="search"
       type="search"
@@ -208,6 +207,7 @@
       bind:value={query}
       aria-label={t.searchLabel}
     />
+    <div class="secondary" class:on={newOnly}>
     <button
       type="button"
       class="filter"
@@ -218,6 +218,7 @@
     <button type="button" class="sort" onclick={toggleSort}>
       {sortKey === "recent" ? t.sortRecent : sortKey === "title" ? t.sortTitle : t.sortArtist}
     </button>
+    </div>
     <button
       type="button"
       class="filter"
@@ -229,6 +230,7 @@
     <TagFilter candidates={tagIndex.candidates} selected={selectedTags} mode={tagMode} {yearUnset}
       onchoose={chooseTag} onremove={key => selectedTags = selectedTags.filter(tag => tag.key !== key)}
       onmode={mode => tagMode = mode} onunset={enabled => yearUnset = enabled} onclear={clearTagFilters} />
+    <div class="dest"><PlaylistSource compact /></div>
     {#if selectMode}
       <SelectionBar
         totalSelected={selectedCount}
@@ -332,9 +334,9 @@
             {/if}
             <div class="sub">
               <span class="artist">{row.artist || t.noLabel}</span>
+              <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} />
               <span class="dur">{formatDuration(row.duration_secs)}</span>
             </div>
-            <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} />
           </div>
           {#if !selectMode}
             <FavoriteButton path={row.path} contentHash={row.content_hash} title={row.title} />
@@ -357,28 +359,38 @@
 </section>
 
 <style>
-  .library {
-    margin-top: var(--space-xl);
-  }
-
   .heading {
-    margin: 0 0 var(--space-md);
+    margin: 0;
     font-size: var(--font-size-md);
     font-weight: 600;
     color: var(--color-text);
   }
-  .heading-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-md); }
-  .heading-line .heading { margin-bottom: 0; }
 
   .toolbar {
     position: sticky;
-    top: calc(var(--space-xl) + env(safe-area-inset-top, 3rem));
+    top: 0;
     z-index: 5;
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-sm);
     padding: var(--space-sm) 0;
     background: var(--color-bg);
+  }
+  .secondary { display: flex; gap: var(--space-sm); }
+  .toolbar :global(.tag-filter) { order: 5; }
+  .toolbar :global(.bar) { order: 6; }
+  .dest { display: none; flex: 0 1 9rem; min-width: 0; }
+  .dest :global(.compact) { max-width: 100%; }
+  .dest :global(.destination) { display: none; }
+  .dest :global(.choose)::before { content: "+ → "; color: var(--color-text-dim); }
+
+  @container shell (max-width: 47.99rem) {
+    .heading { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .dest { display: block; }
+    .secondary { display: none; order: 4; flex-basis: 100%; }
+    .toolbar:has(:global(.tag-filter)) .secondary { display: flex; }
+    .toolbar:has(.secondary.on) :global(.toggle) { outline: 2px solid var(--color-accent-text); outline-offset: -2px; }
   }
 
   .pick {
@@ -390,7 +402,7 @@
   }
 
   .search {
-    flex: 1 1 14rem;
+    flex: 1 1 5rem;
     min-width: 0;
     border: 1px solid var(--color-border);
   }
@@ -460,8 +472,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-md);
-    min-height: var(--library-row-height);
-    padding: var(--space-sm) 0;
+    min-height: var(--row-min);
+    box-sizing: border-box;
+    padding: 1px 0;
     border-bottom: 1px solid var(--color-border);
     user-select: none;
     -webkit-user-select: none;
@@ -481,7 +494,7 @@
     align-items: center;
     gap: var(--space-sm);
     font-size: var(--font-size-md);
-    line-height: 1.3;
+    line-height: 1.25;
     min-width: 0;
   }
 
@@ -508,12 +521,13 @@
     gap: var(--space-md);
     font-size: var(--font-size-sm);
     color: var(--color-text-dim);
-    line-height: 1.3;
+    line-height: 1.25;
   }
+  .sub :global(.tag-summary) { margin: 0; flex: 0 1 auto; min-width: 0; max-width: 55%; }
 
   .artist {
     min-width: 0;
-    flex: 1;
+    flex: 1 1 45%;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -534,5 +548,4 @@
     color: var(--color-transport-disabled-text);
   }
 
-  .toolbar:has(:global(.tag-filter)) { position: static; }
 </style>

@@ -16,15 +16,15 @@ Before implementation, record:
 - the user’s main goal and task sequence;
 - primary, secondary, and rare actions;
 - the permanent UI area or controls being added;
-- why an existing entrypoint cannot be reused, but only when proposing a new entrypoint.
+- the `tests/ui/density.spec.mjs` measurement before and after, when permanent height outside the lists changes.
 
-Choose one recommended UI that serves the stated task. Do not invent a generic platform or unspecified design system. Group search, sort, and filter controls by purpose, distinguish displayed metadata from interactive controls, and preserve title, artist, and the main row action area. Use progressive disclosure for rare actions and reuse existing components, tokens, and entrypoints first.
+Choose one recommended UI that serves the stated task. Do not invent a generic platform or unspecified design system. Place each action by its class in the linked document, distinguish displayed metadata from interactive controls, and keep title, artist, and one main action on a row. Use the size of the active input kind from the tokens; do not add another control size.
 
 Follow the linked document's verification order. Use the existing tests to construct states and check behavior in one run; reserve Computer Use for judgments the machine assertions cannot make.
 
 After implementation, run the relevant existing unit tests and `npm run check`. Then use the documented `npm run ui:capture` entrypoint for the affected scenarios and inspect the affected
 current screens, using real viewport captures at wide and narrow widths. Check
-the existing two-column boundary when relevant. Extend the existing fixture for
+the column boundaries when relevant. Extend the existing fixture for
 uncovered states, using synthetic long names, overflowing lists and relevant
 failures. Exercise the new UI path and inspect payloads, selected identity, focus,
 Escape/return and short-height action reachability; capture success and

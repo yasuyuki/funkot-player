@@ -222,9 +222,9 @@ test("the source picker stays reachable in a short Japanese viewport and Escape 
     const { i18n } = await import("/src/lib/i18n.svelte.ts");
     i18n.setLocale("ja");
   });
-  await page.getByRole("tab", { name: "次に再生" }).click();
+  await page.getByRole("tab", { name: "再生待ち" }).click();
   const choose = page.locator("section.queue .source .choose");
-  expect((await choose.boundingBox()).height).toBeGreaterThanOrEqual(44);
+  expect((await choose.boundingBox()).height).toBeGreaterThanOrEqual(await page.evaluate(() => matchMedia("(pointer: coarse)").matches) ? 44 : 28);
   await choose.click();
   const picker = page.locator("section.queue .picker");
   await expect(picker).toBeVisible();
@@ -312,9 +312,7 @@ test("queue save dialog has no axe color contrast failures", async ({ page }, te
     });
     expect(result.violations, `${preference} color contrast violations`).toEqual([]);
     const incomplete = result.incomplete.filter((item) => item.id === "color-contrast");
-    expect(incomplete, `${preference} incomplete targets`).toHaveLength(1);
-    expect(incomplete[0].nodes.map((node) => node.target)).toEqual([[".save-scope"]]);
-    expect(incomplete[0].nodes[0].any[0].data.messageKey).toBe("elmPartiallyObscuring");
+    expect(incomplete, `${preference} incomplete targets`).toEqual([]);
     const scope = await dialog.evaluate((element) => {
       const paragraph = element.querySelector(".save-scope");
       const label = element.querySelector("label");
@@ -450,7 +448,7 @@ test("save dialog remains usable with a long Japanese name, delayed save, and fa
     };
     window.__uiFixture.setReply("queue_state", store.queue);
   });
-  await page.getByRole("tab", { name: "次に再生" }).click();
+  await page.getByRole("tab", { name: "再生待ち" }).click();
   const queue = page.locator("section.queue");
   const trigger = queue.getByRole("button", { name: "プレイリスト操作" });
   const open = async () => {

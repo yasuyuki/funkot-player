@@ -8,10 +8,12 @@
   import { LOCALE_NAMES, nextLocale } from "../lib/locale";
   import { musicDirErrorMessage } from "../lib/messages";
   import { getThemeController, parseThemePreference } from "../lib/theme.svelte";
+  import { browserStorage, parseDensityPreference, readDensityPreference, saveDensityPreference } from "../lib/density";
 
   let t = $derived(i18n.t);
   const theme = getThemeController();
   let themePreference = $state(theme.preference);
+  let densityPreference = $state(readDensityPreference(browserStorage()));
 
   let scanBusy = $state(false);
   let openMusicBusy = $state(false);
@@ -39,6 +41,13 @@
     const preference = parseThemePreference(target.value);
     theme.setPreference(preference);
     themePreference = preference;
+  }
+
+  function onDensityPreferenceChange(event: Event) {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLSelectElement)) return;
+    densityPreference = parseDensityPreference(target.value);
+    saveDensityPreference(document.documentElement, browserStorage(), densityPreference);
   }
 
   function toggleMenu(event: MouseEvent) {
@@ -238,6 +247,14 @@
           <option value="dark">{t.themeDark}</option>
           <option value="light">{t.themeLight}</option>
           <option value="system">{t.themeSystem}</option>
+        </select>
+      </label>
+      <label class="theme-control">
+        <span>{t.densityPreferenceLabel}</span>
+        <select value={densityPreference} onchange={onDensityPreferenceChange}>
+          <option value="auto">{t.densityAuto}</option>
+          <option value="mouse">{t.densityMouse}</option>
+          <option value="touch">{t.densityTouch}</option>
         </select>
       </label>
       <button class="menu-item" type="button" onclick={onRescan} disabled={scanBusy}>{t.rescan}</button>

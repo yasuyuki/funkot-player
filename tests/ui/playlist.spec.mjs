@@ -26,7 +26,7 @@ test("favorites deduplicate by content identity without changing the playback so
   const library = page.locator("section.library");
   const add = library.locator("li.row").first().getByRole("button", { name: "Add Pulse to Favorites" });
   await expect(add).toBeEnabled();
-  await expect(page.locator(".now-card").getByRole("button", { name: "Add Pulse to Favorites" })).toBeVisible();
+  await expect(page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: "Add Pulse to Favorites" })).toBeVisible();
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");
     window.__uiFixture.setReply("playlist_catalog", { ...store.catalog, favorite_hashes: ["1".repeat(64)] });
@@ -372,7 +372,7 @@ test("a prepared playlist enables both next controls without a normal reservatio
     window.__uiFixture.setReply("player_state", store.player);
     window.__uiFixture.setReply("skip_next", null);
   });
-  const next = page.locator(".transport").getByRole("button", { name: /Next track/ });
+  const next = page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: "Next track", exact: true });
   await expect(next).toBeDisabled();
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");
@@ -396,13 +396,13 @@ test("a prepared playlist enables both next controls without a normal reservatio
     store.queue = { ...store.queue, playlist: { ...store.queue.playlist, rows: store.queue.playlist.rows.map((row, i) => ({ ...row, status: i === 0 ? "prepared" : "pending" })) } };
     window.__uiFixture.setReply("queue_state", store.queue);
   });
-  await page.locator(".mode-switch").getByRole("tab").nth(1).click();
-  const miniNext = page.locator(".minibar").getByRole("button", { name: "Next track", exact: true });
+  await page.getByRole("tab", { name: "Go to edit mode" }).click();
+  const miniNext = page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: "Next track", exact: true });
   await expect(miniNext).toBeVisible();
   await expect(miniNext).toBeEnabled();
   await miniNext.click();
   await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter(c => c.command === "skip_next").length)).toBe(2);
-  await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-playlist-next-minibar.jpg`), quality: 70, fullPage: true, animations: "disabled" });
+  await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-playlist-next-edit-mode.jpg`), quality: 70, fullPage: true, animations: "disabled" });
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");
     window.__uiFixture.setReply("player_state", {
@@ -451,7 +451,10 @@ test("enabled button roles show hover feedback without changing disabled control
     expect(await styles(button)).not.toEqual(before);
   }
 
-  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
+  if (testInfo.project.name === "narrow") {
+    await page.getByRole("tab", { name: "Library" }).click();
+    await page.locator("section.library").getByRole("button", { name: "Filter", exact: true }).click();
+  }
   await expectHoverFeedback(page.locator(".library .sort"));
   await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-button-hover.jpg`), quality: 70, fullPage: true, animations: "disabled" });
 
@@ -477,8 +480,8 @@ test("enabled button roles show hover feedback without changing disabled control
     store.player = player;
     window.__uiFixture.setReply("player_state", player);
   });
-  await expectHoverFeedback(page.locator(".transport .primary"));
-  const flag = page.locator(".transport .flag");
+  await expectHoverFeedback(page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: /Pause|Resume|Start/ }));
+  const flag = page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: /This transition is wrong/ });
   const flagIdle = await styles(flag);
   await expectHoverFeedback(flag);
   const flagHover = await styles(flag);
@@ -486,11 +489,11 @@ test("enabled button roles show hover feedback without changing disabled control
   expect(flagHover.color).not.toBe(flagIdle.color);
   await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-flag-hover.jpg`), quality: 70, fullPage: true, animations: "disabled" });
 
-  await page.locator(".mode-switch").getByRole("tab").nth(1).click();
-  const compactPrimary = page.locator(".minibar .ctrl").first();
+  await page.getByRole("tab", { name: "Go to edit mode" }).click();
+  const compactPrimary = page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: /Pause|Resume|Start/ });
   await expectHoverFeedback(compactPrimary);
 
-  const disabledNext = page.locator(".minibar .ctrl.next");
+  const disabledNext = page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: "Next track", exact: true });
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");
     const player = { ...store.player, playback_started_frames: null };
@@ -525,7 +528,7 @@ test("next stays disabled across stale prepared snapshots and history edits unti
     window.__uiFixture.delayNext("skip_next");
   });
 
-  const transportNext = page.locator(".transport").getByRole("button", { name: /Next track/ });
+  const transportNext = page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: "Next track", exact: true });
   await expect(transportNext).toBeEnabled();
   const transportDefault = await transportNext.evaluate((button) => getComputedStyle(button).backgroundColor);
   await transportNext.hover();
@@ -542,8 +545,8 @@ test("next stays disabled across stale prepared snapshots and history edits unti
   await page.keyboard.press("Space");
   await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "skip_next").length)).toBe(skipCallsBefore + 1);
 
-  await page.locator(".mode-switch").getByRole("tab").nth(1).click();
-  const miniNext = page.locator(".minibar").getByRole("button", { name: "Next track", exact: true });
+  await page.getByRole("tab", { name: "Go to edit mode" }).click();
+  const miniNext = page.getByRole("toolbar", { name: "Playback controls" }).getByRole("button", { name: "Next track", exact: true });
   await expect(miniNext).toBeVisible();
   await expect(miniNext).toBeDisabled();
 

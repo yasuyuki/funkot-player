@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { store } from "../../lib/state.svelte";
   import { toast, BULK_DISMISS_MS } from "../../lib/toast.svelte";
   import ChipEditor from "./ChipEditor.svelte";
@@ -90,9 +91,11 @@
     return kind === "intro" || kind === "outro" ? kind : null;
   }
 
-  function closeEditor() {
+  async function closeEditor() {
     openChipKey = null;
+    await tick();
     editorOpener?.focus();
+    editorOpener?.scrollIntoView({ block: "nearest" });
   }
 
   function toggleCard(path: string, opener: HTMLButtonElement) {
@@ -217,8 +220,7 @@
 }} />
 
 <div class="wrap">
-  <p class="destination">{t.playlistDestination(store.destinationLabel || t.playlistNormal)}</p>
-  <p class="destination">{t.editImmediate}</p>
+  <p class="destination">{t.playlistDestination(store.destinationLabel || t.playlistNormal)} · {t.editImmediate}</p>
   <table class="table">
     <thead>
       <tr>
@@ -377,10 +379,10 @@
 
 <style>
   .wrap {
-    margin-top: var(--space-md);
+    margin-top: var(--space-sm);
     overflow-x: auto;
   }
-  .destination { margin: 0 0 var(--space-sm); color: var(--color-text-dim); font-size: var(--font-size-sm); overflow-wrap: anywhere; }
+  .destination { margin: 0 0 var(--space-xs); line-height: 1.25; color: var(--color-text-dim); font-size: var(--font-size-sm); overflow-wrap: anywhere; }
 
   .table {
     width: 100%;
@@ -391,7 +393,8 @@
   th,
   td {
     text-align: left;
-    padding: var(--space-xs) var(--space-sm);
+    padding: 2px var(--space-sm);
+    line-height: 1.25;
     border-bottom: 1px solid var(--color-border);
     vertical-align: middle;
   }
@@ -475,14 +478,18 @@
   @media (max-width: 47.99rem) {
     .table { display: none; }
     .wrap { overflow: visible; }
-    .cards { display: grid; gap: var(--space-md); }
+    .cards { display: grid; gap: var(--space-sm); }
     .group { border: 1px solid var(--color-border); }
     summary { cursor: pointer; padding: var(--space-sm) var(--space-md); font-weight: 600; }
     .folder-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); }
-    .card-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); padding: 0 var(--space-sm) var(--space-xs); }
-    .card-values { flex: 1 1 auto; display: flex; flex-wrap: wrap; gap: var(--space-xs); font-size: var(--font-size-sm); color: var(--color-text-dim); }
-    .card { border-top: 1px solid var(--color-border); }
-    .track-copy { padding: var(--space-sm) var(--space-sm) 0; overflow-wrap: anywhere; }
+    .card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; column-gap: var(--space-sm); align-items: center; padding: 2px var(--space-sm); line-height: 1.25; border-top: 1px solid var(--color-border); }
+    .card-status { display: contents; }
+    .card-status > button { grid-row: 1 / span 2; }
+    .card-status > button:first-of-type { grid-column: 2; }
+    .card-status > button:last-of-type { grid-column: 3; }
+    .card-values { grid-column: 1; grid-row: 2; display: flex; flex-wrap: wrap; gap: 0 var(--space-sm); min-width: 0; font-size: var(--font-size-sm); color: var(--color-text-dim); }
+    .track-copy { grid-column: 1; grid-row: 1; min-width: 0; overflow-wrap: anywhere; }
+    .card-editor { grid-column: 1 / -1; }
     .card.current { background: var(--color-queue-reserved-bg); }
     .card-editor { padding: 0 var(--space-md) var(--space-md); }
   }

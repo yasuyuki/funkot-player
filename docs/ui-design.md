@@ -1,45 +1,58 @@
 # UI design and review
 
-## Project principles
+## Screen skeleton
 
-Funkot Player’s main job is helping people find a track, judge it, and play or queue it. Start each UI change by recording the user’s main task and the action order it requires; hierarchy follows that task, rather than a heading-first template. Classify actions as primary, secondary, or rare, and justify each permanently visible control by its expected frequency and importance.
+Funkot Player's main job is helping people find a track, judge it, and play or add it. The list is the main content.
 
-Keep search, sort, and filter controls grouped when they serve the same browsing purpose. Treat metadata display separately from controls: title, artist, tags, and other information should remain plain readable content unless an interaction is actually needed. Reuse an existing entrypoint before adding another one; if a new entrypoint is necessary, record why the existing route cannot serve the task. Preserve the title, artist, and main row action area when adding features.
+The screen has three bands: one navigation row at the top, the work area, and the playback bar at the bottom. The page itself never scrolls. The work area is divided into panes that scroll separately; the width decides how many panes are shown, and the navigation tabs switch the ones that do not fit. Tabs and pane columns switch at the same width, measured on the whole shell.
 
-Use progressive disclosure for infrequent editing, diagnostics, and management actions. Keep the main browsing and queue path visually dominant on desktop and around 412px wide. Reuse existing Svelte components and tokens. UI changes require rendered-screen review, while accessibility and keyboard behavior remain existing quality requirements.
+A change that adds permanent height outside the lists shows the `tests/ui/density.spec.mjs` measurement before and after.
 
-## Shared roles and screen patterns
+## Size follows the input kind
 
-Choose the existing role in [`src/tokens.css`](../src/tokens.css) before choosing
-new geometry or colour. Body text, metadata, action labels and headings have
-separate jobs: labels use the shared control font and line height; supporting
-metadata uses the small token. Neutral buttons are content width. `.primary`
-adds emphasis, `.danger` marks destructive actions, and `.quiet` reduces fill.
-Transport and MiniBar explicitly own playback colours. Layout may allocate
-width; a screen must not invent another ordinary button size or shrink labels
-to fit. The shared target floor applies to touch and mixed input at any width.
-The target policy follows [WCAG target size](https://www.w3.org/WAI/WCAG22/Understanding/target-size-enhanced.html);
-it is not a claim of complete WCAG conformance.
+There are two sizes. The primary pointer chooses between them, not the screen width ([ADR 0001](adr/0001-control-size-follows-input-kind.md)).
 
-Library and History group exploration controls and show the current add target.
-A direct add stays direct. Queue rows select an occurrence; one persistent
-operation area serves repeated moves and removal. Selection follows playlist
-entry identity, never the new row index. Playback source and a browsed list are
-separate: browsing or closing an editor must not switch the source.
+| | Mouse (`pointer: fine`) | Touch (`pointer: coarse`) |
+|---|---|---|
+| Minimum control height and width | 28px (1.75rem) | 44px (2.75rem) |
+| Control label | 0.85rem | 0.95rem |
+| Minimum list row height | 40px (2.5rem) | 48px (3rem) |
 
-Editors lead with the target, then current values and changes, then result and
-return actions. AllTracks keeps comparison columns at wide widths and a
-readable summary plus target editor at narrow widths. FlaggedDetail selects a
-partner and shares audition controls. Long names and extra partners must not
-multiply management controls or bury the current edit.
+The values live in [`src/tokens.css`](../src/tokens.css) as rem, so enlarged text enlarges them. Within one input kind there is one ordinary control size; a screen does not invent another. The ⋮ menu overrides the detected kind with Automatic, For mouse or For touch. Android uses the same screen with the touch size. The touch size follows [WCAG target size](https://www.w3.org/WAI/WCAG22/Understanding/target-size-enhanced.html) and the mouse size exceeds the 24px [minimum](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html); neither is a claim of complete WCAG conformance.
 
-Preserve each commit model: TagEditor sends a draft with Save; playlist edits
-persist immediately; bars apply immediately while Confirm resolves the flag,
-Cancel restores opening values and manual state, and Back keeps changes.
-Use the existing `.edit-footer` with playback/toast clearance for long pages;
-dialogs keep their actions within their own scroll area. A proposed exception
-must name the user task or state that needs it and be reviewed beside the same
-role in another current screen. Keep geometry in code, not a second value table.
+## Where an action goes
+
+Classify an action by how often it is needed and what it acts on. Each class has one place.
+
+| Class | Examples | Place |
+|---|---|---|
+| Needed at any time | start, pause, next track, flag | The playback bar: same position in every mode, one press |
+| Main row action | add | One control at the end of the row, pressed directly |
+| Secondary row action | favorite, label, edit tags | The most used one on the row; the rest in the long-press and right-click menu |
+| Acts on the selection | move up, move down, remove, add several | An operation area shown only while something is selected |
+| Pane tool | search, sort, filter, select | One row at the top of the pane |
+| Management and rare | rename, clear, settings, log | The ⋮ and ⋯ menus |
+
+- When pane tools do not fit one row, the least used move into a panel that opens and closes. While a condition inside the panel is active, its opener is marked.
+- Show a state once per screen. The add target and the current track each need only one visible place.
+- Say what an action applies to inside or beside the control. The flag button shows the transition it will flag.
+- Information that needs no interaction is not a control. Title, artist and tags are text to read.
+- A symbol-only button has an accessible name and a title.
+- A navigation label is never cut short. Tabs that do not fit one line move to the next.
+
+## List rows
+
+A row has two lines: the title, then the artist with any accompanying information. New information joins the second line; there is no third line. A list for browsing truncates long names so that rows stay the same height. A list for comparing names while editing wraps them.
+
+## Editors
+
+Editors lead with the target, then current values and changes, then result and return actions. The actions sit below the scrolling content so that they never cover the control being edited.
+
+Preserve each commit model: TagEditor sends a draft with Save; playlist edits persist immediately; bars apply immediately while Confirm resolves the flag, Cancel restores opening values and manual state, and Back keeps changes. Selection follows playlist entry identity, never the row index. The playback source and a browsed list are separate: browsing or closing an editor must not switch the source.
+
+## What does not change
+
+Keep accessible names, focus indication, keyboard order, contrast, and the loading, empty, disabled and error states. Choose colour and geometry from the roles in `src/tokens.css`. `.primary` adds emphasis, `.danger` marks destructive actions and `.quiet` reduces fill.
 
 ## Choose the verification route
 
@@ -114,8 +127,8 @@ npm run ui:capture
 
 It writes `artifacts/ui-review` with an HTML report and viewport captures. The current
 scenarios and dimensions are defined by `tests/ui/` and `playwright.config.mjs`.
-Inspect affected screens in the desktop and narrow runs, and the existing
-two-column boundary when navigation or shell layout changes. Use viewport images
+Inspect affected screens in the desktop and narrow runs, and the
+column boundaries when navigation or shell layout changes. Use viewport images
 to judge initial occupancy and action reachability; full-page images may supplement
 the overall structure. A passing command is rendering evidence, not visual approval.
 

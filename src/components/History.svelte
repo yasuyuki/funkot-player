@@ -186,9 +186,8 @@
 </script>
 
 <section class="history">
-  <div class="heading-line"><h2 class="heading">{t.historyHeading}</h2><PlaylistSource compact /></div>
-
   <div class="toolbar">
+    <h2 class="heading">{t.historyHeading}</h2>
     <div class="views" role="tablist" aria-label={t.historyHeading}>
       <button
         type="button"
@@ -215,6 +214,7 @@
       aria-label={t.selectModeLabel}
       onclick={toggleSelectMode}
     >{t.selectMode}</button>
+    <div class="dest"><PlaylistSource compact /></div>
     {#if selectMode}
       <SelectionBar
         count={selectedCount}
@@ -318,28 +318,31 @@
 </section>
 
 <style>
-  .history {
-    margin-top: var(--space-xl);
-  }
-
   .heading {
-    margin: 0 0 var(--space-md);
+    margin: 0;
     font-size: var(--font-size-md);
     font-weight: 600;
     color: var(--color-text);
   }
-  .heading-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-md); }
-  .heading-line .heading { margin-bottom: 0; }
 
   .toolbar {
     position: sticky;
-    top: calc(var(--space-xl) + env(safe-area-inset-top, 3rem));
+    top: 0;
     z-index: 5;
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-sm);
     padding: var(--space-sm) 0;
     background: var(--color-bg);
+  }
+  .dest { display: none; flex: 0 1 9rem; min-width: 0; }
+  .dest :global(.compact) { max-width: 100%; }
+  .dest :global(.destination) { display: none; }
+  .dest :global(.choose)::before { content: "+ → "; color: var(--color-text-dim); }
+  @container shell (max-width: 47.99rem) {
+    .heading { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .dest { display: block; }
   }
 
   .views {
@@ -355,7 +358,10 @@
   }
 
   .view {
-    flex: 1;
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: var(--space-xs);
+    white-space: nowrap;
   }
 
   .view.active {
@@ -389,7 +395,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-md);
-    min-height: var(--library-row-height);
+    min-height: var(--row-min);
+    box-sizing: border-box;
+    line-height: 1.25;
     border-bottom: 1px solid var(--color-border);
     user-select: none;
     -webkit-user-select: none;

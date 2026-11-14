@@ -182,6 +182,8 @@
 </script>
 
 {#if row}
+<div class="detail">
+<div class="body">
   <div class="meta">
     <div>
       <strong>{flaggedTitle(t, row.title, row.missing)}</strong>
@@ -221,6 +223,7 @@
     {/if}
     <button type="button" class="quiet again" disabled={!againEnabled || busy || store.playbackRecovery?.kind !== "ready"} onclick={onAgain}>{t.listenAgain}</button>
   </section>
+</div>
 
   <div class="actions edit-footer">
     <button type="button" class="primary confirm" aria-label={t.confirmAction} disabled={busy} onclick={onConfirm}>
@@ -231,9 +234,14 @@
     </button>
     <button type="button" class="quiet" aria-label={t.backToList} disabled={busy} onclick={goList}>{t.flaggedBack}</button>
   </div>
+</div>
 {/if}
 
 <style>
+  /* The actions sit below the scrolling body, so they never cover the control being edited. */
+  .detail { display: flex; flex-direction: column; height: 100%; }
+  .body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: var(--space-md); }
+
   .meta {
     overflow-wrap: anywhere;
     font-size: var(--font-size-md);
@@ -253,10 +261,9 @@
   }
 
   .actions {
-    display: flex;
-    flex-wrap: wrap;
+    position: static;
+    flex: none;
     gap: var(--space-md);
-    margin-top: var(--space-lg);
   }
 
   .partners { margin-top: var(--space-lg); }

@@ -1,23 +1,17 @@
 <script lang="ts">
-  import { tick } from "svelte";
   import { ui, type PlaySub } from "./lib/ui.svelte";
   import { i18n } from "./lib/i18n.svelte";
   import { store } from "./lib/state.svelte";
-  import { sessionActive } from "./lib/transportMode";
   import UiBoundary from "./components/UiBoundary.svelte";
-  import NowCard from "./components/NowCard.svelte";
-  import AuditionBanner from "./components/AuditionBanner.svelte";
   import NewArrivalsBanner from "./components/NewArrivalsBanner.svelte";
-  import TransitionStrip from "./components/TransitionStrip.svelte";
-  import Transport from "./components/Transport.svelte";
   import PlaybackRecovery from "./components/PlaybackRecovery.svelte";
   import OverflowMenu from "./components/OverflowMenu.svelte";
+  import PlaybackBar from "./components/PlaybackBar.svelte";
   import Toast from "./components/Toast.svelte";
   import LogView from "./components/LogView.svelte";
   import Queue from "./components/Queue.svelte";
   import Library from "./components/Library.svelte";
   import History from "./components/History.svelte";
-  import MiniBar from "./components/MiniBar.svelte";
   import FlaggedList from "./components/edit/FlaggedList.svelte";
   import FlaggedDetail from "./components/edit/FlaggedDetail.svelte";
   import AllTracks from "./components/edit/AllTracks.svelte";
@@ -26,40 +20,11 @@
 
   let t = $derived(i18n.t);
 
-  let transportVisible = $state(true);
-  let sentinelEl = $state<HTMLElement | null>(null);
-
-  let miniBarVisible = $derived(
-    sessionActive(store.player?.phase ?? "idle", store.player?.auditioning ?? false) &&
-      (ui.mode === "edit" || !transportVisible),
-  );
-
-  $effect(() => {
-    document.documentElement.style.setProperty("--playback-dock-height", miniBarVisible
-      ? "calc(var(--minibar-height) + env(safe-area-inset-bottom, 0px))" : "0px");
-  });
-
-  let scrollByPlaySub: Record<PlaySub, number> = { queue: 0, library: 0, history: 0 };
-
   let leftSub = $derived(ui.playSub === "history" ? "history" : "library");
 
-  async function onPlaySub(sub: PlaySub) {
-    if (ui.playSub === sub) return;
-    scrollByPlaySub[ui.playSub] = window.scrollY;
+  function onPlaySub(sub: PlaySub) {
     ui.setPlaySub(sub);
-    await tick();
-    window.scrollTo(0, scrollByPlaySub[sub]);
   }
-
-  $effect(() => {
-    const el = sentinelEl;
-    if (!el) return;
-    const io = new IntersectionObserver(([entry]) => {
-      transportVisible = entry?.isIntersecting ?? true;
-    });
-    io.observe(el);
-    return () => io.disconnect();
-  });
 
   $effect(() => {
     document.documentElement.lang = i18n.locale;
@@ -101,104 +66,47 @@
   });
 </script>
 
-<div class="header">
-  <h1 class="app-title">Funkot</h1>
+<div class="nav">
+  <h1 class="sr-only">Funkot</h1>
   <div class="mode-switch" role="tablist">
-    <button
-      type="button"
-      class="mode"
-      class:active={ui.mode === "play"}
-      role="tab"
-      aria-selected={ui.mode === "play"}
-      aria-label={t.toPlayModeLabel}
-      onclick={() => ui.setMode("play")}
-    >{t.playMode}</button>
-    <button
-      type="button"
-      class="mode"
-      class:active={ui.mode === "edit"}
-      role="tab"
-      aria-selected={ui.mode === "edit"}
-      aria-label={t.toEditModeLabel}
-      onclick={() => ui.setMode("edit")}
-    >{t.editMode}</button>
+    <button type="button" class="mode" class:active={ui.mode === "play"} role="tab" aria-selected={ui.mode === "play"}
+      aria-label={t.toPlayModeLabel} onclick={() => ui.setMode("play")}>{t.playMode}</button>
+    <button type="button" class="mode" class:active={ui.mode === "edit"} role="tab" aria-selected={ui.mode === "edit"}
+      aria-label={t.toEditModeLabel} onclick={() => ui.setMode("edit")}>{t.editMode}</button>
   </div>
+  {#if ui.mode === "play"}
+    <div class="subtabs play" role="tablist" aria-label={t.playTabsLabel}>
+      <button type="button" class="tab queue" class:active={ui.playSub === "queue"} role="tab"
+        aria-selected={ui.playSub === "queue"} onclick={() => onPlaySub("queue")}>{t.queueHeading}</button>
+      <button type="button" class="tab" class:active={ui.playSub === "library"} class:left={leftSub === "library"} role="tab"
+        aria-selected={ui.playSub === "library"} onclick={() => onPlaySub("library")}>{t.libraryHeading}</button>
+      <button type="button" class="tab" class:active={ui.playSub === "history"} role="tab"
+        aria-selected={ui.playSub === "history"} onclick={() => onPlaySub("history")}>{t.historyHeading}</button>
+    </div>
+  {:else}
+    <div class="subtabs" role="tablist" aria-label={t.editTabsLabel}>
+      <button type="button" class="tab" class:active={ui.editSub === "flags"} role="tab"
+        aria-selected={ui.editSub === "flags"} onclick={() => ui.setEditSub("flags")}>{t.tabFlags}</button>
+      <button type="button" class="tab" class:active={ui.editSub === "all"} role="tab"
+        aria-selected={ui.editSub === "all"} onclick={() => ui.setEditSub("all")}>{t.tabAllTracks}</button>
+    </div>
+  {/if}
   <UiBoundary>
     <OverflowMenu />
   </UiBoundary>
 </div>
 
-{#if store.player?.auditioning}
+<div class="main" class:play={ui.mode === "play"}>
   <UiBoundary>
-    <AuditionBanner />
+    <LogView />
   </UiBoundary>
-{:else if ui.mode === "play"}
-  <UiBoundary>
-    <NowCard />
-  </UiBoundary>
-{/if}
-
-{#if ui.mode === "play"}
-  <UiBoundary>
-    <PlaybackRecovery />
-  </UiBoundary>
-  <div class="playback-blocks">
-    <div class="transport-block">
-      <UiBoundary>
-        <Transport />
-      </UiBoundary>
-      <div class="minibar-sentinel" bind:this={sentinelEl} aria-hidden="true"></div>
-    </div>
-    <div class="strip-block">
-      <UiBoundary>
-        <TransitionStrip />
-      </UiBoundary>
-    </div>
-  </div>
-{/if}
-
-<UiBoundary>
-  <Toast raised={miniBarVisible} />
-</UiBoundary>
-
-<UiBoundary>
-  <LogView />
-</UiBoundary>
-
-{#if ui.mode === "play"}
-  <UiBoundary>
-    <NewArrivalsBanner />
-  </UiBoundary>
-
-  <div class="browse">
-    <div class="subtabs" role="tablist" aria-label={t.playTabsLabel}>
-      <button
-        type="button"
-        class="tab queue"
-        class:active={ui.playSub === "queue"}
-        role="tab"
-        aria-selected={ui.playSub === "queue"}
-        onclick={() => onPlaySub("queue")}
-      >{t.queueHeading}</button>
-      <button
-        type="button"
-        class="tab"
-        class:active={ui.playSub === "library"}
-        class:left={leftSub === "library"}
-        role="tab"
-        aria-selected={ui.playSub === "library"}
-        onclick={() => onPlaySub("library")}
-      >{t.libraryHeading}</button>
-      <button
-        type="button"
-        class="tab"
-        class:active={ui.playSub === "history"}
-        role="tab"
-        aria-selected={ui.playSub === "history"}
-        onclick={() => onPlaySub("history")}
-      >{t.historyHeading}</button>
-    </div>
-
+  {#if ui.mode === "play"}
+    <UiBoundary>
+      <PlaybackRecovery />
+    </UiBoundary>
+    <UiBoundary>
+      <NewArrivalsBanner />
+    </UiBoundary>
     <div class="panes" class:history-left={leftSub === "history"}>
       <div class="pane library" class:active={ui.playSub === "library"}>
         <UiBoundary>
@@ -216,29 +124,7 @@
         </UiBoundary>
       </div>
     </div>
-  </div>
-
-{:else}
-  <div class="subtabs" role="tablist" aria-label={t.editTabsLabel}>
-    <button
-      type="button"
-      class="tab"
-      class:active={ui.editSub === "flags"}
-      role="tab"
-      aria-selected={ui.editSub === "flags"}
-      onclick={() => ui.setEditSub("flags")}
-    >{t.tabFlags}</button>
-    <button
-      type="button"
-      class="tab"
-      class:active={ui.editSub === "all"}
-      role="tab"
-      aria-selected={ui.editSub === "all"}
-      onclick={() => ui.setEditSub("all")}
-    >{t.tabAllTracks}</button>
-  </div>
-
-  {#if ui.editSub === "flags"}
+  {:else if ui.editSub === "flags"}
     {#if ui.flaggedDetailKey}
       <UiBoundary>
         <FlaggedDetail />
@@ -253,141 +139,78 @@
       <AllTracks />
     </UiBoundary>
   {/if}
-{/if}
+</div>
 
 <UiBoundary>
-  <MiniBar show={miniBarVisible} />
+  <Toast />
+</UiBoundary>
+
+<UiBoundary>
+  <PlaybackBar />
 </UiBoundary>
 
 <style>
-  .header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-md);
-    margin-bottom: var(--space-lg);
-  }
-
-  .app-title {
-    color: var(--color-text);
-    font-size: var(--font-size-lg);
-    margin: 0;
-    min-width: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .mode-switch {
-    display: flex;
+  .nav {
     flex: none;
-    gap: var(--space-xs);
+    display: flex;
+    align-items: start;
+    gap: var(--space-sm);
+    padding: 0 var(--shell-pad) var(--space-sm);
+    border-bottom: 1px solid var(--color-border);
   }
 
-  .mode-switch .mode {
-    width: auto;
-  }
-
-  .mode-switch .mode.active {
+  .mode-switch { display: flex; flex: none; gap: var(--space-xs); }
+  /* A tab label is never cut short: tabs that do not fit one line move to the next, and a tab wider than the line wraps its text. */
+  .subtabs { display: flex; flex-wrap: wrap; flex: 1 1 0; min-width: 0; gap: var(--space-xs); }
+  .subtabs .tab { flex: 1 1 auto; padding-inline: var(--space-xs); }
+  .mode.active, .subtabs .tab.active {
     background: var(--color-tab-active-bg);
     color: var(--color-tab-active-text);
   }
+  .nav > :global(:last-child) { margin-left: auto; }
 
-  .playback-blocks {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-md);
-  }
-
-  .minibar-sentinel {
-    height: 1px;
-    margin: 0;
-    pointer-events: none;
-  }
-
-  .subtabs {
-    display: flex;
-    gap: var(--space-xs);
-    margin-top: var(--space-md);
-  }
-
-  .subtabs .tab {
+  .main {
     flex: 1;
-    width: auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 var(--shell-pad);
+  }
+  .main.play { display: flex; flex-direction: column; overflow: hidden; }
+
+  .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--browse-gutter); }
+  .pane { min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .panes > .pane:not(.active) { display: none; }
+
+  /* Below two panes the selected mode names itself through its tabs, so only the way out is shown. */
+  @container shell (max-width: 47.99rem) {
+    .mode.active { display: none; }
   }
 
-  .subtabs .tab.active {
-    background: var(--color-tab-active-bg);
-    color: var(--color-tab-active-text);
+  @container shell (min-width: 48rem) {
+    .panes { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+    .panes > .pane.queue, .panes > .pane.library { display: block; }
+    .panes > .pane.history { display: none; }
+    .panes.history-left > .pane.library { display: none; }
+    .panes.history-left > .pane.history { display: block; }
   }
 
-  .browse {
-    container-type: inline-size;
-    container-name: browse;
-  }
-
-  .pane {
-    min-width: 0;
-  }
-
-  .panes > .pane:not(.active) {
-    display: none;
-  }
-
-  /* 48rem >= 2 x --browse-col-min + --browse-gutter (744px); see tokens.css. */
-  @container browse (min-width: 48rem) {
-    .subtabs .tab.queue {
-      display: none;
-    }
-
-    .subtabs .tab.left {
-      background: var(--color-tab-active-bg);
-      color: var(--color-tab-active-text);
-    }
-
-    .panes {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(var(--browse-col-min), 1fr));
-      gap: var(--browse-gutter);
-      align-items: start;
-    }
-
-    .panes > .pane.queue,
-    .panes > .pane.library {
-      display: block;
-    }
-
-    .panes > .pane.history {
-      display: none;
-    }
-
-    .panes.history-left > .pane.library {
-      display: none;
-    }
-
-    .panes.history-left > .pane.history {
-      display: block;
-    }
-  }
-
-  /* 70.5rem = 3 x --browse-col-min + 2 x --browse-gutter (1128px). */
-  @container browse (min-width: 70.5rem) {
-    .subtabs {
-      display: none;
-    }
-
-    .panes {
-      grid-template-columns: repeat(3, minmax(var(--browse-col-min), 1fr));
-    }
-
+  @container shell (min-width: 72rem) {
+    .panes { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); }
     .panes > .pane.queue,
     .panes > .pane.library,
     .panes > .pane.history,
     .panes.history-left > .pane.library,
-    .panes.history-left > .pane.history {
-      display: block;
-    }
+    .panes.history-left > .pane.history { display: block; }
+  }
+
+  @container shell (min-width: 48rem) {
+    .subtabs.play .tab.queue { display: none; }
+    .subtabs.play .tab.left { background: var(--color-tab-active-bg); color: var(--color-tab-active-text); }
+    .subtabs { flex: 0 1 auto; }
+    .subtabs .tab { flex: 0 1 auto; padding-inline: var(--control-pad-inline); }
+  }
+  @container shell (min-width: 72rem) {
+    .subtabs.play { display: none; }
   }
 </style>
 {#if tagEditorSession.current}

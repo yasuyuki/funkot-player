@@ -18,4 +18,10 @@
   root.dataset.theme = dark ? "dark" : "light";
   root.classList.toggle("dark", dark);
   root.style.colorScheme = dark ? "dark" : "light";
+  try {
+    const density = localStorage.getItem("funkot-player:density-preference");
+    if (density === "mouse" || density === "touch") root.dataset.density = density;
+  } catch {
+    // Without storage the control size follows the pointer.
+  }
 })();
