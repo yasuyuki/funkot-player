@@ -1,4 +1,4 @@
-FROM rust:1.93-slim-trixie
+FROM rust:1.99-slim-trixie
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
