@@ -28,6 +28,8 @@
   let tagReady = $derived(!!row?.content_hash && !!store.trackTags?.ready && store.trackTags.tracks[row.path]?.content_hash === row.content_hash);
   let current = $derived(shownVerdict(row));
   let title = $derived(explicitTitle ?? (path ? store.titleForPath(path) : ""));
+  let favorite = $derived(store.isFavorite(row?.content_hash ?? null));
+  let favoriteReady = $derived(!!row?.content_hash && store.canFavoriteMutate && !store.isFavoriteBusy(row.path, row.content_hash));
   let busy = $state(false);
   let menuEl = $state<HTMLDivElement | null>(null);
   let pos = $state<{ left: number; top: number } | null>(null);
@@ -96,6 +98,18 @@
     }
   }
 
+  async function toggleFavorite() {
+    if (busy || !row || !favoriteReady) return;
+    busy = true;
+    try {
+      const result = await store.doSetFavorite(row.path, !favorite, row.content_hash);
+      if (!result) toast.notify(t.playlistError(store.lastError ?? "busy"));
+    } finally {
+      busy = false;
+      onclose();
+    }
+  }
+
   async function handleClearPlayCount() {
     if (busy || !onClearPlayCount) return;
     busy = true;
@@ -132,6 +146,16 @@
   {#if path}
     <button type="button" role="menuitem" disabled={busy || !tagReady} title={!tagReady ? t.tagIdentityUnavailable : undefined} onclick={editTags}>{t.tagEdit}</button>
     {#if !tagReady}<p class="for">{t.tagIdentityUnavailable}</p>{/if}
+    <button
+      type="button"
+      role="menuitemcheckbox"
+      aria-checked={favorite}
+      disabled={busy || !favoriteReady}
+      onclick={toggleFavorite}
+    >
+      <span class="tick" aria-hidden="true">{favorite ? "✓" : ""}</span>
+      {t.favoritesTitle}
+    </button>
     <button
       type="button"
       role="menuitemradio"

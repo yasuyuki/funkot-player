@@ -573,3 +573,30 @@ test("next stays disabled across stale prepared snapshots and history edits unti
   await page.locator(".mode-switch").getByRole("tab").first().click();
   await expect(transportNext).toBeEnabled();
 });
+
+test("a played track is added to Favorites from the History context menu", async ({ page }, testInfo) => {
+  await page.goto("/tests/ui/");
+  await expect(page.locator("section.library li.row")).toHaveCount(6, { timeout: 15000 });
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const first = store.libraryList[0];
+    store.player = { ...store.player, phase: "playing", now_playing: first.path, playback_started_frames: 48000 };
+    store.catalog = { ...store.catalog, favorite_hashes: [] };
+    store.playHistory = { log: [], log_total: 0, tracks: [{ ...first, track_hash: first.content_hash, count: 1, last_played_ms: 1767225600000, missing: false }] };
+    window.__uiFixture.setReply("player_state", store.player);
+    window.__uiFixture.setReply("playlist_catalog", store.catalog);
+    window.__uiFixture.setReply("list_play_history", store.playHistory);
+  });
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "History" }).click();
+  const row = page.locator("section.history li.row").first();
+  await expect(row).toBeVisible();
+  await row.click({ button: "right" });
+  const item = page.getByRole("menuitemcheckbox", { name: "Favorites", exact: true });
+  await expect(item).toHaveAttribute("aria-checked", "false");
+  await item.click();
+  await expect.poll(() => page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").length)).toBe(1);
+  expect(await page.evaluate(() => window.__uiFixture.calls.find((call) => call.command === "playlist_command").args.request.action)).toEqual({
+    kind: "set_favorite", track: { path: "/fixture/music/track-1.mp3", expected_hash: "1".repeat(64) }, favorite: true,
+  });
+  await expect(page.getByRole("menu")).toHaveCount(0);
+});

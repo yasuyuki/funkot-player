@@ -108,7 +108,7 @@ export const id: Messages = {
   playlistMenu: "Aksi daftar putar",
   playlistEditAll: "Tampilkan dan edit semua lagu",
   playlistShowRemaining: "Tampilkan lagu tersisa",
-  playlistRestart: "Mulai dari awal (lagu saat ini tetap diputar)",
+  playlistRestart: "Putar daftar putar dari awal (setelah lagu saat ini)",
   playlistEnded: "Pemutaran selesai",
   playlistEmpty: "Daftar putar ini kosong",
   playlistRemoveLabel: (title) => `Hapus ${title} dari daftar putar ini`,

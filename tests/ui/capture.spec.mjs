@@ -119,7 +119,7 @@ test("Library and tag review states", async ({ page }, testInfo) => {
     window.__uiFixture.setReply("queue_state", store.queue);
     window.__uiFixture.setReply("playlist_catalog", store.catalog);
   });
-  await expect(queue.getByRole("button", { name: "Start over (current song keeps playing)" })).toBeVisible();
+  await expect(queue.getByRole("button", { name: "Play the playlist from the top (after the current song)" })).toBeVisible();
   await capture("playlist-ended-empty");
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");

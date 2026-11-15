@@ -108,7 +108,7 @@ export const en = {
   playlistMenu: "Playlist actions",
   playlistEditAll: "Show and edit all tracks",
   playlistShowRemaining: "Show remaining tracks",
-  playlistRestart: "Start over (current song keeps playing)",
+  playlistRestart: "Play the playlist from the top (after the current song)",
   playlistEnded: "Playback ended",
   playlistEmpty: "No tracks in this playlist",
   playlistRemoveLabel: (title: string) => `Remove ${title} from this playlist`,

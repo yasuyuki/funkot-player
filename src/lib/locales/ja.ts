@@ -108,7 +108,7 @@ export const ja: Messages = {
   playlistMenu: "プレイリスト操作",
   playlistEditAll: "全曲を表示・編集",
   playlistShowRemaining: "残りの曲を表示",
-  playlistRestart: "先頭からやり直す（再生中の曲は続行）",
+  playlistRestart: "プレイリストを先頭から再生（再生中の曲の次から）",
   playlistEnded: "再生終了",
   playlistEmpty: "このプレイリストは空です",
   playlistRemoveLabel: (title) => `${title} をこのプレイリストから削除`,
