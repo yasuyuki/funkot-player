@@ -687,9 +687,10 @@ def resume(repo: Path | str) -> list[dict]:
     directory = receipt_directory(repo, context)
     results = []
     for candidate in sorted(directory.glob(OWNER + "-*.json")) if directory.exists() else []:
-        path, record = record_for(candidate)
-        if record.get("repo") != str(repo):
+        # record_for runs Git in the receipt's own checkout, which may have been removed.
+        if read_json(candidate).get("repo") != str(repo):
             continue
+        path, record = record_for(candidate)
         if record.get("state") == "active":
             try:
                 _capture_failed(path, record)
