@@ -191,3 +191,19 @@ test("editor controls preserve shared geometry with translated and enlarged labe
   await page.locator(".actions button").last().click({ trial: true });
   await capture(page, testInfo, "flagged-enlarged");
 });
+
+test("the WebView's own context menu is suppressed except in text fields", async ({ page }, testInfo) => {
+  await page.goto("/tests/ui/");
+  await expect(page.locator("section.queue, section.library").first()).toBeAttached();
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Library" }).click();
+  const prevented = (selector) => page.evaluate((selector) => {
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    document.querySelector(selector).dispatchEvent(event);
+    return event.defaultPrevented;
+  }, selector);
+  expect(await prevented("body")).toBe(true);
+  expect(await prevented(".nav")).toBe(true);
+  expect(await prevented("section.library input[type=search], section.library input:not([type=checkbox])")).toBe(false);
+  await page.locator("section.library li.row").first().click({ button: "right" });
+  await expect(page.getByRole("menu")).toBeVisible();
+});
