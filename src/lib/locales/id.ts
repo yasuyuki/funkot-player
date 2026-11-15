@@ -91,6 +91,8 @@ export const id: Messages = {
   queueErrAuditioning: "Tidak bisa diubah saat pratinjau",
   queueErrOriginBoundary: "Lagu manual dan otomatis tidak dapat dipindahkan melewati batasnya",
   queueErrGeneric: "Tidak dapat memperbarui antrean",
+  queueHeadLocked: "Lagu berikutnya hanya bisa dipindah atau dihapus setelah siap dan tersisa lebih dari 30 detik sebelum pergantian.",
+  queueBelowHeadLocked: "Lagu di atas diputar berikutnya dan tidak bisa ditukar sekarang.",
   playlistNormal: "Antrean",
   favoritesTitle: "Favorit",
   favoriteAddLabel: (title) => `Tambahkan ${title} ke Favorit`,

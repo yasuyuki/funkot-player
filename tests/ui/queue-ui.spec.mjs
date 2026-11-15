@@ -214,6 +214,18 @@ test("normal queue keeps same-path occurrences selected and protects an unswappa
     toolbar.getByRole("button", { name: "Move down" }),
   ).toBeDisabled();
   await expect(toolbar.getByRole("button", { name: "Remove" })).toBeDisabled();
+  await expect(toolbar.locator(".selection-note")).toHaveText("The next track can be moved or removed only once it is ready and more than 30 seconds remain before the switch.");
+  await queue.locator(".row-select").nth(1).click();
+  await expect(toolbar.getByRole("button", { name: "Move up" })).toBeDisabled();
+  await expect(toolbar.getByRole("button", { name: "Remove" })).toBeEnabled();
+  await expect(toolbar.locator(".selection-note")).toHaveText("The track above plays next and cannot be swapped right now.");
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    store.queue = { ...store.queue, reserved_swappable: true };
+    window.__uiFixture.setReply("queue_state", store.queue);
+  });
+  await expect(toolbar.locator(".selection-note")).toHaveCount(0);
+  await expect(toolbar.getByRole("button", { name: "Move up" })).toBeEnabled();
 });
 
 test("the source picker stays reachable in a short Japanese viewport and Escape restores its trigger", async ({ page }) => {

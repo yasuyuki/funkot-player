@@ -91,6 +91,8 @@ export const en = {
   queueErrAuditioning: "Cannot edit while auditioning",
   queueErrOriginBoundary: "Manual and automatic tracks cannot be reordered across each other",
   queueErrGeneric: "Could not update the queue",
+  queueHeadLocked: "The next track can be moved or removed only once it is ready and more than 30 seconds remain before the switch.",
+  queueBelowHeadLocked: "The track above plays next and cannot be swapped right now.",
   playlistNormal: "Queue",
   favoritesTitle: "Favorites",
   favoriteAddLabel: (title: string) => `Add ${title} to Favorites`,
