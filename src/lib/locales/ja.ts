@@ -91,6 +91,8 @@ export const ja: Messages = {
   queueErrAuditioning: "試聴中は変更できません",
   queueErrOriginBoundary: "手動追加曲と自動選曲の境界を越えて並べ替えできません",
   queueErrGeneric: "再生待ちを更新できませんでした",
+  queueHeadLocked: "次につなぐ曲は、準備が済み、切替まで30秒より長く残っている間だけ動かしたり消したりできます。",
+  queueBelowHeadLocked: "すぐ上は次につなぐ曲で、今は入れ替えられません。",
   playlistNormal: "再生待ち",
   favoritesTitle: "お気に入り",
   favoriteAddLabel: (title) => `「${title}」をお気に入りに追加`,
