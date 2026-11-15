@@ -1,5 +1,5 @@
 # Output (unsigned):
-#   packaging\msix\out\Funkot_0.9.1.0_x64.msix
+#   packaging\msix\out\Funkot_0.10.0.0_x64.msix
 
 [CmdletBinding()]
 param(
@@ -14,7 +14,7 @@ $ManifestSrc = Join-Path $MsixRoot "Package.appxmanifest"
 $IconsDir = Join-Path $RepoRoot "src-tauri\icons"
 $ReleaseDir = Join-Path $RepoRoot "src-tauri\target\release"
 $ExeName = "funkot-player.exe"
-$PackageVersion = "0.9.1.0"
+$PackageVersion = "0.10.0.0"
 $OutDir = Join-Path $MsixRoot "out"
 $OutMsix = Join-Path $OutDir "Funkot_${PackageVersion}_x64.msix"
 $StagingDir = Join-Path $MsixRoot "staging"
