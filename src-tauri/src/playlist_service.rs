@@ -245,12 +245,16 @@ impl Service {
         self.capture_normal(&mut candidate, None);
         let queue = queue::pending_snapshot(&self.queue);
         let session = crate::SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        self.progress_error = self.disk.update(|state| {
+        let saved = self.disk.update(|state| {
             state.catalog = candidate.clone();
             state.queue = queue;
             state.session = session;
             Ok(())
-        }).is_err();
+        });
+        if let Err(error) = &saved {
+            log::warn!("cannot save playback progress: {error:?}");
+        }
+        self.progress_error = saved.is_err();
         self.catalog = candidate;
     }
     fn started(&mut self, index: usize) {

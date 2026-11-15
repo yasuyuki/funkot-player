@@ -513,3 +513,18 @@ test("the list menu opens in view after the list has been scrolled", async ({ pa
   await queue.getByRole("button", { name: "Playlist actions" }).click();
   await expect(queue.getByRole("button", { name: "Duplicate", exact: true })).toBeInViewport();
 });
+
+test("a failed save is reported in view while a long list is scrolled", async ({ page }) => {
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const rows = Array.from({ length: 60 }, (_, i) => ({ entry_id: `r${i}`, path: `/fixture/music/track-${(i % 6) + 1}.mp3`, title: `Track ${i}`, artist: "A", status: "pending", reason: null }));
+    store.queue = { ...store.queue, playlist_store_status: "persist_failed", playlist: { ...store.queue.playlist, total: 60, rows } };
+    window.__uiFixture.setReply("queue_state", store.queue);
+  });
+  const queue = page.locator("section.queue");
+  await expect(queue.locator(".playlist-row")).toHaveCount(60);
+  await expect(queue.getByRole("alert")).toBeInViewport();
+  await queue.locator(".playlist-row").last().scrollIntoViewIfNeeded();
+  await expect(queue.getByRole("alert")).toBeInViewport();
+  await expect(queue.getByRole("alert")).toHaveText("The latest playlist change could not be saved. Check storage and try again.");
+});
