@@ -126,7 +126,7 @@ export const ja: Messages = {
   playlistReadOnly: "保存データを読み込めないため、プレイリストは読み取り専用です。再生待ちは再生できます。",
   playlistSaveFailedRetry: "直前のプレイリスト変更を保存できませんでした。保存先を確認してやり直してください。",
   playlistSkipped: (count) => `${count}曲をスキップ`,
-  playlistStatus: (status) => ({ pending: "次に再生", preparing: "準備中", prepared: "準備済み", missing: "見つからない", unplayable: "再生できない", played: "再生済み", current: "再生中" })[status] ?? status,
+  playlistStatus: (status) => ({ pending: "待ち", preparing: "準備中", prepared: "準備済み", missing: "見つからない", unplayable: "再生できない", played: "再生済み", current: "再生中" })[status] ?? status,
   playlistFailureReason: (reason) => ({ missing: "ファイルが見つかりません。", non_funkot: "Funkotのみの設定で除外されました。", identity_changed: "追加後にファイルが変わりました。", identity_unavailable: "この曲を識別できません。", load_failed: "曲を読み込めませんでした。", loader_failure: "曲を読み込めませんでした。" })[reason] ?? "曲を読み込めませんでした。",
   playlistCreateSavedSelectionFailed: (name, reason) => `「${name}」を作成しましたが、切替できませんでした：${reason}`,
 
