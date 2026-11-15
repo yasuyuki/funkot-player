@@ -173,6 +173,22 @@ class WindowsBuildOwnerTests(unittest.TestCase):
         finally:
             owner._checkpoint = checkpoint
 
+    def test_resume_ignores_a_receipt_left_by_a_removed_worktree(self):
+        retired = self.root / "retired"
+        self.git("worktree", "add", "--detach", str(retired))
+        begun = owner.begin(retired, self.inputs)
+        release = Path(begun["output"]) / "release"
+        release.mkdir(parents=True)
+        (release / "funkot-player.exe").write_bytes(b"exe")
+        (retired / "dist").mkdir()
+        (retired / "dist" / "index.html").write_text("built", encoding="utf-8")
+        owner.seal(begun["receipt"], self.inputs)
+        self.git("worktree", "remove", "--force", str(retired))
+
+        self.assertEqual(owner.resume(self.repo), [])
+        sealed, _output = self.new_sealed()
+        self.assertEqual(owner.record_for(sealed["receipt"])[1]["state"], "sealed")
+
     def test_operation_lock_is_common_to_managed_and_unmanaged_calls(self):
         self.assertEqual(owner.operation_lock_path(self.repo, None),
                          owner.operation_lock_path(self.repo, {"task": "separate"}))
@@ -196,6 +212,7 @@ class WindowsBuildOwnerTests(unittest.TestCase):
         finally:
             owner._checkpoint = checkpoint
 
+    @unittest.skipUnless(os.name == "nt", "holds the output open with a Windows share mode")
     def test_capture_refusal_holds_failed_generation_and_allows_a_new_one(self):
         begun = owner.begin(self.repo, self.inputs)
         output = Path(begun["output"])
