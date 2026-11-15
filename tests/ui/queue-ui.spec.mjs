@@ -499,3 +499,17 @@ test("save dialog remains usable with a long Japanese name, delayed save, and fa
   await expect(dialog).toHaveCount(0);
   await expect(trigger).toBeFocused();
 });
+
+test("the list menu opens in view after the list has been scrolled", async ({ page }) => {
+  await page.evaluate(async () => {
+    const { store } = await import("/src/lib/state.svelte.ts");
+    const rows = Array.from({ length: 60 }, (_, i) => ({ entry_id: `r${i}`, path: `/fixture/music/track-${(i % 6) + 1}.mp3`, title: `Track ${i}`, artist: "A", status: "pending", reason: null }));
+    store.queue = { ...store.queue, playlist: { ...store.queue.playlist, total: 60, rows } };
+    window.__uiFixture.setReply("queue_state", store.queue);
+  });
+  const queue = page.locator("section.queue");
+  await expect(queue.locator(".playlist-row")).toHaveCount(60);
+  await queue.locator(".playlist-row").last().scrollIntoViewIfNeeded();
+  await queue.getByRole("button", { name: "Playlist actions" }).click();
+  await expect(queue.getByRole("button", { name: "Duplicate", exact: true })).toBeInViewport();
+});
