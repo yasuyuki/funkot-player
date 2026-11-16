@@ -132,6 +132,8 @@ Notes:
 - `npm run check`, `npm test`, and `npm run build` cover the frontend. Run the invariant
   scripts listed in `.github/workflows/checks.yml` as well. Engine changes also require its
   own workspace tests and any real-audio acceptance required by its development instructions.
+- Checks skips its Rust steps when a change touches only frontend or documentation files.
+  `scripts/ci-change-scope.sh` lists those files; a file it does not list runs every check.
 
 ## Compare a captured manual Next
 
