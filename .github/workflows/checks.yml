@@ -381,6 +381,63 @@ jobs:
           npm run ui:capture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  windows-window:
+    name: Windows app window
+    runs-on: windows-latest
+    needs: [core-pin, docker-toolchain]
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: funkot-player
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - uses: actions/checkout@v7
+        with:
+          repository: yasuyuki/funkot-autodj
+          ref: ${{ needs.core-pin.outputs.sha }}
+          path: funkot-autodj-for-ui
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ needs.docker-toolchain.outputs.node }}
+          cache: npm
+          cache-dependency-path: funkot-player/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.docker-toolchain.outputs.rust }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: funkot-player/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install LLVM for bindgen
+        shell: pwsh
+        run: |
+          choco install llvm -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path -LiteralPath (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) {
+            throw "libclang.dll not found at $env:LIBCLANG_PATH"
+          }
+          "LIBCLANG_PATH=$env:LIBCLANG_PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build the app that ships
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run tauri -- build --no-bundle -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Launch it and keep a picture of its window
+        shell: pwsh
+        run: ./scripts/windows-window.ps1 -Exe src-tauri/target/release/funkot-player.exe -Out "$env:RUNNER_TEMP\windows-window"
+      - name: Preserve the picture
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-window
+          path: ${{ runner.temp }}/windows-window
+          if-no-files-found: error
+
   dependency-policy:
     name: Rust dependency policy
     runs-on: ubuntu-latest

@@ -134,6 +134,10 @@ Notes:
   own workspace tests and any real-audio acceptance required by its development instructions.
 - Checks skips its Rust steps when a change touches only frontend or documentation files.
   `scripts/ci-change-scope.sh` lists those files; a file it does not list runs every check.
+- Checks also builds the Windows app, launches it on the runner and keeps a picture of its window.
+  `gh run download <run> -n windows-window` fetches `window.png` and `result.json`, so a change can be
+  looked at on Windows without a Windows machine. The runner has no sound device, and the job fails
+  when no window appears or the picture stays blank.
 
 ## Compare a captured manual Next
 
