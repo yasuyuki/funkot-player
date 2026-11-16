@@ -21,6 +21,10 @@
   },
   {
     "app": "github-actions",
+    "name": "Output sample bound"
+  },
+  {
+    "app": "github-actions",
     "name": "Frontend and native library"
   },
   {

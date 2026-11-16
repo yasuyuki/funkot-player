@@ -216,6 +216,26 @@ jobs:
           grep -E '^(rust|node|npm)=' versions.txt >> "$GITHUB_OUTPUT"
           cat versions.txt >> "$GITHUB_STEP_SUMMARY"
 
+  output-guard:
+    name: Output sample bound
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the pinned Rust
+        run: rustup toolchain install 1.93.0 --profile minimal
+      - name: Check every f32 against the output guard
+        run: ./scripts/check-output-guard.sh "$RUNNER_TEMP/output-guard-proof"
+      - name: Preserve proof results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: output-guard-proof
+          path: |
+            ${{ runner.temp }}/output-guard-proof/summary.json
+            ${{ runner.temp }}/output-guard-proof/cargo.log
+          if-no-files-found: error
+
   build-and-test:
     name: Frontend and native library
     runs-on: ubuntu-latest

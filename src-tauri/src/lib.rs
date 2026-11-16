@@ -2,6 +2,7 @@
 mod queue;
 mod queue_progress;
 mod transport_fade;
+mod output_guard;
 mod store;
 mod store_cache;
 mod track_tags;
@@ -2258,7 +2259,7 @@ fn open_output_stream(
     let stream = device
         .build_output_stream(
             config,
-            move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+            output_guard::guarded(sample_rate, move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 let sequence = CALLBACK_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
                 let output_frames = (out.len() / 2) as u64;
                 let timestamp = capture.as_ref().map(|_| info.timestamp());
@@ -2382,7 +2383,7 @@ fn open_output_stream(
                     }
                 }
                 state.was_in_transition = in_transition;
-            },
+            }),
             move |e| {
                 let m = format!("stream error: {e}");
                 log::error!("{m}");

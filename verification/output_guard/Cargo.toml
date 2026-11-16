@@ -1,0 +1,10 @@
+[package]
+name = "output_guard_proof"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[profile.test]
+opt-level = 3
+overflow-checks = true
+debug-assertions = true

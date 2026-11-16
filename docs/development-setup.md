@@ -277,6 +277,16 @@ The Loom check uses Rust 1.93 and Loom 0.7.2. It imports the production `EngineO
 
 Success is `"status": "PASS"` in the printed summary. That status means the four named tests ran and passed on the production module. A Cargo exit code of 0 with a filtered or missing test is a failure. The playlist proof above is a separate command.
 
+## Output sample bound
+
+Every sample the app hands to the output device is finite and within `[-1.0, 1.0]`. The check runs the production `src-tauri/src/output_guard.rs` on all 2^32 `f32` values and confirms that each device stream is wrapped in it. It needs host `cargo +1.93.0` and no Docker.
+
+```sh
+./scripts/check-output-guard.sh /tmp/output-guard-proof
+```
+
+Success is `"status": "PASS"` in the printed summary. The same check runs in the **Output sample bound** Checks job.
+
 ## Common failures
 
 | Symptom | What to do |
