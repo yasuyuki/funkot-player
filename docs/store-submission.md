@@ -269,9 +269,9 @@ intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
 ```
 
-**このバージョンの新機能（0.9.1）:**
+**このバージョンの新機能（0.10.0）:**
 ```text
-「次の曲」のつなぎを改善し、拍を合わせられる位置を探してから切り替えるようにしました。非Funkotの再生をオフにすると、判定済みの非Funkot曲を再生待ちから除きます。再生待ちの自動補充とボタンのマウスオーバー表示も改善しました。
+ハートで曲を「お気に入り」に追加できるようになり、お気に入りはプレイリストとして残ります。画面を作り直して一覧を広く表示し、ボタンの大きさをマウスとタッチに合わせました。つなぎで音が割れないよう出力を抑え、保存に失敗しても元のデータを残すようにしました。
 ```
 
 ### English
@@ -317,9 +317,9 @@ Adjust intro / outro
 Flag a bad transition and keep a feedback ZIP
 ```
 
-**What's new in this version (0.9.1):**
+**What's new in this version (0.10.0):**
 ```text
-Next track now searches for a suitable beat-aligned transition point before switching. Turning off non-Funkot playback removes identified non-Funkot tracks from the queue. Automatic queue refill and button hover states have also been improved.
+Tap the heart to add a track to Favorites, which is kept as a playlist. The redesigned screens give the lists more room and size buttons for mouse or touch. Output is now limited so transitions no longer clip, and a failed save keeps your existing data.
 ```
 
 ### Bahasa Indonesia
@@ -365,9 +365,9 @@ Sesuaikan intro / outro
 Tandai transisi yang tidak pas dan simpan ZIP masukan
 ```
 
-**Yang baru di versi ini (0.9.1):**
+**Yang baru di versi ini (0.10.0):**
 ```text
-Tombol Lagu berikutnya kini mencari titik transisi yang sesuai dengan ketukan sebelum beralih. Saat pemutaran lagu non-Funkot dimatikan, lagu yang telah teridentifikasi sebagai non-Funkot dihapus dari antrean. Pengisian antrean otomatis dan tampilan tombol saat kursor diarahkan juga diperbaiki.
+Ketuk ikon hati untuk menambahkan lagu ke Favorit, yang disimpan sebagai playlist. Tampilan baru memberi ruang lebih untuk daftar dan menyesuaikan ukuran tombol untuk mouse atau sentuhan. Keluaran kini dibatasi agar transisi tidak pecah, dan penyimpanan yang gagal tetap mempertahankan data yang ada.
 ```
 
 ---
