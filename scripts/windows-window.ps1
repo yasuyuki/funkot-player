@@ -13,7 +13,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $WindowSeconds = 60
 $DrawSeconds = 30
-# A drawn window samples well over a hundred colours; an undrawn one is a single fill.
+# Colours are counted inside the page only. The title bar, the window frame and a
+# taskbar that overlaps the bottom edge are drawn before the page is.
+$TitleBar = 40
+$Frame = 16
+$Taskbar = 56
+# A drawn page samples about seventy colours there; an undrawn one is a single fill.
 $DrawnColors = 16
 
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -38,8 +43,8 @@ function Save-Picture($area) {
         $graphics.CopyFromScreen($area.X, $area.Y, 0, 0, $bitmap.Size)
         $bitmap.Save((Join-Path $Out 'window.png'), [System.Drawing.Imaging.ImageFormat]::Png)
         $colors = @{}
-        for ($x = 0; $x -lt $bitmap.Width; $x += 16) {
-            for ($y = 0; $y -lt $bitmap.Height; $y += 16) { $colors[$bitmap.GetPixel($x, $y).ToArgb()] = 1 }
+        for ($x = $Frame; $x -lt $bitmap.Width - $Frame; $x += 8) {
+            for ($y = $TitleBar; $y -lt $bitmap.Height - $Taskbar; $y += 8) { $colors[$bitmap.GetPixel($x, $y).ToArgb()] = 1 }
         }
         return $colors.Count
     } finally {
@@ -77,6 +82,11 @@ try {
         $result.drawn = $result.sampled_colors -ge $DrawnColors
     } until ($result.drawn -or $clock.Elapsed.TotalSeconds -ge $DrawSeconds)
     $result.seconds_to_draw = [math]::Round($clock.Elapsed.TotalSeconds, 1)
+    if ($result.drawn) {
+        # The first drawn frame can be partial; keep the picture of the settled page.
+        Start-Sleep -Seconds 2
+        $result.sampled_colors = Save-Picture $area
+    }
     $result.picture = "$($area.Width)x$($area.Height)"
     if (-not $result.drawn) { throw "the window stayed blank for $DrawSeconds seconds" }
 } catch {
