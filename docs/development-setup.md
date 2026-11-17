@@ -135,9 +135,11 @@ Notes:
 - Checks skips its Rust steps when a change touches only frontend or documentation files.
   `scripts/ci-change-scope.sh` lists those files; a file it does not list runs every check.
 - Checks also builds the Windows app, launches it on the runner and keeps a picture of its window.
-  `gh run download <run> -n windows-window` fetches `window.png` and `result.json`, so a change can be
-  looked at on Windows without a Windows machine. The runner has no sound device, and the job fails
-  when no window appears or the picture stays blank.
+  `gh run download <run> -n windows-window` fetches `window.png`, `history.png` and `result.json`,
+  so a change can be looked at on Windows without a Windows machine. The job then selects the
+  History tab by its accessible name and role, with no screen position. It fails when no window
+  appears, the picture stays blank, or the tab cannot be found and selected by name. The runner
+  has no sound device.
 
 ## Compare a captured manual Next
 
