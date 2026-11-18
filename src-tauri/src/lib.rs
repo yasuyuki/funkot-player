@@ -1645,20 +1645,7 @@ fn request_skip_next() -> Result<(), String> {
         return Err("skip is disabled while auditioning".into());
     }
     let playback = PLAYBACK.get().ok_or("not playing")?;
-    let _request = MANUAL_NEXT_REQUEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if manual_next_owns_analysis(
-        MANUAL_NEXT_PENDING.load(Ordering::Acquire),
-        MANUAL_NEXT_IN_FLIGHT.load(Ordering::Acquire)) {
-        return Ok(());
-    }
-    let current = playback.observation.read()
-        .or_else(|| playback.observation.read())
-        .and_then(|snapshot| snapshot.current)
-        .ok_or("current track not ready")?;
-    MANUAL_NEXT_EXPECTED_INDEX.store(current, Ordering::Release);
-    MANUAL_NEXT_PENDING.store(true, Ordering::Release);
-    drop(_request);
-    if next_dispatch_ready() && dispatch_manual_next(playback)? {
+    if press_manual_next(playback)? != ManualNextPress::Waiting {
         return Ok(());
     }
     std::thread::Builder::new()
@@ -1695,6 +1682,72 @@ fn request_skip_next() -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ManualNextPress {
+    /// An earlier Next is still pending or in flight; this press adds nothing.
+    Ignored,
+    Sent,
+    /// Accepted, but the next track is not ready; a waiter must dispatch it.
+    Waiting,
+}
+
+fn press_manual_next(playback: &Playback) -> Result<ManualNextPress, String> {
+    let _request = MANUAL_NEXT_REQUEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if manual_next_owns_analysis(
+        MANUAL_NEXT_PENDING.load(Ordering::Acquire),
+        MANUAL_NEXT_IN_FLIGHT.load(Ordering::Acquire)) {
+        return Ok(ManualNextPress::Ignored);
+    }
+    let current = playback.observation.read()
+        .or_else(|| playback.observation.read())
+        .and_then(|snapshot| snapshot.current)
+        .ok_or("current track not ready")?;
+    MANUAL_NEXT_EXPECTED_INDEX.store(current, Ordering::Release);
+    MANUAL_NEXT_PENDING.store(true, Ordering::Release);
+    drop(_request);
+    if next_dispatch_ready() && dispatch_manual_next(playback)? {
+        return Ok(ManualNextPress::Sent);
+    }
+    Ok(ManualNextPress::Waiting)
+}
+
+/// Called with the render lock held, right after the engine discarded every
+/// queued and accepted navigation (`commit_future_update`, `revoke_next`).
+/// A sent Next is gone, so it must no longer block the next press. The engine
+/// no longer has the next track it had, so a press must wait for the callback
+/// to publish one again; that callback drains the channel first.
+fn forget_discarded_manual_next() {
+    NEXT_PREPARED.store(false, Ordering::SeqCst);
+    MANUAL_NEXT_DISCARDS.fetch_add(1, Ordering::SeqCst);
+    MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::SeqCst);
+}
+
+fn commit_future_update_on(
+    playback: &Playback,
+    token: funkot_core::engine::FutureUpdate,
+    prepared: funkot_core::engine::PreparedSourceReplacement,
+) -> funkot_core::engine::RetiredFuture {
+    let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
+    let retired = render.engine.commit_future_update(token, prepared);
+    forget_discarded_manual_next();
+    playback.publish_engine_observation(&render.engine);
+    retired
+}
+
+/// What one main-engine render leaves for the Next button: whether a next
+/// track is ready, and whether a sent Next has resolved.
+fn publish_next_state(engine: &Engine) -> (bool, bool) {
+    let next_ready = engine.next_track_path().is_some();
+    NEXT_PREPARED.store(next_ready, Ordering::Relaxed);
+    let finished = engine.is_finished();
+    let expected = MANUAL_NEXT_EXPECTED_INDEX.load(Ordering::Acquire);
+    if manual_next_completed(expected, engine.current_index(), finished) {
+        MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+        MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::Release);
+    }
+    (next_ready, finished)
+}
+
 fn manual_next_owns_analysis(pending: bool, in_flight: bool) -> bool {
     pending || in_flight
 }
@@ -1711,6 +1764,9 @@ fn next_dispatch_ready() -> bool {
 fn dispatch_manual_next(playback: &Playback) -> Result<bool, String> {
     use std::sync::mpsc::TrySendError;
     if !MANUAL_NEXT_PENDING.load(Ordering::Acquire) { return Ok(false); }
+    // Read before NEXT_PREPARED: a discard after this read is seen below.
+    let discards = MANUAL_NEXT_DISCARDS.load(Ordering::SeqCst);
+    if !NEXT_PREPARED.load(Ordering::SeqCst) { return Ok(false); }
     let expected = MANUAL_NEXT_EXPECTED_INDEX.load(Ordering::Acquire);
     let Some(snapshot) = playback.observation.read() else { return Ok(false); };
     if snapshot.current != Some(expected) || snapshot.finished {
@@ -1718,10 +1774,16 @@ fn dispatch_manual_next(playback: &Playback) -> Result<bool, String> {
         return Ok(false);
     }
     NAV_REQUESTED_MS.store(now_ms(), Ordering::Relaxed);
-    MANUAL_NEXT_IN_FLIGHT.store(true, Ordering::Release);
+    MANUAL_NEXT_IN_FLIGHT.store(true, Ordering::SeqCst);
     match playback.nav_tx.try_send(NavAction::TransitionToNext) {
         Ok(()) => {
             MANUAL_NEXT_PENDING.store(false, Ordering::Release);
+            // A discard that ran between the readiness check and the send may
+            // have cleared the flag before it was set, or drained the channel
+            // before the send. Either way this Next may be dropped unseen.
+            if MANUAL_NEXT_DISCARDS.load(Ordering::SeqCst) != discards {
+                MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::SeqCst);
+            }
             Ok(true)
         }
         Err(error) => {
@@ -2303,15 +2365,8 @@ fn open_output_stream(
                     let rendered_silence = navigation_capture::finalize_rendered_output(capture.as_ref(), out);
                     if !audition {
                         MAIN_FRAMES.fetch_add(frames as u64, Ordering::Relaxed);
-                        let next_ready = engine.next_track_path().is_some();
-                        NEXT_PREPARED.store(next_ready, Ordering::Relaxed);
-                        let finished = engine.is_finished();
+                        let (next_ready, finished) = publish_next_state(engine);
                         YIELD_FOR_LOADER.store(!next_ready && !finished, Ordering::Relaxed);
-                        let expected = MANUAL_NEXT_EXPECTED_INDEX.load(Ordering::Acquire);
-                        if manual_next_completed(expected, engine.current_index(), finished) {
-                            MANUAL_NEXT_PENDING.store(false, Ordering::Release);
-                            MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::Release);
-                        }
                         FRAMES_UNTIL_TRANSITION.store(
                             engine.frames_until_transition().unwrap_or(u64::MAX),
                             Ordering::Relaxed,
@@ -3816,6 +3871,123 @@ fn manual_priority_swap_safe(
 }
 
 #[cfg(test)]
+mod manual_next_discard_tests {
+    use super::*;
+    use funkot_core::engine::{PreparedSourceReplacement, PreparedTrack, TrackSource};
+
+    const RATE: u32 = 8_000;
+
+    struct Exhausted;
+    impl TrackSource for Exhausted {
+        fn next(&mut self) -> Option<(usize, PathBuf)> { None }
+    }
+
+    fn track(index: usize) -> PreparedTrack {
+        // Long enough that the 30 s manual-priority runway is never short and
+        // no track ends on its own during a test.
+        let frames = RATE as u64 * 120;
+        PreparedTrack {
+            path: PathBuf::from(format!("synthetic-{index}.wav")), playlist_index: index,
+            samples: Arc::new(vec![0.25; frames as usize * 2]), frames,
+            first_downbeat_out: 0, outro_start_out: frames - RATE as u64 * 16,
+            outro_end_anchored_out: frames,
+            intro_bars: 0, outro_bars: 0, gain_linear: 1.0, preview: false, head_only: false,
+        }
+    }
+
+    fn playback(tracks: usize) -> Playback {
+        let options = EngineOptions { output_sample_rate: RATE, ..EngineOptions::default() };
+        let engine = Engine::from_prepared(options, (0..tracks).map(track).collect()).unwrap();
+        Playback {
+            paused: Arc::new(AtomicBool::new(false)),
+            nav_tx: engine.nav_sender(),
+            observation: Arc::new(engine_observation::EngineObservation::new(
+                engine.current_index(), engine.is_finished())),
+            render: Arc::new(Mutex::new(RenderState {
+                engine, audition: None, stall: StallWatch::new(RATE), was_in_transition: false,
+            })),
+            sample_rate: RATE,
+        }
+    }
+
+    /// The main branch of the audio callback, without the device.
+    fn callback(playback: &Playback) {
+        let mut out = vec![0.0; 512];
+        let mut state = playback.render.lock().unwrap();
+        state.engine.render(&mut out);
+        publish_next_state(&state.engine);
+        playback.publish_engine_observation(&state.engine);
+    }
+
+    fn callbacks_until(playback: &Playback, mut done: impl FnMut() -> bool) {
+        for _ in 0..20_000 {
+            if done() { return; }
+            callback(playback);
+            std::thread::sleep(Duration::from_micros(50));
+        }
+        panic!("callbacks did not reach the expected state");
+    }
+
+    fn current(playback: &Playback) -> Option<usize> {
+        playback.observation.read().and_then(|snapshot| snapshot.current)
+    }
+
+    fn reset() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        MANUAL_NEXT_PENDING.store(false, Ordering::SeqCst);
+        MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::SeqCst);
+        NEXT_PREPARED.store(false, Ordering::SeqCst);
+        LIBRARY_ANALYSIS_BUSY.store(false, Ordering::SeqCst);
+        guard
+    }
+
+    #[test]
+    fn next_works_again_after_manual_priority_revokes_the_next_track() {
+        let _serial = reset();
+        let playback = playback(3);
+        callbacks_until(&playback, || NEXT_PREPARED.load(Ordering::SeqCst));
+        assert_eq!(current(&playback), Some(0));
+
+        assert_eq!(press_manual_next(&playback).unwrap(), ManualNextPress::Sent);
+        assert!(revoke_reserved_on(&playback).is_some(), "manual priority takes the next slot");
+        // The engine drops the sent Next unless the loader installs the
+        // following track before this callback drains it.
+        callback(&playback);
+
+        match press_manual_next(&playback).unwrap() {
+            ManualNextPress::Ignored => panic!("the next press was swallowed by the discarded one"),
+            ManualNextPress::Sent => {}
+            ManualNextPress::Waiting => {
+                callbacks_until(&playback, || dispatch_manual_next(&playback).unwrap());
+            }
+        }
+        callbacks_until(&playback, || current(&playback) != Some(0));
+        assert!(!MANUAL_NEXT_IN_FLIGHT.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn next_works_again_after_a_saved_change_discards_the_sent_one() {
+        let _serial = reset();
+        let playback = playback(2);
+        callbacks_until(&playback, || NEXT_PREPARED.load(Ordering::SeqCst));
+        let token = playback.render.lock().unwrap().engine.begin_future_update().unwrap();
+
+        assert_eq!(press_manual_next(&playback).unwrap(), ManualNextPress::Sent,
+            "Next is still sent while the change is being saved");
+        callback(&playback);
+        let replacement = PreparedSourceReplacement::new(Box::new(Exhausted)).unwrap();
+        drop(commit_future_update_on(&playback, token, replacement));
+        callback(&playback);
+        assert_eq!(current(&playback), Some(0), "the commit discarded the sent Next");
+
+        assert_eq!(press_manual_next(&playback).unwrap(), ManualNextPress::Waiting,
+            "the next press is accepted, not swallowed by the discarded one");
+        assert!(!MANUAL_NEXT_IN_FLIGHT.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
 mod manual_priority_tests {
     use super::*;
 
@@ -3974,7 +4146,10 @@ fn with_settings_rmw_then<R>(
 }
 
 fn revoke_reserved_for_manual_priority() -> Option<PathBuf> {
-    let playback = PLAYBACK.get()?;
+    revoke_reserved_on(PLAYBACK.get()?)
+}
+
+fn revoke_reserved_on(playback: &Playback) -> Option<PathBuf> {
     let mut state = playback
         .render
         .lock()
@@ -3989,7 +4164,7 @@ fn revoke_reserved_for_manual_priority() -> Option<PathBuf> {
     }
     let path = state.engine.revoke_next();
     if path.is_some() {
-        NEXT_PREPARED.store(false, Ordering::Relaxed);
+        forget_discarded_manual_next();
     }
     path
 }
@@ -4127,6 +4302,8 @@ static ANALYZING: AtomicBool = AtomicBool::new(false);
 static LIBRARY_ANALYSIS_BUSY: AtomicBool = AtomicBool::new(false);
 static MANUAL_NEXT_PENDING: AtomicBool = AtomicBool::new(false);
 static MANUAL_NEXT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Counts engine discards of queued navigation; see `forget_discarded_manual_next`.
+static MANUAL_NEXT_DISCARDS: AtomicU64 = AtomicU64::new(0);
 static MANUAL_NEXT_EXPECTED_INDEX: AtomicUsize = AtomicUsize::new(0);
 static MANUAL_NEXT_REQUEST_LOCK: Mutex<()> = Mutex::new(());
 

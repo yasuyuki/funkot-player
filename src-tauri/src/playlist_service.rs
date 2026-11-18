@@ -805,13 +805,7 @@ pub fn reconfigure_admission(
     drop(normal_source_guard);
     drop(_saving);
 
-    let retired = {
-        let mut render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
-        let retired = render.engine.commit_future_update(token, prepared);
-        playback.publish_engine_observation(&render.engine);
-        retired
-    };
-    crate::NEXT_PREPARED.store(false, Ordering::Relaxed);
+    let retired = crate::commit_future_update_on(playback, token, prepared);
     crate::YIELD_FOR_LOADER.store(true, Ordering::Relaxed);
     drop(owner);
     drop(retired);
@@ -1081,10 +1075,7 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         drop(normal_source_guard);
         drop(_saving);
         let playback = playback.unwrap();
-        retired = Some({ let mut render = playback.render.lock().unwrap_or_else(|e|e.into_inner());
-            let retired = render.engine.commit_future_update(fence.unwrap(), prepared.unwrap());
-            playback.publish_engine_observation(&render.engine);
-            retired });
+        retired = Some(crate::commit_future_update_on(playback, fence.unwrap(), prepared.unwrap()));
     } else if normal != old_normal {
         queue::replace_pending(&owner.queue, normal);
         drop(normal_source_guard);
