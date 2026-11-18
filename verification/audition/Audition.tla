@@ -54,82 +54,82 @@ Building == \E r \in Req : pc[r] = "building"
 
 Listen(r) ==
     /\ pc[r] \in {"idle", "done", "failed"}
-    /\ Serialize => ~LockHeld           \* lib.rs:3225 | let _audition = try_audition_lock()?;
-    /\ preparing' = TRUE                \* lib.rs:3256 | AUDITION_PREPARING.store(true, Ordering::Relaxed);
-    /\ before' = [before EXCEPT ![r] = paused]  \* lib.rs:3257 | let before = paused.swap(true, Ordering::Relaxed);
-    /\ paused' = TRUE                   \* lib.rs:3257 | let before = paused.swap(true, Ordering::Relaxed);
+    /\ Serialize => ~LockHeld           \* lib.rs:3280 | let _audition = try_audition_lock()?;
+    /\ preparing' = TRUE                \* lib.rs:3311 | AUDITION_PREPARING.store(true, Ordering::Relaxed);
+    /\ before' = [before EXCEPT ![r] = paused]  \* lib.rs:3312 | let before = paused.swap(true, Ordering::Relaxed);
+    /\ paused' = TRUE                   \* lib.rs:3312 | let before = paused.swap(true, Ordering::Relaxed);
     /\ pc' = [pc EXCEPT ![r] = "building"]
     /\ UNCHANGED <<auditioning, installed, wantMain, rpc, tpc>>
 
 PrepareFails(r) ==
     /\ pc[r] = "building"
-    /\ paused' = IF RestoreOnFailure THEN before[r] ELSE FALSE  \* lib.rs:3260 | paused.store(before, Ordering::Relaxed);
-    /\ preparing' = FALSE               \* lib.rs:3262 | AUDITION_PREPARING.store(false, Ordering::Relaxed);
+    /\ paused' = IF RestoreOnFailure THEN before[r] ELSE FALSE  \* lib.rs:3315 | paused.store(before, Ordering::Relaxed);
+    /\ preparing' = FALSE               \* lib.rs:3317 | AUDITION_PREPARING.store(false, Ordering::Relaxed);
     /\ pc' = [pc EXCEPT ![r] = "failed"]
     /\ UNCHANGED <<auditioning, installed, wantMain, before, rpc, tpc>>
 
 RaiseAuditioning(r) ==
     /\ pc[r] = "building"
-    /\ auditioning' = TRUE              \* lib.rs:3190 | AUDITIONING.store(true, Ordering::Relaxed);
+    /\ auditioning' = TRUE              \* lib.rs:3245 | AUDITIONING.store(true, Ordering::Relaxed);
     /\ pc' = [pc EXCEPT ![r] = "flagged"]
     /\ UNCHANGED <<paused, preparing, installed, wantMain, before, rpc, tpc>>
 
 SwapInAudition(r) ==
     /\ pc[r] = "flagged"
-    /\ installed' = r                   \* lib.rs:3197-3198 | state.audition = Some(engine);
+    /\ installed' = r                   \* lib.rs:3252-3253 | state.audition = Some(engine);
     /\ pc' = [pc EXCEPT ![r] = "swapped"]
     /\ UNCHANGED <<paused, auditioning, preparing, wantMain, before, rpc, tpc>>
 
 UnmuteAudition(r) ==
     /\ pc[r] = "swapped"
-    /\ paused' = FALSE                  \* lib.rs:3204 | playback.paused.store(false, Ordering::Relaxed);
+    /\ paused' = FALSE                  \* lib.rs:3259 | playback.paused.store(false, Ordering::Relaxed);
     /\ pc' = [pc EXCEPT ![r] = "unmuted"]
     /\ UNCHANGED <<auditioning, preparing, installed, wantMain, before, rpc, tpc>>
 
 EndPreparing(r) ==
     /\ pc[r] = "unmuted"
-    /\ preparing' = FALSE               \* lib.rs:3262 | AUDITION_PREPARING.store(false, Ordering::Relaxed);
+    /\ preparing' = FALSE               \* lib.rs:3317 | AUDITION_PREPARING.store(false, Ordering::Relaxed);
     /\ pc' = [pc EXCEPT ![r] = "done"]
     /\ UNCHANGED <<paused, auditioning, installed, wantMain, before, rpc, tpc>>
 
 PressResume ==
     /\ rpc = "idle"
     /\ BannerShown                      \* PlaybackBar.svelte:124 | {#if auditioning}
-    /\ IF Serialize THEN ~LockHeld      \* lib.rs:3268 | let _audition = try_audition_lock()?;
+    /\ IF Serialize THEN ~LockHeld      \* lib.rs:3323 | let _audition = try_audition_lock()?;
                     ELSE ~preparing     \* the pre-#115 AUDITION_PREPARING guard
     /\ rpc' = "checked"
     /\ UNCHANGED <<paused, auditioning, preparing, installed, wantMain, before, pc, tpc>>
 
 ResumeMutes ==
     /\ rpc = "checked"
-    /\ paused' = TRUE                   \* lib.rs:3270 | playback.paused.store(true, Ordering::Relaxed);
+    /\ paused' = TRUE                   \* lib.rs:3325 | playback.paused.store(true, Ordering::Relaxed);
     /\ rpc' = "muted"
     /\ UNCHANGED <<auditioning, preparing, installed, wantMain, before, pc, tpc>>
 
 ResumeClearsAuditioning ==
     /\ rpc = "muted"
-    /\ auditioning' = FALSE             \* lib.rs:3273 | AUDITIONING.store(false, Ordering::Relaxed);
+    /\ auditioning' = FALSE             \* lib.rs:3328 | AUDITIONING.store(false, Ordering::Relaxed);
     /\ rpc' = "restored"
     /\ UNCHANGED <<paused, preparing, installed, wantMain, before, pc, tpc>>
 
 ResumeTakesAudition ==
     /\ rpc = "restored"
-    /\ installed' = 0                   \* lib.rs:3288 | let previous = state.audition.take();
+    /\ installed' = 0                   \* lib.rs:3343 | let previous = state.audition.take();
     /\ rpc' = "taken"
     /\ UNCHANGED <<paused, auditioning, preparing, wantMain, before, pc, tpc>>
 
 ResumeUnmutes ==
     /\ rpc = "taken"
-    /\ paused' = FALSE                  \* lib.rs:3295 | playback.paused.store(false, Ordering::Relaxed);
-    /\ wantMain' = TRUE                 \* lib.rs:3300 | session.paused = false;
+    /\ paused' = FALSE                  \* lib.rs:3350 | playback.paused.store(false, Ordering::Relaxed);
+    /\ wantMain' = TRUE                 \* lib.rs:3355 | session.paused = false;
     /\ rpc' = "idle"
     /\ UNCHANGED <<auditioning, preparing, installed, before, pc, tpc>>
 
 PressPause ==
     /\ tpc = "idle"
     /\ ~BannerShown                     \* transportMode.ts:18 | if (auditioning) return "off";
-    /\ Serialize => ~LockHeld           \* lib.rs:3345 | let _audition = try_audition_lock()?;
-    /\ ~auditioning /\ ~preparing       \* lib.rs:3346-3349 | ensure_pause_allowed(
+    /\ Serialize => ~LockHeld           \* lib.rs:3400 | let _audition = try_audition_lock()?;
+    /\ ~auditioning /\ ~preparing       \* lib.rs:3401-3404 | ensure_pause_allowed(
     /\ tpc' = "checked"
     /\ UNCHANGED <<paused, auditioning, preparing, installed, wantMain, before, pc, rpc>>
 
