@@ -1691,9 +1691,19 @@ mod tests {
                 "--nocapture",
             ])
             .env(CHILD_DIR, &dir.0)
-            .status()
+            // The file-size limit also applies to inherited output; a parent
+            // writing to a regular file would fail the child's own report.
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
             .unwrap();
-        assert!(status.success(), "child did not observe a write error: {status}");
+        assert!(
+            status.status.success(),
+            "child did not observe a write error: {}\n{}{}",
+            status.status,
+            String::from_utf8_lossy(&status.stdout),
+            String::from_utf8_lossy(&status.stderr),
+        );
 
         let changed: Vec<_> = before
             .iter()
