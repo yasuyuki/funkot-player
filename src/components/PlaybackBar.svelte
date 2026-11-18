@@ -37,7 +37,12 @@
   let showOpenMusic = $derived(store.lastError !== null && store.lastError.includes("need >= 1 track"));
 
   let mode = $derived(resolvePrimaryMode(phase, paused, auditioning));
-  let primaryGlyph = $derived(mode === "pause" ? "⏸" : "▶\uFE0F");
+  const icons = {
+    play: "M8 5v14l11-7z",
+    pause: "M6 5h4v14H6zM14 5h4v14h-4z",
+    next: "M5 6l9 6-9 6zM16 6h3v12h-3z",
+  };
+  let primaryIcon = $derived(mode === "pause" ? icons.pause : icons.play);
   let primaryName = $derived(mode === "pause" ? t.pauseLabel : mode === "resume" ? t.resumeLabel : t.start);
   let primaryBusy = $state(false);
   let primaryDisabled = $derived(mode === "off" || primaryBusy || (mode === "start" && !store.canStart));
@@ -119,6 +124,8 @@
   }
 </script>
 
+{#snippet icon(d: string)}<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d={d} fill="currentColor" /></svg>{/snippet}
+
 <div class="playback-bar" class:auditioning role="toolbar" aria-label={t.playbackControlsLabel}>
   <div class="bar" aria-hidden="true"><div class="bar-fill" style={`width: ${progressPct}%`}></div></div>
   <div class="inner">
@@ -146,8 +153,8 @@
         {#if nowRow}<FavoriteButton path={nowRow.path} contentHash={nowRow.content_hash} title={nowRow.title} />{/if}
       </div>
       <div class="controls">
-        <button type="button" class="play" class:resume={mode === "resume"} disabled={primaryDisabled} onclick={onPrimaryClick} aria-label={primaryName} title={primaryName}>{primaryGlyph}</button>
-        <button type="button" class="next" disabled={nextDisabled} onclick={onNextClick} aria-label={t.nextTrackLabel} title={t.nextTrackLabel}>⏭</button>
+        <button type="button" class="play" class:resume={mode === "resume"} disabled={primaryDisabled} onclick={onPrimaryClick} aria-label={primaryName} title={primaryName}>{@render icon(primaryIcon)}</button>
+        <button type="button" class="next" disabled={nextDisabled} onclick={onNextClick} aria-label={t.nextTrackLabel} title={t.nextTrackLabel}>{@render icon(icons.next)}</button>
         <button
           type="button"
           class="flag"
@@ -204,6 +211,7 @@
     background: var(--color-transport-primary-bg);
     color: var(--color-transport-primary-text);
   }
+  .icon { display: block; width: 1.25em; height: 1.25em; margin: auto; }
   .play.resume { background: var(--color-transport-paused-bg); color: var(--color-transport-paused-text); }
   .next { flex: 0 0 auto; background: var(--color-transport-secondary-bg); color: var(--color-transport-secondary-text); }
   .flag {
