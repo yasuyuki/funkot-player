@@ -9,8 +9,6 @@ export const ja: Messages = {
   tabAllTracks: "すべての曲",
 
   start: "開始",
-  pause: "⏸ 一時停止",
-  resumePlayback: "▶ 再開",
   nextTrack: "⏭ 次の曲",
   playbackControlsLabel: "再生コントロール",
   resumeLabel: "再開",

@@ -7,8 +7,6 @@ export const en = {
   tabAllTracks: "All tracks",
 
   start: "Start",
-  pause: "⏸ Pause",
-  resumePlayback: "▶ Resume",
   nextTrack: "⏭ Next track",
   playbackControlsLabel: "Playback controls",
   resumeLabel: "Resume",

@@ -37,7 +37,8 @@
   let showOpenMusic = $derived(store.lastError !== null && store.lastError.includes("need >= 1 track"));
 
   let mode = $derived(resolvePrimaryMode(phase, paused, auditioning));
-  let primaryLabel = $derived(mode === "pause" ? t.pause : mode === "resume" ? t.resumePlayback : t.start);
+  let primaryGlyph = $derived(mode === "pause" ? "⏸" : "▶\uFE0F");
+  let primaryName = $derived(mode === "pause" ? t.pauseLabel : mode === "resume" ? t.resumeLabel : t.start);
   let primaryBusy = $state(false);
   let primaryDisabled = $derived(mode === "off" || primaryBusy || (mode === "start" && !store.canStart));
   let nextDisabled = $derived(
@@ -145,7 +146,7 @@
         {#if nowRow}<FavoriteButton path={nowRow.path} contentHash={nowRow.content_hash} title={nowRow.title} />{/if}
       </div>
       <div class="controls">
-        <button type="button" class="play" class:resume={mode === "resume"} disabled={primaryDisabled} onclick={onPrimaryClick}>{primaryLabel}</button>
+        <button type="button" class="play" class:resume={mode === "resume"} disabled={primaryDisabled} onclick={onPrimaryClick} aria-label={primaryName} title={primaryName}>{primaryGlyph}</button>
         <button type="button" class="next" disabled={nextDisabled} onclick={onNextClick} aria-label={t.nextTrackLabel} title={t.nextTrackLabel}>⏭</button>
         <button
           type="button"
@@ -200,7 +201,6 @@
   .controls { flex: 1 0 100%; display: flex; gap: var(--space-sm); min-width: 0; }
   .play {
     flex: 0 0 auto;
-    min-width: 6.5rem;
     background: var(--color-transport-primary-bg);
     color: var(--color-transport-primary-text);
   }

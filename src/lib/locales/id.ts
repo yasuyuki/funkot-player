@@ -9,8 +9,6 @@ export const id: Messages = {
   tabAllTracks: "Semua lagu",
 
   start: "Mulai",
-  pause: "⏸ Jeda",
-  resumePlayback: "▶ Lanjutkan",
   nextTrack: "⏭ Lagu berikutnya",
   playbackControlsLabel: "Kontrol pemutaran",
   resumeLabel: "Lanjutkan",
