@@ -33,7 +33,8 @@ Production `publish` runs while the render mutex is held. Callers at the sync co
 
 - `Playback::publish_engine_observation` and `resume_finished_engine` in `src-tauri/src/lib.rs`
 - the main-engine publish in `open_output_stream`, after `render.try_lock`, and only when this buffer is not auditioning
-- `publish_engine_observation` in `src-tauri/src/playlist_service.rs` on the source-replacement and save-failure paths, each after `playback.render.lock`
+- `publish_engine_observation` in `src-tauri/src/playlist_service.rs` on the save-failure and stale-token paths, each after `playback.render.lock`
+- `commit_future_update_on` in `src-tauri/src/lib.rs`, the source-replacement commit for both `playlist_service.rs` callers, after `playback.render.lock`
 
 A new caller that publishes without that mutex makes this proof blocked. Two overlapping writers are outside the model.
 
@@ -42,6 +43,8 @@ A new caller that publishes without that mutex makes this proof blocked. Two ove
 ## Writer review for crash recovery
 
 At product commit `a79a0c1a31797e8740a118eeff2bfd593ba8739d`, the observation module and its blob above are unchanged. The service writer count changes from nine to six because failed multi-file save rollback branches were removed. Every remaining production publish in `lib.rs` and `playlist_service.rs` was re-read and remains inside the render mutex. `WRITER_COUNTS` records that reviewed set; the official four-test Loom run passes. This is writer-inventory drift, not a change to the seqlock model or its sync commit.
+
+At the funkot-player #154 fix, the two source-replacement commits in `playlist_service.rs` moved into `commit_future_update_on` in `lib.rs`, and `lib.rs` gained a test callback in `manual_next_discard_tests`. The counts change from 4 to 6 in `lib.rs` and from 6 to 4 in `playlist_service.rs`. Each production publish was re-read and still runs while its function holds the render mutex guard; the test callback holds its own test mutex guard. The observation module is unchanged, so this is writer-inventory drift and `sync_commit` stays.
 
 A test copy with the final quiescent `#[test]` removed returned `FAIL` for the missing named test even though its remaining tests passed. The production check and all four tests remain intact.
 
