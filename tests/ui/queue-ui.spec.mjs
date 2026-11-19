@@ -325,9 +325,9 @@ test("queue save dialog has no axe color contrast failures", async ({ page }, te
     expect(result.violations, `${preference} color contrast violations`).toEqual([]);
     const incomplete = result.incomplete.filter((item) => item.id === "color-contrast");
     const unmeasured = incomplete.flatMap((item) => item.nodes.map((node) => ({ target: node.target, reason: node.any[0]?.data?.messageKey })));
-    expect([[], [{ target: [".save-scope"], reason: "elmPartiallyObscuring" }]], `${preference} incomplete targets`).toContainEqual(unmeasured);
+    expect([[], [{ target: [".dialog-note"], reason: "elmPartiallyObscuring" }]], `${preference} incomplete targets`).toContainEqual(unmeasured);
     const scope = await dialog.evaluate((element) => {
-      const paragraph = element.querySelector(".save-scope");
+      const paragraph = element.querySelector(".dialog-note");
       const label = element.querySelector("label");
       const color = getComputedStyle(paragraph).color;
       const background = getComputedStyle(element).backgroundColor;
@@ -489,7 +489,7 @@ test("save dialog remains usable with a long Japanese name, delayed save, and fa
   await page.evaluate(() => window.__uiFixture.failNext("playlist_command", "save refused"));
   await dialog.getByRole("button", { name: "保存" }).click();
   await expect(dialog).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("プレイリストを更新できませんでした");
+  await expect(dialog.getByRole("alert")).toHaveText("プレイリストを更新できませんでした");
   await expect(dialog.getByRole("button", { name: "保存" })).toBeEnabled();
 
   await page.evaluate(() => window.__uiFixture.delayNext("playlist_command"));

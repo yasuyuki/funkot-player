@@ -85,7 +85,7 @@ impl Default for Catalog {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case", tag = "code")]
 pub enum PlaylistError {
-    InvalidInput { message: String }, NotFound, Stale, ActiveList, DuplicateUndo,
+    InvalidInput { message: String }, NotFound, Stale, DuplicateUndo,
     StoreReadOnly { state: LoadState }, PersistFailed { message: String },
 }
 
@@ -153,8 +153,8 @@ impl Catalog {
     }
     pub fn delete(&mut self, id: &str) -> Result<(), PlaylistError> {
         if id == FAVORITES_ID { return Err(invalid("favorites cannot be deleted")); }
-        if self.active_id.as_deref() == Some(id) { return Err(PlaylistError::ActiveList); }
         let at = self.definitions.iter().position(|p| p.id == id).ok_or(PlaylistError::NotFound)?;
+        if self.active_id.as_deref() == Some(id) { self.select(None)?; }
         self.definitions.remove(at); self.runs.remove(id);
         if self.current.as_ref().and_then(|c| c.playlist_id.as_deref()) == Some(id) { self.current = None; }
         self.changed(); Ok(())
@@ -394,6 +394,18 @@ mod tests {
     use super::*;
     fn track(name: &str) -> TrackRef { TrackRef { content_hash: name.into(), preferred_path: PathBuf::from(format!("/{name}")), title: name.into(), artist: "artist".into() } }
     fn entries(c: &Catalog, id: &str) -> Vec<String> { c.definition(id).unwrap().entries.iter().map(|e| e.track.title.clone()).collect() }
+    #[test]
+    fn deleting_the_source_returns_the_source_to_the_normal_queue() {
+        let mut catalog = Catalog::default();
+        let id = catalog.create("Set", vec![track("A")]).unwrap();
+        catalog.select(Some(id.clone())).unwrap();
+        let generation = catalog.generation;
+        catalog.delete(&id).unwrap();
+        assert_eq!(catalog.active_id, None);
+        assert!(catalog.definition(&id).is_err() && catalog.run(&id).is_err());
+        assert_eq!(catalog.generation, generation + 1, "deleting the source changes the source");
+        catalog.validate().unwrap();
+    }
     #[test]
     fn favorites_are_unique_by_track_and_do_not_change_ordinary_occurrences() {
         let mut catalog = Catalog::default();

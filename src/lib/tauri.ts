@@ -249,7 +249,7 @@ export type PlaylistAction =
   | { kind: "queue_move"; from: number; to: number; expect: QueueItem }
   | { kind: "queue_remove"; index: number; expect: QueueItem };
 export interface PlaylistCommandResult { created_id: string | null; undo_id: string | null; added: number; rejected: number; skipped: number; }
-export type PlaylistCommandErrorCode = "stale" | "invalid_input" | "not_found" | "active_list" | "store_read_only" | "persist_failed" | "busy" | "transition_in_progress" | "active_upgrade_pending" | "navigation_pending" | "no_runway" | "auditioning" | "identity_unavailable" | "identity_changed" | "duplicate_undo";
+export type PlaylistCommandErrorCode = "stale" | "invalid_input" | "not_found" | "store_read_only" | "persist_failed" | "busy" | "transition_in_progress" | "active_upgrade_pending" | "navigation_pending" | "no_runway" | "auditioning" | "identity_unavailable" | "identity_changed" | "duplicate_undo";
 export interface PlaylistCommandError { code: PlaylistCommandErrorCode; message: string; }
 
 export function playlistCatalog(): Promise<PlaylistCatalogSnapshot> { return ipc.invoke("playlist_catalog"); }

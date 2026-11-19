@@ -889,7 +889,8 @@ fn command_with(service: &Shared, request: Request, playback: Option<&crate::Pla
         Action::Select { id } => { force_source = next.active_id != id; next.select(id)?; }
         Action::Rename { id, name } => next.rename(&id, name)?,
         Action::Duplicate { id } => { result.created_id = Some(next.duplicate(&id)?); }
-        Action::Delete { id, confirm_name } => { if next.definition(&id)?.name != confirm_name { return Err(error("stale")); } next.delete(&id)?; }
+        Action::Delete { id, confirm_name } => { if next.definition(&id)?.name != confirm_name { return Err(error("stale")); }
+            force_source = next.active_id.as_deref() == Some(id.as_str()); next.delete(&id)?; }
         Action::Restart { id } => { next.restart(&id)?; force_source = owner.active() == Some(&id); }
         Action::Remove { id, entry_id } => { removed = Some((id.clone(), next.remove(&id, &entry_id)?)); result.undo_id = Some(request.request_id.clone()); }
         Action::UndoRemove { undo_id } => { let (id, entry) = owner.undo.get(&undo_id).cloned().ok_or_else(|| error("stale"))?;

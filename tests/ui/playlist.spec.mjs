@@ -172,6 +172,32 @@ test("inactive full editor changes its own occurrences without switching the sou
   expect(actions.some((item) => item.kind === "select")).toBe(false);
 });
 
+test("the displayed source list is deleted from its menu and the dialog explains the switch and failures", async ({ page }, testInfo) => {
+  const queue = page.locator("section.queue");
+  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "Up next" }).click();
+  const name = "Night set with an intentionally very long name";
+  await queue.getByRole("button", { name: "Playlist actions" }).click();
+  await queue.getByRole("button", { name: "Delete", exact: true }).click();
+  const dialog = queue.getByRole("dialog", { name: "Delete" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Playback will switch to the queue.");
+  await dialog.getByRole("textbox").fill(name);
+  await page.evaluate(() => window.__uiFixture.failNext("playlist_command", { code: "busy" }));
+  await dialog.getByRole("button", { name: "Delete" }).click();
+  await expect(dialog.getByRole("alert")).toHaveText("Playlist editing is busy.");
+  await expect(dialog.getByRole("alert")).toBeInViewport();
+  const path = testInfo.outputPath(`${testInfo.project.name}-delete-source-failure.png`);
+  await page.screenshot({ path, animations: "disabled" });
+  await testInfo.attach("delete-source-failure", { path, contentType: "image/png" });
+  await dialog.getByRole("button", { name: "Delete" }).click();
+  await expect(dialog).toHaveCount(0);
+  const actions = await page.evaluate(() => window.__uiFixture.calls.filter((call) => call.command === "playlist_command").map((call) => call.args.request.action));
+  expect(actions).toEqual([
+    { kind: "delete", id: "night", confirm_name: name },
+    { kind: "delete", id: "night", confirm_name: name },
+  ]);
+});
+
 test("normal queue stays addable when playlist data is read-only", async ({ page }, testInfo) => {
   await page.evaluate(async () => {
     const { store } = await import("/src/lib/state.svelte.ts");

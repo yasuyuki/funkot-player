@@ -1335,6 +1335,36 @@ fn real_source_switch_cancels_all_future_claims_and_retains_normal_order() {
 }
 
 #[test]
+fn deleting_the_source_playlist_returns_to_the_normal_queue_in_one_command() {
+    if isolated_source_fixture("playlist_service::tests::deleting_the_source_playlist_returns_to_the_normal_queue_in_one_command") { return; }
+    let fixture = Fixture::new();
+    let paths: Vec<_> = ["a.wav", "b.wav", "c.wav"].iter().map(|n| fixture.file(n)).collect();
+    let items = vec![QueueItem::manual(paths[0].clone()), QueueItem::automatic(paths[1].clone()), QueueItem::manual(paths[2].clone())];
+    queue::replace_pending(&fixture.queue, items.clone());
+    let normal = HostSource::new(fixture.queue.clone(), queue::DrainPolicy::ContinueFolder { tracks: vec![], pos: 0 });
+    let mut source = configure(&fixture.service, normal);
+    let first = source.next().unwrap(); let second = source.next().unwrap();
+    let player = playback(&[first.clone(),second.clone()], 4096);
+    fixture.service.lock().unwrap().reconcile_with(Some(&player));
+    let id = fixture.install("Night set", vec![Fixture::track(&paths[2])]);
+    command_with(&fixture.service, fixture.request("switch", Action::Select { id: Some(id.clone()) }), Some(&player)).unwrap();
+    let delete = fixture.request("delete", Action::Delete { id: id.clone(), confirm_name: "Night set".into() });
+    command_with(&fixture.service, delete, Some(&player)).unwrap();
+    {
+        let owner = fixture.service.lock().unwrap();
+        assert_eq!(owner.active(), None);
+        assert!(owner.catalog.definition(&id).is_err());
+        assert!(owner.catalog.run(&id).is_err());
+        assert_eq!(owner.normal_items(), items[1..].to_vec());
+    }
+    let saved = fs::read_to_string(fixture.data.path().join("playback-state.json")).unwrap();
+    assert!(!saved.contains("Night set"), "deletion is saved");
+    let mut render = player.render.lock().unwrap();
+    assert_eq!(render.engine.current_index(), Some(first.0));
+    assert!(render.engine.render(&mut [0.0; 128]) > 0, "current audio remains audible");
+}
+
+#[test]
 fn source_fences_reject_an_engine_current_the_service_has_not_observed() {
     if isolated_source_fixture("playlist_service::tests::source_fences_reject_an_engine_current_the_service_has_not_observed") { return; }
     let _allow_lock = crate::arrivals_settings_rmw_tests::ALLOW_NON_FUNKOT_LOCK
