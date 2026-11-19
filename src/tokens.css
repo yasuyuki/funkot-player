@@ -95,6 +95,22 @@
   --row-min: 2.5rem;
   --shell-pad: 0.75rem;
 
+  /* The part of the viewport that no system bar or cutout covers. Tauri on
+     Android draws edge-to-edge, and a touch on the status bar or navigation
+     bar goes to the system; elsewhere the insets are 0. Anything placed
+     against the viewport (fixed panels, modal dialogs, the track menu) keeps
+     inside this area, an overlay gap away from its edges. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --overlay-gap: var(--space-lg);
+  --overlay-top: calc(var(--safe-top) + var(--overlay-gap));
+  --overlay-right: calc(var(--safe-right) + var(--overlay-gap));
+  --overlay-bottom: calc(var(--safe-bottom) + var(--overlay-gap));
+  --overlay-left: calc(var(--safe-left) + var(--overlay-gap));
+  --overlay-max-height: calc(100dvh - var(--overlay-top) - var(--overlay-bottom));
+  --overlay-max-width: calc(100vw - var(--overlay-left) - var(--overlay-right));
 }
 
 :root[data-theme="light"] {
@@ -156,9 +172,18 @@ body {
   margin: 0;
   /* Tauri on Android draws edge-to-edge: without this the first control sits
      under the status bar / cutout and the system eats the touch. */
-  padding: calc(var(--shell-pad) + env(safe-area-inset-top, 0px)) 0 0;
+  padding: calc(var(--shell-pad) + var(--safe-top)) 0 0;
   background: var(--color-bg);
   color: var(--color-text);
+}
+
+/* The browser centres a modal dialog in the whole viewport; centre it in the
+   safe area instead, and let taller content scroll inside it. */
+dialog:modal {
+  box-sizing: border-box;
+  inset: var(--overlay-top) var(--overlay-right) var(--overlay-bottom) var(--overlay-left);
+  max-height: var(--overlay-max-height);
+  max-width: var(--overlay-max-width);
 }
 
 #app {

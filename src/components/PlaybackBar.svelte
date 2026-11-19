@@ -175,7 +175,7 @@
     container-type: inline-size;
     background: var(--color-playback-bar-bg);
     border-top: 1px solid var(--color-border);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: var(--safe-bottom);
   }
   .playback-bar.auditioning { background: var(--color-audition-banner-bg); }
   .bar { height: 3px; background: var(--color-border); }

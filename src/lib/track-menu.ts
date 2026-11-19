@@ -17,19 +17,34 @@ export interface MenuPoint {
   y: number;
 }
 
+/// The viewport edges covered by system bars or a cutout (`--safe-*` in tokens.css).
+export interface Insets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+const NO_INSETS: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
+
 export function clampMenuPosition(
   at: MenuPoint,
   menu: { width: number; height: number },
   viewport: { width: number; height: number },
+  insets: Insets = NO_INSETS,
   gap: number = MENU_GAP_PX,
 ): { left: number; top: number } {
+  const minLeft = insets.left + gap;
+  const minTop = insets.top + gap;
+  const maxRight = viewport.width - insets.right - gap;
+  const maxBottom = viewport.height - insets.bottom - gap;
   const right = at.x + gap;
   const below = at.y + gap;
-  const left = right + menu.width > viewport.width ? at.x - gap - menu.width : right;
-  const top = below + menu.height > viewport.height ? at.y - gap - menu.height : below;
+  const left = right + menu.width > maxRight ? at.x - gap - menu.width : right;
+  const top = below + menu.height > maxBottom ? at.y - gap - menu.height : below;
   return {
-    left: Math.max(gap, Math.min(left, viewport.width - menu.width - gap)),
-    top: Math.max(gap, Math.min(top, viewport.height - menu.height - gap)),
+    left: Math.max(minLeft, Math.min(left, maxRight - menu.width)),
+    top: Math.max(minTop, Math.min(top, maxBottom - menu.height)),
   };
 }
 

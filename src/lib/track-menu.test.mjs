@@ -42,6 +42,15 @@ test("a menu wider than the viewport is clamped, not pushed off screen", () => {
   assert.equal(pos.top, 10 + MENU_GAP_PX);
 });
 
+test("system bars count as edges: the menu stays clear of the status and navigation bars", () => {
+  const insets = { top: 48, right: 0, bottom: 40, left: 0 };
+  const top = clampMenuPosition({ x: 30, y: 2 }, MENU, VIEWPORT, insets);
+  assert.equal(top.top, insets.top + MENU_GAP_PX);
+  const bottom = clampMenuPosition({ x: 30, y: 700 }, MENU, VIEWPORT, insets);
+  assert.equal(bottom.top, 700 - MENU_GAP_PX - MENU.height);
+  assert.ok(bottom.top + MENU.height <= VIEWPORT.height - insets.bottom - MENU_GAP_PX);
+});
+
 test("the human label wins over analysis, and analysis fills in for no label", () => {
   assert.equal(shownVerdict({ is_funkot: true, label: false }), false);
   assert.equal(shownVerdict({ is_funkot: false, label: true }), true);

@@ -311,7 +311,7 @@
     z-index: 10;
     min-width: min(20rem, calc(100vw - 2rem));
     max-width: calc(100vw - 2rem);
-    max-height: calc(100dvh - 5rem);
+    max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 5rem);
     overflow-y: auto;
   }
   .theme-control {

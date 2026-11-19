@@ -50,10 +50,15 @@
     const el = menuEl;
     if (!el) return;
     const rect = el.getBoundingClientRect();
+    // The menu is fixed at the measured position, so read the safe-area
+    // insets as the same element resolves them.
+    const style = getComputedStyle(el);
+    const inset = (name: string) => parseFloat(style.getPropertyValue(name)) || 0;
     pos = clampMenuPosition(
       at,
       { width: rect.width, height: rect.height },
       { width: window.innerWidth, height: window.innerHeight },
+      { top: inset("--safe-top"), right: inset("--safe-right"), bottom: inset("--safe-bottom"), left: inset("--safe-left") },
     );
   });
 
@@ -211,7 +216,7 @@
     z-index: 20;
     min-width: 10rem;
     max-width: 16rem;
-    max-height: calc(100dvh - 2 * var(--space-xl));
+    max-height: var(--overlay-max-height);
     overflow-y: auto;
     padding: var(--space-xs);
     background: var(--color-menu-bg);

@@ -70,6 +70,6 @@
   small { color: var(--color-text-dim); white-space: nowrap; }
   .picker form { display: flex; gap: var(--space-sm); margin: 0; } .picker form button { width: auto; flex: 0 0 auto; }
   @media (max-width: 47.99rem) {
-    .picker { position: fixed; left: var(--space-lg); right: var(--space-lg); top: var(--space-lg); min-width: 0; width: auto; max-height: calc(100dvh - 2 * var(--space-lg)); }
+    .picker { position: fixed; left: var(--overlay-left); right: var(--overlay-right); top: var(--overlay-top); min-width: 0; width: auto; max-height: var(--overlay-max-height); }
   }
 </style>

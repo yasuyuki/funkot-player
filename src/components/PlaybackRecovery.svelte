@@ -108,7 +108,7 @@
   .recovery-card > button { flex: 0 0 auto; }
   .recovery-dialog {
     width: min(34rem, calc(100% - 2 * var(--space-xl)));
-    max-height: min(90dvh, 32rem);
+    max-height: min(var(--overlay-max-height), 32rem);
     overflow: auto;
     padding: var(--space-lg);
     color: var(--color-text);
