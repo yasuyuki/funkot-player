@@ -269,9 +269,9 @@ intro / outro の手直し
 不適切なつなぎのフラグと意見 ZIP
 ```
 
-**このバージョンの新機能（0.10.0）:**
+**このバージョンの新機能（0.11.0）:**
 ```text
-ハートで曲を「お気に入り」に追加できるようになり、お気に入りはプレイリストとして残ります。画面を作り直して一覧を広く表示し、ボタンの大きさをマウスとタッチに合わせました。つなぎで音が割れないよう出力を抑え、保存に失敗しても元のデータを残すようにしました。
+「次の曲」を押しても、その曲が終わるまで効かなくなることがある不具合を直しました。再生ボタンを記号だけの表示にし、再生と次の曲のアイコンがボタンの状態や配色に合わせて表示されるようにしました。再生中のプレイリストを、先に切り替えずに削除できるようになり、再生は再生待ちに戻ります。
 ```
 
 ### English
@@ -317,9 +317,9 @@ Adjust intro / outro
 Flag a bad transition and keep a feedback ZIP
 ```
 
-**What's new in this version (0.10.0):**
+**What's new in this version (0.11.0):**
 ```text
-Tap the heart to add a track to Favorites, which is kept as a playlist. The redesigned screens give the lists more room and size buttons for mouse or touch. Output is now limited so transitions no longer clip, and a failed save keeps your existing data.
+Fixed an issue where Next could stop responding until the current track ended. The play button now shows only its symbol, and the playback icons follow the button state and color mode. You can delete the playlist that is playing without switching first; playback returns to the queue.
 ```
 
 ### Bahasa Indonesia
@@ -365,9 +365,9 @@ Sesuaikan intro / outro
 Tandai transisi yang tidak pas dan simpan ZIP masukan
 ```
 
-**Yang baru di versi ini (0.10.0):**
+**Yang baru di versi ini (0.11.0):**
 ```text
-Ketuk ikon hati untuk menambahkan lagu ke Favorit, yang disimpan sebagai playlist. Tampilan baru memberi ruang lebih untuk daftar dan menyesuaikan ukuran tombol untuk mouse atau sentuhan. Keluaran kini dibatasi agar transisi tidak pecah, dan penyimpanan yang gagal tetap mempertahankan data yang ada.
+Memperbaiki masalah tombol Lagu berikutnya yang bisa berhenti merespons hingga lagu saat ini selesai. Tombol putar kini hanya menampilkan simbol, dan ikon pemutaran mengikuti status tombol serta mode warna. Playlist yang sedang diputar kini dapat dihapus tanpa beralih terlebih dahulu; pemutaran kembali ke antrean.
 ```
 
 ---
