@@ -126,6 +126,19 @@ jobs:
           name: transport-phase-proof
           path: ${{ runner.temp }}/transport-phase-proof
           if-no-files-found: error
+      - name: Test manual Next source references
+        working-directory: funkot-player
+        run: python3 -B -m unittest discover -s verification -p 'test_manual_next.py'
+      - name: Check manual Next model and break variants
+        working-directory: funkot-player
+        run: python3 -B verification/check_manual_next.py --output "$RUNNER_TEMP/manual-next-proof"
+      - name: Preserve manual Next proof results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: manual-next-proof
+          path: ${{ runner.temp }}/manual-next-proof
+          if-no-files-found: error
 
   invariants:
     name: Release-only invariants

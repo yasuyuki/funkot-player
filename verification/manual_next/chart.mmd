@@ -1,0 +1,111 @@
+---
+title: "Next button"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: idle
+    lg1: press
+    lg2: Breaks NoSendDuringDecode or OneTrackPerPress
+    lg3: Path to the NoSendDuringDecode or OneTrackPerPress bug
+  }
+  class lg0 tan
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  state "At the same time" as all {
+    state "Next button" as r0 {
+      s0: Ready
+      s1: Press accepted
+      s2: Press accepted, a skip is out
+      s3: Skip out, track changing
+      s4: Skip on its way
+      [*] --> s0
+      s0 --> s1: the press is accepted [when Engine is Playing track 1, next not ready and Press 1 is Taking the press and Analysis is Next file]
+      s1 --> s2: the sender marks a skip out [when Engine is Playing track 1, next ready and Press 1 is Sending the skip]
+      s1 --> s0: the track changed, so the press is done [when Engine is Playing track 2, next not ready and Press 1 is Sending the skip]
+      s2 --> s3: the track changed, so the press is done [when Engine is Playing track 2, next not ready]
+      s3 --> s0: the track changed, so the skip is done [when Analysis is Next file]
+      s0 --> s3: the sender marks a skip out [when Engine is Playing track 2, next not ready and Press 1 is Sending the skip and Analysis is Decoding]
+      s3 --> s4: the sender sends the skip [when Analysis is Decoding]
+    }
+    --
+    state "Engine" as r1 {
+      s5: Playing track 1, next not ready
+      s6: Playing track 1, next ready
+      s7: Mixing out of track 1
+      s8: Playing track 2, next not ready
+      s9: Playing track 2, next ready
+      s10: Playing track 2, skip accepted
+      [*] --> s5
+      s5 --> s6: the next track is ready [when Next button is Press accepted and Press 1 is Waiting for the next track]
+      s6 --> s7: the mix into the next track starts [when Press 1 is Sending the skip]
+      s7 --> s8: the next track starts
+      s8 --> s9: the next track is ready [when Next button is Ready and Analysis is Next file]
+      s9 --> s10: the engine takes the skip
+    }
+    --
+    state "Press 1" as r2 {
+      s11: Not running
+      s12: Taking the press
+      s13: Waiting for the next track
+      s14: Checking the track
+      s15: Sending the skip
+      [*] --> s11
+      s11 --> s12: you press Next
+      s12 --> s13: the press is accepted
+      s13 --> s14: the thread checks the analysis [when Engine is Playing track 1, next ready]
+      s14 --> s15: the sender sees the recorded track still playing
+    }
+    --
+    state "Press 2" as r3 {
+      s16: Not running
+      [*] --> s16
+    }
+    --
+    state "Analysis" as r4 {
+      s17: Next file
+      s18: Checking for a skip
+      s19: Decoding
+      [*] --> s17
+      s17 --> s18: the analysis claims the CPU [when Next button is Ready and Engine is Playing track 2, next not ready and Press 1 is Sending the skip]
+      s18 --> s19: the analysis checks for a skip out
+    }
+  }
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 tan
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 breaks
+  class s4 bugPath
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 bugPath
+  class s9 tan
+  class s9 bugPath
+  class s10 tan
+  class s10 breaks
+  class s10 bugPath
+  class s11 tan
+  class s11 bugPath
+  class s12 tan
+  class s12 bugPath
+  class s13 blue
+  class s13 bugPath
+  class s14 blue
+  class s14 bugPath
+  class s15 bugPath
+  class s16 bugPath
+  class s17 bugPath
+  class s18 tan
+  class s18 bugPath
+  class s19 bugPath

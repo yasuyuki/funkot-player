@@ -1,0 +1,106 @@
+---
+title: "Next button"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: idle
+    lg1: press
+    lg2: Breaks SentNextNotStuck
+    lg3: Path to the SentNextNotStuck bug
+  }
+  class lg0 tan
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  state "At the same time" as all {
+    state "Next button" as r0 {
+      s0: Ready
+      s1: Press accepted
+      s2: Skip out, track changing
+      s3: Skip on its way
+      s4: Press accepted, a skip is out
+      s5: Stuck: presses ignored
+      [*] --> s0
+      s0 --> s1: the press is accepted [when Engine is Playing track 1, next not ready and Press 1 is Taking the press and Press 2 is Not running]
+      s1 --> s0: the track changed, so the press is done [when Engine is Playing track 2, next not ready and Press 1 is Sending the skip and Press 2 is Taking the press]
+      s0 --> s2: the sender marks a skip out [when Engine is Playing track 2, next not ready and Press 1 is Sending the skip and Press 2 is Taking the press]
+      s2 --> s3: the sender sends the skip
+      s3 --> s4: the press is accepted [when Press 1 is Sending the skip and Press 2 is Taking the press]
+      s4 --> s3: the sender clears the press
+      s3 --> s5: the engine drops the skip [when Press 1 is Not running and Press 2 is Not running]
+    }
+    --
+    state "Engine" as r1 {
+      s6: Playing track 1, next not ready
+      s7: Playing track 1, next ready
+      s8: Mixing out of track 1
+      s9: Playing track 2, next not ready
+      [*] --> s6
+      s6 --> s7: the next track is ready [when Next button is Press accepted and Press 1 is Waiting for the next track and Press 2 is Taking the press]
+      s7 --> s8: the mix into the next track starts [when Press 1 is Sending the skip]
+      s8 --> s9: the next track starts
+    }
+    --
+    state "Press 1" as r2 {
+      s10: Not running
+      s11: Taking the press
+      s12: Waiting for the next track
+      s13: Checking the track
+      s14: Sending the skip
+      [*] --> s10
+      s10 --> s11: you press Next [when Next button is Ready and Engine is Playing track 1, next not ready and Press 2 is Not running]
+      s11 --> s12: the press is accepted
+      s12 --> s13: the thread checks the analysis [when Engine is Playing track 1, next ready and Press 2 is Taking the press]
+      s13 --> s14: the sender sees the recorded track still playing
+      s14 --> s10: the sender rechecks the discard count [when Next button is Skip on its way and Engine is Playing track 2, next not ready and Press 2 is Waiting for the next track]
+    }
+    --
+    state "Press 2" as r3 {
+      s15: Not running
+      s16: Taking the press
+      s17: Waiting for the next track
+      [*] --> s15
+      s15 --> s16: you press Next [when Next button is Press accepted and Engine is Playing track 1, next not ready and Press 1 is Waiting for the next track]
+      s16 --> s17: the press is accepted [when Next button is Skip on its way and Engine is Playing track 2, next not ready and Press 1 is Sending the skip]
+      s17 --> s15: the wait thread checks the press [when Next button is Skip on its way and Press 1 is Not running]
+    }
+    --
+    state "Analysis" as r4 {
+      s18: Done
+      [*] --> s18
+    }
+  }
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 tan
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 breaks
+  class s5 bugPath
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s9 bugPath
+  class s10 bugPath
+  class s11 tan
+  class s11 bugPath
+  class s12 blue
+  class s12 bugPath
+  class s13 blue
+  class s13 bugPath
+  class s14 bugPath
+  class s15 bugPath
+  class s16 bugPath
+  class s17 blue
+  class s17 bugPath
+  class s18 bugPath
