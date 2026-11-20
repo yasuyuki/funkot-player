@@ -262,6 +262,7 @@ jobs:
       - name: Check the Windows jobs use the Docker toolchain
         working-directory: funkot-player
         run: ./scripts/check-toolchain-versions.sh
+      - name: Test frontend in the normal Docker toolchain
         working-directory: funkot-player
         run: |
           ./dev.sh sh -ec 'npm ci; npm test; npm run check; npm run build'
