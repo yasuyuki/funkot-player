@@ -157,7 +157,11 @@ PressStoresPending(s) ==
 \* next_dispatch_ready, from the press or from the wait thread. Not ready:
 \* the press returns Waiting and request_skip_next spawns the wait thread,
 \* which this slot then runs.
+\* A press that returns Waiting, also after a dispatch that returned Ok(false),
+\* spawns the wait thread; Ignored and Sent spawn nothing.
 WaitOrEnd == IF Break = "no_waiter" THEN "idle" ELSE "w1"
+                                       \* lib.rs:request_skip_next | if press_manual_next(playback)? != ManualNextPress::Waiting {
+                                       \* lib.rs:press_manual_next | Ok(ManualNextPress::Waiting)
 
 ReadyLoadsPrepared(s) ==
     /\ hpc[s] \in {"rp", "wp"}

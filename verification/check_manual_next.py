@@ -74,7 +74,7 @@ WRITERS = {
     "revoke_reserved_on": {"forget_discarded_manual_next()": 1},
     "spawn_analysis_worker": {"LIBRARY_ANALYSIS_BUSY.store(": 3},
 }
-SOURCE_REFERENCE_COUNT = 40
+SOURCE_REFERENCE_COUNT = 42
 SOURCE_REFERENCE = re.compile(
     r"\\\*\s+lib\.rs:(?P<function>[A-Za-z_][A-Za-z0-9_]*)\s+\|\s+(?P<fragment>.+?)\s*$"
 )
