@@ -1,0 +1,16 @@
+# Read by wl (workspace-lifecycle-native) from the commit a finish accepted.
+# The required checks in .github/required-checks.json build and test on
+# GitHub runners; these steps check the merged commit before it reaches main.
+slot_cache = ["node_modules", "src-tauri/target"]
+
+[[validation]]
+argv = ["./scripts/check-release-invariants.sh"]
+where = "any"
+
+[[validation]]
+argv = ["./scripts/check-doc-claims.sh"]
+where = "any"
+
+[[validation]]
+argv = ["./scripts/set-version.sh", "--check"]
+where = "any"
