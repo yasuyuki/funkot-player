@@ -48,10 +48,10 @@ Run when a diff touches any name in the description, adds or removes a
 `playback_session_alive` returns. Line moves alone do not need a run: model
 references are scoped by function name, not line number.
 
-Sync commit: `790a3e81b6389c3dd03172a2978a8b161f7d0e8e`. To see what changed since:
+Sync commit: `d02c86b962070c156cb165959f754427f706928c`. To see what changed since:
 
 ```sh
-git diff 790a3e81b6389c3dd03172a2978a8b161f7d0e8e -- src-tauri/src/lib.rs
+git diff d02c86b962070c156cb165959f754427f706928c -- src-tauri/src/lib.rs
 ```
 
 Read every hunk inside the functions named above. Move the sync commit forward
