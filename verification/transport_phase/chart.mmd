@@ -1,0 +1,82 @@
+---
+title: "Transport phase"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: before
+    lg1: live
+    lg2: over
+  }
+  class lg0 tan
+  class lg1 blue
+  class lg2 orange
+  state "At the same time" as all {
+    state "Screen" as r0 {
+      s0: Not started
+      s1: Starting
+      s2: Failed
+      s3: Output lost
+      s4: Paused
+      s5: Playing
+      s6: Stalled (nothing ready)
+      [*] --> s0
+      s0 --> s1: you press start [when Not started]
+      s1 --> s0: the audio thread cannot start [when Being started]
+      s1 --> s2: there is no usable output device or engine [when Preparing engine]
+      s1 --> s2: the output cannot open [when Opening output]
+      s1 --> s3: the watchdog finds the output stuck [when Output open]
+      s1 --> s5: the audio callback reports what it heard [when Output open or Reopening output]
+      s1 --> s4: the audio callback reports what it heard [when Output open or Reopening output]
+      s3 --> s1: the audio callback reports what it heard
+      s3 --> s5: the audio callback reports what it heard
+      s3 --> s4: the audio callback reports what it heard
+      s4 --> s3: the watchdog finds the output stuck [when Output open]
+      s5 --> s3: the watchdog finds the output stuck [when Output open]
+      s5 --> s6: the audio callback reports what it heard
+      s3 --> s6: the audio callback reports what it heard
+      s4 --> s3: the watchdog sees no output [when Reopening output]
+      s5 --> s3: the watchdog sees no output [when Reopening output]
+      s5 --> s4: the audio callback reports what it heard
+      s6 --> s3: the watchdog finds the output stuck [when Output open]
+      s1 --> s3: the watchdog sees no output [when Reopening output]
+      s6 --> s5: the audio callback reports what it heard
+      s6 --> s3: the watchdog sees no output [when Reopening output]
+      s6 --> s4: the audio callback reports what it heard
+    }
+    --
+    state "Audio thread" as r1 {
+      s7: Not started
+      s8: Being started
+      s9: Never started
+      s10: Preparing engine
+      s11: Gave up
+      s12: Opening output
+      s13: Output open
+      s14: Reopening output
+      [*] --> s7
+      s7 --> s8: you press start
+      s8 --> s9: the audio thread cannot start
+      s8 --> s10: the audio thread starts
+      s10 --> s11: there is no usable output device or engine
+      s10 --> s12: the engine is ready
+      s12 --> s11: the output cannot open
+      s12 --> s13: the output opens
+      s13 --> s14: the watchdog finds the output stuck
+      s14 --> s13: the output reopens [when Output lost]
+    }
+  }
+  class s1 blue
+  class s2 orange
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 tan
+  class s8 blue
+  class s9 orange
+  class s10 blue
+  class s11 orange
+  class s12 blue
+  class s13 blue
+  class s14 blue
