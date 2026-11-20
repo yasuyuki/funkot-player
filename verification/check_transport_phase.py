@@ -19,29 +19,32 @@ SOURCE = "src-tauri/src/lib.rs"
 PLAYER_SOURCES = (SOURCE, SPEC, CONFIG, "verification/check_transport_phase.py")
 
 # Rules the code at the sync commit breaks. Each must still break; every
-# other rule must hold. Empty this tuple when #162 is fixed.
-FINDINGS = ("FailedStaysFailed", "AliveMatchesAudioThread")
+# other rule must hold.
+FINDINGS = ()
 RULES = ("FailedStaysFailed", "AliveMatchesAudioThread")
-CURRENT = '  PauseWrite = "current"\n'
-# Fix models: each run says whether that change to record_pause_change
-# would remove the findings.
+CURRENT = '  PauseWrite = "atomic"\n'
+# Broken pause writes (#162). Each must still break the rules it names, so a
+# pass shows the rules can fail.
 VARIANTS = (
-    ("checked", ((CURRENT, '  PauseWrite = "checked"\n'),), "Invariant FailedStaysFailed is violated"),
-    ("atomic", ((CURRENT, '  PauseWrite = "atomic"\n'),), None),
+    ("before-162-failed", '  PauseWrite = "current"\n', ("FailedStaysFailed",)),
+    ("before-162-alive", '  PauseWrite = "current"\n', ("AliveMatchesAudioThread",)),
+    ("checked", '  PauseWrite = "checked"\n', ("FailedStaysFailed",)),
 )
 
-# Every set_phase call outside #[cfg(test)] modules, by enclosing function.
-# A new, moved or removed writer fails the check until the model accounts for it.
+# Every set_phase call and other PHASE write outside #[cfg(test)] modules,
+# by enclosing function. A new, moved or removed writer fails the check until
+# the model accounts for it.
 PHASE_WRITERS = {
     "record_pause_change": 1,
     "open_output_stream": 2,
     "audio_thread": 8,
     "start_impl": 2,
 }
-SOURCE_REFERENCE_COUNT = 35
+SOURCE_REFERENCE_COUNT = 36
 SOURCE_REFERENCE = re.compile(
     r"\\\*\s+lib\.rs:(?P<function>[A-Za-z_][A-Za-z0-9_]*)\s+\|\s+(?P<fragment>.+?)\s*$"
 )
+PHASE_WRITE = re.compile(r"\bset_phase\(|\bPHASE\.(?:store|swap|fetch_\w+|compare_exchange\w*)\(")
 FUNCTION = re.compile(r"^(?P<indent>\s*)(?:pub(?:\([^)]*\))?\s+)?(?:extern \"C\"\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b")
 
 
@@ -114,7 +117,7 @@ def validate_phase_writers(tree, expected=PHASE_WRITERS):
     for name, texts in bodies.items():
         if name == "set_phase":
             continue
-        count = sum(body.count("set_phase(") for body in texts)
+        count = sum(len(PHASE_WRITE.findall(body)) for body in texts)
         if count:
             found[name] = count
     stores = sum(body.count("PHASE.store(") for body in bodies.get("set_phase", []))
@@ -181,7 +184,7 @@ def main():
             }
             cfg = (tree / CONFIG).read_text()
             if cfg.count(CURRENT) != 1:
-                raise RuntimeError('TransportPhase.cfg must set PauseWrite = "current" once')
+                raise RuntimeError('TransportPhase.cfg must set PauseWrite = "atomic" once')
             summary["rules"] = {}
             for rule in RULES:
                 violation = f"Invariant {rule} is violated" if rule in FINDINGS else None
@@ -189,14 +192,11 @@ def main():
                     tree, out, args.java, jar, rule, config_for(cfg, (rule,)), started, violation, spec=SPEC
                 )
             summary["variants"] = {}
-            for label, edits, violation in VARIANTS:
-                mutated = config_for(cfg, RULES)
-                for original, replacement in edits:
-                    if mutated.count(original) != 1:
-                        raise RuntimeError(label + ": variant edit no longer matches")
-                    mutated = mutated.replace(original, replacement)
+            for label, replacement, rules in VARIANTS:
+                mutated = config_for(cfg, rules).replace(CURRENT, replacement)
                 summary["variants"][label] = shared.run_tlc(
-                    tree, out, args.java, jar, label, mutated, started, violation, spec=SPEC
+                    tree, out, args.java, jar, label, mutated, started,
+                    f"Invariant {rules[0]} is violated", spec=SPEC,
                 )
             summary["findings"] = list(FINDINGS)
             summary["status"] = "KNOWN_FINDINGS" if FINDINGS else "PASS"

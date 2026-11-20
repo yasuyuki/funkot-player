@@ -16,11 +16,13 @@
    itself, skip, persistence and the UI poll are outside this model.
 
    PauseWrite chooses how record_pause_change writes Paused:
-     "current" the code today: load the phase, then store Paused unless it
-               was Disconnected (two steps);
-     "checked" the same two steps, also skipping Failed;
-     "atomic"  one compare-exchange that never replaces Disconnected or
-               Failed. *)
+     "atomic"  the code since #162: one fetch_update that never replaces
+               Disconnected or Failed;
+     "current" the code before #162: load the phase, then store Paused
+               unless it was Disconnected (two steps);
+     "checked" the same two steps, also skipping Failed.
+   Only "atomic" cites lib.rs. The other two are the broken variants the
+   runner requires to fail. *)
 
 EXTENDS Naturals
 
@@ -268,22 +270,25 @@ SetSwaps ==
     /\ UNCHANGED <<phase, finished, playbackSet, stream, deviceUp, losses, heard,
                    spc, tpc, cpc, cbPhase, kDesired, presses>>
 
-\* record_pause_change(paused, true)
+\* record_pause_change(paused, true). "write" is reached only by the
+\* two-step variants.
 Keep == IF PauseWrite = "current" THEN {"disconnected"} ELSE {"disconnected", "failed"}
 
 PauseReadsPhase ==
     /\ kpc = "check"
     /\ IF PauseWrite = "atomic"
-       THEN /\ phase' = IF phase \in Keep THEN phase ELSE "paused"
+       THEN /\ phase' = IF phase \in Keep THEN phase ELSE "paused"  \* lib.rs:record_pause_change | PHASE.fetch_update(
+                                                                    \* lib.rs:record_pause_change | Phase::Disconnected | Phase::Failed => None,
+                                                                    \* lib.rs:record_pause_change | _ => Some(Phase::Paused as u8),
             /\ kpc' = "idle"
-       ELSE /\ kpc' = IF phase \in Keep THEN "idle" ELSE "write"  \* lib.rs:record_pause_change | if now_paused && get_phase() != Phase::Disconnected {
+       ELSE /\ kpc' = IF phase \in Keep THEN "idle" ELSE "write"
             /\ UNCHANGED phase
     /\ UNCHANGED <<paused, finished, playbackSet, stream, deviceUp, losses, heard,
                    spc, tpc, cpc, cbPhase, kDesired, presses>>
 
 PauseStoresPaused ==
     /\ kpc = "write"
-    /\ phase' = "paused"                 \* lib.rs:record_pause_change | set_phase(Phase::Paused);
+    /\ phase' = "paused"
     /\ kpc' = "idle"
     /\ UNCHANGED <<paused, finished, playbackSet, stream, deviceUp, losses, heard,
                    spc, tpc, cpc, cbPhase, kDesired, presses>>

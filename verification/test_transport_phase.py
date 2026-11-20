@@ -79,6 +79,12 @@ class TransportPhaseSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"set_phase writers changed"):
             CHECK.validate_phase_writers(self.tree, expected={"record_pause_change": 1})
 
+    def test_atomic_phase_write_counts_as_a_writer(self):
+        self.source.write_text(SOURCE.replace(
+            "    let x = 1;\n", "    let _ = PHASE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| Some(p));\n"))
+        with self.assertRaisesRegex(RuntimeError, r"set_phase writers changed"):
+            CHECK.validate_phase_writers(self.tree, expected={"record_pause_change": 1})
+
     def test_config_keeps_only_the_named_rules(self):
         cfg = "SPECIFICATION Spec\nINVARIANTS\n  TypeOK\n  A\n  B\n"
         self.assertEqual(CHECK.config_for(cfg, ("B",)), "SPECIFICATION Spec\nINVARIANTS\n  TypeOK\n  B\n")

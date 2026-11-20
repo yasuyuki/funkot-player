@@ -185,8 +185,17 @@ fn get_phase() -> Phase {
 }
 
 fn record_pause_change(paused: &AtomicBool, now_paused: bool) {
-    if now_paused && get_phase() != Phase::Disconnected {
-        set_phase(Phase::Paused);
+    if now_paused {
+        // One read-modify-write: the audio thread can store Disconnected or
+        // Failed between a separate load and store.
+        let _ = PHASE.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |p| match Phase::from_u8(p) {
+                Phase::Disconnected | Phase::Failed => None,
+                _ => Some(Phase::Paused as u8),
+            },
+        );
     }
     persist_pause_state(paused);
 }
@@ -1251,6 +1260,28 @@ mod flip_paused_tests {
         assert!(!set_paused(&paused, true));
         assert!(!flip_paused(&paused));
         assert!(!set_paused(&paused, false));
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
+    fn pause_after_failure_keeps_failed() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        set_phase(Phase::Failed);
+        let paused = AtomicBool::new(false);
+        assert!(flip_paused(&paused));
+        assert!(get_phase() == Phase::Failed);
+        assert!(!playback_session_alive(true, get_phase()));
+        set_phase(Phase::Idle);
+    }
+
+    #[test]
+    fn set_pause_after_failure_keeps_failed() {
+        let _guard = PHASE_LOCK.lock().unwrap();
+        set_phase(Phase::Failed);
+        let paused = AtomicBool::new(false);
+        assert!(set_paused(&paused, true));
+        assert!(get_phase() == Phase::Failed);
+        assert!(!playback_session_alive(true, get_phase()));
         set_phase(Phase::Idle);
     }
 

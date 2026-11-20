@@ -3,7 +3,7 @@ name: verify-transport-phase
 description: >-
   Model-check Funkot Player's transport phase (idle, starting, playing,
   paused, stalled, failed, disconnected) with TLC after any change to a
-  set_phase call, Phase, record_pause_change, flip_paused, set_paused,
+  set_phase call or PHASE write, Phase, record_pause_change, flip_paused, set_paused,
   playback_session_alive, start_impl, audio_thread, the audio callback in
   open_output_stream, or verification/transport_phase. Also use it to redraw
   the transport phase statechart.
@@ -26,24 +26,25 @@ the cpal audio callback in `open_output_stream`, and the pause/play commands
   audio thread is running or about to run. Harm when broken: an Android
   notification keeps offering transport controls with nothing behind them.
 
-## Known findings (open in player #162)
+## The pause write (#162)
 
-The code at the sync commit breaks both rules. Path, in the code's words:
-`start_impl` publishes Starting, `audio_thread` sets `PLAYBACK`, the first
-`open_output_stream` fails and stores Failed, then a pause arrives (toggle_pause,
-or the notification / MediaSession pause through `onNativeControl`).
-`record_pause_change` only spares Disconnected, so it stores Paused over Failed,
-and `playback_session_alive(true, Paused)` is true.
+`record_pause_change` writes Paused with one `PHASE.fetch_update` that leaves
+Disconnected and Failed in place (`PauseWrite = "atomic"`). Before #162 it
+loaded the phase and then stored Paused unless the phase was Disconnected. A
+pause after the first `open_output_stream` failed then replaced Failed with
+Paused, and `playback_session_alive(true, Paused)` returned true.
 
-The `checked` variant (also skip Failed, but still load then store) still breaks
-`FailedStaysFailed`: the first open can fail between the load and the store.
-The `atomic` variant (one compare-exchange that keeps Disconnected and Failed)
-holds both rules. These variants are models of fixes, not product code.
+The runner keeps two broken writes as variants that must still fail:
+`current` (the code before #162) breaks both rules, and `checked` (load, skip
+Failed too, then store) still breaks `FailedStaysFailed`, because the first open
+can fail between the load and the store. Do not split the write back into a
+load and a store.
 
 ## When to use
 
 Run when a diff touches any name in the description, adds or removes a
-`set_phase(` call outside `#[cfg(test)]` modules, or changes what
+`set_phase(` call or another `PHASE.` write (store, swap, `fetch_*`,
+`compare_exchange*`) outside `#[cfg(test)]` modules, or changes what
 `playback_session_alive` returns. Line moves alone do not need a run: model
 references are scoped by function name, not line number.
 
@@ -75,10 +76,10 @@ CI runs it in the `Source switch model` job and uploads `transport-phase-proof`.
 
 Read `summary.json`:
 
-- `KNOWN_FINDINGS`: every rule in `FINDINGS` still breaks with its counterexample,
-  every other rule holds over the whole graph, and each fix variant gave its
-  expected result. No new break. The findings are still open.
-- `PASS`: `FINDINGS` is empty and every rule holds.
+- `PASS`: `FINDINGS` is empty, every rule holds over the whole graph, and each
+  broken variant in `VARIANTS` still fails its rule.
+- `KNOWN_FINDINGS`: only while `FINDINGS` lists rules the code breaks; each
+  still breaks and every other rule holds.
 - `FAIL` with `error`: read the message. Never report it as a pass.
 
 `summary.json` also records the revision, source hashes, state counts, and
@@ -86,20 +87,19 @@ Read `summary.json`:
 
 ## Read a failure
 
-Read every TLC log (`<rule>.log`, `checked.log`, `atomic.log`) with the
+Read every TLC log (`<rule>.log` and `<variant>.log`) with the
 `/statechart` skill and `verification/transport_phase/view.mjs`. It tells each
 violation as its shortest path in plain words.
 
 - `expects fn X to contain ...` or `no longer defines`: the cited code changed.
   Read the function. Moved text with the same behavior needs only the fragment
   updated. Changed behavior needs the action updated first.
-- `set_phase writers changed`: a store to PHASE was added, removed or moved to
-  another function. Model it as its own action (one atomic store per action),
+- `set_phase writers changed`: a write to PHASE (`set_phase(` or a direct
+  atomic write) was added, removed or moved to another function. Model it as its own action (one atomic store per action),
   then update `PHASE_WRITERS`. Do not edit the count alone.
-- `missing the required checked counterexample` on a rule in `FINDINGS`: that
-  rule now holds. If the product fix landed, set `PauseWrite` in
-  `TransportPhase.cfg` to the model that matches the fix, remove the rule from
-  `FINDINGS`, and close #162. Otherwise the model drifted.
+- `missing the required checked counterexample` on a variant in `VARIANTS`:
+  a broken pause write no longer breaks its rule, so the model or a rule
+  changed. Find which change did that before trusting a `PASS`.
 - `TLC did not finish the complete safety check` on a rule not in `FINDINGS`:
   a new break. Replay the path against the code, one step per action, as a
   unit test or a live run. If the code takes those steps, report a product bug
