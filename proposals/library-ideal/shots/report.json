@@ -1,0 +1,392 @@
+{
+  "errors": [],
+  "flow": [
+    {
+      "step": "three-and",
+      "text": "6曲がすべて一致並びは新しい順複数選ぶ"
+    },
+    {
+      "step": "toggle-or",
+      "text": "7曲が一致並びは新しい順複数選ぶ",
+      "word": "または"
+    },
+    {
+      "step": "judge",
+      "hero": "誰も知らないエンドロールのあとでまだ鳴っているベ",
+      "heroSize": 32,
+      "addSize": 14
+    },
+    {
+      "step": "add",
+      "added": "再生待ちに追加した「誰も知らないエンドロールのあとでまだ鳴っているベースと名前の長いリミックス」"
+    },
+    {
+      "step": "queue-has-long",
+      "queued": true
+    },
+    {
+      "step": "removed-one",
+      "text": "6曲がすべて一致並びは新しい順複数選ぶ"
+    },
+    {
+      "step": "narrow-add",
+      "added": "再生待ちに追加した「星を踏む」"
+    }
+  ],
+  "axe": [
+    {
+      "label": "desktop-library",
+      "violations": []
+    },
+    {
+      "label": "desktop-finder",
+      "violations": []
+    },
+    {
+      "label": "desktop-results",
+      "violations": []
+    },
+    {
+      "label": "desktop-eight",
+      "violations": []
+    },
+    {
+      "label": "desktop-zoom",
+      "violations": []
+    },
+    {
+      "label": "narrow-results",
+      "violations": []
+    },
+    {
+      "label": "narrow-judge",
+      "violations": []
+    }
+  ],
+  "overflow": [
+    {
+      "label": "desktop-library",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "narrow-flow",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "desktop-finder",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-results",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-judge",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-eight",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-empty",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-error",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-loading",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-or",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-scale",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-blocked",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-zoom",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "desktop-queue",
+      "scrollWidth": 1280,
+      "clientWidth": 1280,
+      "overflow": false
+    },
+    {
+      "label": "narrow-library",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "narrow-finder",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "narrow-results",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "narrow-judge",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "narrow-eight",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "narrow-empty",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "narrow-scale",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "narrow-blocked",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    },
+    {
+      "label": "narrow-zoom",
+      "scrollWidth": 412,
+      "clientWidth": 412,
+      "overflow": false
+    }
+  ],
+  "type": [
+    {
+      "label": "desktop-library",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "50曲並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "narrow-flow",
+      "titleSize": 24,
+      "addSize": 15,
+      "titleWeight": "900",
+      "result": "6曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-finder",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "50曲並びは新しい順複数選ぶ",
+      "hits": 2
+    },
+    {
+      "label": "desktop-results",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "6曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-judge",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "6曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-eight",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "1曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-empty",
+      "titleSize": 0,
+      "addSize": 15,
+      "titleWeight": "",
+      "result": "0曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-error",
+      "titleSize": 0,
+      "addSize": 15,
+      "titleWeight": "",
+      "result": "検索できなかった並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-loading",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "探している並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-or",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "6曲が一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-scale",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "50曲並びは新しい順複数選ぶ",
+      "hits": 8
+    },
+    {
+      "label": "desktop-blocked",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "50曲並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-zoom",
+      "titleSize": 44,
+      "addSize": 30,
+      "titleWeight": "700",
+      "result": "6曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "desktop-queue",
+      "titleSize": 21.6,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "",
+      "hits": 0
+    },
+    {
+      "label": "narrow-library",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "50曲並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "narrow-finder",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "50曲並びは新しい順複数選ぶ",
+      "hits": 2
+    },
+    {
+      "label": "narrow-results",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "6曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "narrow-judge",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "6曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "narrow-eight",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "1曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "narrow-empty",
+      "titleSize": 0,
+      "addSize": 15,
+      "titleWeight": "",
+      "result": "0曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "narrow-scale",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "50曲並びは新しい順複数選ぶ",
+      "hits": 8
+    },
+    {
+      "label": "narrow-blocked",
+      "titleSize": 22,
+      "addSize": 15,
+      "titleWeight": "700",
+      "result": "50曲並びは新しい順複数選ぶ",
+      "hits": 0
+    },
+    {
+      "label": "narrow-zoom",
+      "titleSize": 44,
+      "addSize": 30,
+      "titleWeight": "700",
+      "result": "6曲がすべて一致並びは新しい順複数選ぶ",
+      "hits": 0
+    }
+  ]
+}

@@ -1,0 +1,1543 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ライブラリ — Funkot</title>
+<style>
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/latin-400-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/latin-700-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  src: url("fonts/latin-900-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/japanese-400-normal.woff2") format("woff2");
+  unicode-range: U+3000-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF;
+}
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/japanese-700-normal.woff2") format("woff2");
+  unicode-range: U+3000-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF;
+}
+@font-face {
+  font-family: "Zen Kaku Gothic New";
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  src: url("fonts/japanese-900-normal.woff2") format("woff2");
+  unicode-range: U+3000-30FF, U+31F0-31FF, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF;
+}
+
+:root {
+  --stage: #c5ced6;
+  --paper: #f4f7f6;
+  --ink: #1b2330;
+  --stamp: #b0004e;
+  --filament: #f0c24b;
+  --quiet: #3d4a5c;
+  --hover: #e6ebed;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--stage);
+  color: var(--ink);
+  font-family: "Zen Kaku Gothic New", "Yu Gothic UI", "Hiragino Sans", sans-serif;
+  font-weight: 400;
+  font-size: 100%;
+  line-height: 1.5;
+}
+
+html.zoom { font-size: 200%; }
+
+button, input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible, input:focus-visible, .row:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
+.vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.ground {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding: 0.85rem 1.15rem 0.75rem;
+  gap: 0.55rem;
+}
+
+.nav {
+  display: flex;
+  gap: 0.35rem 1.35rem;
+  flex: none;
+  max-width: 76rem;
+  width: 100%;
+  margin: 0 auto;
+  align-items: center;
+}
+
+.nav button {
+  min-height: 2.75rem;
+  color: var(--quiet);
+  font-size: 1rem;
+}
+
+.nav button[aria-current="page"] {
+  color: var(--ink);
+  font-weight: 700;
+  box-shadow: inset 0 -0.14rem 0 var(--ink);
+}
+
+.frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: 76rem;
+  margin: 0 auto;
+  display: flex;
+}
+
+.sheet {
+  container-type: inline-size;
+  background: var(--paper);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 1.15rem 1.35rem 0.7rem;
+}
+
+.mast {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 46%;
+  overflow: auto;
+  padding-bottom: 0.35rem;
+}
+
+.mast-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 18rem);
+  gap: 0.35rem 1.5rem;
+  align-items: start;
+}
+
+.invite {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font-weight: 900;
+  font-size: 1.75rem;
+  line-height: 1.3;
+  padding: 0.1rem 0 0.2rem;
+}
+
+.sheet.is-query .invite,
+.sheet.is-judge .invite {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.invite::placeholder { color: var(--quiet); opacity: 1; }
+
+.invite:focus {
+  outline: none;
+  box-shadow: inset 0 -0.16rem 0 var(--stamp);
+}
+
+.invite:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
+.sentence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.55rem 1rem;
+  margin: 0.35rem 0 0;
+  max-width: 100%;
+}
+
+.group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.55rem;
+}
+
+.group.is-or {
+  box-shadow: inset 0 -0.18rem 0 var(--stamp);
+  padding-bottom: 0.12rem;
+}
+
+.kind {
+  color: var(--quiet);
+  font-size: 0.875rem;
+}
+
+.value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.group.is-one .value {
+  box-shadow: inset 0 -0.22rem 0 var(--stamp);
+}
+
+.junction, .textish, .quiet-act {
+  min-height: 2.75rem;
+  font-size: 0.9375rem;
+  color: var(--quiet);
+}
+
+.junction.is-or {
+  color: var(--stamp);
+  font-weight: 700;
+  font-size: 1.25rem;
+}
+
+.collapsed-head {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 0.4rem 0 0;
+}
+
+.collapsed-sub {
+  margin: 0.15rem 0 0;
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+}
+
+.result-line {
+  margin: 0.45rem 0 0;
+  font-size: 1rem;
+}
+
+.result-line .sort {
+  margin-left: 0.9rem;
+  color: var(--quiet);
+  min-height: 2.75rem;
+}
+
+.prose {
+  margin: 0.1rem 0 0;
+  color: var(--quiet);
+  overflow-wrap: anywhere;
+}
+
+.confirm {
+  margin: 0.15rem 0 0;
+}
+
+.dest {
+  justify-self: end;
+  text-align: right;
+  min-width: 0;
+}
+
+.dest p { margin: 0; }
+
+.dest-line, .source-line {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.35rem 0.55rem;
+}
+
+.source-line button, .dest-line button { min-height: 2.75rem; }
+
+.dest-name {
+  background: var(--filament);
+  color: var(--ink);
+  font-weight: 700;
+  padding: 0.12rem 0.45rem;
+  border-radius: 2px;
+}
+
+.choices {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+}
+
+.choices button {
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.choices button.is-current {
+  background: var(--filament);
+  font-weight: 700;
+  padding: 0.1rem 0.45rem;
+  border-radius: 2px;
+}
+
+.finder { margin-top: 0.7rem; }
+
+.kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.9rem;
+  margin-top: 0.25rem;
+}
+
+.kinds button {
+  min-height: 2.75rem;
+  color: var(--quiet);
+}
+
+.kinds button[aria-pressed="true"] {
+  color: var(--ink);
+  font-weight: 700;
+  box-shadow: inset 0 -0.12rem 0 var(--ink);
+}
+
+.finder-field {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font-size: 1.6rem;
+  font-weight: 900;
+  padding: 0.15rem 0;
+}
+
+button.quiet-act + button.quiet-act { margin-left: 0.9rem; }
+
+.finder-field:focus {
+  outline: none;
+  box-shadow: inset 0 -0.14rem 0 var(--stamp);
+}
+
+.finder-field:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
+.hits {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+  max-height: 16rem;
+  overflow: auto;
+}
+
+.hits button {
+  width: 100%;
+  min-height: 2.75rem;
+  display: flex;
+  gap: 0.7rem;
+  align-items: baseline;
+  padding: 0.28rem 0;
+}
+
+.hit-value {
+  font-size: 1.2rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.hit-note, .finder-status {
+  color: var(--quiet);
+  margin: 0.2rem 0 0;
+}
+
+.split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 1.25rem;
+}
+
+.editor {
+  width: 22rem;
+  flex: none;
+  overflow: auto;
+  padding-right: 0.2rem;
+}
+
+.edit-block {
+  display: grid;
+  grid-template-columns: 4.25rem minmax(0, 1fr) auto;
+  gap: 0.15rem 0.45rem;
+  align-items: baseline;
+  margin: 0 0 0.55rem;
+}
+
+.edit-value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.edit-block .junction { grid-column: 1 / -1; }
+
+.list-scroll {
+  flex: 1;
+  min-height: 12rem;
+  min-width: 0;
+  overflow: auto;
+}
+
+.tracks, .plain-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 8.5rem 4.75rem 3.2rem auto;
+  column-gap: 0.75rem;
+  align-items: center;
+  padding: 0.28rem 0.2rem 0.28rem 0.45rem;
+  box-shadow: inset 0.22rem 0 0 transparent;
+}
+
+.row.is-playing { box-shadow: inset 0.22rem 0 0 var(--stamp); }
+
+.row.is-selected .title::before {
+  content: "";
+  display: inline-block;
+  width: 0.42rem;
+  height: 0.42rem;
+  margin-right: 0.4rem;
+  background: var(--ink);
+  vertical-align: 0.12em;
+}
+
+.title {
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.file, .member, .artist, .year, .dur {
+  color: var(--quiet);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.file { grid-column: 1 / -1; }
+
+.add {
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+  font-size: 0.875rem;
+  color: var(--quiet);
+  justify-self: end;
+}
+
+.row:hover .add,
+.row:focus-within .add,
+.add.is-done {
+  color: var(--ink);
+}
+
+.row.is-focus {
+  display: block;
+  padding: 0.55rem 0.2rem 0.75rem 0.45rem;
+}
+
+.hero {
+  font-size: 2rem;
+  font-weight: 900;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+.meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  color: var(--quiet);
+  margin: 0.25rem 0 0;
+}
+
+.focus-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  align-items: center;
+  margin-top: 0.15rem;
+}
+
+.focus-actions button, .tag-row button, .year-modes button {
+  min-height: 2.75rem;
+}
+
+.reason { margin: 0.15rem 0 0; }
+
+.tags { margin: 0.35rem 0 0; }
+
+.tag-row, .year-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.8rem;
+  align-items: center;
+}
+
+.tag-name { font-weight: 700; }
+
+.origin { color: var(--quiet); }
+
+.tag-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.7rem;
+  align-items: center;
+  margin-top: 0.3rem;
+}
+
+.tag-add input {
+  border: 0;
+  background: transparent;
+  box-shadow: inset 0 -0.1rem 0 var(--quiet);
+  min-height: 2.75rem;
+  min-width: 8rem;
+  font-size: 1rem;
+}
+
+.note { color: var(--quiet); margin: 0.35rem 0; }
+
+.empty-block { padding: 0.4rem 0 0.8rem; }
+
+.empty-block p { margin: 0 0 0.35rem; }
+
+.empty-block .lead {
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.empty-block button { min-height: 2.75rem; }
+
+.keys {
+  color: var(--quiet);
+  margin: 0.6rem 0 0.2rem;
+  font-size: 0.875rem;
+}
+
+.transport {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1.1rem;
+  align-items: center;
+  padding-top: 0.45rem;
+  background: var(--paper);
+}
+
+.now-title {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.mark {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  background: var(--stamp);
+  margin-right: 0.35rem;
+  vertical-align: 0.08em;
+}
+
+.mark.is-paused { background: var(--quiet); }
+
+.transport button { min-height: 2.75rem; }
+
+.busy { opacity: 0.45; }
+
+.plain-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.4rem 1rem;
+  align-items: center;
+  padding: 0.45rem 0;
+}
+
+.plain-row .title { font-size: 1.35rem; }
+
+.auto-note {
+  margin: 0.8rem 0 0.2rem;
+  color: var(--quiet);
+}
+
+.list-head {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0 0 0.2rem;
+}
+
+@container (max-width: 46rem) {
+  .mast-grid { grid-template-columns: 1fr; }
+  .dest { justify-self: start; text-align: left; order: -1; }
+  .dest-line, .source-line { justify-content: flex-start; }
+  .split { flex-direction: column; }
+  .editor { width: auto; max-height: 46%; }
+  .value { font-size: 1.3rem; }
+  .row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 0.05rem;
+  }
+  .artist, .year, .dur { grid-column: 1; }
+  .add { grid-row: 1 / span 4; grid-column: 2; align-self: center; }
+  .file { grid-column: 1 / -1; }
+  .hero { font-size: 1.5rem; }
+  .invite { font-size: 1.35rem; }
+  .sheet.is-query .invite,
+  .sheet.is-judge .invite { font-size: 1rem; }
+}
+
+html.zoom .row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+html.zoom .artist,
+html.zoom .year,
+html.zoom .dur { grid-column: 1; }
+html.zoom .add { grid-row: 1 / span 4; grid-column: 2; align-self: center; }
+html.zoom .value { font-size: 1.2rem; }
+html.zoom .mast { max-height: none; overflow: visible; }
+html.zoom .list-scroll { min-height: 7rem; }
+html.zoom .collapsed-head { line-height: 1.45; padding-top: 0.15rem; }
+
+@media (max-width: 720px) {
+  .ground { padding: 0.45rem 0.45rem 0.3rem; }
+  .sheet { padding: 0.85rem 0.8rem 0.45rem; }
+  .nav { order: 2; justify-content: space-between; }
+  .frame { order: 1; }
+  .nav button { flex: 1; text-align: center; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto; }
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const KIND = { year: "年", genre: "ジャンル", custom: "タグ" };
+const LONG_TAG = "深夜のアニソンremixでベースだけ前に出す指定";
+
+const tracks = [
+  { id: "star", title: "星を踏む", artist: "日向ソラ", year: 2015, yearStatus: "ok", genres: ["Funkot"], customs: ["日本人トラックメーカー", "アニソンremix", "女性vocal"], file: "hoshi.mp3", duration: 201, added: 520, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "日本人トラックメーカー": "manual", "アニソンremix": "manual", "女性vocal": "manual" }, yearOrigin: "embedded" },
+  { id: "over-a", title: "オーバーレイ", artist: "青葉ユキ", year: 2014, yearStatus: "ok", genres: ["Funkot"], customs: ["女性vocal", "都市"], file: "overlay-a.mp3", duration: 198, added: 510, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "女性vocal": "embedded", "都市": "manual" }, yearOrigin: "embedded" },
+  { id: "over-b", title: "オーバーレイ", artist: "青葉ユキ", year: 2016, yearStatus: "ok", genres: ["Funkot"], customs: ["女性vocal"], file: "overlay-b.mp3", duration: 246, added: 500, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "女性vocal": "embedded" }, yearOrigin: "embedded" },
+  { id: "night-a", title: "夜の回線", artist: "東雲ハル", year: 2015, yearStatus: "ok", genres: ["Funkot"], customs: ["日本人トラックメーカー", "アニソンremix", "都市"], file: "night-a.mp3", duration: 214, added: 490, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "日本人トラックメーカー": "manual", "アニソンremix": "manual", "都市": "manual" }, yearOrigin: "embedded" },
+  { id: "zankyo", title: "残響ガール", artist: "白石アオイ", year: 2015, yearStatus: "ok", genres: ["Funkot"], customs: ["日本人トラックメーカー", "アニソンremix", "クラブ"], file: "zankyo.mp3", duration: 188, added: 480, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "日本人トラックメーカー": "manual", "アニソンremix": "manual", "クラブ": "manual" }, yearOrigin: "manual" },
+  { id: "long", title: "誰も知らないエンドロールのあとでまだ鳴っているベースと名前の長いリミックス", artist: "北村レン", year: 2015, yearStatus: "ok", genres: ["Funkot"], customs: ["日本人トラックメーカー", "アニソンremix", "女性vocal", "都市", "夜", "クラブ", LONG_TAG], file: "endroll-long.mp3", duration: 328, added: 470, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: {}, yearOrigin: "embedded" },
+  { id: "clear", title: "透明なビート", artist: "森カイ", year: 2015, yearStatus: "ok", genres: ["Pop"], customs: ["日本人トラックメーカー"], file: "clear-beat.mp3", duration: 176, added: 460, funkot: false, genreOrigin: { Pop: "embedded" }, customOrigin: { "日本人トラックメーカー": "manual" }, yearOrigin: "embedded" },
+  { id: "unsent", title: "未送信の恋", artist: "", year: 2018, yearStatus: "ok", genres: ["Funkot"], customs: ["インスト"], file: "unsent.mp3", duration: 164, added: 450, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "インスト": "manual" }, yearOrigin: "embedded" },
+  { id: "lamp", title: "灯台リミックス", artist: "泉田ミオ", year: 2015, yearStatus: "ok", genres: ["Funkot"], customs: ["日本人トラックメーカー", "アニソンremix"], file: "lighthouse.mp3", duration: 233, added: 440, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "日本人トラックメーカー": "manual", "アニソンremix": "manual" }, yearOrigin: "embedded" },
+  { id: "night-b", title: "夜の回線", artist: "東雲ハル", year: 2015, yearStatus: "ok", genres: ["Funkot"], customs: ["日本人トラックメーカー", "アニソンremix", "女性vocal"], file: "night-live.mp3", duration: 251, added: 430, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "日本人トラックメーカー": "manual", "アニソンremix": "manual", "女性vocal": "manual" }, yearOrigin: "embedded" },
+  { id: "glass", title: "ガラスのBPM", artist: "黒川ナツ", year: null, yearStatus: "conflict", genres: ["Funkot"], customs: ["高速"], file: "glass-bpm.mp3", duration: 190, added: 300, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "高速": "manual" }, yearOrigin: "embedded" },
+  { id: "box", title: "箱庭の低音", artist: "水瀬ツバサ", year: null, yearStatus: "missing", genres: ["Funkot"], customs: ["インスト", "低音強め"], file: "hakoniwa.mp3", duration: 207, added: 280, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "インスト": "manual", "低音強め": "manual" }, yearOrigin: "unset" },
+  { id: "red", title: "赤い信号", artist: "霧生ケン", year: null, yearStatus: "invalid", genres: ["Funkot"], customs: ["都市"], file: "red-signal.mp3", duration: 155, added: 260, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "都市": "manual" }, yearOrigin: "embedded" },
+  { id: "gate", title: "未明の改札", artist: "相沢ノエル", year: 2017, yearStatus: "ok", genres: ["Funkot"], customs: ["ボカロ", "女性vocal"], file: "kaisatsu.mp3", duration: 219, added: 240, funkot: true, genreOrigin: { Funkot: "embedded" }, customOrigin: { "ボカロ": "manual", "女性vocal": "manual" }, yearOrigin: "embedded" }
+];
+
+const titleBitsA = ["遅い", "青い", "遠い", "高い", "新しい", "短い", "深い", "明るい"];
+const titleBitsB = ["窓", "航路", "残光", "路面", "呼鈴", "水位", "余韻", "境界"];
+const artists = ["青葉ユキ", "北村レン", "白石アオイ", "森カイ", "東雲ハル", "泉田ミオ", "黒川ナツ", "日向ソラ", "小田リン", "相沢ノエル", "水瀬ツバサ", "霧生ケン"];
+const poolTags = ["女性vocal", "男性vocal", "インスト", "クラブ", "都市", "雨", "海", "ボカロ", "高速", "低音強め", "懐メロ"];
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rnd = mulberry32(169);
+for (let i = 1; i <= 36; i++) {
+  const year = 2009 + Math.floor(rnd() * 12);
+  const customs = [poolTags[Math.floor(rnd() * poolTags.length)]];
+  if (rnd() > 0.55) customs.push(poolTags[Math.floor(rnd() * poolTags.length)]);
+  const customOrigin = {};
+  customs.forEach((tag) => { customOrigin[tag] = "manual"; });
+  tracks.push({
+    id: `g${i}`,
+    title: `${titleBitsA[i % titleBitsA.length]}${titleBitsB[(i * 3) % titleBitsB.length]}`,
+    artist: artists[i % artists.length],
+    year,
+    yearStatus: "ok",
+    genres: ["Funkot"],
+    customs: [...new Set(customs)],
+    file: `synth-${i}.mp3`,
+    duration: 150 + Math.floor(rnd() * 160),
+    added: 200 - i,
+    funkot: true,
+    genreOrigin: { Funkot: "embedded" },
+    customOrigin,
+    yearOrigin: "embedded"
+  });
+}
+tracks.forEach((track) => {
+  track.embeddedYear = track.yearStatus === "ok" ? track.year : null;
+  track.customs.forEach((tag) => {
+    if (!track.customOrigin[tag]) track.customOrigin[tag] = "manual";
+  });
+});
+
+const catalog = [];
+const seen = new Set();
+function addCatalog(kind, value) {
+  const key = `${kind}\0${value}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  catalog.push({ kind, value });
+}
+tracks.forEach((track) => {
+  if (track.yearStatus === "ok") addCatalog("year", String(track.year));
+  track.genres.forEach((value) => addCatalog("genre", value));
+  track.customs.forEach((value) => addCatalog("custom", value));
+});
+for (let year = 1998; year <= 2026; year++) addCatalog("year", String(year));
+addCatalog("custom", "2015");
+addCatalog("custom", "アニソンRemix");
+addCatalog("custom", "アニソン・リミックス");
+addCatalog("custom", "日本人によるトラック");
+for (let i = 1; i <= 1500; i++) addCatalog("custom", `標本${String(i).padStart(4, "0")}`);
+
+const state = {
+  screen: "library",
+  text: "",
+  conditions: [],
+  junctions: [],
+  finderOpen: false,
+  finderText: "",
+  finderKind: "all",
+  editorOpen: false,
+  focusId: null,
+  tagsOpen: false,
+  tagEdit: false,
+  tagDraftKind: "custom",
+  tagDraft: "",
+  yearDraft: "",
+  selection: false,
+  selected: new Set(),
+  dest: "queue",
+  destOpen: false,
+  source: "queue",
+  sort: "new",
+  phase: "ready",
+  zoom: false,
+  message: "",
+  flashId: null,
+  flashUntil: 0,
+  paused: false,
+  playIndex: 0,
+  queue: [
+    { id: "q1", trackId: "over-a", auto: false },
+    { id: "q2", trackId: "star", auto: false },
+    { id: "q3", trackId: "g1", auto: true }
+  ],
+  favorites: new Set(),
+  playlists: [
+    { id: "night", name: "今夜のセット", entries: [{ id: "n1", trackId: "zankyo" }] },
+    { id: "morning", name: "朝の短さ", entries: [{ id: "m1", trackId: "unsent" }] }
+  ],
+  openPlaylist: "night",
+  seq: 10
+};
+
+const app = document.getElementById("app");
+let composing = false;
+let flashTimer = 0;
+
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+function norm(value) {
+  return String(value).normalize("NFC").toLocaleLowerCase("ja");
+}
+function trackById(id) {
+  return tracks.find((track) => track.id === id);
+}
+function kindLabel(kind) { return KIND[kind] || kind; }
+function yearLabel(track) {
+  if (track.yearStatus === "ok") return String(track.year);
+  if (track.yearStatus === "missing") return "年なし";
+  if (track.yearStatus === "conflict") return "年が矛盾";
+  return "年が不正";
+}
+function durLabel(sec) {
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+function artistLabel(track) {
+  return track.artist ? track.artist : "アーティスト不明";
+}
+function duplicated(track) {
+  return tracks.some((other) => other.id !== track.id && other.title === track.title);
+}
+function sourceName() {
+  if (state.source === "queue") return "再生待ち";
+  if (state.source === "favorite") return "お気に入り";
+  const list = state.playlists.find((playlist) => playlist.id === state.source);
+  return list ? list.name : "再生待ち";
+}
+function destName() {
+  if (state.dest === "queue") return "再生待ち";
+  if (state.dest === "favorite") return "お気に入り";
+  const list = state.playlists.find((playlist) => playlist.id === state.dest);
+  return list ? list.name : "再生待ち";
+}
+function destEntries() {
+  if (state.dest === "queue") return state.queue;
+  if (state.dest === "favorite") {
+    return [...state.favorites].map((trackId) => ({ id: `fav-${trackId}`, trackId, auto: false }));
+  }
+  const list = state.playlists.find((playlist) => playlist.id === state.dest);
+  return list ? list.entries : [];
+}
+function membership(track) {
+  if (state.dest === "favorite") {
+    return state.favorites.has(track.id) ? "お気に入りに入っている" : "";
+  }
+  const count = destEntries().filter((entry) => entry.trackId === track.id && !entry.auto).length;
+  if (!count) return "";
+  return `${destName()}に${count}回入っている`;
+}
+function blockReason(track) {
+  if (!track.funkot) return "Funkotとして扱われていないため、入れられない";
+  if (state.dest === "favorite" && state.favorites.has(track.id)) return "お気に入りには一度だけ入る";
+  return "";
+}
+function addLabel(track) {
+  if (blockReason(track)) return "追加できない";
+  if (state.flashId === track.id && Date.now() < state.flashUntil) return "追加した";
+  return "追加";
+}
+function groupsOf(conditions, junctions) {
+  if (!conditions.length) return [];
+  const groups = [[conditions[0]]];
+  for (let i = 0; i < junctions.length; i++) {
+    if (junctions[i] === "or") groups[groups.length - 1].push(conditions[i + 1]);
+    else groups.push([conditions[i + 1]]);
+  }
+  return groups;
+}
+function modeOf() {
+  if (!state.junctions.length) return "and";
+  if (state.junctions.every((junction) => junction === "and")) return "and";
+  if (state.junctions.every((junction) => junction === "or")) return "or";
+  return "mixed";
+}
+function hasCond(track, condition) {
+  if (condition.kind === "year") return track.yearStatus === "ok" && String(track.year) === condition.value;
+  if (condition.kind === "genre") return track.genres.includes(condition.value);
+  return track.customs.includes(condition.value);
+}
+function matches(track) {
+  const query = norm(state.text.trim());
+  if (query) {
+    const hay = norm(`${track.title}\n${artistLabel(track)}`);
+    if (!hay.includes(query)) return false;
+  }
+  return groupsOf(state.conditions, state.junctions).every((group) => group.some((condition) => hasCond(track, condition)));
+}
+function visibleTracks() {
+  const list = tracks.filter(matches);
+  const factor = { new: (a, b) => b.added - a.added, name: (a, b) => a.title.localeCompare(b.title, "ja"), short: (a, b) => a.duration - b.duration }[state.sort];
+  return list.sort(factor);
+}
+function resultLine(count) {
+  if (state.phase === "loading") return "探している";
+  if (state.phase === "error") return "検索できなかった";
+  const filtered = state.text.trim() || state.conditions.length;
+  const amount = count.toLocaleString("ja-JP");
+  if (!filtered) return `${amount}曲`;
+  if (modeOf() === "or") return `${amount}曲のいずれかが一致`;
+  if (modeOf() === "mixed") return `${amount}曲が一致`;
+  return `${amount}曲がすべて一致`;
+}
+function prose() {
+  const groups = groupsOf(state.conditions, state.junctions);
+  return groups.map((group) => {
+    const parts = group.map((condition) => `${kindLabel(condition.kind)}が${condition.value}`);
+    if (parts.length === 1) return parts[0];
+    return `${parts.slice(0, -1).join("、")}か、${parts[parts.length - 1]}`;
+  }).join("で、");
+}
+function collapsed() {
+  if (state.zoom && state.conditions.length >= 3) return true;
+  return state.conditions.length >= 5;
+}
+function sortLabel() {
+  return { new: "新しい順", name: "名前順", short: "短い順" }[state.sort];
+}
+function nextSort() {
+  state.sort = { new: "name", name: "short", short: "new" }[state.sort];
+}
+function hits() {
+  const query = norm(state.finderText.trim());
+  if (!query) return { shown: [], total: 0 };
+  let list = catalog.filter((item) => state.finderKind === "all" || item.kind === state.finderKind);
+  list = list.filter((item) => norm(item.value).includes(query));
+  list.sort((a, b) => {
+    const ap = norm(a.value).startsWith(query) ? 0 : 1;
+    const bp = norm(b.value).startsWith(query) ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    const order = { year: 0, genre: 1, custom: 2 };
+    if (order[a.kind] !== order[b.kind]) return order[a.kind] - order[b.kind];
+    return a.value.localeCompare(b.value, "ja");
+  });
+  return { shown: list.slice(0, 8), total: list.length };
+}
+function sameValueDifferentKind(shown) {
+  return shown.some((hit, index) => shown.some((other, otherIndex) => index !== otherIndex && other.value === hit.value && other.kind !== hit.kind));
+}
+function loudClass() {
+  if (state.finderOpen) return "is-query";
+  if (state.focusId && state.screen === "library") return "is-judge";
+  if (state.conditions.length || state.text.trim()) return "is-query";
+  return "is-invite";
+}
+function playingTrack() {
+  const entry = state.queue[state.playIndex];
+  return entry ? trackById(entry.trackId) : null;
+}
+
+function renderSentence() {
+  if (!state.conditions.length) return "";
+  if (collapsed()) {
+    const first = state.conditions.slice(0, 2).map((condition) => `${kindLabel(condition.kind)}が${condition.value}`).join("、");
+    const rest = state.conditions.length - 2;
+    const verb = modeOf() === "or" ? "のどれかを満たす" : modeOf() === "mixed" ? "の組み合わせ" : "をすべて満たす";
+    return `<p class="collapsed-head">${state.conditions.length}条件${verb}</p>
+      <p class="collapsed-sub">${esc(first)}、ほか${rest}</p>
+      <button class="quiet-act" type="button" data-act="editor">${state.editorOpen ? "編集を閉じる" : "条件を編集"}</button>`;
+  }
+  const groups = groupsOf(state.conditions, state.junctions);
+  let index = 0;
+  const parts = [];
+  groups.forEach((group, groupIndex) => {
+    const tokens = group.map((condition, inner) => {
+      const junction = inner > 0
+        ? `<button class="junction is-or" type="button" data-act="junction" data-index="${index - 1}">または</button>`
+        : "";
+      index += 1;
+      return `${junction}<span class="token"><span class="kind">${kindLabel(condition.kind)}</span> <span class="value">${esc(condition.value)}</span> <button class="quiet-act" type="button" data-act="remove" data-id="${condition.id}">外す</button></span>`;
+    }).join("");
+    parts.push(`<span class="group ${group.length > 1 ? "is-or" : "is-one"}">${tokens}</span>`);
+    if (groupIndex < groups.length - 1) {
+      parts.push(`<button class="junction" type="button" data-act="junction" data-index="${index - 1}">かつ</button>`);
+    }
+  });
+  return `<div class="sentence">${parts.join("")}</div>`;
+}
+
+function renderDest() {
+  const choices = [
+    ["queue", "再生待ち"],
+    ["favorite", "お気に入り"],
+    ...state.playlists.map((playlist) => [playlist.id, playlist.name])
+  ];
+  const menu = state.destOpen
+    ? `<ul class="choices">${choices.map(([id, name]) => `<li><button type="button" class="${id === state.dest ? "is-current" : ""}" data-act="dest" data-dest="${id}" aria-current="${id === state.dest ? "true" : "false"}">${esc(name)}</button></li>`).join("")}</ul>`
+    : "";
+  return `<div class="dest">
+    <p class="dest-line"><span>追加先は</span> <span class="dest-name">${esc(destName())}</span> <button type="button" data-act="dest-toggle" aria-expanded="${state.destOpen ? "true" : "false"}">${state.destOpen ? "閉じる" : "変える"}</button></p>
+    <p class="source-line"><button type="button" data-act="open-source">再生元は${esc(sourceName())}</button></p>
+    ${menu}
+  </div>`;
+}
+
+function renderFinder() {
+  if (!state.finderOpen) {
+    return `<button class="quiet-act" type="button" data-act="finder-open">条件を足す</button>`;
+  }
+  const { shown, total } = hits();
+  const kinds = ["all", "year", "genre", "custom"].map((kind) => {
+    const label = kind === "all" ? "すべて" : kindLabel(kind);
+    return `<button type="button" data-act="kind" data-kind="${kind}" aria-pressed="${state.finderKind === kind ? "true" : "false"}">${label}</button>`;
+  }).join("");
+  let body;
+  if (!state.finderText.trim()) {
+    body = `<p class="finder-status">名前の一部を入力する。候補は一度に8件まで並べる。</p>`;
+  } else if (!total) {
+    body = `<p class="finder-status">「${esc(state.finderText.trim())}」に合う候補はない。字を変えて探す。</p>`;
+  } else {
+    const ambiguity = sameValueDifferentKind(shown) ? `<p class="finder-status">同じ文字でも、年とタグは別の条件。</p>` : "";
+    const status = total > shown.length
+      ? `<p class="finder-status">該当は${total.toLocaleString("ja-JP")}件。${shown.length}件まで表示する。文字を足すと狭まる。</p>`
+      : `<p class="finder-status">${total}件。</p>`;
+    body = `${status}${ambiguity}<ul class="hits">${shown.map((hit) => `<li><button type="button" data-act="hit" data-kind="${hit.kind}" data-value="${esc(hit.value)}"><span class="kind">${kindLabel(hit.kind)}</span><span class="hit-value">${esc(hit.value)}</span></button></li>`).join("")}</ul>`;
+  }
+  return `<div class="finder">
+    <input class="finder-field" data-focus="finder" aria-label="年、ジャンル、タグを探す" placeholder="年、ジャンル、タグ" value="${esc(state.finderText)}">
+    <div class="kinds">${kinds}</div>
+    ${body}
+    <button class="quiet-act" type="button" data-act="finder-close">閉じる</button>
+  </div>`;
+}
+
+function renderEditor() {
+  if (!state.editorOpen) return "";
+  const blocks = state.conditions.map((condition, index) => {
+    const junction = index < state.conditions.length - 1
+      ? `<button class="junction ${state.junctions[index] === "or" ? "is-or" : ""}" type="button" data-act="junction" data-index="${index}">${state.junctions[index] === "or" ? "または" : "かつ"}</button>`
+      : "";
+    return `<div class="edit-block"><span class="kind">${kindLabel(condition.kind)}</span><span class="edit-value">${esc(condition.value)}</span><button class="quiet-act" type="button" data-act="remove" data-id="${condition.id}">外す</button>${junction}</div>`;
+  }).join("");
+  return `<div class="editor"><button class="quiet-act" type="button" data-act="editor-close">一覧へ戻る</button>${blocks}<p class="note">${state.conditions.length}条件</p></div>`;
+}
+
+function renderTags(track) {
+  if (state.focusId !== track.id || !state.tagsOpen) return "";
+  const rows = [];
+  rows.push(`<p class="tag-row"><span class="kind">年</span> <span class="tag-name">${esc(yearLabel(track))}</span> <span class="origin">${track.yearOrigin === "manual" ? "自分で指定" : track.yearOrigin === "unset" ? "自分で消した" : "埋め込み"}</span></p>`);
+  track.genres.forEach((value) => {
+    rows.push(`<p class="tag-row"><span class="kind">ジャンル</span> <span class="tag-name">${esc(value)}</span> <span class="origin">${track.genreOrigin[value] === "manual" ? "自分で指定" : "埋め込み"}</span>${state.tagEdit ? ` <button type="button" data-act="untag" data-id="${track.id}" data-kind="genre" data-value="${esc(value)}">外す</button>` : ""}</p>`);
+  });
+  track.customs.forEach((value) => {
+    rows.push(`<p class="tag-row"><span class="kind">タグ</span> <span class="tag-name">${esc(value)}</span> <span class="origin">${track.customOrigin[value] === "manual" ? "自分で指定" : "埋め込み"}</span>${state.tagEdit ? ` <button type="button" data-act="untag" data-id="${track.id}" data-kind="custom" data-value="${esc(value)}">外す</button>` : ""}</p>`);
+  });
+  let editor = "";
+  if (state.tagEdit) {
+    editor = `<div class="year-modes">
+      <button type="button" data-act="year-auto" data-id="${track.id}">年を自動に戻す</button>
+      <button type="button" data-act="year-clear" data-id="${track.id}">年を消す</button>
+      <input data-focus="year" inputmode="numeric" aria-label="指定する年" placeholder="年" value="${esc(state.yearDraft)}">
+      <button type="button" data-act="year-set" data-id="${track.id}">年を指定する</button>
+    </div>
+    <div class="tag-add">
+      <button type="button" data-act="draft-kind" data-kind="genre" aria-pressed="${state.tagDraftKind === "genre" ? "true" : "false"}">ジャンル</button>
+      <button type="button" data-act="draft-kind" data-kind="custom" aria-pressed="${state.tagDraftKind === "custom" ? "true" : "false"}">タグ</button>
+      <input data-focus="tagdraft" aria-label="足すジャンルまたはタグ" placeholder="足す言葉" value="${esc(state.tagDraft)}">
+      <button type="button" data-act="tag-add" data-id="${track.id}">足す</button>
+    </div>
+    <p class="note">音源ファイルは変えない。</p>`;
+  }
+  return `<div class="tags">${rows.join("")}<button class="quiet-act" type="button" data-act="tag-edit">${state.tagEdit ? "編集を閉じる" : "タグを直す"}</button>${editor}</div>`;
+}
+
+function renderRow(track) {
+  const playing = playingTrack()?.id === track.id;
+  const selected = state.selected.has(track.id);
+  const reason = blockReason(track);
+  if (state.focusId === track.id) {
+    const member = membership(track);
+    return `<li class="row is-focus${playing ? " is-playing" : ""}${selected ? " is-selected" : ""}" data-track="${track.id}" tabindex="0">
+      <p class="hero title">${selected ? '<span class="vh">選択中</span>' : ""}${esc(track.title)}</p>
+      <p class="meta-line"><span>${esc(artistLabel(track))}</span><span>${esc(yearLabel(track))}</span><span>${durLabel(track.duration)}</span>${duplicated(track) ? `<span>${esc(track.file)}</span>` : ""}${playing ? "<span>再生中</span>" : ""}</p>
+      ${member ? `<p class="member">${esc(member)}</p>` : ""}
+      ${reason ? `<p class="reason">${esc(reason)}</p>` : ""}
+      <div class="focus-actions">
+        <button type="button" data-act="tags" data-id="${track.id}">${state.tagsOpen ? "タグを閉じる" : "タグを見る"}</button>
+        <button type="button" data-act="fav" data-id="${track.id}">${state.favorites.has(track.id) ? "お気に入りを外す" : "お気に入り"}</button>
+        <button type="button" class="add${addLabel(track) === "追加した" ? " is-done" : ""}" data-act="add" data-id="${track.id}" ${reason ? 'aria-disabled="true"' : ""}>${addLabel(track)}</button>
+      </div>
+      ${renderTags(track)}
+    </li>`;
+  }
+  const member = membership(track);
+  return `    <li class="row${playing ? " is-playing" : ""}${selected ? " is-selected" : ""}" data-track="${track.id}" tabindex="0">
+    <div class="id"><div class="title clamp">${selected ? '<span class="vh">選択中</span>' : ""}${esc(track.title)}</div>${duplicated(track) ? `<div class="file">${esc(track.file)}</div>` : ""}</div>
+    <div class="artist">${esc(artistLabel(track))}</div>
+    <div class="year">${esc(yearLabel(track))}</div>
+    <div class="dur">${durLabel(track.duration)}</div>
+    <button type="button" class="add${addLabel(track) === "追加した" ? " is-done" : ""}" data-act="add" data-id="${track.id}" ${reason ? 'aria-disabled="true"' : ""}>${addLabel(track)}</button>
+    ${(playing || member) ? `<div class="file">${playing ? "再生中" : ""}${playing && member ? " " : ""}${member ? esc(member) : ""}</div>` : ""}
+  </li>`;
+}
+
+function renderLibrary() {
+  const list = visibleTracks();
+  let main;
+  if (state.phase === "error") {
+    main = `<div class="empty-block"><p class="lead">検索できなかった</p><p>条件はそのまま残っている。</p><button type="button" data-act="retry">もう一度探す</button></div>`;
+  } else if (!list.length && state.phase !== "loading") {
+    const removals = state.conditions.map((condition) => `<p><button type="button" data-act="remove" data-id="${condition.id}">${esc(kindLabel(condition.kind))}：${esc(condition.value)}を外す</button></p>`).join("");
+    const text = state.text.trim() ? `<p><button type="button" data-act="clear-text">「${esc(state.text.trim())}」を外す</button></p>` : "";
+    main = `<div class="empty-block"><p class="lead">一致する曲はない</p>${text}${removals || "<p>字を変えるか、条件を足し直す。</p>"}</div>`;
+  } else {
+    main = `<ul class="tracks${state.phase === "loading" ? " busy" : ""}" aria-busy="${state.phase === "loading" ? "true" : "false"}" aria-label="曲">${list.map(renderRow).join("")}</ul><p class="keys">上下で曲を移動する。Enterで追加する。/で条件を足す。</p>`;
+  }
+  const modeLine = modeOf() === "and" || state.phase !== "ready" ? "" : `<p class="prose">${esc(prose())}</p>`;
+  return `<div class="split">${renderEditor()}<div class="list-scroll">
+    <p class="result-line" data-result>${resultLine(list.length)}<button class="sort" type="button" data-act="sort">並びは${sortLabel()}</button>${state.selection ? `<button class="sort" type="button" data-act="selection-off">選択をやめる</button><button class="sort" type="button" data-act="add-selected">${state.selected.size}曲を追加</button>` : `<button class="sort" type="button" data-act="selection-on">複数選ぶ</button>`}</p>
+    ${modeLine}
+    ${state.message ? `<p class="confirm" aria-live="polite">${esc(state.message)}</p>` : `<p class="confirm vh" aria-live="polite"></p>`}
+    ${main}
+  </div></div>`;
+}
+
+function renderQueue() {
+  const manual = state.queue.filter((entry) => !entry.auto);
+  const auto = state.queue.filter((entry) => entry.auto);
+  const row = (entry) => {
+    const track = trackById(entry.trackId);
+    if (!track) return "";
+    const playing = playingTrack()?.id === track.id;
+    return `<li class="plain-row${playing ? " is-playing" : ""}"><div><div class="title">${esc(track.title)}</div><div class="artist">${esc(artistLabel(track))}${playing ? " 再生中" : ""}</div></div>${entry.auto ? "<span>自動選曲</span>" : `<button class="quiet-act" type="button" data-act="drop" data-id="${entry.id}">外す</button>`}</li>`;
+  };
+  const body = state.queue.length
+    ? `<ul class="plain-list">${manual.map(row).join("")}</ul>${auto.length ? `<p class="auto-note">ここから下は自動選曲</p><ul class="plain-list">${auto.map(row).join("")}</ul>` : ""}`
+    : `<div class="empty-block"><p class="lead">再生待ちに曲がない</p><p><button type="button" data-act="screen" data-screen="library">ライブラリから追加する</button></p></div>`;
+  const sourceAct = state.source === "queue" ? `<p>再生元にしている</p>` : `<p><button class="quiet-act" type="button" data-act="make-source" data-source="queue">再生待ちを再生元にする</button></p>`;
+  return `<div class="list-scroll"><h2 class="list-head">再生待ち</h2>${sourceAct}${state.message ? `<p class="confirm" aria-live="polite">${esc(state.message)}</p>` : ""}${body}</div>`;
+}
+
+function renderPlaylists() {
+  const favCount = state.favorites.size;
+  const blocks = [[ "favorite", "お気に入り", favCount ], ...state.playlists.map((playlist) => [playlist.id, playlist.name, playlist.entries.length])];
+  const heads = blocks.map(([id, name, count]) => `<p><button type="button" data-act="open-playlist" data-id="${id}"><span class="title">${esc(name)}</span></button> ${count}曲 ${state.dest === id ? "追加先" : ""} ${state.source === id ? "再生元" : ""}</p>`).join("");
+  let detail = "";
+  if (state.openPlaylist) {
+    const entries = state.openPlaylist === "favorite"
+      ? [...state.favorites].map((trackId) => ({ id: trackId, trackId, auto: false }))
+      : (state.playlists.find((playlist) => playlist.id === state.openPlaylist)?.entries || []);
+    const name = state.openPlaylist === "favorite" ? "お気に入り" : state.playlists.find((playlist) => playlist.id === state.openPlaylist)?.name;
+    const rows = entries.map((entry) => {
+      const track = trackById(entry.trackId);
+      return track ? `<li class="plain-row"><div class="title">${esc(track.title)}</div><div class="artist">${esc(artistLabel(track))}</div></li>` : "";
+    }).join("");
+    const empty = entries.length ? `<ul class="plain-list">${rows}</ul>` : `<p class="note">${esc(name)}に曲がない。ライブラリから追加する。</p>`;
+    const makeDest = state.dest === state.openPlaylist ? "" : `<button class="quiet-act" type="button" data-act="dest" data-dest="${state.openPlaylist}">追加先にする</button>`;
+    const makeSource = state.source === state.openPlaylist ? `<span>再生元にしている</span>` : `<button class="quiet-act" type="button" data-act="make-source" data-source="${state.openPlaylist}">再生元にする</button>`;
+    detail = `<h2 class="list-head">${esc(name)}</h2><p>${makeDest} ${makeSource}</p>${empty}`;
+  }
+  return `<div class="list-scroll"><h2 class="list-head">プレイリスト</h2>${heads}${detail}${state.message ? `<p class="confirm" aria-live="polite">${esc(state.message)}</p>` : ""}</div>`;
+}
+
+function renderTransport() {
+  const track = playingTrack();
+  const title = track ? track.title : "再生している曲はない";
+  const paused = state.paused || !track;
+  return `<footer class="transport"><p class="now-title"><span class="mark${paused ? " is-paused" : ""}"></span>${paused ? "一時停止中" : "再生中"} ${esc(title)}</p><button type="button" data-act="pause">${state.paused ? "再開" : "一時停止"}</button><button type="button" data-act="next">次の曲</button></footer>`;
+}
+
+function view() {
+  const screen = state.screen;
+  const h1 = screen === "queue" ? "再生待ち" : screen === "playlists" ? "プレイリスト" : "ライブラリ";
+  const body = screen === "queue" ? renderQueue() : screen === "playlists" ? renderPlaylists() : renderLibrary();
+  const mast = screen === "library"
+    ? `<header class="mast"><div class="mast-grid"><div><input class="invite" data-focus="q" aria-label="曲名やアーティストで絞る" placeholder="${state.conditions.length ? "さらに曲名で絞る" : "曲名やアーティスト"}" value="${esc(state.text)}">${renderSentence()}${renderFinder()}</div>${renderDest()}</div></header>`
+    : `<header class="mast"><div class="mast-grid"><div><p class="collapsed-head">${esc(h1)}</p></div>${renderDest()}</div></header>`;
+  return `<div class="ground"><h1 class="vh">${esc(h1)}</h1><nav class="nav" aria-label="画面">${[["library", "ライブラリ"], ["queue", "再生待ち"], ["playlists", "プレイリスト"]].map(([id, label]) => `<button type="button" data-act="screen" data-screen="${id}" ${screen === id ? 'aria-current="page"' : ""}>${label}</button>`).join("")}</nav><div class="frame"><main class="sheet ${loudClass()}">${mast}${body}${renderTransport()}</main></div></div>`;
+}
+
+function focusKey(el) {
+  if (!el || !el.dataset) return "";
+  if (el.dataset.focus) return `f:${el.dataset.focus}`;
+  if (el.dataset.track) return `row:${el.dataset.track}`;
+  if (el.dataset.act) return ["b", el.dataset.act, el.dataset.id || "", el.dataset.kind || "", el.dataset.value || "", el.dataset.index || "", el.dataset.dest || "", el.dataset.screen || ""].join(":");
+  return "";
+}
+
+function render() {
+  const active = document.activeElement;
+  const key = focusKey(active);
+  const caret = typeof active?.selectionStart === "number" ? active.selectionStart : null;
+  document.documentElement.classList.toggle("zoom", state.zoom);
+  app.innerHTML = view();
+  if (key) {
+    const next = [...app.querySelectorAll("[data-focus],[data-track],[data-act]")].find((el) => focusKey(el) === key);
+    if (next) {
+      next.focus({ preventScroll: true });
+      if (caret != null && next.setSelectionRange) {
+        const pos = Math.min(caret, next.value.length);
+        next.setSelectionRange(pos, pos);
+      }
+    }
+  }
+  const row = app.querySelector(".row.is-focus");
+  const scroller = row?.closest(".list-scroll");
+  if (row && scroller) {
+    const rowRect = row.getBoundingClientRect();
+    const box = scroller.getBoundingClientRect();
+    if (rowRect.top < box.top - 4 || rowRect.top > box.bottom - 48) {
+      row.scrollIntoView({ block: "start" });
+    }
+  }
+}
+
+function setMessage(text) { state.message = text; }
+
+function addCondition(kind, value) {
+  if (state.conditions.some((condition) => condition.kind === kind && condition.value === value)) {
+    setMessage(`すでに条件にある。${kindLabel(kind)}：${value}`);
+    return;
+  }
+  if (state.conditions.length) state.junctions.push("and");
+  state.conditions.push({ id: `c${state.seq++}`, kind, value });
+  state.finderText = "";
+  state.phase = "ready";
+  setMessage("");
+}
+
+function removeCondition(id) {
+  const index = state.conditions.findIndex((condition) => condition.id === id);
+  if (index < 0) return;
+  const [removed] = state.conditions.splice(index, 1);
+  if (state.junctions.length) {
+    if (index === 0) state.junctions.shift();
+    else state.junctions.splice(index - 1, 1);
+  }
+  if (!state.conditions.length) state.editorOpen = false;
+  state.phase = "ready";
+  setMessage(`${kindLabel(removed.kind)}：${removed.value}を外した`);
+}
+
+function addTrack(id) {
+  const track = trackById(id);
+  if (!track) return;
+  const reason = blockReason(track);
+  if (reason) {
+    setMessage(reason);
+    state.focusId = id;
+    return;
+  }
+  const entry = { id: `e${state.seq++}`, trackId: id, auto: false };
+  if (state.dest === "queue") state.queue.splice(Math.max(0, state.queue.length - state.queue.filter((item) => item.auto).length), 0, entry);
+  else if (state.dest === "favorite") state.favorites.add(id);
+  else state.playlists.find((playlist) => playlist.id === state.dest)?.entries.push(entry);
+  state.flashId = id;
+  state.flashUntil = Date.now() + 2200;
+  setMessage(`${destName()}に追加した「${track.title}」`);
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(render, 2300);
+}
+
+function addSelected() {
+  const ids = [...state.selected];
+  const added = [];
+  const blocked = [];
+  ids.forEach((id) => {
+    const track = trackById(id);
+    if (!track) return;
+    if (blockReason(track)) blocked.push(track.title);
+    else {
+      addTrack(id);
+      added.push(track.title);
+    }
+  });
+  clearTimeout(flashTimer);
+  const lead = added.length ? `${destName()}に${added.length}曲を追加した` : "追加した曲はない";
+  const tail = blocked.length ? `。${blocked.length}曲は入れられなかった` : "";
+  setMessage(lead + tail);
+  state.selection = false;
+  state.selected.clear();
+}
+
+function applyHash() {
+  const hash = location.hash.replace("#", "");
+  const three = () => {
+    addCondition("year", "2015");
+    addCondition("custom", "日本人トラックメーカー");
+    addCondition("custom", "アニソンremix");
+    state.dest = "night";
+  };
+  if (hash === "finder") {
+    state.finderOpen = true;
+    state.finderText = "2015";
+  } else if (hash === "results" || hash === "judge" || hash === "added" || hash === "zoom") {
+    three();
+    if (hash === "judge" || hash === "added") state.focusId = "long";
+    if (hash === "added") {
+      state.flashId = "long";
+      state.flashUntil = Date.now() + 600000;
+      state.message = "今夜のセットに追加した「誰も知らないエンドロールのあとでまだ鳴っているベースと名前の長いリミックス」";
+    }
+    if (hash === "zoom") state.zoom = true;
+  } else if (hash === "eight") {
+    ["2015"].forEach((value) => addCondition("year", value));
+    [LONG_TAG, "日本人トラックメーカー", "アニソンremix", "女性vocal", "都市", "夜", "クラブ"].forEach((value) => addCondition("custom", value));
+    state.editorOpen = true;
+    state.dest = "night";
+  } else if (hash === "empty") {
+    addCondition("year", "1999");
+    addCondition("custom", "アニソンremix");
+  } else if (hash === "error" || hash === "loading") {
+    three();
+    state.phase = hash === "error" ? "error" : "loading";
+  } else if (hash === "or") {
+    addCondition("year", "2015");
+    addCondition("custom", "アニソンremix");
+    addCondition("custom", "ボカロ");
+    state.junctions[1] = "or";
+  } else if (hash === "scale") {
+    state.finderOpen = true;
+    state.finderText = "標本";
+  } else if (hash === "blocked") {
+    state.focusId = "clear";
+  } else if (hash === "queue") {
+    state.screen = "queue";
+  }
+}
+
+app.addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) {
+    const row = event.target.closest(".row");
+    if (row) {
+      state.focusId = row.dataset.track;
+      if (state.selection || event.shiftKey) {
+        if (state.selected.has(row.dataset.track)) state.selected.delete(row.dataset.track);
+        else state.selected.add(row.dataset.track);
+      }
+      render();
+    }
+    return;
+  }
+  const act = button.dataset.act;
+  if (act === "screen") {
+    state.screen = button.dataset.screen;
+    state.finderOpen = false;
+    state.editorOpen = false;
+    state.destOpen = false;
+  } else if (act === "finder-open") {
+    state.finderOpen = true;
+    state.screen = "library";
+  } else if (act === "finder-close") state.finderOpen = false;
+  else if (act === "kind") state.finderKind = button.dataset.kind;
+  else if (act === "hit") addCondition(button.dataset.kind, button.dataset.value);
+  else if (act === "remove") removeCondition(button.dataset.id);
+  else if (act === "clear-text") { state.text = ""; state.phase = "ready"; setMessage("曲名の条件を外した"); }
+  else if (act === "junction") {
+    const index = Number(button.dataset.index);
+    state.junctions[index] = state.junctions[index] === "or" ? "and" : "or";
+    state.phase = "ready";
+  } else if (act === "editor") state.editorOpen = !state.editorOpen;
+  else if (act === "editor-close") state.editorOpen = false;
+  else if (act === "dest-toggle") state.destOpen = !state.destOpen;
+  else if (act === "dest") {
+    state.dest = button.dataset.dest;
+    state.destOpen = false;
+    state.openPlaylist = button.dataset.dest;
+    setMessage(`追加先は${destName()}`);
+  } else if (act === "open-source") {
+    if (state.source === "queue") state.screen = "queue";
+    else { state.screen = "playlists"; state.openPlaylist = state.source; }
+  } else if (act === "selection-on") { state.selection = true; state.selected.clear(); }
+  else if (act === "selection-off") { state.selection = false; state.selected.clear(); }
+  else if (act === "add-selected") addSelected();
+  else if (act === "sort") nextSort();
+  else if (act === "add") addTrack(button.dataset.id);
+  else if (act === "retry") { state.phase = "ready"; setMessage(""); }
+  else if (act === "tags") { state.tagsOpen = !state.tagsOpen; if (!state.tagsOpen) state.tagEdit = false; }
+  else if (act === "tag-edit") state.tagEdit = !state.tagEdit;
+  else if (act === "fav") {
+    const track = trackById(button.dataset.id);
+    if (!track.funkot) setMessage("Funkotとして扱われていないため、入れられない");
+    else if (state.favorites.has(track.id)) {
+      state.favorites.delete(track.id);
+      setMessage(`お気に入りから外した「${track.title}」`);
+    } else {
+      state.favorites.add(track.id);
+      setMessage(`お気に入りに追加した「${track.title}」`);
+    }
+  } else if (act === "year-auto") {
+    const track = trackById(button.dataset.id);
+    if (track.embeddedYear) {
+      track.year = track.embeddedYear;
+      track.yearStatus = "ok";
+      track.yearOrigin = "embedded";
+      setMessage("年を自動に戻した");
+    } else {
+      track.year = null;
+      track.yearStatus = "missing";
+      track.yearOrigin = "embedded";
+      setMessage("埋め込みの年はない");
+    }
+  } else if (act === "year-clear") {
+    const track = trackById(button.dataset.id);
+    track.year = null;
+    track.yearStatus = "missing";
+    track.yearOrigin = "unset";
+    setMessage("年を消した");
+  } else if (act === "year-set") {
+    const track = trackById(button.dataset.id);
+    const year = Number(state.yearDraft);
+    if (!Number.isInteger(year) || year < 1000 || year > 9999) setMessage("年は4桁で指定する");
+    else {
+      track.year = year;
+      track.yearStatus = "ok";
+      track.yearOrigin = "manual";
+      setMessage(`年を${year}にした`);
+    }
+  } else if (act === "draft-kind") state.tagDraftKind = button.dataset.kind;
+  else if (act === "tag-add") {
+    const track = trackById(button.dataset.id);
+    const value = state.tagDraft.trim();
+    if (!value) setMessage("足す言葉を書く");
+    else if (state.tagDraftKind === "genre") {
+      if (!track.genres.includes(value)) track.genres.push(value);
+      track.genreOrigin[value] = "manual";
+      state.tagDraft = "";
+      setMessage(`ジャンルを足した。${value}`);
+    } else {
+      if (!track.customs.includes(value)) track.customs.push(value);
+      track.customOrigin[value] = "manual";
+      addCatalog("custom", value);
+      state.tagDraft = "";
+      setMessage(`タグを足した。${value}`);
+    }
+  } else if (act === "untag") {
+    const track = trackById(button.dataset.id);
+    const value = button.dataset.value;
+    if (button.dataset.kind === "genre") track.genres = track.genres.filter((item) => item !== value);
+    else track.customs = track.customs.filter((item) => item !== value);
+    setMessage(`${kindLabel(button.dataset.kind)}：${value}を外した`);
+  } else if (act === "drop") {
+    state.queue = state.queue.filter((entry) => entry.id !== button.dataset.id);
+    if (state.playIndex >= state.queue.length) state.playIndex = 0;
+    setMessage("再生待ちから外した");
+  } else if (act === "make-source") {
+    state.source = button.dataset.source;
+    setMessage(`再生元は${sourceName()}`);
+  } else if (act === "open-playlist") state.openPlaylist = button.dataset.id;
+  else if (act === "pause") {
+    state.paused = !state.paused;
+    setMessage(state.paused ? "一時停止した" : "再開した");
+  } else if (act === "next") {
+    if (!state.queue.length) setMessage("再生待ちに曲がない");
+    else {
+      state.playIndex = (state.playIndex + 1) % state.queue.length;
+      state.paused = false;
+      const track = playingTrack();
+      setMessage(track ? `次の曲は「${track.title}」` : "");
+    }
+  }
+  render();
+});
+
+app.addEventListener("input", (event) => {
+  const field = event.target;
+  if (field.dataset.focus === "q") state.text = field.value;
+  else if (field.dataset.focus === "finder") state.finderText = field.value;
+  else if (field.dataset.focus === "year") { state.yearDraft = field.value; return; }
+  else if (field.dataset.focus === "tagdraft") { state.tagDraft = field.value; return; }
+  else return;
+  if (field.dataset.focus === "q") state.phase = "ready";
+  if (!composing) render();
+});
+app.addEventListener("compositionstart", () => { composing = true; });
+app.addEventListener("compositionend", (event) => {
+  composing = false;
+  if (event.target.dataset.focus === "q") state.text = event.target.value;
+  if (event.target.dataset.focus === "finder") state.finderText = event.target.value;
+  render();
+});
+app.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && event.target.dataset?.act === "add") return;
+  if (event.key === "Enter" && event.target.classList?.contains("row")) {
+    event.preventDefault();
+    addTrack(event.target.dataset.track);
+    render();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  const typing = document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA");
+  if (event.key === "/" && !typing) {
+    event.preventDefault();
+    state.screen = "library";
+    state.finderOpen = true;
+    render();
+    return;
+  }
+  if (event.key === "Escape") {
+    if (state.destOpen) state.destOpen = false;
+    else if (state.finderOpen) state.finderOpen = false;
+    else if (state.editorOpen) state.editorOpen = false;
+    else if (state.selection) { state.selection = false; state.selected.clear(); }
+    else state.focusId = null;
+    render();
+    return;
+  }
+  if ((event.key === "ArrowDown" || event.key === "ArrowUp") && state.screen === "library" && !typing) {
+    const rows = [...app.querySelectorAll(".row")];
+    if (!rows.length) return;
+    event.preventDefault();
+    const current = rows.findIndex((row) => row.dataset.track === state.focusId);
+    const next = event.key === "ArrowDown" ? Math.min(rows.length - 1, current + 1) : Math.max(0, current < 0 ? 0 : current - 1);
+    state.focusId = rows[next].dataset.track;
+    state.tagsOpen = false;
+    render();
+    const row = app.querySelector(`.row[data-track="${state.focusId}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+  }
+});
+
+applyHash();
+render();
+</script>
+</body>
+</html>
