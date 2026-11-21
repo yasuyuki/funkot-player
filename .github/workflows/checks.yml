@@ -41,10 +41,16 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.core.outputs.sha }}
+      rust: ${{ steps.toolchain.outputs.rust }}
+      node: ${{ steps.toolchain.outputs.node }}
+      npm: ${{ steps.toolchain.outputs.npm }}
     steps:
       - uses: actions/checkout@v7
       - id: core
         run: echo "sha=$(tr -d '\r\n' < funkot-core.commit)" >> "$GITHUB_OUTPUT"
+      # build-and-test fails when the Docker image reports other versions.
+      - id: toolchain
+        run: grep -E '^(rust|node|npm)=[0-9.]+$' toolchain.versions >> "$GITHUB_OUTPUT"
 
   source-switch-model:
     name: Source switch model
@@ -215,39 +221,6 @@ jobs:
           path: ${{ runner.temp }}/engine-snapshot-proof
           if-no-files-found: error
 
-  docker-toolchain:
-    name: Docker toolchain versions
-    runs-on: ubuntu-latest
-    needs: core-pin
-    outputs:
-      rust: ${{ steps.versions.outputs.rust }}
-      node: ${{ steps.versions.outputs.node }}
-      npm: ${{ steps.versions.outputs.npm }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: funkot-player
-      - uses: actions/checkout@v7
-        with:
-          repository: yasuyuki/funkot-autodj
-          ref: ${{ needs.core-pin.outputs.sha }}
-          path: funkot-autodj-for-ui
-      - uses: docker/setup-buildx-action@v4
-      - name: Build the normal development image
-        uses: docker/build-push-action@v7
-        with:
-          context: funkot-player
-          load: true
-          tags: funkot-player-dev
-          cache-from: type=gha,scope=player-dev
-      - name: Record the actual Docker toolchain
-        id: versions
-        working-directory: funkot-player
-        run: |
-          ./dev.sh sh -c 'printf "rust=%s\nnode=%s\nnpm=%s\n" "$(rustc --version | cut -d " " -f2)" "$(node -p process.versions.node)" "$(npm --version)"' | tee versions.txt
-          grep -E '^(rust|node|npm)=' versions.txt >> "$GITHUB_OUTPUT"
-          cat versions.txt >> "$GITHUB_STEP_SUMMARY"
-
   output-guard:
     name: Output sample bound
     runs-on: ubuntu-latest
@@ -299,6 +272,9 @@ jobs:
           tags: funkot-player-dev
           cache-from: type=gha,scope=player-dev
           cache-to: type=gha,mode=max,scope=player-dev
+      - name: Check the Windows jobs use the Docker toolchain
+        working-directory: funkot-player
+        run: ./scripts/check-toolchain-versions.sh
       - name: Test frontend in the normal Docker toolchain
         working-directory: funkot-player
         run: |
@@ -320,7 +296,7 @@ jobs:
   windows-build-and-test:
     name: Windows frontend and native library
     runs-on: windows-latest
-    needs: [core-pin, docker-toolchain]
+    needs: core-pin
     defaults:
       run:
         working-directory: funkot-player
@@ -343,13 +319,13 @@ jobs:
         run: ./scripts/ci-change-scope.sh
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ needs.docker-toolchain.outputs.node }}
+          node-version: ${{ needs.core-pin.outputs.node }}
           cache: npm
           cache-dependency-path: funkot-player/package-lock.json
       - uses: dtolnay/rust-toolchain@master
         if: steps.scope.outputs.native == 'true'
         with:
-          toolchain: ${{ needs.docker-toolchain.outputs.rust }}
+          toolchain: ${{ needs.core-pin.outputs.rust }}
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.native == 'true'
         with:
@@ -358,7 +334,7 @@ jobs:
       - name: Match Docker npm and record Windows toolchain
         shell: bash
         env:
-          DOCKER_NPM: ${{ needs.docker-toolchain.outputs.npm }}
+          DOCKER_NPM: ${{ needs.core-pin.outputs.npm }}
         run: |
           npm install --global "npm@$DOCKER_NPM"
           { rustc --version; node --version; npm --version; } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -399,9 +375,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo check --locked --manifest-path src-tauri/Cargo.toml --release --features custom-protocol
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  windows-ui:
+    name: Windows browser UI regressions
+    runs-on: windows-latest
+    needs: core-pin
+    defaults:
+      run:
+        working-directory: funkot-player
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: funkot-player
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ needs.core-pin.outputs.node }}
+          cache: npm
+          cache-dependency-path: funkot-player/package-lock.json
+      - name: Match Docker npm
+        shell: bash
+        env:
+          DOCKER_NPM: ${{ needs.core-pin.outputs.npm }}
+        run: npm install --global "npm@$DOCKER_NPM"
       - name: Check browser UI regressions
         shell: pwsh
         run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npx --no-install playwright install chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run ui:capture
@@ -410,7 +410,7 @@ jobs:
   windows-window:
     name: Windows app window
     runs-on: windows-latest
-    needs: [core-pin, docker-toolchain]
+    needs: core-pin
     timeout-minutes: 45
     defaults:
       run:
@@ -426,12 +426,12 @@ jobs:
           path: funkot-autodj-for-ui
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ needs.docker-toolchain.outputs.node }}
+          node-version: ${{ needs.core-pin.outputs.node }}
           cache: npm
           cache-dependency-path: funkot-player/package-lock.json
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ needs.docker-toolchain.outputs.rust }}
+          toolchain: ${{ needs.core-pin.outputs.rust }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: funkot-player/src-tauri

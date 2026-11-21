@@ -33,6 +33,10 @@
   },
   {
     "app": "github-actions",
+    "name": "Windows browser UI regressions"
+  },
+  {
+    "app": "github-actions",
     "name": "Rust dependency policy"
   },
   {
