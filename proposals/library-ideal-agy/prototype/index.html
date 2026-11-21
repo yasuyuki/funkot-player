@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Funkot Player — Jakarta Midnight Studio (Library Ideal Design)</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body data-input-kind="fine" data-zoom="100">
+  <div id="app" class="app-shell">
+    <!-- Top Studio Header -->
+    <header class="studio-header" aria-label="スタジオナビゲーション">
+      <div class="header-left">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Funkot</span>
+          <span class="brand-scale" id="scaleSummary">24,840曲 · 3,420タグ</span>
+        </div>
+
+        <nav class="primary-nav" aria-label="表示切替">
+          <button type="button" class="nav-tab is-active" data-view="library" id="navLibrary">ライブラリ</button>
+          <button type="button" class="nav-tab" data-view="queue" id="navQueue">再生待ち <span class="tab-count" id="navQueueCount">4</span></button>
+          <button type="button" class="nav-tab" data-view="playlists" id="navPlaylists">プレイリスト <span class="tab-count">3</span></button>
+        </nav>
+      </div>
+
+      <div class="header-right">
+        <button type="button" class="narrow-tools-toggle" id="btnNarrowTools" aria-expanded="false" aria-controls="headerToolsGroup" title="検証ケース・複数選択・操作サイズを開く">
+          設定
+        </button>
+        <div class="header-tools-group" id="headerToolsGroup">
+          <div class="preset-control" id="presetControlWrap">
+            <label for="presetSelect" class="sr-only">検証シナリオ切替</label>
+            <select id="presetSelect" class="preset-select" title="デザイン審査・例外検証シナリオの切替">
+              <option value="default">検証ケース: 通常表示</option>
+              <option value="facet-open">検証ケース: 複合検索編集中 (3,420候補)</option>
+              <option value="and-3tags">検証ケース: 2015年 AND 日本人 AND アニソン</option>
+              <option value="add-inspect">検証ケース: 1操作追加後 + 曲詳細展開</option>
+              <option value="scale-9tags">検証ケース: 9条件 + 長大タグ負荷</option>
+              <option value="zero-conflict">検証ケース: 0件診断 + 保存競合エラー</option>
+              <option value="zoom-200">検証ケース: 200%文字拡大</option>
+            </select>
+          </div>
+
+          <button type="button" class="icon-utility-btn" id="btnToggleSelectMode" aria-pressed="false" title="複数選択モードを切替">
+            複数選択
+          </button>
+          <button type="button" class="icon-utility-btn" id="btnInputKindToggle" title="入力サイズ(マウス/タッチ)を切替">
+            細操作
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main 2-Region Studio Grid -->
+    <main class="studio-grid" id="studioGrid">
+      <!-- Primary Stage: Library Discovery & Track Ledger -->
+      <section class="library-stage" aria-label="音楽ライブラリ検索と曲一覧">
+        <!-- Unified Query & Bounded Condition Lens -->
+        <div class="query-lens" id="queryLens">
+          <div class="lens-primary-row">
+            <div class="search-field-wrap">
+              <svg class="search-glyph" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <circle cx="9" cy="9" r="6" stroke="currentColor" stroke-width="1.8" />
+                <path d="M13.5 13.5L17.5 17.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              </svg>
+              <input
+                type="search"
+                id="searchInput"
+                class="search-input"
+                placeholder="曲名、アーティスト、ファイルパスで絞り込む"
+                aria-label="曲名、アーティスト、ファイルパスで検索"
+              />
+              <button type="button" id="btnClearTextSearch" class="search-clear-btn" hidden aria-label="検索文字をクリア">×</button>
+            </div>
+
+            <div class="lens-actions">
+              <button
+                type="button"
+                id="btnToggleFacetStudio"
+                class="facet-trigger-btn"
+                aria-expanded="false"
+                aria-controls="facetStudio"
+              >
+                <span class="facet-trigger-dot" aria-hidden="true"></span>
+                <span>タグ・条件</span>
+                <span class="facet-count-hint">(3,420)</span>
+              </button>
+
+              <div class="logic-segmented" role="group" aria-label="タグ条件の一致方法">
+                <button type="button" class="logic-btn is-active" data-mode="AND" id="btnModeAnd" aria-pressed="true" aria-label="すべて一致 (AND)">AND一致</button>
+                <button type="button" class="logic-btn" data-mode="OR" id="btnModeOr" aria-pressed="false" aria-label="いずれか一致 (OR)">OR一致</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bounded Active Condition Strip (Never expands into endless multi-row toolbar) -->
+          <div class="condition-strip" id="conditionStrip" hidden aria-live="polite">
+            <div class="condition-pills-rail" id="conditionPillsRail"></div>
+            <div class="condition-strip-controls">
+              <button type="button" id="btnOverflowConditions" class="overflow-cond-btn" hidden></button>
+              <button type="button" id="btnRestoreCondition" class="restore-cond-btn" hidden>条件を元に戻す</button>
+              <button type="button" id="btnClearAllConditions" class="clear-cond-btn">すべて解除</button>
+            </div>
+          </div>
+
+          <!-- Popover for 8+ / overflow conditions -->
+          <div class="overflow-conditions-drawer" id="overflowConditionsDrawer" hidden aria-label="適用中の全検索条件">
+            <div class="drawer-header">
+              <span class="drawer-title" id="overflowDrawerTitle">適用中のすべての検索条件</span>
+              <button type="button" class="drawer-close-btn" id="btnCloseOverflowDrawer" aria-label="条件一覧を閉じる">閉じる</button>
+            </div>
+            <div class="overflow-pills-grid" id="overflowPillsGrid"></div>
+          </div>
+
+          <!-- Faceted Crate Studio (5-category structured tag explorer across 3,420 tags) -->
+          <section class="facet-studio" id="facetStudio" hidden aria-label="タグ・条件スタジオ">
+            <div class="facet-studio-top">
+              <div class="facet-search-wrap">
+                <input
+                  type="search"
+                  id="facetCandidateInput"
+                  class="facet-candidate-input"
+                  placeholder="3,420個のタグ候補を絞込（例: 2015, 日本人, アニソン, Anime Remix）"
+                  aria-label="タグ候補を検索"
+                />
+                <span class="facet-match-summary" id="facetMatchSummary">代表カテゴリを表示中</span>
+              </div>
+              <button type="button" id="btnCloseFacetStudio" class="studio-done-btn">完了</button>
+            </div>
+
+            <!-- Variant / Synonym suggestion strip -->
+            <div class="variant-hint-bar" id="variantHintBar" hidden></div>
+
+            <!-- 5 Semantic Categories -->
+            <div class="facet-category-tabs" role="tablist" aria-label="タグ分類">
+              <button type="button" role="tab" class="cat-tab is-active" data-cat="all" aria-selected="true">5分類一覧</button>
+              <button type="button" role="tab" class="cat-tab" data-cat="year" aria-selected="false">制作年</button>
+              <button type="button" role="tab" class="cat-tab" data-cat="creator" aria-selected="false">制作圏・作家</button>
+              <button type="button" role="tab" class="cat-tab" data-cat="culture" aria-selected="false">原曲・文化</button>
+              <button type="button" role="tab" class="cat-tab" data-cat="style" aria-selected="false">曲調・構成</button>
+              <button type="button" role="tab" class="cat-tab" data-cat="status" aria-selected="false">状態・管理</button>
+            </div>
+
+            <div class="facet-columns" id="facetColumns"></div>
+          </section>
+        </div>
+
+        <!-- Results Status & Quick Filter Bar -->
+        <div class="results-bar" id="resultsBar">
+          <div class="results-status">
+            <span class="results-count" id="resultsCount">18 曲</span>
+            <span class="results-scope" id="resultsScope">全 24,840 曲の代表サンプルを表示</span>
+            <span class="pending-indicator" id="pendingIndicator" hidden>
+              <span class="spinner-dot" aria-hidden="true"></span>
+              検索・タグ状態を更新中...
+            </span>
+          </div>
+
+          <div class="results-quick-filters">
+            <button type="button" class="quick-filter-chip" id="btnQuickNew" aria-pressed="false">新着のみ</button>
+            <button type="button" class="quick-filter-chip" id="btnQuickFav" aria-pressed="false">お気に入り</button>
+            <label for="sortSelect" class="sr-only">並び順</label>
+            <select id="sortSelect" class="sort-select" aria-label="曲の並び順">
+              <option value="relevance">関連・おすすめ順</option>
+              <option value="title">曲名順</option>
+              <option value="year_desc">制作年（新しい順）</option>
+              <option value="bpm_desc">BPM（速い順）</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Save Conflict / Error Banner (Non-destructive, preserves draft) -->
+        <div class="diagnostic-banner is-error" id="errorBanner" hidden role="alert">
+          <div class="diagnostic-body">
+            <strong class="diagnostic-title" id="errorBannerTitle">タグ更新の保存を中断しました（stale_revision）</strong>
+            <p class="diagnostic-text" id="errorBannerText">
+              別の再スキャン処理によりライブラリ版数が進みました。入力中の下書きは保持されています。
+            </p>
+          </div>
+          <div class="diagnostic-actions">
+            <button type="button" class="diag-btn is-primary" id="btnReopenDraft">下書きを確認・再読込</button>
+            <button type="button" class="diag-btn" id="btnDismissError">閉じる</button>
+          </div>
+        </div>
+
+        <!-- Track List / Empty Diagnostic / Queue View -->
+        <div class="ledger-scroll-area" id="ledgerScrollArea">
+          <div class="track-ledger" id="trackLedger" role="list" aria-label="曲一覧"></div>
+
+          <!-- Zero Results Diagnostic State -->
+          <div class="empty-diagnostic" id="emptyDiagnostic" hidden>
+            <h2 class="empty-title">条件に一致する曲が見つかりません（0 曲）</h2>
+            <p class="empty-reason" id="emptyReasonText"></p>
+            <div class="empty-recovery-actions" id="emptyRecoveryActions"></div>
+          </div>
+        </div>
+
+        <!-- Bulk Selection Floating Bar -->
+        <div class="selection-bar" id="selectionBar" hidden aria-live="polite">
+          <span class="selection-summary" id="selectionSummary">2 曲を選択中</span>
+          <div class="selection-actions">
+            <button type="button" class="sel-btn is-jade" id="btnBulkAdd">追加先へまとめて追加</button>
+            <button type="button" class="sel-btn" id="btnBulkEditTags">選択曲のタグを編集</button>
+            <button type="button" class="sel-btn is-quiet" id="btnClearSelection">選択解除</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Secondary Stage (Desktop Right Dock): Destination Lock Dock -->
+      <aside class="destination-dock" id="destinationDock" aria-label="追加先ターゲット">
+        <div class="dock-header">
+          <div class="dock-heading-row">
+            <span class="dock-lock-badge" aria-hidden="true"></span>
+            <h2 class="dock-title">追加先ターゲット</h2>
+          </div>
+          <p class="dock-separation-note" id="dockSeparationNote">
+            再生元（再生待ち）とは独立して曲を追加できます
+          </p>
+
+          <label for="destinationSelectDesktop" class="sr-only">追加先を選択</label>
+          <select id="destinationSelectDesktop" class="destination-select">
+            <option value="pl-anison-2015">プレイリスト: アニソンFunkot 2015特選</option>
+            <option value="queue">再生待ち（通常キュー）</option>
+            <option value="pl-friday-warmup">プレイリスト: 金曜深夜ウォームアップ</option>
+            <option value="favorites">お気に入り</option>
+          </select>
+
+          <div class="dock-meta-line" id="dockMetaLine">
+            <span id="dockDestCount">3 曲登録済</span>
+            <span id="dockDestHint">1クリックで末尾へ追加</span>
+          </div>
+        </div>
+
+        <div class="dock-items-scroll" id="dockItemsScroll" role="list" aria-label="追加先の曲リスト"></div>
+      </aside>
+    </main>
+
+    <!-- Narrow / 200%-Zoom Thumb Destination Lock Strip -->
+    <div class="narrow-dest-bar" id="narrowDestBar" aria-label="追加先バー">
+      <button type="button" class="narrow-dest-trigger" id="btnOpenNarrowDestSheet">
+        <span class="dock-lock-badge" aria-hidden="true"></span>
+        <span class="narrow-dest-text">
+          <span class="narrow-dest-label">追加先</span>
+          <strong class="narrow-dest-name" id="narrowDestName">アニソンFunkot 2015特選 (3曲)</strong>
+        </span>
+        <span class="narrow-dest-action">切替・確認</span>
+      </button>
+    </div>
+
+    <!-- Bottom Studio Playback Strip (Always separated from Add Destination) -->
+    <footer class="playback-strip" aria-label="再生中の操作バー">
+      <div class="playback-now">
+        <span class="playing-led" id="playingLed" aria-hidden="true"></span>
+        <div class="playing-meta">
+          <div class="playing-title" id="playingTitle">Starlight Overture (Kansai Nightcore-Funkot 2015 Rework)</div>
+          <div class="playing-source" id="playingSource">再生元: 再生待ち · Murasaki Sound</div>
+        </div>
+      </div>
+
+      <div class="playback-controls">
+        <button type="button" class="transport-btn" id="btnPlayPause" aria-label="一時停止">
+          <span id="playPauseIcon">⏸</span>
+          <span class="transport-label">一時停止</span>
+        </button>
+        <button type="button" class="transport-btn" id="btnNextTrack" aria-label="次の曲へつなぐ">
+          <span>⏭</span>
+          <span class="transport-label">次の曲</span>
+        </button>
+        <button type="button" class="transport-btn is-quiet" id="btnFlagTransition" aria-label="現在のつなぎをフラグ記録">
+          <span>🚩</span>
+          <span class="transport-label">つなぎ記録</span>
+        </button>
+      </div>
+    </footer>
+
+    <!-- Non-blocking Undo / Feedback Toast -->
+    <div class="studio-toast" id="studioToast" hidden role="status" aria-live="polite">
+      <span class="toast-message" id="toastMessage"></span>
+      <button type="button" class="toast-undo-btn" id="btnToastUndo" hidden>元に戻す</button>
+    </div>
+
+    <!-- Narrow Destination Sheet Modal -->
+    <div class="modal-backdrop" id="narrowDestBackdrop" hidden>
+      <div class="sheet-dialog" role="dialog" aria-modal="true" aria-labelledby="narrowSheetTitle">
+        <div class="sheet-header">
+          <h2 id="narrowSheetTitle" class="sheet-title">追加先を切替・確認</h2>
+          <button type="button" class="drawer-close-btn" id="btnCloseNarrowDestSheet">閉じる</button>
+        </div>
+        <div class="sheet-dest-options" id="narrowDestOptions"></div>
+        <div class="sheet-dest-preview">
+          <div class="sheet-preview-label" id="narrowSheetPreviewLabel">現在の登録曲</div>
+          <div class="sheet-preview-list" id="narrowSheetPreviewList"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Track Inspector & Tag/Override Editor Modal -->
+    <div class="modal-backdrop" id="inspectorBackdrop" hidden>
+      <div class="inspector-dialog" role="dialog" aria-modal="true" aria-labelledby="inspectorTitle">
+        <div class="inspector-header">
+          <div class="inspector-heading">
+            <h2 id="inspectorTitle" class="inspector-title"></h2>
+            <p id="inspectorSubtitle" class="inspector-subtitle"></p>
+          </div>
+          <button type="button" class="drawer-close-btn" id="btnCloseInspector">閉じる</button>
+        </div>
+
+        <div class="inspector-body" id="inspectorBody">
+          <!-- File identity & disambiguation -->
+          <section class="inspector-section">
+            <h3 class="inspector-section-title">ファイル識別と解析状態</h3>
+            <div class="identity-box" id="inspectorIdentityBox"></div>
+          </section>
+
+          <!-- Tag Editor (contract-compliant: year mode, patch add/remove, draft persistence) -->
+          <section class="inspector-section">
+            <h3 class="inspector-section-title">タグ編集（音源ファイルは変更せず保存）</h3>
+            <div class="tag-editor-year-row" id="inspectorYearControls"></div>
+            <div class="tag-origin-legend">
+              <span>下書き変更: 追加は緑、除外は赤で示し「保存」で確定します</span>
+            </div>
+            <div class="inspector-tags-wrap" id="inspectorTagsWrap"></div>
+            <div class="inspector-add-tag-row">
+              <select id="newTagKind" class="inspector-select" aria-label="追加するタグの種別">
+                <option value="custom">任意タグ</option>
+                <option value="genre">ジャンル・曲調</option>
+              </select>
+              <input type="text" id="newTagInput" class="inspector-input" placeholder="新しいタグ名を入力" aria-label="新しいタグ名" />
+              <button type="button" id="btnStageNewTag" class="diag-btn">候補に追加</button>
+            </div>
+          </section>
+
+          <!-- Bar Overrides & Funkot Gate -->
+          <section class="inspector-section">
+            <h3 class="inspector-section-title">曲補正・Funkot判定</h3>
+            <div class="override-controls" id="inspectorOverrideControls"></div>
+          </section>
+
+          <!-- Save Error inside Modal -->
+          <div class="modal-error-box" id="inspectorErrorBox" hidden role="alert">
+            <strong id="inspectorErrorTitle"></strong>
+            <p id="inspectorErrorDetail"></p>
+            <div class="modal-error-actions">
+              <button type="button" class="diag-btn is-primary" id="btnReloadSnapshot">最新状態を再読込</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="inspector-footer">
+          <button type="button" class="diag-btn" id="btnInspectorCancel">キャンセル</button>
+          <button type="button" class="diag-btn" id="btnSimulateSaveError" title="保存競合の例外動作をテスト">保存競合を再現</button>
+          <button type="button" class="diag-btn is-jade" id="btnInspectorSave">タグ変更を保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./data.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
