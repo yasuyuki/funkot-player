@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Funkot Library — Overprint</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app" id="app" data-layout="wide">
+
+  <nav class="rail" aria-label="画面">
+    <div class="mark" aria-hidden="true"><span>F</span><span>k</span></div>
+    <a class="rail-item" aria-current="page" href="#">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h3v14H4zM9 5h3v14H9zM14.2 5.6l2.9-.8 3.7 13.5-2.9.8z"/></svg>
+      <span>ライブラリ</span></a>
+    <a class="rail-item" href="#" data-goto="queue">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12v2H4zm0 5h12v2H4zm0 5h8v2H4zm14-3 4 3-4 3z"/></svg>
+      <span>再生待ち</span></a>
+    <a class="rail-item" href="#" data-goto="lists">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v4H5zm0 6h14v4H5zm0 6h14v4H5z" opacity=".9"/></svg>
+      <span>プレイ<br>リスト</span></a>
+    <a class="rail-item" href="#" data-goto="history">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 1-8.5 6h2.2A7 7 0 1 0 12 5zm-1 4h2v5l4 2.3-1 1.7-5-3z"/></svg>
+      <span>履歴</span></a>
+    <span class="rail-spacer"></span>
+    <button class="rail-item" type="button" id="themeBtn" aria-label="表示テーマを切り替える">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+      <span>テーマ</span></button>
+  </nav>
+
+  <main class="main" id="main">
+    <header class="query" id="query">
+      <div class="query-top">
+        <button class="mode" type="button" id="modeBtn" aria-haspopup="true"></button>
+        <span class="query-status" id="queryStatus" role="status" aria-live="polite"></span>
+      </div>
+      <div class="query-body">
+        <div class="stamps" id="stamps"></div>
+        <div class="count" id="count" aria-hidden="true"></div>
+      </div>
+      <div class="finder" id="finder">
+        <label class="finder-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3a7 7 0 0 1 5.6 11.2l5 5-1.4 1.4-5-5A7 7 0 1 1 10 3zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/></svg>
+          <input id="finderInput" type="search" autocomplete="off" spellcheck="false"
+            placeholder="曲名、アーティスト、タグ、年で探す" aria-label="曲名、アーティスト、タグ、年で探す"
+            aria-controls="lens" aria-expanded="false" role="combobox" aria-autocomplete="list">
+          <kbd class="hint-key" aria-hidden="true">/</kbd>
+        </label>
+      </div>
+    </header>
+
+    <section class="lens" id="lens" hidden aria-label="条件を組み立てる"></section>
+
+    <section class="results" id="results" aria-label="検索結果">
+      <div class="results-bar" id="resultsBar"></div>
+      <ol class="rows" id="rows" aria-label="曲"></ol>
+      <div class="rows-empty" id="rowsEmpty" hidden></div>
+      <div class="sentinel" id="sentinel"></div>
+    </section>
+  </main>
+
+  <aside class="dock" id="dock" aria-label="追加先"></aside>
+
+  <footer class="now" id="now" aria-label="再生中"></footer>
+
+  <div class="sheet-scrim" id="scrim" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <div class="flyer" id="flyer" aria-hidden="true"></div>
+</div>
+
+<div class="demo" id="demo" aria-label="デモ用シナリオ（製品UIではない）">
+  <span>デモ</span>
+  <button type="button" data-scn="base">通常</button>
+  <button type="button" data-scn="a">3条件</button>
+  <button type="button" data-scn="eight">8条件+</button>
+  <button type="button" data-scn="zero">0件</button>
+  <button type="button" data-scn="loading">検索中</button>
+  <button type="button" data-scn="error">失敗</button>
+  <button type="button" data-scn="long">長い名前</button>
+</div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
