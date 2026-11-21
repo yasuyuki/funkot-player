@@ -18,7 +18,7 @@ Breaking it leaves checkout files behind and prevents normal task completion.
 
 ## Run and judge
 
-From the player root on Linux, use Java 21 and Python 3.12 or later:
+From the player root on Linux, use Java 25 and Python 3.12 or later:
 
 ```sh
 python3 -B verification/check_cache_lifecycle.py --setup

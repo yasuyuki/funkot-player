@@ -143,7 +143,7 @@ def main():
         / "funkot-verification/tla2tools-1.7.4.jar",
         help="TLC jar prepared by check_source_switch.py --setup",
     )
-    parser.add_argument("--java", default="java", help="Java 21 executable")
+    parser.add_argument("--java", default="java", help="Java 25 executable")
     parser.add_argument("--output", type=Path, help="new or empty evidence directory")
     args = parser.parse_args()
 
@@ -169,8 +169,8 @@ def main():
             if shared.sha256(jar) != shared.TLC_SHA256:
                 raise RuntimeError("TLC jar does not match the fixed hash")
             java_version = subprocess.check_output([args.java, "-version"], stderr=subprocess.STDOUT, text=True)
-            if re.search(r'version "21[."]', java_version) is None:
-                raise RuntimeError("Java 21 is required")
+            if re.search(r'version "25[."]', java_version) is None:
+                raise RuntimeError("Java 25 is required")
             summary["tools"] = {"tlc": "1.7.4", "jar_sha256": shared.TLC_SHA256, "java": java_version.splitlines()[0]}
             cfg = (tree / CONFIG).read_text()
             summary["rules"] = {}

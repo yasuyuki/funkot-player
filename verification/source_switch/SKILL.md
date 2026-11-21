@@ -47,7 +47,7 @@ rename before reply, so a missing reply is not proof that the command failed.
 
 ## Run and judge
 
-From the clean player root on Linux with Python 3.12 or later and Java 21:
+From the clean player root on Linux with Python 3.12 or later and Java 25:
 
 ```sh
 python3 -B -m unittest discover -s verification -p 'test_source_switch_result.py'

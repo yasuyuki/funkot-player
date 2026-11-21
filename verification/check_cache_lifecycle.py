@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--setup", action="store_true", help="prepare the existing fixed TLC jar")
     parser.add_argument("--jar", type=Path, default=Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "funkot-verification/tla2tools-1.7.4.jar")
-    parser.add_argument("--java", default="java", help="Java 21 executable")
+    parser.add_argument("--java", default="java", help="Java 25 executable")
     parser.add_argument("--output", type=Path, help="new or empty evidence directory")
     args = parser.parse_args()
     if args.setup:
@@ -35,8 +35,8 @@ def main():
             raise RuntimeError("TLC jar does not match the fixed hash")
         summary.update(revision=revision, core_revision=core_revision, tlc="1.7.4", jar_sha256=tlc.TLC_SHA256)
         java_version = subprocess.check_output([args.java, "-version"], stderr=subprocess.STDOUT, text=True)
-        if re.search(r'version "21[.\"]', java_version) is None:
-            raise RuntimeError("Java 21 is required")
+        if re.search(r'version "25[.\"]', java_version) is None:
+            raise RuntimeError("Java 25 is required")
         summary["java"] = java_version.splitlines()[0]
         with tempfile.TemporaryDirectory(prefix="cache-lifecycle-model-") as temporary:
             tree = Path(temporary)

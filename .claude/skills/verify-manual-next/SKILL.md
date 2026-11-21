@@ -88,7 +88,7 @@ at the new commit.
 
 ## Run
 
-From the player root on Linux, Python 3.12+ and Java 21, on a clean committed
+From the player root on Linux, Python 3.12+ and Java 25, on a clean committed
 checkout (the runner archives `HEAD`):
 
 ```sh

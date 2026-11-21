@@ -179,7 +179,7 @@ abstraction of this protocol. It does not import Rust. The native tests below
 check its connection to the actual implementation; the existing Kani proofs
 continue to import the pure occurrence and recovery decisions directly.
 
-On Linux with Python 3.12 or later and Java 21, from a clean player checkout:
+On Linux with Python 3.12 or later and Java 25, from a clean player checkout:
 
 ```sh
 python3 -B -m unittest discover -s verification -p 'test_source_switch_result.py'
@@ -198,7 +198,7 @@ a pin mismatch, unexpected tool bytes, timeout, incomplete exploration or an
 undetected mutation produce FAIL. A nonempty output directory is refused without
 changing old evidence. Use a new output directory for each invocation.
 
-The runner fixes TLC 1.7.4 by SHA-256 and requires Java 21. The normal model must
+The runner fixes TLC 1.7.4 by SHA-256 and requires Java 25. The normal model must
 finish with an empty work queue and no invariant violation. Three isolated cfg
 variants must terminate with TLC exit 12 and their named invariant trace:
 

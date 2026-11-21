@@ -47,7 +47,7 @@ comment still describes the code at the new commit.
 
 ## Run
 
-From the player root on Linux with Python 3.12+ and Java 21, on a clean committed
+From the player root on Linux with Python 3.12+ and Java 25, on a clean committed
 checkout (the runner archives `HEAD`, so uncommitted edits are not checked):
 
 ```sh
