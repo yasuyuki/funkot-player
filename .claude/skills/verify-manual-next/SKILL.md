@@ -7,7 +7,7 @@ description: >-
   publish_next_state, forget_discarded_manual_next, commit_future_update_on,
   revoke_reserved_on, next_dispatch_ready, the LIBRARY_ANALYSIS_BUSY handshake
   in spawn_analysis_worker, the MANUAL_NEXT_* or NEXT_PREPARED atomics, or
-  verification/manual_next. Also use it to redraw the Next button statecharts.
+  verification/manual_next. Also use it to draw a Next button violation.
 ---
 # Verify the Next button
 
@@ -17,15 +17,19 @@ carry it across threads:
 - `press_manual_next` (under `MANUAL_NEXT_REQUEST_LOCK`) records the current
   track in `MANUAL_NEXT_EXPECTED_INDEX` and sets `MANUAL_NEXT_PENDING`.
 - `dispatch_manual_next` (from the press, or from the `funkot-next-wait`
-  thread that `request_skip_next` spawns) checks the observation, sets
-  `MANUAL_NEXT_IN_FLIGHT` and sends `TransitionToNext` on `nav_tx`.
+  thread that `request_skip_next` spawns) holds the render mutex while it
+  checks the flag, the analysis, the engine's next and current track, sets
+  `MANUAL_NEXT_IN_FLIGHT` and sends `TransitionToNext` on `nav_tx`. The
+  message names no track, so the track must not change between the check and
+  the send (#166).
 - The audio callback's `publish_next_state` stores `NEXT_PREPARED` and clears
   both flags once the current track changed or the engine finished.
 - `commit_future_update_on` (a saved list or queue change) and
   `revoke_reserved_on` (a manual track takes the next slot) call
   `forget_discarded_manual_next`.
-- `spawn_analysis_worker` and `next_dispatch_ready` hand the CPU back and
-  forth through `LIBRARY_ANALYSIS_BUSY`.
+- `spawn_analysis_worker` hands the CPU back and forth with
+  `next_dispatch_ready` and `dispatch_manual_next` through
+  `LIBRARY_ANALYSIS_BUSY`.
 
 The engine in funkot-core is abstract in the model: one render drains the
 channel (last command wins), then prepares the next track, starts or ends a
@@ -45,26 +49,19 @@ transition, or finishes.
 - `NoSendDuringDecode`: no skip is sent while the analysis decodes a file.
   Harm when broken: the manual transition plan competes with the decode.
 
-## Known findings (open in player #166)
+## Why dispatch holds the render mutex (#166)
 
-The code at the sync commit breaks `SentNextNotStuck`, `OneTrackPerPress` and
-`NoSendDuringDecode`. They have one cause. `dispatch_manual_next` checks
-`snapshot.current != Some(expected)`, then in later steps stores
-`MANUAL_NEXT_IN_FLIGHT`, sends, and stores `MANUAL_NEXT_PENDING = false`. If its
-thread stalls between the check and the send while the track changes:
+Before #166, `dispatch_manual_next` checked the observation and then sent
+without the mutex. A sender that stalled between the two while the track
+changed sent a stale skip: the engine skipped the new track
+(`OneTrackPerPress`), the skip arrived during a decode (`NoSendDuringDecode`),
+or the sender's `MANUAL_NEXT_PENDING.store(false)` erased a press on the new
+track and left `IN_FLIGHT` set (`SentNextNotStuck`). The `unlocked` break
+restores that code and must still fail.
 
-1. The callback completes the press and clears both flags. The analysis sees
-   no press and starts decoding. The sender wakes and sends: `NoSendDuringDecode`.
-2. If the next track is ready by then, the engine accepts that skip on the new
-   track: `OneTrackPerPress`. Replayed in a scratch test: track 2 played 1 s of 120.
-3. If you press Next on the new track before the sender wakes, the sender's
-   `MANUAL_NEXT_PENDING.store(false)` erases your press, the wait thread exits,
-   and the engine drops the stale skip because no next track is ready.
-   `IN_FLIGHT` stays set with `expected` equal to the current track:
-   `SentNextNotStuck`. Replayed in a scratch test: the next press was `Ignored`.
-
-The stall must last through a whole transition, so it needs heavy scheduling
-delay. The model has no time, so it cannot tell how likely that is.
+The `LIBRARY_ANALYSIS_BUSY` load inside the mutex is needed too: the caller's
+`next_dispatch_ready` may have passed for an earlier press, before the
+analysis started decoding. The `no_busy_check` break removes that load.
 
 ## When to use
 
@@ -98,17 +95,18 @@ python3 -B verification/check_manual_next.py --output "$(mktemp -d)/manual-next-
 ```
 
 `--setup` downloads the pinned TLC 1.7.4 jar into `~/.cache/funkot-verification`.
-Pass `--jar` and `--java` when they live elsewhere. `PressNotLost` explores
-the whole graph (about 20 million distinct states, 2 to 5 minutes with 4
-cores); the other runs stop at their counterexample. CI runs it in the
+Pass `--jar` and `--java` when they live elsewhere. Each rule explores the
+whole graph (about 950 thousand distinct states, seconds with 8 workers); the
+variants stop at their counterexample. CI runs it in the
 `Source switch model` job and uploads `manual-next-proof`.
 
 Read `summary.json`:
 
+- `PASS`: `FINDINGS` is empty, every rule holds over the whole graph, and each
+  `Break` variant broke its rule.
 - `KNOWN_FINDINGS`: every rule in `FINDINGS` still breaks, every other rule
-  holds over the whole graph, and each `Break` variant broke its rule. No new
-  break. The findings are still open.
-- `PASS`: `FINDINGS` is empty and every rule holds.
+  holds, and each variant broke its rule. Use `FINDINGS` only for a break
+  reported as a product bug and still open.
 - `FAIL` with `error`: read the message. Never report it as a pass.
 
 `summary.json` also records the revision, source hashes, state counts and
@@ -127,8 +125,8 @@ shortest path in plain words, one region for each thread.
   as its own action (one atomic load, store or send per action), then update
   `WRITERS`. Do not edit the count alone.
 - `missing the required checked counterexample` on a rule in `FINDINGS`: that
-  rule now holds. If the #166 fix landed, model the fix, remove the rule from
-  `FINDINGS`, and close #166. Otherwise the model drifted.
+  rule now holds. If the fix for that finding landed, model the fix and remove
+  the rule from `FINDINGS`. Otherwise the model drifted.
 - `missing the required checked counterexample` on a variant: the model no
   longer notices that break. Find which action stopped depending on it.
 - `TLC did not finish the complete safety check` on a rule not in `FINDINGS`:
@@ -148,12 +146,9 @@ try_send, or one section under the render mutex; split a read-then-write into
 two actions. Rerun, read the result with `/statechart`, and move the sync
 commit.
 
-If the change alters a chart, redraw it with `/statechart` and
-`verification/manual_next/view.mjs`: `Chart.cfg` into `chart.mmd` (the
-`NoSendDuringDecode` and `OneTrackPerPress` paths) and `ChartStuck.cfg` into
-`stuck.mmd` (the `SentNextNotStuck` path). The full graph is far above the
-chart budget, so both charts show bug paths; once the findings are fixed they
-show nothing, and a smaller config is needed for a whole chart.
+No statechart is committed: the full graph is far above the chart budget,
+and the bug-path charts were removed with the #166 fix. To draw a violation,
+run `/statechart` on its TLC log with `verification/manual_next/view.mjs`.
 
 ## Scope
 

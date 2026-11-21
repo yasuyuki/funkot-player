@@ -20,17 +20,17 @@ SOURCE = "src-tauri/src/lib.rs"
 PLAYER_SOURCES = (SOURCE, SPEC, CONFIG, "verification/check_manual_next.py")
 
 RULES = ("SentNextNotStuck", "PressNotLost", "OneTrackPerPress", "NoSendDuringDecode")
-# Rules the code at the sync commit breaks (#166). Each must still break;
-# every other rule must hold. Remove a rule here only with the fix that
-# makes it hold.
-FINDINGS = ("SentNextNotStuck", "OneTrackPerPress", "NoSendDuringDecode")
+# Rules the code at the sync commit breaks. Each must still break; every
+# other rule must hold. Remove a rule here only with the fix that makes it
+# hold.
+FINDINGS = ()
 CODE = '  Break = "none"\n'
 # Sensitivity: each deliberate break of the code must break its rule.
 VARIANTS = (
     ("no_forget", "SentNextNotStuck"),
-    ("no_recheck", "SentNextNotStuck"),
+    ("unlocked", "SentNextNotStuck"),
     ("no_waiter", "PressNotLost"),
-    ("no_snapshot_check", "OneTrackPerPress"),
+    ("no_current_check", "OneTrackPerPress"),
     ("no_busy_check", "NoSendDuringDecode"),
 )
 
@@ -41,7 +41,6 @@ WRITES = (
     "MANUAL_NEXT_PENDING.store(",
     "MANUAL_NEXT_IN_FLIGHT.store(",
     "MANUAL_NEXT_EXPECTED_INDEX.store(",
-    "MANUAL_NEXT_DISCARDS.fetch_add(",
     "NEXT_PREPARED.store(",
     "LIBRARY_ANALYSIS_BUSY.store(",
     "nav_tx.try_send(",
@@ -57,7 +56,6 @@ WRITERS = {
     },
     "forget_discarded_manual_next": {
         "NEXT_PREPARED.store(": 1,
-        "MANUAL_NEXT_DISCARDS.fetch_add(": 1,
         "MANUAL_NEXT_IN_FLIGHT.store(": 1,
     },
     "commit_future_update_on": {"forget_discarded_manual_next()": 1},
@@ -68,13 +66,13 @@ WRITERS = {
     },
     "dispatch_manual_next": {
         "MANUAL_NEXT_PENDING.store(": 3,
-        "MANUAL_NEXT_IN_FLIGHT.store(": 3,
+        "MANUAL_NEXT_IN_FLIGHT.store(": 2,
         "nav_tx.try_send(": 1,
     },
     "revoke_reserved_on": {"forget_discarded_manual_next()": 1},
     "spawn_analysis_worker": {"LIBRARY_ANALYSIS_BUSY.store(": 3},
 }
-SOURCE_REFERENCE_COUNT = 42
+SOURCE_REFERENCE_COUNT = 40
 SOURCE_REFERENCE = re.compile(
     r"\\\*\s+lib\.rs:(?P<function>[A-Za-z_][A-Za-z0-9_]*)\s+\|\s+(?P<fragment>.+?)\s*$"
 )

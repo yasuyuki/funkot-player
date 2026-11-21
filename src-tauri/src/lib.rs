@@ -1749,7 +1749,6 @@ fn press_manual_next(playback: &Playback) -> Result<ManualNextPress, String> {
 /// to publish one again; that callback drains the channel first.
 fn forget_discarded_manual_next() {
     NEXT_PREPARED.store(false, Ordering::SeqCst);
-    MANUAL_NEXT_DISCARDS.fetch_add(1, Ordering::SeqCst);
     MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::SeqCst);
 }
 
@@ -1794,13 +1793,17 @@ fn next_dispatch_ready() -> bool {
 
 fn dispatch_manual_next(playback: &Playback) -> Result<bool, String> {
     use std::sync::mpsc::TrySendError;
+    // The message names no track, so the track must not change between the
+    // check and the send (#166). Tracks change, the callback clears the
+    // flags and discards drain the channel only under the render lock.
+    let render = playback.render.lock().unwrap_or_else(|e| e.into_inner());
     if !MANUAL_NEXT_PENDING.load(Ordering::Acquire) { return Ok(false); }
-    // Read before NEXT_PREPARED: a discard after this read is seen below.
-    let discards = MANUAL_NEXT_DISCARDS.load(Ordering::SeqCst);
-    if !NEXT_PREPARED.load(Ordering::SeqCst) { return Ok(false); }
+    // The caller's readiness check may belong to an earlier press; the
+    // analysis may have started decoding since.
+    if LIBRARY_ANALYSIS_BUSY.load(Ordering::Acquire) { return Ok(false); }
+    if render.engine.next_track_path().is_none() { return Ok(false); }
     let expected = MANUAL_NEXT_EXPECTED_INDEX.load(Ordering::Acquire);
-    let Some(snapshot) = playback.observation.read() else { return Ok(false); };
-    if snapshot.current != Some(expected) || snapshot.finished {
+    if render.engine.current_index() != Some(expected) || render.engine.is_finished() {
         MANUAL_NEXT_PENDING.store(false, Ordering::Release);
         return Ok(false);
     }
@@ -1809,12 +1812,6 @@ fn dispatch_manual_next(playback: &Playback) -> Result<bool, String> {
     match playback.nav_tx.try_send(NavAction::TransitionToNext) {
         Ok(()) => {
             MANUAL_NEXT_PENDING.store(false, Ordering::Release);
-            // A discard that ran between the readiness check and the send may
-            // have cleared the flag before it was set, or drained the channel
-            // before the send. Either way this Next may be dropped unseen.
-            if MANUAL_NEXT_DISCARDS.load(Ordering::SeqCst) != discards {
-                MANUAL_NEXT_IN_FLIGHT.store(false, Ordering::SeqCst);
-            }
             Ok(true)
         }
         Err(error) => {
@@ -4333,8 +4330,6 @@ static ANALYZING: AtomicBool = AtomicBool::new(false);
 static LIBRARY_ANALYSIS_BUSY: AtomicBool = AtomicBool::new(false);
 static MANUAL_NEXT_PENDING: AtomicBool = AtomicBool::new(false);
 static MANUAL_NEXT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-/// Counts engine discards of queued navigation; see `forget_discarded_manual_next`.
-static MANUAL_NEXT_DISCARDS: AtomicU64 = AtomicU64::new(0);
 static MANUAL_NEXT_EXPECTED_INDEX: AtomicUsize = AtomicUsize::new(0);
 static MANUAL_NEXT_REQUEST_LOCK: Mutex<()> = Mutex::new(());
 
