@@ -113,14 +113,15 @@
           <Library />
         </UiBoundary>
       </div>
-      <div class="pane history" class:active={ui.playSub === "history"}>
-        <UiBoundary>
-          <History />
-        </UiBoundary>
-      </div>
+      <!-- Up next sits beside the Library: a row's + lands in the column next to it. -->
       <div class="pane queue" class:active={ui.playSub === "queue"}>
         <UiBoundary>
           <Queue />
+        </UiBoundary>
+      </div>
+      <div class="pane history" class:active={ui.playSub === "history"}>
+        <UiBoundary>
+          <History />
         </UiBoundary>
       </div>
     </div>
@@ -195,7 +196,7 @@
   }
 
   @container shell (min-width: 72rem) {
-    .panes { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); }
+    .panes { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 0.85fr); }
     .panes > .pane.queue,
     .panes > .pane.library,
     .panes > .pane.history,

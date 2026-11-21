@@ -481,7 +481,7 @@ test("enabled button roles show hover feedback without changing disabled control
     await page.getByRole("tab", { name: "Library" }).click();
     await page.locator("section.library").getByRole("button", { name: "Filter", exact: true }).click();
   }
-  await expectHoverFeedback(page.locator(".library .sort"));
+  await expectHoverFeedback(page.locator(".library button.filter").first());
   await page.screenshot({ path: testInfo.outputPath(`${testInfo.project.name}-button-hover.jpg`), quality: 70, fullPage: true, animations: "disabled" });
 
   const menuButton = page.getByRole("button", { name: "menu" });

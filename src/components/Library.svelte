@@ -2,14 +2,11 @@
   import { store } from "../lib/state.svelte";
   import { openMusicDir, type TrackRow } from "../lib/tauri";
   import { showLibraryEmpty } from "../lib/library-empty";
-  import {
-    nextLibrarySortKey,
-    sortLibraryRows,
-    type LibrarySortKey,
-  } from "../lib/library-sort";
+  import { sortLibraryRows, type LibrarySortKey } from "../lib/library-sort";
+  import { ambiguousPaths, upNextPositions } from "../lib/library-rows";
   import { toast } from "../lib/toast.svelte";
   import { i18n } from "../lib/i18n.svelte";
-  import { enqueueManyMessage, musicDirErrorMessage } from "../lib/messages";
+  import { enqueueManyMessage, musicDirErrorMessage, phaseLabel } from "../lib/messages";
   import {
     addAll,
     clearSelection,
@@ -19,7 +16,7 @@
   import SelectionBar from "./SelectionBar.svelte";
   import PlaylistSource from "./PlaylistSource.svelte";
   import TrackMenu from "./TrackMenu.svelte";
-  import { createLongPress, type MenuPoint } from "../lib/track-menu";
+  import { createLongPress, shownVerdict, type MenuPoint } from "../lib/track-menu";
   import { tagTargets, tagEditSelection, enqueueSelection } from "../lib/tag-edit";
   import { tagEditorSession } from "../lib/tag-editor.svelte";
   import { buildTagIndex, matchesTagFilter, type TagChoice, type TagFilter as TagFilterState } from "../lib/tag-filter";
@@ -96,8 +93,35 @@
   }).length);
   let allState = $derived(selectAllState(selected, visiblePaths));
 
-  function toggleSort() {
-    sortKey = nextLibrarySortKey(sortKey);
+  // What the list already knows about playback, shown where the eye is while browsing.
+  let playingPath = $derived(store.player?.now_playing ?? null);
+  let playingWord = $derived(phaseLabel(t, store.player?.phase ?? "idle"));
+  let upNext = $derived(upNextPositions(store.queue));
+  let ambiguous = $derived(ambiguousPaths(rows));
+
+  // One row at a time opens in place to judge and organise it; the list stays a list.
+  let openPath = $state<string | null>(null);
+  let detailBusy = $state(false);
+  function toggleDetails(path: string) { openPath = openPath === path ? null : path; }
+  function closeDetails(event: KeyboardEvent, path: string) {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    openPath = null;
+    document.getElementById(`row-${path}`)?.focus();
+  }
+  async function setVerdict(row: TrackRow, verdict: boolean) {
+    if (detailBusy) return;
+    detailBusy = true;
+    const previous = row.label;
+    try {
+      const updated = await store.doSetLabel(row.path, verdict);
+      if (updated) toast.show(verdict ? t.labeledFunkot : t.labeledNotFunkot, async () => (await store.doSetLabel(row.path, previous)) !== null);
+    } finally {
+      detailBusy = false;
+    }
+  }
+  function tagValues(path: string): string[] {
+    return tagIndex.tracks.get(path)?.state?.effective.map((tag) => tag.value) ?? [];
   }
 
   function toggleNewOnly() {
@@ -215,9 +239,11 @@
       aria-pressed={newOnly}
       onclick={toggleNewOnly}
     >{t.newOnly}</button>
-    <button type="button" class="sort" onclick={toggleSort}>
-      {sortKey === "recent" ? t.sortRecent : sortKey === "title" ? t.sortTitle : t.sortArtist}
-    </button>
+    <select class="sort" aria-label={t.sortLabel} title={t.sortLabel} bind:value={sortKey}>
+      <option value="recent">{t.sortRecent}</option>
+      <option value="title">{t.sortTitle}</option>
+      <option value="artist">{t.sortArtist}</option>
+    </select>
     </div>
     <button
       type="button"
@@ -304,41 +330,54 @@
   {:else}
     <ul class="list">
       {#each rows as row (row.path)}
+        {@const open = openPath === row.path && !selectMode}
+        {@const position = upNext.get(row.path)}
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
         <li
           class="row"
           class:non-funkot={isNonFunkot(row)}
+          class:playing={row.path === playingPath}
+          class:open
           onpointerdown={(e) => press.down(e, row.path)}
           onpointermove={press.move}
           onpointerup={press.cancel}
           onpointercancel={press.cancel}
           oncontextmenu={(e) => press.context(e, row.path)}
+          onkeydown={(e) => open && closeDetails(e, row.path)}
         >
+          {#snippet text()}
+            <span class="title">
+              <span class="title-text">{row.title}</span>
+              {#if row.path === playingPath}<span class="state now">{playingWord}</span>
+              {:else if position}<span class="state next">{t.rowUpNext(position)}</span>{/if}
+              {#if store.isNewArrival(row.path)}
+                <span class="new-badge">NEW</span>
+              {/if}
+            </span>
+            {#if selectMode && (!row.content_hash || store.trackTags?.tracks[row.path]?.content_hash !== row.content_hash)}
+              <span class="identity-unavailable">{t.tagIdentityUnavailable}</span>
+            {/if}
+            <span class="sub">
+              <span class="artist">{row.artist || t.noLabel}</span>
+              {#if ambiguous.has(row.path)}<span class="file">{store.relName(row.path)}</span>
+              {:else}<TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} />{/if}
+              <span class="dur">{formatDuration(row.duration_secs)}</span>
+            </span>
+          {/snippet}
           {#if selectMode}
             <input
               type="checkbox"
               class="pick"
+              id={`pick-${row.path}`}
               checked={selected.has(row.path)}
               onchange={() => onToggleRow(row.path)}
               aria-label={t.selectTrackLabel(row.title)}
             />
-          {/if}
-          <div class="text">
-            <div class="title">
-              <span class="title-text">{row.title}</span>
-              {#if store.isNewArrival(row.path)}
-                <span class="new-badge">NEW</span>
-              {/if}
-            </div>
-            {#if selectMode && (!row.content_hash || store.trackTags?.tracks[row.path]?.content_hash !== row.content_hash)}
-              <span class="identity-unavailable">{t.tagIdentityUnavailable}</span>
-            {/if}
-            <div class="sub">
-              <span class="artist">{row.artist || t.noLabel}</span>
-              <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} />
-              <span class="dur">{formatDuration(row.duration_secs)}</span>
-            </div>
-          </div>
-          {#if !selectMode}
+            <label class="text" for={`pick-${row.path}`}>{@render text()}</label>
+          {:else}
+            <button type="button" class="text row-select quiet" id={`row-${row.path}`} aria-expanded={open}
+              aria-controls={`detail-${row.path}`} aria-label={t.trackDetailsShow(row.title)}
+              onclick={() => toggleDetails(row.path)}>{@render text()}</button>
             <FavoriteButton path={row.path} contentHash={row.content_hash} title={row.title} />
             <button
               type="button"
@@ -347,6 +386,31 @@
               onclick={() => onAdd(row.path)}
               aria-label={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)}
             >+</button>
+          {/if}
+          {#if open}
+            {@const verdict = shownVerdict(row)}
+            {@const tagReady = !!row.content_hash && store.trackTags?.tracks[row.path]?.content_hash === row.content_hash}
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <div class="detail" id={`detail-${row.path}`} role="group" aria-label={row.title}
+              onpointerdown={(e) => e.stopPropagation()} oncontextmenu={(e) => e.stopPropagation()}>
+              <p class="full-title">{row.title}</p>
+              <p class="full-artist">{row.artist || t.noLabel}</p>
+              <dl>
+                <dt>{t.trackLength}</dt><dd>{formatDuration(row.duration_secs)}</dd>
+                <dt>{t.trackFile}</dt><dd class="path">{store.relName(row.path)}</dd>
+                {#if tagValues(row.path).length}<dt>{t.trackTags}</dt><dd>{tagValues(row.path).join(", ")}</dd>{/if}
+              </dl>
+              <div class="detail-actions">
+                <button type="button" disabled={!tagReady}
+                  title={tagReady ? undefined : t.tagIdentityUnavailable}
+                  onclick={(e) => openTagEditor([row], row.title || store.relName(row.path), e.currentTarget)}>{t.tagEdit}</button>
+                <span class="verdict" role="radiogroup" aria-label={t.labelMenuLabel}>
+                  <button type="button" role="radio" aria-checked={verdict === true} disabled={detailBusy} onclick={() => setVerdict(row, true)}>{t.funkot}</button>
+                  <button type="button" role="radio" aria-checked={verdict === false} disabled={detailBusy} onclick={() => setVerdict(row, false)}>{t.notFunkot}</button>
+                </span>
+                <button type="button" class="quiet close" onclick={() => { openPath = null; document.getElementById(`row-${row.path}`)?.focus(); }}>{t.trackDetailsClose}</button>
+              </div>
+            </div>
           {/if}
         </li>
       {/each}
@@ -470,6 +534,7 @@
 
   .row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-md);
     min-height: var(--row-min);
@@ -487,10 +552,78 @@
   .text {
     min-width: 0;
     flex: 1;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
   }
+  /* The row text is the way into the row's details: a plain surface until pointed at. */
+  button.text {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    line-height: 1.25;
+    color: inherit;
+    text-align: start;
+    overflow-wrap: normal;
+    cursor: pointer;
+  }
+  button.text:hover:not(:disabled) { background: var(--color-hover-bg); }
+  button.text:active:not(:disabled) { transform: none; }
+  button.text:focus-visible { outline-offset: -2px; }
+  label.text { cursor: pointer; }
+
+  .state {
+    flex: 0 0 auto;
+    font-size: var(--font-size-sm);
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+  .state.now { color: var(--color-status-playing); font-weight: 600; }
+  .state.now::before { content: "▶ "; }
+  .state.next { color: var(--color-text-dim); }
+  .row.playing { box-shadow: inset 3px 0 0 var(--color-status-playing); padding-left: var(--space-sm); }
+
+  .file {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 55%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .row.open { background: var(--color-panel-bg); }
+  .detail {
+    flex: 1 0 100%;
+    box-sizing: border-box;
+    padding: var(--space-sm) var(--space-md) var(--space-md);
+    border-top: 1px solid var(--color-border);
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .full-title { margin: 0; font-size: var(--font-size-lg); font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+  .full-artist { margin: 0 0 var(--space-sm); color: var(--color-text-dim); overflow-wrap: anywhere; }
+  dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--space-xs) var(--space-md);
+    margin: 0 0 var(--space-md);
+    font-size: var(--font-size-sm);
+  }
+  dt { color: var(--color-text-dim); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  dd.path { font-variant-numeric: tabular-nums; }
+  .detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); }
+  .verdict { display: inline-flex; }
+  .verdict button:first-child { border-start-end-radius: 0; border-end-end-radius: 0; }
+  .verdict button:last-child { border-start-start-radius: 0; border-end-start-radius: 0; border-inline-start-width: 0; }
+  .verdict button[aria-checked="true"] { background: var(--color-accent-bg); color: var(--color-accent-text); }
+  .detail-actions .close { margin-inline-start: auto; }
 
   .title {
     display: flex;
+    font-weight: 500;
     align-items: center;
     gap: var(--space-sm);
     font-size: var(--font-size-md);

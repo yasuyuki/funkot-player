@@ -35,14 +35,6 @@ export function sortLibraryRows(
   });
 }
 
-export function nextLibrarySortKey(
-  current: LibrarySortKey,
-): LibrarySortKey {
-  if (current === "recent") return "title";
-  if (current === "title") return "artist";
-  return "recent";
-}
-
 export function preserveLibraryAddedOrder(
   previous: TrackRow | undefined,
   incoming: TrackRow,

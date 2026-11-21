@@ -11,7 +11,7 @@ const transformed = await transformWithEsbuild(source, sourceUrl.pathname, {
   format: "esm",
 });
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(transformed.code).toString("base64")}`;
-const { nextLibrarySortKey, preserveLibraryAddedOrder, sortLibraryRows } =
+const { preserveLibraryAddedOrder, sortLibraryRows } =
   await import(moduleUrl);
 
 function row(path, title, artist, addedOrder) {
@@ -41,12 +41,6 @@ test("recent breaks a scan-batch tie by title then path", () => {
     sortLibraryRows(rows, "recent").map((r) => r.path),
     ["/a", "/b", "/z"],
   );
-});
-
-test("sort control cycles recent, title, artist", () => {
-  assert.equal(nextLibrarySortKey("recent"), "title");
-  assert.equal(nextLibrarySortKey("title"), "artist");
-  assert.equal(nextLibrarySortKey("artist"), "recent");
 });
 
 test("partial row replacement preserves a known addition time", () => {
