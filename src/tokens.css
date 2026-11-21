@@ -74,6 +74,23 @@
   --color-log-bg: var(--gray-1);
   --browse-gutter: 1.5rem;
 
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  --color-row-playing-bg: var(--green-2);
+  --color-row-playing-border: var(--green-9);
+  --color-row-queued-border: var(--indigo-8);
+  --color-badge-playing-bg: var(--green-3);
+  --color-badge-playing-text: var(--green-11);
+  --color-badge-queued-bg: var(--indigo-3);
+  --color-badge-queued-text: var(--indigo-11);
+  --color-pill-year-bg: var(--gray-3);
+  --color-pill-year-text: var(--gray-12);
+  --color-pill-genre-bg: var(--indigo-3);
+  --color-pill-genre-text: var(--indigo-11);
+  --color-pill-custom-bg: var(--gray-4);
+  --color-pill-custom-text: var(--gray-11);
+  --color-dest-bg: var(--gray-2);
+  --color-dest-border: var(--color-input-border);
+
   --space-xs: 0.3rem;
   --space-sm: 0.4rem;
   --space-md: 0.6rem;
@@ -132,6 +149,10 @@
   --color-backdrop: rgba(0, 0, 0, 0.38);
   --color-popup-shadow: rgba(0, 0, 0, 0.2);
   --color-tap-highlight: rgba(62, 99, 221, 0.2);
+  --color-badge-playing-text: var(--green-12);
+  --color-badge-queued-text: var(--indigo-12);
+  --color-pill-genre-text: var(--indigo-12);
+  --color-pill-custom-text: var(--gray-12);
 }
 
 :root[data-density="touch"] {
@@ -239,18 +260,18 @@ button.primary:active:not(:disabled), button[aria-pressed="true"]:active:not(:di
 button.danger { color: var(--color-status-failed); }
 button.primary.danger { background: var(--color-danger-bg); color: var(--color-danger-text); }
 button.primary.danger:hover:not(:disabled), button.primary.danger:active:not(:disabled) { background: var(--color-danger-hover-bg); }
-button.quiet, button.menu-item, button[role="menuitem"] {
+button.quiet, button.menu-item, button[role="menuitem"], button[role="menuitemcheckbox"], button[role="menuitemradio"] {
   background: transparent;
   border-color: transparent;
 }
-button.quiet:hover:not(:disabled), button.menu-item:hover:not(:disabled), button[role="menuitem"]:hover:not(:disabled) {
+button.quiet:hover:not(:disabled), button.menu-item:hover:not(:disabled), button[role="menuitem"]:hover:not(:disabled), button[role="menuitemcheckbox"]:hover:not(:disabled), button[role="menuitemradio"]:hover:not(:disabled) {
   background: var(--color-hover-bg);
   border-color: var(--color-text-dim);
 }
-button.quiet:active:not(:disabled), button.menu-item:active:not(:disabled), button[role="menuitem"]:active:not(:disabled) {
+button.quiet:active:not(:disabled), button.menu-item:active:not(:disabled), button[role="menuitem"]:active:not(:disabled), button[role="menuitemcheckbox"]:active:not(:disabled), button[role="menuitemradio"]:active:not(:disabled) {
   background: var(--color-pressed-bg);
 }
-button.menu-item, button[role="menuitem"] {
+button.menu-item, button[role="menuitem"], button[role="menuitemcheckbox"], button[role="menuitemradio"] {
   display: flex;
   align-items: center;
   gap: var(--space-sm);

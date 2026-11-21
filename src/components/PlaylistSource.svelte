@@ -39,7 +39,7 @@
 
 <div class:compact class="source">
   {#if compact}<span class="destination">{t.playlistDestination("")}</span>{/if}
-  <button type="button" class="quiet choose" bind:this={chooseButton} aria-label={compact ? t.playlistDestination(current) : current} aria-expanded={open} onclick={() => (open ? closePicker() : (open = true))} title={current}>{current}<span aria-hidden="true">▾</span></button>
+  <button type="button" class="quiet choose" bind:this={chooseButton} aria-label={compact ? t.playlistDestination(current) : current} aria-expanded={open} onclick={() => (open ? closePicker() : (open = true))} title={current}><span class="choose-label">{current}</span><svg class="chev" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M2.5 4.25 6 7.75l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
   {#if open}
     <div class="picker" role="dialog" aria-label={t.playlistChoose}>
       <button type="button" class="quiet picker-close" onclick={closePicker}>{t.close}</button>
@@ -58,7 +58,9 @@
 
 <style>
   .source { position: relative; display: flex; gap: var(--space-sm); align-items: center; min-width: 0; }
-  .choose { width: auto; min-width: var(--control-target); flex: 1 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .choose { display: inline-flex; align-items: center; gap: 0.25rem; width: auto; min-width: var(--control-target); flex: 1 1 auto; max-width: 100%; overflow: hidden; white-space: nowrap; }
+  .choose-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chev { flex: 0 0 auto; width: 0.75rem; height: 0.75rem; }
   .compact { min-width: 0; max-width: 70%; }
   .compact .destination { flex: 0 0 auto; }
   .destination { color: var(--color-text-dim); font-size: var(--font-size-sm); white-space: nowrap; }

@@ -11,6 +11,7 @@
     path = null,
     title: explicitTitle,
     at,
+    opener = null,
     onclose,
     onClearPlayCount,
     onRemoveFromPlayLog,
@@ -18,6 +19,7 @@
     path?: string | null;
     title?: string;
     at: MenuPoint;
+    opener?: HTMLElement | null;
     onclose: () => void;
     onClearPlayCount?: () => Promise<void> | void;
     onRemoveFromPlayLog?: () => Promise<void> | void;
@@ -33,16 +35,26 @@
   let busy = $state(false);
   let menuEl = $state<HTMLDivElement | null>(null);
   let pos = $state<{ left: number; top: number } | null>(null);
-  const sourceElement = untrack(() => document.elementFromPoint(at.x, at.y)?.closest<HTMLElement>("li")
-    ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null));
+  const sourceElement = untrack(() => opener
+    ?? document.elementFromPoint(at.x, at.y)?.closest<HTMLElement>("li")
+    ?? (document.activeElement instanceof HTMLElement ? (document.activeElement.closest<HTMLElement>("li") ?? document.activeElement) : null));
+  function closeWithReturn() {
+    const target = opener;
+    onclose();
+    if (target) {
+      queueMicrotask(() => {
+        if (target.isConnected) target.focus({ preventScroll: true });
+      });
+    }
+  }
   function editTags() {
     if (!row || !store.trackTags) { toast.notify(t.tagError("identity_unavailable")); return; }
     const targets = tagTargets([row], store.trackTags);
     if (targets.length !== 1) { toast.notify(t.tagError("identity_unavailable")); return; }
     const target = targets[0]!;
-    const opener = sourceElement;
-    if (opener) opener.tabIndex = -1;
-    tagEditorSession.open({ targets, revision: store.trackTags.revision, title, initialStates: [store.trackTags.tracks[target.path]!], opener });
+    const editorOpener = sourceElement;
+    if (editorOpener && editorOpener.tagName === "LI") editorOpener.tabIndex = -1;
+    tagEditorSession.open({ targets, revision: store.trackTags.revision, title, initialStates: [store.trackTags.tracks[target.path]!], opener: editorOpener });
     onclose();
   }
 
@@ -73,7 +85,7 @@
       onclose();
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onclose();
+      if (event.key === "Escape") closeWithReturn();
     };
     const onScroll = () => onclose();
     document.addEventListener("pointerdown", onPointerDown, true);

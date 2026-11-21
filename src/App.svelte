@@ -195,7 +195,10 @@
   }
 
   @container shell (min-width: 72rem) {
-    .panes { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); }
+    .panes { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1.05fr) minmax(0, 0.85fr); }
+    .panes > .pane.library { order: 1; }
+    .panes > .pane.queue { order: 2; }
+    .panes > .pane.history { order: 3; }
     .panes > .pane.queue,
     .panes > .pane.library,
     .panes > .pane.history,
