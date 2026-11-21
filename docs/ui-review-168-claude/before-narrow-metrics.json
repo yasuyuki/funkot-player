@@ -1,0 +1,50 @@
+{
+  "variant": "before",
+  "project": "narrow",
+  "library": {
+    "viewport": "412x915",
+    "libraryPaneWidth": 396,
+    "listTop": 116,
+    "toolsHeight": 57,
+    "rowHeight": 48,
+    "rowsFullyVisible": 14,
+    "controlsAboveList": 4,
+    "titleAvgWidth": 113,
+    "titlesTruncated": "3/14",
+    "artistAvgWidth": 179,
+    "artistsTruncated": "3/14",
+    "addToTargetDistance": 72
+  },
+  "search": {
+    "viewport": "412x915",
+    "libraryPaneWidth": 396,
+    "listTop": 116,
+    "toolsHeight": 57,
+    "rowHeight": 48,
+    "rowsFullyVisible": 4,
+    "controlsAboveList": 4,
+    "titleAvgWidth": 289,
+    "titlesTruncated": "4/4",
+    "artistAvgWidth": 103,
+    "artistsTruncated": "4/4",
+    "addToTargetDistance": 72
+  },
+  "addLabel": "Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+  "menuItems": [
+    "Edit tags"
+  ],
+  "tabOrder": [
+    "BUTTON:Select several tracks",
+    "BUTTON:Filter",
+    "BUTTON:Adding to: Night set with an intentionally very long name",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "BUTTON:Funkot"
+  ]
+}

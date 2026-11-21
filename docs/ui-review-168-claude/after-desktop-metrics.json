@@ -1,0 +1,57 @@
+{
+  "variant": "after",
+  "project": "desktop",
+  "library": {
+    "viewport": "1280x900",
+    "libraryPaneWidth": 541,
+    "listTop": 88,
+    "toolsHeight": 41,
+    "rowHeight": 40,
+    "rowsFullyVisible": 19,
+    "controlsAboveList": 5,
+    "titleAvgWidth": 124,
+    "titlesTruncated": "3/19",
+    "artistAvgWidth": 335,
+    "artistsTruncated": "3/19",
+    "addToTargetDistance": 234
+  },
+  "search": {
+    "viewport": "1280x900",
+    "libraryPaneWidth": 541,
+    "listTop": 88,
+    "toolsHeight": 41,
+    "rowHeight": 40,
+    "rowsFullyVisible": 4,
+    "controlsAboveList": 5,
+    "titleAvgWidth": 438,
+    "titlesTruncated": "4/4",
+    "artistAvgWidth": 329,
+    "artistsTruncated": "4/4",
+    "addToTargetDistance": 234
+  },
+  "addLabel": "Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+  "menuItems": [
+    "Edit tags"
+  ],
+  "detailActions": [
+    "Edit tags",
+    "Funkot",
+    "Non-Funkot",
+    "Close details"
+  ],
+  "detailFlow": "click/Enter opens, label request sent, Escape closes and returns focus, Edit tags opens the editor",
+  "tabOrder": [
+    "BUTTON:New only",
+    "SELECT:Sort",
+    "BUTTON:Select several tracks",
+    "BUTTON:Filter",
+    "row:Details for Midnight on the coast — extended festival reconstruction with a very long title",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Details for Midnight on the coast — extended festival reconstruction with a very long title",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Edit tags",
+    "row:Funkot"
+  ]
+}

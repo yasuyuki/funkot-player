@@ -1,0 +1,57 @@
+{
+  "variant": "after",
+  "project": "narrow",
+  "library": {
+    "viewport": "412x915",
+    "libraryPaneWidth": 396,
+    "listTop": 116,
+    "toolsHeight": 57,
+    "rowHeight": 48,
+    "rowsFullyVisible": 14,
+    "controlsAboveList": 4,
+    "titleAvgWidth": 110,
+    "titlesTruncated": "3/14",
+    "artistAvgWidth": 170,
+    "artistsTruncated": "3/14",
+    "addToTargetDistance": 72
+  },
+  "search": {
+    "viewport": "412x915",
+    "libraryPaneWidth": 396,
+    "listTop": 116,
+    "toolsHeight": 57,
+    "rowHeight": 48,
+    "rowsFullyVisible": 4,
+    "controlsAboveList": 4,
+    "titleAvgWidth": 270,
+    "titlesTruncated": "4/4",
+    "artistAvgWidth": 161,
+    "artistsTruncated": "4/4",
+    "addToTargetDistance": 72
+  },
+  "addLabel": "Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+  "menuItems": [
+    "Edit tags"
+  ],
+  "detailActions": [
+    "Edit tags",
+    "Funkot",
+    "Non-Funkot",
+    "Close details"
+  ],
+  "detailFlow": "click/Enter opens, label request sent, Escape closes and returns focus, Edit tags opens the editor",
+  "tabOrder": [
+    "BUTTON:Select several tracks",
+    "BUTTON:Filter",
+    "BUTTON:Adding to: Night set with an intentionally very long name",
+    "row:Details for Midnight on the coast — extended festival reconstruction with a very long title",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Details for Midnight on the coast — extended festival reconstruction with a very long title",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Edit tags",
+    "row:Funkot",
+    "row:Non-Funkot"
+  ]
+}

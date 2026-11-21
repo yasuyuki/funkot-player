@@ -1,0 +1,50 @@
+{
+  "variant": "before",
+  "project": "desktop",
+  "library": {
+    "viewport": "1280x900",
+    "libraryPaneWidth": 453,
+    "listTop": 88,
+    "toolsHeight": 41,
+    "rowHeight": 40,
+    "rowsFullyVisible": 19,
+    "controlsAboveList": 5,
+    "titleAvgWidth": 112,
+    "titlesTruncated": "3/19",
+    "artistAvgWidth": 254,
+    "artistsTruncated": "3/19",
+    "addToTargetDistance": 642
+  },
+  "search": {
+    "viewport": "1280x900",
+    "libraryPaneWidth": 453,
+    "listTop": 88,
+    "toolsHeight": 41,
+    "rowHeight": 40,
+    "rowsFullyVisible": 4,
+    "controlsAboveList": 5,
+    "titleAvgWidth": 369,
+    "titlesTruncated": "4/4",
+    "artistAvgWidth": 157,
+    "artistsTruncated": "4/4",
+    "addToTargetDistance": 642
+  },
+  "addLabel": "Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+  "menuItems": [
+    "Edit tags"
+  ],
+  "tabOrder": [
+    "BUTTON:New only",
+    "BUTTON:Newest▾",
+    "BUTTON:Select several tracks",
+    "BUTTON:Filter",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Favorites",
+    "row:Add Midnight on the coast — extended festival reconstruction with a very long title to Night set with an intentionally very long name"
+  ]
+}
