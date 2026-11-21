@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Funkot Player — 曲のライブラリ</title>
+<style>
+:root{font:100%/1.5 "Yu Gothic UI",Meiryo,sans-serif;color:#191a35;background:#f7f6f0;--ink:#191a35;--blue:#273b9b;--pink:#ffb7c7;--line:#cdcdc7;--muted:#595b68}
+*{box-sizing:border-box}body{margin:0}button,input,select{font:inherit;color:inherit}button,select{cursor:pointer}button{background:none;border:0;min-height:44px;padding:.45rem .75rem}button:hover{background:#e4e5ed}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #bd385b;outline-offset:1px}button:disabled{color:#777;cursor:default}h1,h2,p{margin:0}small,.meta{color:var(--muted)}header{max-width:1120px;margin:auto;min-height:56px;display:flex;align-items:center;justify-content:space-between;padding:.4rem 24px;gap:1rem}header b{font:italic 800 1.23rem Georgia,serif;letter-spacing:-.055em}.brand{display:flex;align-items:center;gap:.65rem}.brand i{width:22px;height:22px;border:6px double var(--blue);border-radius:50%;box-shadow:inset 0 0 0 2px var(--blue)}header small{font-size:.8rem;text-align:end}
+main{max-width:1120px;margin:auto;padding:0 24px 2rem}.mast{isolation:isolate;position:relative;overflow:hidden;background:var(--blue);color:#fff6ea;border-radius:4px;padding:1.45rem 2.5rem 1.7rem}.mast h1{font:italic normal clamp(4rem,8vw,7.7rem)/.99 Georgia,serif;letter-spacing:-.085em;position:relative}.mast p{font-weight:600;position:relative;margin-top:.55rem}.mark{position:absolute;z-index:-1;right:-3%;top:-60%;width:54%;height:235%;transform:rotate(-22deg);color:var(--pink);overflow:visible}.search{display:flex;align-items:stretch;border-bottom:2px solid var(--ink);margin-top:1rem;gap:.5rem}.search label{display:flex;align-items:center;flex:1;min-width:0;gap:.7rem}.glass{width:17px;height:17px;border:2px solid;border-radius:50%;position:relative;margin-left:.4rem;flex:none}.glass:after{content:'';position:absolute;background:currentColor;width:8px;height:2px;right:-6px;bottom:-3px;transform:rotate(46deg)}input[type=search]{width:100%;min-width:0;border:0;background:transparent;padding:.7rem .35rem;min-height:44px}.search button{font-weight:650;color:var(--blue)}.formula{font-size:.9rem;display:block;width:100%;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#e7e9f5;color:var(--blue)}.bar{display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap;margin:1.15rem 0 .25rem}.bar h2,dialog h2{font:600 1.12rem/1.45 "Yu Gothic UI",sans-serif}.count{font-weight:400;font-size:.85rem;color:var(--muted);margin-left:.6rem}.tools{display:flex;align-items:center;gap:.3rem}.dest,.pill{border-radius:30px;border:1px solid #adafc2;background:#fffdf8}.dest{font-weight:650}.multi{color:var(--muted)}.song{display:flex;align-items:center;border-top:1px solid var(--line);gap:.65rem;padding:.52rem .25rem}.song .info{min-width:0;flex:1;text-align:left;padding:.18rem .4rem}.title{display:block;font:normal clamp(1.4rem,2.6vw,2.45rem)/1.17 Georgia,"Yu Mincho",serif;letter-spacing:-.035em;overflow-wrap:anywhere}.credit{display:block;color:var(--muted);font-size:.9rem;margin-top:.28rem;overflow-wrap:anywhere}.extra{font-size:.79rem;color:var(--blue)}.add{border-radius:50%;font-size:1.45rem;width:48px;height:48px;flex:none;color:#35395c}.duration{font-variant-numeric:tabular-nums;color:var(--muted);font-size:.85rem}.status{font-size:.8rem;color:var(--blue)}[hidden]{display:none!important}.notice:empty{display:none}.notice{position:sticky;bottom:.6rem;z-index:2;background:var(--ink);color:white;border-radius:4px;padding:.7rem 1rem;width:fit-content;max-width:100%;overflow-wrap:anywhere}.empty{padding:2rem 1rem}.bottom{margin-top:1rem;color:var(--muted)}dialog{padding:0;color:var(--ink);background:#f7f6f0;border:0;border-radius:12px;width:min(620px,94vw);max-height:90dvh;box-shadow:0 20px 80px #10153255}dialog::backdrop{background:#10163780}.panel{padding:1.2rem 1.5rem;overflow-wrap:anywhere}.head,.pair{display:flex;align-items:center;justify-content:space-between;gap:.65rem}.head{border-bottom:2px solid var(--blue);margin-bottom:.75rem}.head h2{font-size:1.55rem}.actions{position:sticky;bottom:0;background:#f7f6f0;border-top:1px solid var(--line);padding:.7rem 1.5rem;display:flex;align-items:center;justify-content:space-between;gap:.6rem;flex-wrap:wrap}.solid{background:var(--blue);color:white;border-radius:24px;font-weight:600}.solid:hover{background:#172778}.box{background:white;border:1px solid #aaaeba;border-radius:4px;margin:.65rem 0}.seg,.categories{display:flex;flex-wrap:wrap;gap:.35rem}.seg button,.categories button{border-radius:4px}.seg [aria-pressed=true],.categories [aria-pressed=true]{color:white;background:var(--blue)}.chosen{margin:.7rem 0;padding:.35rem .65rem;background:#e7e9f5;border-radius:5px}.chosen summary{cursor:pointer;min-height:44px;align-content:center}.taglist{max-height:24vh;overflow:auto}.opt{width:100%;border-bottom:1px solid var(--line);text-align:left;display:flex;gap:.65rem;align-items:center;justify-content:space-between;overflow-wrap:anywhere}.opt small{flex:none}.opt[aria-pressed=true]{color:var(--blue);font-weight:700}.file{overflow-wrap:anywhere}.detailTitle{font:normal 2.65rem/1.12 Georgia,"Yu Mincho",serif;margin:1rem 0 .55rem;overflow-wrap:anywhere}.detailMeta{margin:.9rem 0;color:var(--muted)}.pick{min-width:44px;min-height:44px;display:grid;place-items:center}.pick input{width:20px;height:20px}.demo{margin:2rem 0;color:var(--muted);font-size:.85rem}.demo summary{cursor:pointer}.demo div{display:flex;flex-wrap:wrap;gap:.35rem}
+@media(max-width:620px){header{padding:.45rem 16px}main{padding:0 14px 1rem}.mast{padding:1.25rem 1.15rem}.mark{right:-20%;width:68%}.mast h1{font-size:3.75rem}.bar{margin-top:.75rem}.tools{margin-left:auto}.tools button{padding:.4rem .5rem;font-size:.88rem}.song{gap:.18rem;padding:.65rem 0}.duration{display:none}.title{font-size:1.55rem}.credit{font-size:.86rem}.add{width:44px}.search{gap:0}.search input{font-size:.9rem}.panel{padding:1rem}.actions{padding:.55rem 1rem}dialog{margin:auto auto 0;width:100%;max-width:100%;border-radius:14px 14px 0 0;max-height:92dvh}.detailTitle{font-size:2rem}.taglist{max-height:22vh}}
+@media(prefers-reduced-motion:no-preference){dialog[open]{animation:arrive .16s ease-out}@keyframes arrive{from{opacity:.4;transform:translateY(8px)}}}
+.mast h1{width:fit-content;background:var(--blue);padding-right:.14em}
+.add{font:400 1.18rem/1 "Segoe UI",sans-serif}
+.rack{position:sticky;top:0;z-index:1;background:#f7f6f0}.rack:has(#bulk:not(:empty)){padding-bottom:.35rem}@container (max-width:18em){.rack{position:static}}
+.tools button,.dest{white-space:nowrap}.tools{flex-wrap:wrap}
+body{container-type:inline-size}
+@container (max-width:18em){.mark{opacity:.23}
+.mast h1{font-size:2.3rem}
+.search{flex-wrap:wrap}
+.search label{flex-basis:100%}
+.search button{margin-left:auto}
+header{display:block}.brand{display:inline-flex}header small{display:block;text-align:left}.mast{padding:.5rem}.tools{justify-content:flex-end}}
+</style>
+<header><div class="brand"><i></i><b>Funkot Player</b></div><small>再生元　再生待ち</small></header>
+<main><div class="mast"><svg class="mark" aria-hidden="true" viewBox="0 0 420 360"><g id="print" fill="none" stroke="currentColor" stroke-width="4"></g></svg><h1 lang="en">Library</h1><p>曲のライブラリ</p></div>
+<div class="search"><label><span class="glass"></span><input id="words" type="search" aria-label="曲名・アーティスト・ファイル名を検索" placeholder="曲名・アーティストを検索"></label><button id="filter">条件を編集</button></div><button id="formula" class="formula" hidden></button>
+<div class="rack"><div class="bar"><h2>曲目<span class="count" id="total" role="status"></span></h2><div class="tools"><button class="multi" id="multi">複数選択</button><button class="dest" id="dest"></button></div></div><div id="bulk"></div></div><section id="songs" aria-label="曲目"></section><div id="pages"></div><div class="notice" role="status" id="notice"></div>
+<details class="demo"><summary>試作の検証用シナリオ</summary><div id="examples"></div></details></main><dialog id="sheet"></dialog>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fold=s=>s.normalize('NFKC').toLowerCase().replace(/[\s・_-]/g,'');
+const kinds=['制作年','ジャンル','任意タグ'];
+const names=['2015年','日本人トラックメーカー','アニソンremix','Funkot','深夜','歌もの','長尺版','ライブ用','夜明け前のフロアで流したいロングイントロのリミックス','2016年','アニソン Remix','インスト','2014年','日本語ボーカル'];
+const aliases={0:'2015',1:'日本 作家 にほん',2:'アニメ リミックス anisong',10:'アニメ リミックス anisong'};
+const tags=Array.from({length:3214},(_,i)=>({id:i,label:names[i]||'セレクション '+String(i-13).padStart(4,'0'),kind:[0,9,12].includes(i)?0:i===3?1:2}));
+const seeds=[
+['Pasar Malam','Mika Senja','Original mix'],['Neon Angkot','Ruang Dua','Club edit'],['夜明けのパレード','水鳥ユニット','Radio edit'],['Neon Angkot','Ruang Dua','Warehouse dub'],['Paper Lantern Motorcade','Studio Kaca','Extended'],['Sora, Again','ミナト制作室','Vocal mix'],['Last Train to Kemang','Tirai Biru','Original mix'],['夜明けのパレードが海岸線に消えるまで / After the Last Streetlight (Long Passage Rework)','水鳥ユニット','Long version'],['','', ''],['Meridian Steps','Nila','Demo'],['Glass Taxi','Aya Awan','Night edit'],['Kota Kita','Mika Senja','Original mix']];
+const tracks=Array.from({length:24640},(_,i)=>{
+ const [base,artist,version]=seeds[i%seeds.length], file=(base||'untitled')+'_'+String(i+1).padStart(5,'0')+'.flac';
+ const keys=i===0?Array.from({length:9},(_,n)=>n):[i%4===0?9:i%3===0?12:0,3,...(i%3===1?[1]:[]),...(i%5===1?[2]:[]),4+i%5,14+i%3200];
+ return {id:i,title:base?(base+(i<12?'':' / Session '+Math.floor(i/12))):file,artist:artist||'アーティスト未設定',version,file,tags:[...new Set(keys)],length:['4:38','5:12','3:56','6:19'][i%4],ok:i!==9};
+});
+const destinations={'再生待ち':[],'夜行便':[],'朝のセット':[]},favorites=new Set(),picked=new Set();
+let candidateLimit=8;
+let target='再生待ち',active=[],mode='AND',draft=[],op=mode,kind=-1,term='',history=null,limit=36,selecting=false,focusFrom,editId=null,timer;
+const results=(ids=active,logic=mode)=>tracks.filter(t=> (!ids.length||(logic==='AND'?ids.every(v=>t.tags.includes(v)):ids.some(v=>t.tags.includes(v))))&&fold([t.title,t.artist,t.file].join(' ')).includes(fold($('words').value.trim())));
+const label=i=>tags[i].label,fmt=n=>n.toLocaleString('ja-JP');
+const tell=s=>{$('notice').textContent=s;clearTimeout(timer);timer=setTimeout(()=>$('notice').textContent='',4500)};
+const btn=(s,fn,cls='')=>{const b=document.createElement('button');b.textContent=s;b.className=cls;b.onclick=fn;return b};
+function remember(){history={ids:[...active],mode,text:$('words').value}}
+function restore(){if(!history)return;const old=history;remember();active=old.ids;mode=old.mode;$('words').value=old.text;refresh();tell('直前の条件に戻しました')}
+function refresh(){limit=36;picked.clear();render()}
+function render(){
+ const rows=results();$('total').textContent=fmt(rows.length)+' 曲';$('formula').hidden=!active.length&&!history;
+ $('formula').textContent=active.length?(mode==='AND'?'すべて一致':'いずれか一致')+'　'+active.length+'条件　'+active.map(label).join(' ／ '):'条件の履歴を開く';
+ $('dest').textContent='追加先　'+target+' ⌄';$('multi').textContent=selecting?'選択を終了':'複数選択';
+ $('songs').innerHTML=rows.slice(0,limit).map(t=>{
+ const tail=[t.artist,t.version].filter(Boolean).join('　/　'),n=destinations[target].filter(id=>id===t.id).length;
+ return '<article class="song" data-id="'+t.id+'">'+(selecting?'<label class="pick"><input type="checkbox" aria-label="'+esc(t.title)+'を選択" '+(picked.has(t.id)?'checked ':'')+(t.ok?'':'disabled')+'></label>':'')+'<button class="info"><span class="title">'+esc(t.title)+'</span><span class="credit">'+esc(tail)+'</span>'+((t.id===4||n||!t.ok)?'<span class="extra">'+[t.id===4?'再生中':'',n?'追加済み ×'+n:'',!t.ok?'Funkot 判定外・追加不可':''].filter(Boolean).join('　')+'</span>':'')+'</button><span class="duration">'+t.length+'</span><button class="add" aria-label="'+esc(t.title+'を'+target+'に追加')+'" '+(t.ok?'':'disabled')+'>＋</button></article>'
+ }).join('');
+ if(!rows.length){$('songs').innerHTML='<div class="empty"><h2>一致する曲がありません</h2><p>検索語を短くするか、条件を外してください。</p></div>';$('songs').firstChild.append(btn('条件を編集',openFilter,'pill'))}
+ $('pages').replaceChildren();if(rows.length>limit)$('pages').append(btn('次の曲を表示',()=>{limit+=36;render()},'bottom'));
+ updateBulk()
+}
+function updateBulk(){$('bulk').replaceChildren();if(selecting){const b=btn(picked.size+'曲を'+target+'に追加',()=>add([...picked]),'solid');b.disabled=!picked.size;$('bulk').append(b)}}
+function add(ids){const valid=ids.filter(id=>tracks[id].ok);destinations[target].push(...valid);picked.clear();render();tell((valid.length===1?tracks[valid[0]].title:valid.length+'曲')+' を「'+target+'」に追加しました')}
+$('songs').onclick=e=>{const row=e.target.closest('.song');if(!row)return;const id=Number(row.dataset.id);
+ if(e.target.closest('.info'))detail(id);else if(e.target.closest('.add')){add([id]);$('songs').querySelector('[data-id="'+id+'"] .add')?.focus({preventScroll:true})}else if(e.target.matches('input')){e.target.checked?picked.add(id):picked.delete(id);updateBulk()}};
+function mount(title,body,foot=''){const s=$('sheet');if(!s.open)focusFrom=document.activeElement;
+ s.innerHTML='<div class="panel"><div class="head"><h2 id="sheetTitle">'+esc(title)+'</h2><button id="close" aria-label="閉じる">✕</button></div>'+body+'</div>'+(foot?'<div class="actions">'+foot+'</div>':'');s.setAttribute('aria-labelledby','sheetTitle');if(!s.open)s.showModal();$('close').onclick=()=>s.close()}
+$('sheet').onclose=()=>{if(focusFrom?.isConnected)focusFrom.focus();else if(editId!==null)$('songs').querySelector('[data-id="'+editId+'"] .info')?.focus({preventScroll:true})};
+function openFilter(){draft=[...active];op=mode;kind=-1;term='';editId=null;editor(false)}
+function editor(assign){candidateLimit=8;
+ const heading=assign?'曲のタグを編集':'検索条件';
+ mount(heading,(assign?'':'<div class="seg" id="logic"></div>')+'<details class="chosen" id="chosen"><summary></summary><div class="taglist" id="used"></div></details><div class="box"><input id="tagq" type="search" aria-label="タグ候補を検索" placeholder="タグ名を入力　例：2015"></div><div id="cats" class="categories"></div><p class="meta" id="found" role="status"></p><div id="opts"></div>',(assign?'':'<button id="undo" '+(history?'':'disabled')+'>直前に戻す</button>')+'<button class="solid" id="apply"></button>');
+ const reload=()=>{
+ if(!assign){$('logic').replaceChildren(...['AND','OR'].map((v,i)=>{const b=btn(['すべて一致 (AND)','いずれか一致 (OR)'][i],()=>{op=v;reload();$('logic').children[i].focus()});b.setAttribute('aria-pressed',op===v);return b}))}
+ $('chosen').querySelector('summary').textContent='選択中 '+draft.length+' 件'+(draft.length?'　確認・解除':'');
+ const toggle=id=>{const others=assign&&tags[id].kind===0?draft.filter(x=>tags[x].kind!==0):draft;draft=draft.includes(id)?draft.filter(x=>x!==id):[...others,id];reload();document.querySelector('#opts [data-tag="'+id+'"]')?.focus({preventScroll:true})};
+ $('used').replaceChildren(...draft.map(id=>btn('×　'+label(id),()=>toggle(id),'opt')));
+ $('cats').replaceChildren(...['全分類',...kinds].map((s,i)=>{const b=btn(s,()=>{kind=i-1;reload();$('cats').children[i].focus()});b.setAttribute('aria-pressed',kind===i-1);return b}));
+ const match=tags.filter(t=>(kind<0||kind===t.kind)&&fold(t.label+' '+(aliases[t.id]||'')).includes(fold(term)));
+ $('found').textContent=fmt(match.length)+' 候補'+(match.length>candidateLimit?'　入力で絞り込み':match.length?'':'　別の表記か分類で検索');
+ $('opts').replaceChildren(...match.slice(0,candidateLimit).map(t=>{const b=btn('',()=>toggle(t.id),'opt');b.dataset.tag=t.id;b.innerHTML='<span>'+ (draft.includes(t.id)?'✓　':'')+esc(t.label)+'</span><small>'+kinds[t.kind]+'</small>';b.setAttribute('aria-pressed',draft.includes(t.id));return b}));
+ if(match.length>candidateLimit)$('opts').append(btn('ほかの候補を表示',()=>{candidateLimit+=8;reload()},'pill'));
+ $('apply').textContent=assign?'タグを保存':fmt(results(draft,op).length)+' 曲を見る';
+ };
+ $('tagq').value=term;$('tagq').oninput=e=>{term=e.target.value;candidateLimit=8;reload()};
+ if(!assign)$('undo').onclick=()=>{restore();$('sheet').close()};
+ $('apply').onclick=()=>{if(assign){tracks[editId].tags=[...draft];refresh();detail(editId);return}remember();active=[...draft];mode=op;refresh();$('sheet').close()};
+ reload();
+}
+function choose(back=null){mount('追加先を選ぶ','<p class="detailMeta">追加する曲の行き先</p><div id="places"></div>');
+ $('places').append(...Object.keys(destinations).map(name=>btn((target===name?'✓　':'')+name+'　'+destinations[name].length+' 曲',()=>{target=name;render();if(back!==null)detail(back);else $('sheet').close()},'opt')))}
+function detail(id){editId=id;const t=tracks[id];mount('曲の詳細','<h3 class="detailTitle">'+esc(t.title)+'</h3><p>'+esc(t.artist)+'　/　'+esc(t.version)+'</p><p class="detailMeta file">'+esc(t.file)+'　'+t.length+'</p><details class="chosen"><summary>タグ '+t.tags.length+'件</summary>'+t.tags.map(label).map(esc).join(' ／ ')+'</details><button class="pill" id="tagEdit">タグを編集</button> <button class="pill" id="fav"></button>', '<button id="where">追加先　'+target+' ⌄</button><button class="solid" id="one" '+(t.ok?'':'disabled')+'>'+(t.ok?'この曲を追加':'判定外・追加不可')+'</button>');
+ $('tagEdit').onclick=()=>{draft=[...t.tags];kind=-1;term='';editor(true)};$('where').onclick=()=>choose(id);$('one').onclick=()=>{add([id]);$('sheet').close()};
+ const fav=()=>{$('fav').textContent=favorites.has(id)?'♥ お気に入り登録済み':'♡ お気に入りに登録'};fav();$('fav').onclick=()=>{favorites.has(id)?favorites.delete(id):favorites.add(id);fav()}
+}
+$('filter').onclick=$('formula').onclick=openFilter;$('dest').onclick=()=>choose();$('multi').onclick=()=>{selecting=!selecting;picked.clear();render()};$('words').oninput=refresh;
+function pending(fail){mount('曲を検索中','<p role="status">条件を保ってライブラリを照合しています…</p>');const node=$('sheetTitle');setTimeout(()=>{if(!node.isConnected||!$('sheet').open)return;if(fail){mount('検索できませんでした','<p>条件を保存しています。同じ条件で再試行できます。</p>','<button class="solid" id="retry">再試行</button>');$('retry').onclick=()=>pending(false)}else{$('sheet').close();refresh();tell('検索が完了しました')}},750)}
+$('examples').append(btn('9条件と長いタグ',()=>{remember();active=[0,1,2,3,4,5,6,7,8];mode='AND';$('words').value='';refresh()}),btn('0件',()=>{remember();active=[0,9];mode='AND';refresh()}),btn('処理中',()=>pending(false)),btn('検索失敗',()=>pending(true)),btn('文字サイズ 100% / 200%',()=>{document.documentElement.style.fontSize=document.documentElement.style.fontSize==='200%'?'100%':'200%';$('notice').textContent=''}));
+$('print').innerHTML=Array.from({length:33},(_,i)=>'<ellipse cx="210" cy="180" rx="166" ry="58" transform="rotate('+i*5.46+' 210 180)"/>').join('');
+render();
+</script></html>
