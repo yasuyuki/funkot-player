@@ -71,11 +71,11 @@ to one of the atomics, or changes what `begin_nav`, `drain_nav_commands`,
 `TransitionToNext`. Line moves alone do not need a run: model references are
 scoped by function name, not line number.
 
-Sync commit: `250716ad4e442649d7926b21e8dd2daedebce522` (core pin
+Sync commit: `24995d2d2ce35f118566176b24da1ee71435db8b` (core pin
 `e6d4916061b4d389d887ebe318b610267a00c5ca`). To see what changed since:
 
 ```sh
-git diff 250716ad4e442649d7926b21e8dd2daedebce522 -- src-tauri/src/lib.rs src-tauri/src/playlist_service.rs funkot-core.commit
+git diff 24995d2d2ce35f118566176b24da1ee71435db8b -- src-tauri/src/lib.rs src-tauri/src/playlist_service.rs funkot-core.commit
 ```
 
 Read every hunk inside the functions named above. Move the sync commit forward
