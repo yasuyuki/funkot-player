@@ -133,10 +133,12 @@ export const en = {
 
   searchPlaceholder: "Search",
   searchLabel: "Search the library",
+  searchClear: "Clear search",
   newOnly: "New only",
-  sortRecent: "Newest▾",
-  sortTitle: "Title▾",
-  sortArtist: "Artist▾",
+  sortLabel: "Sort the library",
+  sortRecent: "Newest",
+  sortTitle: "Title",
+  sortArtist: "Artist",
   scanningWalking: "Scanning…",
   scanningHashing: (found: number, done: number) =>
     `Scanning — checking ${found} tracks, ${done}/${found}`,

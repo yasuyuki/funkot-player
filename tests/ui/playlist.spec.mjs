@@ -613,7 +613,8 @@ test("a played track is added to Favorites from the History context menu", async
     window.__uiFixture.setReply("playlist_catalog", store.catalog);
     window.__uiFixture.setReply("list_play_history", store.playHistory);
   });
-  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "History" }).click();
+  const historyTab = page.getByRole("tab", { name: "History", exact: true });
+  if (await historyTab.isVisible()) await historyTab.click();
   const row = page.locator("section.history li.row").first();
   await expect(row).toBeVisible();
   await row.click({ button: "right" });

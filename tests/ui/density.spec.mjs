@@ -40,7 +40,7 @@ test("lists start near the top and controls match the input kind", async ({ page
   await dense(page);
   await page.mouse.move(0, 0);
   const out = { library: await measure(page, "section.library li.row") };
-  if (narrow) await tab(page, "History").click();
+  if (await tab(page, "History").isVisible()) await tab(page, "History").click();
   out.history = await measure(page, "section.history li.row");
   if (narrow) await tab(page, "Up next").click();
   out.upNext = await measure(page, "section.queue li");
@@ -51,10 +51,11 @@ test("lists start near the top and controls match the input kind", async ({ page
   await writeFile(file, JSON.stringify(out, null, 2));
   await testInfo.attach("density", { path: file, contentType: "application/json" });
 
-  for (const list of [out.library, out.history]) {
-    expect(list.listTop).toBeLessThanOrEqual(narrow ? 116 : 88);
-    expect(list.rowsFullyVisible).toBeGreaterThanOrEqual(narrow ? 14 : 19);
-  }
+  expect(out.history.listTop).toBeLessThanOrEqual(narrow ? 116 : 88);
+  expect(out.history.rowsFullyVisible).toBeGreaterThanOrEqual(narrow ? 14 : 19);
+  // Narrow library spends one tool row on a full-width search and a visible sort.
+  expect(out.library.listTop).toBeLessThanOrEqual(narrow ? 167 : 88);
+  expect(out.library.rowsFullyVisible).toBeGreaterThanOrEqual(narrow ? 13 : 19);
   expect(out.upNext.listTop).toBeLessThanOrEqual(narrow ? 138 : 110);
   for (const list of Object.values(out)) expect(list.controlHeightMin).toBe(narrow ? 44 : 28);
 });
@@ -87,7 +88,7 @@ test("every pane and the add target stay reachable across the column boundaries"
     const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
     return !!top && (node.contains(top) || top.contains(node));
   }));
-  for (const [width, columns] of [[767, 1], [768, 2], [1151, 2], [1152, 3]]) {
+  for (const [width, columns] of [[767, 1], [768, 2], [1152, 2], [1439, 2], [1440, 3]]) {
     await page.setViewportSize({ width, height: 900 });
     await dense(page);
     expect((await page.locator(".panes").evaluate(el => getComputedStyle(el).gridTemplateColumns.split(" "))).length, `${width}px columns`).toBe(columns);

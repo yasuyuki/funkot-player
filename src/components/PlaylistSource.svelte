@@ -39,7 +39,7 @@
 
 <div class:compact class="source">
   {#if compact}<span class="destination">{t.playlistDestination("")}</span>{/if}
-  <button type="button" class="quiet choose" bind:this={chooseButton} aria-label={compact ? t.playlistDestination(current) : current} aria-expanded={open} onclick={() => (open ? closePicker() : (open = true))} title={current}>{current}<span aria-hidden="true">▾</span></button>
+  <button type="button" class="quiet choose" bind:this={chooseButton} aria-label={compact ? t.playlistDestination(current) : current} aria-expanded={open} onclick={() => (open ? closePicker() : (open = true))} title={current}>{current}<span class="caret" aria-hidden="true"></span></button>
   {#if open}
     <div class="picker" role="dialog" aria-label={t.playlistChoose}>
       <button type="button" class="quiet picker-close" onclick={closePicker}>{t.close}</button>
@@ -58,7 +58,8 @@
 
 <style>
   .source { position: relative; display: flex; gap: var(--space-sm); align-items: center; min-width: 0; }
-  .choose { width: auto; min-width: var(--control-target); flex: 1 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .choose { position: relative; width: auto; min-width: var(--control-target); flex: 1 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: calc(var(--control-pad-inline) + 0.9em); }
+  .caret { position: absolute; right: 0.45rem; top: 50%; width: 0.4em; height: 0.4em; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-70%) rotate(45deg); pointer-events: none; }
   .compact { min-width: 0; max-width: 70%; }
   .compact .destination { flex: 0 0 auto; }
   .destination { color: var(--color-text-dim); font-size: var(--font-size-sm); white-space: nowrap; }

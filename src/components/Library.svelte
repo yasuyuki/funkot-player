@@ -3,7 +3,6 @@
   import { openMusicDir, type TrackRow } from "../lib/tauri";
   import { showLibraryEmpty } from "../lib/library-empty";
   import {
-    nextLibrarySortKey,
     sortLibraryRows,
     type LibrarySortKey,
   } from "../lib/library-sort";
@@ -96,9 +95,25 @@
   }).length);
   let allState = $derived(selectAllState(selected, visiblePaths));
 
-  function toggleSort() {
-    sortKey = nextLibrarySortKey(sortKey);
+  function trackTitle(row: TrackRow): string {
+    const title = row.title.trim();
+    return title || store.relName(row.path);
   }
+
+  let duplicateTitles = $derived.by(() => {
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const key = `${trackTitle(row)}\n${row.artist}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  });
+
+  function sameName(row: TrackRow): boolean {
+    return (duplicateTitles.get(`${trackTitle(row)}\n${row.artist}`) ?? 0) > 1;
+  }
+
+  let soundingPath = $derived(store.player?.now_playing ?? null);
 
   function toggleNewOnly() {
     newOnly = !newOnly;
@@ -200,24 +215,31 @@
 <section class="library">
   <div class="toolbar">
     <h2 class="heading">{t.libraryHeading}</h2>
-    <input
-      class="search"
-      type="search"
-      placeholder={t.searchPlaceholder}
-      bind:value={query}
-      aria-label={t.searchLabel}
-    />
-    <div class="secondary" class:on={newOnly}>
-    <button
-      type="button"
-      class="filter"
-      class:on={newOnly}
-      aria-pressed={newOnly}
-      onclick={toggleNewOnly}
-    >{t.newOnly}</button>
-    <button type="button" class="sort" onclick={toggleSort}>
-      {sortKey === "recent" ? t.sortRecent : sortKey === "title" ? t.sortTitle : t.sortArtist}
-    </button>
+    <div class="search-wrap">
+      <input
+        class="search"
+        type="search"
+        placeholder={t.searchPlaceholder}
+        bind:value={query}
+        aria-label={t.searchLabel}
+      />
+      {#if query}
+        <button type="button" class="clear-search" aria-label={t.searchClear} onclick={() => (query = "")}>{t.searchClear}</button>
+      {/if}
+    </div>
+    <div class="secondary" class:on={newOnly || sortKey !== "recent"}>
+      <select class="sort" aria-label={t.sortLabel} bind:value={sortKey}>
+        <option value="recent">{t.sortRecent}</option>
+        <option value="title">{t.sortTitle}</option>
+        <option value="artist">{t.sortArtist}</option>
+      </select>
+      <button
+        type="button"
+        class="filter in-toolbar"
+        class:on={newOnly}
+        aria-pressed={newOnly}
+        onclick={toggleNewOnly}
+      >{t.newOnly}</button>
     </div>
     <button
       type="button"
@@ -228,6 +250,7 @@
       onclick={toggleSelectMode}
     >{t.selectMode}</button>
     <TagFilter candidates={tagIndex.candidates} selected={selectedTags} mode={tagMode} {yearUnset}
+      {newOnly} onToggleNew={toggleNewOnly}
       onchoose={chooseTag} onremove={key => selectedTags = selectedTags.filter(tag => tag.key !== key)}
       onmode={mode => tagMode = mode} onunset={enabled => yearUnset = enabled} onclear={clearTagFilters} />
     <div class="dest"><PlaylistSource compact /></div>
@@ -307,6 +330,8 @@
         <li
           class="row"
           class:non-funkot={isNonFunkot(row)}
+          class:sounding={soundingPath === row.path}
+          aria-current={soundingPath === row.path ? "true" : undefined}
           onpointerdown={(e) => press.down(e, row.path)}
           onpointermove={press.move}
           onpointerup={press.cancel}
@@ -319,12 +344,12 @@
               class="pick"
               checked={selected.has(row.path)}
               onchange={() => onToggleRow(row.path)}
-              aria-label={t.selectTrackLabel(row.title)}
+              aria-label={t.selectTrackLabel(trackTitle(row))}
             />
           {/if}
           <div class="text">
             <div class="title">
-              <span class="title-text">{row.title}</span>
+              <span class="title-text" title={trackTitle(row)}>{trackTitle(row)}</span>
               {#if store.isNewArrival(row.path)}
                 <span class="new-badge">NEW</span>
               {/if}
@@ -334,18 +359,19 @@
             {/if}
             <div class="sub">
               <span class="artist">{row.artist || t.noLabel}</span>
+              {#if sameName(row)}<span class="file">{store.relName(row.path)}</span>{/if}
               <TagChips state={tagIndex.tracks.get(row.path)?.state ?? null} />
               <span class="dur">{formatDuration(row.duration_secs)}</span>
             </div>
           </div>
           {#if !selectMode}
-            <FavoriteButton path={row.path} contentHash={row.content_hash} title={row.title} />
+            <FavoriteButton path={row.path} contentHash={row.content_hash} title={trackTitle(row)} />
             <button
               type="button"
               class="add primary icon-button"
               disabled={addDisabled(row)}
               onclick={() => onAdd(row.path)}
-              aria-label={t.playlistAddLabel(row.title, store.destinationLabel || t.playlistNormal)}
+              aria-label={t.playlistAddLabel(trackTitle(row), store.destinationLabel || t.playlistNormal)}
             >+</button>
           {/if}
         </li>
@@ -359,6 +385,14 @@
 </section>
 
 <style>
+  @font-face {
+    font-family: "Barlow Condensed";
+    src: url("../fonts/barlow-condensed-600-latin.woff2") format("woff2");
+    font-weight: 600;
+    font-style: normal;
+    font-display: swap;
+  }
+
   .heading {
     margin: 0;
     font-size: var(--font-size-md);
@@ -378,18 +412,29 @@
     background: var(--color-bg);
   }
   .secondary { display: flex; gap: var(--space-sm); }
+  .sort { width: auto; flex: 0 0 auto; }
+  select.sort:hover { background: var(--color-hover-bg); border-color: var(--color-text-dim); }
   .toolbar :global(.tag-filter) { order: 5; }
   .toolbar :global(.bar) { order: 6; }
   .dest { display: none; flex: 0 1 9rem; min-width: 0; }
   .dest :global(.compact) { max-width: 100%; }
   .dest :global(.destination) { display: none; }
-  .dest :global(.choose)::before { content: "+ → "; color: var(--color-text-dim); }
+
+  .search-wrap {
+    flex: 1 1 8rem;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+  }
+  .clear-search { width: auto; flex: 0 0 auto; }
 
   @container shell not (min-width: 48rem) {
     .heading { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-    .dest { display: block; }
-    .secondary { display: none; order: 4; flex-basis: 100%; }
-    .toolbar:has(:global(.tag-filter)) .secondary { display: flex; }
+    .search-wrap { flex-basis: 100%; }
+    .dest { display: block; flex: 1 1 8rem; }
+    .dest :global(.destination) { display: inline; }
+    .in-toolbar { display: none; }
     .toolbar:has(.secondary.on) :global(.toggle) { outline: 2px solid var(--color-accent-text); outline-offset: -2px; }
   }
 
@@ -402,10 +447,12 @@
   }
 
   .search {
-    flex: 1 1 5rem;
+    flex: 1 1 auto;
     min-width: 0;
+    width: auto;
     border: 1px solid var(--color-border);
   }
+  .search::-webkit-search-cancel-button { display: none; }
   .identity-unavailable { font-size: var(--font-size-sm); color: var(--color-text-dim); overflow-wrap: anywhere; }
 
   .filter,
@@ -484,6 +531,11 @@
     color: var(--color-text-dim);
   }
 
+  .row.sounding {
+    background: color-mix(in srgb, var(--color-status-playing) 16%, transparent);
+    box-shadow: inset 3px 0 0 var(--color-status-playing);
+  }
+
   .text {
     min-width: 0;
     flex: 1;
@@ -500,6 +552,9 @@
 
   .title-text {
     min-width: 0;
+    font-family: "Barlow Condensed", "Segoe UI", sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.01em;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -528,6 +583,14 @@
   .artist {
     min-width: 0;
     flex: 1 1 45%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .file {
+    min-width: 0;
+    flex: 0 1 8rem;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

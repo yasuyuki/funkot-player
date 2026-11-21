@@ -1,17 +1,19 @@
 <script lang="ts">
   import { i18n } from "../lib/i18n.svelte";
   import type { TagChoice, TagIndex } from "../lib/tag-filter";
-  let { candidates, selected, mode, yearUnset, onchoose, onremove, onmode, onunset, onclear }: {
-    candidates: TagIndex["candidates"];
-    selected: readonly TagChoice[];
-    mode: "all" | "any";
-    yearUnset: boolean;
-    onchoose: (tag: TagChoice) => void;
-    onremove: (key: string) => void;
-    onmode: (mode: "all" | "any") => void;
-    onunset: (enabled: boolean) => void;
-    onclear: () => void;
-  } = $props();
+let { candidates, selected, mode, yearUnset, newOnly = false, onToggleNew, onchoose, onremove, onmode, onunset, onclear }: {
+  candidates: TagIndex["candidates"];
+  selected: readonly TagChoice[];
+  mode: "all" | "any";
+  yearUnset: boolean;
+  newOnly?: boolean;
+  onToggleNew?: () => void;
+  onchoose: (tag: TagChoice) => void;
+  onremove: (key: string) => void;
+  onmode: (mode: "all" | "any") => void;
+  onunset: (enabled: boolean) => void;
+  onclear: () => void;
+} = $props();
   let t = $derived(i18n.t);
   let candidateKey = $state("");
   let expanded = $state(false);
@@ -30,6 +32,9 @@
 </button>
 {#if expanded}
 <div class="tag-filter" id="tag-filter-panel" role="group" aria-label={t.tagFilterTitle}>
+  {#if onToggleNew}
+    <button type="button" class="new-only" aria-pressed={newOnly} onclick={onToggleNew}>{t.newOnly}</button>
+  {/if}
   <div class="candidate">
     <label>{t.tagFilterCandidate}<select aria-label={t.tagFilterCandidate} bind:value={candidateKey}>
       <option value="">{t.tagFilterPick}</option>
@@ -64,6 +69,10 @@
 
 <style>
   .toggle { flex: 0 0 auto; }
+  .new-only { width: auto; justify-self: start; }
+  @container shell (min-width: 48rem) {
+    .new-only { display: none; }
+  }
   .toggle.active { outline: 2px solid var(--color-accent-text); outline-offset: -2px; }
   .tag-filter { flex-basis: 100%; display: grid; gap: var(--space-sm); min-width: 0; padding: var(--space-sm); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
   label { display: grid; gap: var(--space-xs); min-width: 0; font-size: var(--font-size-sm); }

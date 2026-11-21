@@ -186,15 +186,17 @@
     .mode.active { display: none; }
   }
 
+  /* Two columns until 90rem: the library stays wide enough to read a long title
+     beside the queue. History is a tab until a third column fits. */
   @container shell (min-width: 48rem) {
-    .panes { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+    .panes { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); }
     .panes > .pane.queue, .panes > .pane.library { display: block; }
     .panes > .pane.history { display: none; }
     .panes.history-left > .pane.library { display: none; }
     .panes.history-left > .pane.history { display: block; }
   }
 
-  @container shell (min-width: 72rem) {
+  @container shell (min-width: 90rem) {
     .panes { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); }
     .panes > .pane.queue,
     .panes > .pane.library,
@@ -209,7 +211,7 @@
     .subtabs { flex: 0 1 auto; }
     .subtabs .tab { flex: 0 1 auto; padding-inline: var(--control-pad-inline); }
   }
-  @container shell (min-width: 72rem) {
+  @container shell (min-width: 90rem) {
     .subtabs.play { display: none; }
   }
 </style>

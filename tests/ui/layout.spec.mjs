@@ -51,7 +51,8 @@ test("shared controls, dense browsing, history and playback retain readable targ
   expect((await controlIssues(page)).some(issue => issue.failures.includes("font=30px"))).toBe(true);
   await add.evaluate(el => el.style.removeProperty("font-size"));
 
-  if (testInfo.project.name === "narrow") await page.getByRole("tab", { name: "History", exact: true }).click();
+  const historyTab = page.getByRole("tab", { name: "History", exact: true });
+  if (await historyTab.isVisible()) await historyTab.click();
   await expect(page.locator("section.history li.row")).toHaveCount(24);
   expect(await controlIssues(page)).toEqual([]);
   await capture(page, testInfo, "dense-history");
