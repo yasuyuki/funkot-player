@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liner Proof</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="proof.css">
+</head>
+<body>
+<div class="app" id="app">
+
+  <header class="top">
+    <div class="mark" aria-hidden="true"><span>F</span><span>k</span></div>
+    <nav class="tabs" aria-label="画面">
+      <a class="tab" aria-current="page" href="#">ライブラリ</a>
+      <a class="tab" href="#" data-goto="queue">再生待ち</a>
+      <a class="tab" href="#" data-goto="lists">プレイリスト</a>
+    </nav>
+    <span class="grow"></span>
+    <div class="menu-wrap">
+      <button class="icon-btn" type="button" id="moreBtn" aria-haspopup="menu" aria-expanded="false" aria-label="その他のメニュー" title="その他のメニュー">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm7 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm7 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/></svg>
+      </button>
+      <div class="menu" id="moreMenu" role="menu" hidden>
+        <button type="button" role="menuitem">再生の履歴</button>
+        <button type="button" role="menuitem" id="themeBtn">表示テーマを切り替える</button>
+        <button type="button" role="menuitem">ライブラリの設定</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main" id="main">
+    <div class="query" id="query">
+      <label class="finder-field" id="finder">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3a7 7 0 0 1 5.6 11.2l5 5-1.4 1.4-5-5A7 7 0 1 1 10 3zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/></svg>
+        <input id="finderInput" type="search" autocomplete="off" spellcheck="false"
+          placeholder="曲名・アーティスト・タグ・年で探す" aria-label="曲名・アーティスト・タグ・年で探す"
+          aria-controls="lens" aria-expanded="false" role="combobox" aria-autocomplete="list">
+        <kbd class="hint-key" aria-hidden="true">/</kbd>
+      </label>
+      <div class="summary" id="summary" hidden></div>
+      <div class="status" id="status" role="status" aria-live="polite" hidden></div>
+    </div>
+
+    <section class="lens" id="lens" hidden aria-label="条件を編集"></section>
+
+    <section class="results" id="results" aria-label="曲の一覧">
+      <div class="results-bar" id="resultsBar"></div>
+      <ol class="rows" id="rows" aria-label="曲"></ol>
+      <div class="rows-empty" id="rowsEmpty" hidden></div>
+      <div class="sentinel" id="sentinel"></div>
+    </section>
+  </main>
+
+  <aside class="dock" id="dock" aria-label="追加先"></aside>
+
+  <footer class="now" id="now" aria-label="再生中"></footer>
+
+  <div class="sheet-scrim" id="scrim" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <div class="flyer" id="flyer" aria-hidden="true"></div>
+</div>
+
+<div class="editor" id="editor" hidden></div>
+
+<div class="demo" id="demo" aria-label="デモ用の操作（製品UIではない）">
+  <span>状態</span>
+  <button type="button" data-scn="base">通常</button>
+  <button type="button" data-scn="a">3条件</button>
+  <button type="button" data-scn="a-amb">2015</button>
+  <button type="button" data-scn="eight">9条件</button>
+  <button type="button" data-scn="zero">0件</button>
+  <button type="button" data-scn="detail">詳細</button>
+  <button type="button" data-scn="edit">編集</button>
+  <button type="button" data-scn="many">多タグ</button>
+  <button type="button" data-scn="batch">一括</button>
+  <span>次の保存</span>
+  <button type="button" data-fail="">成功</button>
+  <button type="button" data-fail="persist_failed">書込失敗</button>
+  <button type="button" data-fail="store_read_only">読取専用</button>
+  <button type="button" data-fail="busy">処理中</button>
+  <button type="button" data-fail="stale_revision">競合</button>
+  <span>外部</span>
+  <button type="button" data-sim="other">別の操作で更新</button>
+  <button type="button" data-sim="replace">ファイル差替</button>
+  <button type="button" data-sim="scan">スキャン</button>
+</div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,242 @@
+{
+  "desktop": {
+    "base": {
+      "typed2015": {
+        "choices": 5,
+        "kindHeaders": 0,
+        "ambiguityNote": 0
+      },
+      "afterFirst": {
+        "choices": 50,
+        "advanced": 4
+      },
+      "typedAnison": {
+        "choices": 19,
+        "joinHint": 0
+      },
+      "threeAnd": {
+        "steps": 8,
+        "rowTop": 218,
+        "lineChoices": 5,
+        "count": "53"
+      },
+      "removeOne": {
+        "steps": 2,
+        "left": 2
+      },
+      "editOpen": {
+        "choices": 63
+      },
+      "pauseOne": {
+        "steps": 2,
+        "countShownBefore": null
+      },
+      "detail": {
+        "choices": 9,
+        "text": {
+          "yearSource": true,
+          "path": true,
+          "rawFields": false,
+          "hash": false,
+          "candidates": false
+        }
+      },
+      "tagEdit": {
+        "possible": false,
+        "why": "削除と保存の操作がなく、入力して Enter で行に加わるだけ（保存しない）",
+        "stepsUntilStuck": 4,
+        "removeButtons": 0
+      },
+      "rowTop_base": 170,
+      "rowTop_a": 218,
+      "rowTop_eight": 218
+    },
+    "mine": {
+      "typed2015": {
+        "choices": 6,
+        "kindHeaders": 3,
+        "ambiguityNote": 1
+      },
+      "afterFirst": {
+        "choices": 44,
+        "advanced": 0
+      },
+      "typedAnison": {
+        "choices": 14,
+        "joinHint": 2
+      },
+      "threeAnd": {
+        "steps": 8,
+        "rowTop": 218,
+        "lineChoices": 7,
+        "count": "55"
+      },
+      "removeOne": {
+        "steps": 1,
+        "left": 2
+      },
+      "editOpen": {
+        "choices": 54
+      },
+      "pauseOne": {
+        "steps": 2,
+        "countShownBefore": "145曲"
+      },
+      "detail": {
+        "choices": 10,
+        "text": {
+          "yearSource": true,
+          "path": true,
+          "rawFields": false,
+          "hash": false,
+          "candidates": true
+        },
+        "layer2": {
+          "path": true,
+          "rawFields": true,
+          "hash": true,
+          "candidates": true
+        }
+      },
+      "editorOpen": {
+        "choices": 7
+      },
+      "tagEdit": {
+        "possible": true,
+        "steps": 6,
+        "saved": true
+      },
+      "cancel": {
+        "steps": 1,
+        "undoOffered": true
+      },
+      "conflict": {
+        "steps": 2,
+        "draftKept": true
+      },
+      "rowTop_base": 170,
+      "rowTop_a": 218,
+      "rowTop_eight": 218
+    }
+  },
+  "narrow": {
+    "base": {
+      "typed2015": {
+        "choices": 7,
+        "kindHeaders": 0,
+        "ambiguityNote": 0
+      },
+      "afterFirst": {
+        "choices": 47,
+        "advanced": 4
+      },
+      "typedAnison": {
+        "choices": 21,
+        "joinHint": 0
+      },
+      "threeAnd": {
+        "steps": 8,
+        "rowTop": 210,
+        "lineChoices": 4,
+        "count": "53"
+      },
+      "removeOne": {
+        "steps": 2,
+        "left": 2
+      },
+      "editOpen": {
+        "choices": 54
+      },
+      "pauseOne": {
+        "steps": 2,
+        "countShownBefore": null
+      },
+      "detail": {
+        "choices": 9,
+        "text": {
+          "yearSource": true,
+          "path": true,
+          "rawFields": false,
+          "hash": false,
+          "candidates": false
+        }
+      },
+      "tagEdit": {
+        "possible": false,
+        "why": "削除と保存の操作がなく、入力して Enter で行に加わるだけ（保存しない）",
+        "stepsUntilStuck": 4,
+        "removeButtons": 0
+      },
+      "rowTop_base": 158,
+      "rowTop_a": 210,
+      "rowTop_eight": 210
+    },
+    "mine": {
+      "typed2015": {
+        "choices": 8,
+        "kindHeaders": 3,
+        "ambiguityNote": 1
+      },
+      "afterFirst": {
+        "choices": 46,
+        "advanced": 0
+      },
+      "typedAnison": {
+        "choices": 12,
+        "joinHint": 2
+      },
+      "threeAnd": {
+        "steps": 8,
+        "rowTop": 210,
+        "lineChoices": 3,
+        "count": "55"
+      },
+      "removeOne": {
+        "steps": 2,
+        "left": 2
+      },
+      "editOpen": {
+        "choices": 39
+      },
+      "pauseOne": {
+        "steps": 2,
+        "countShownBefore": "145曲"
+      },
+      "detail": {
+        "choices": 10,
+        "text": {
+          "yearSource": true,
+          "path": true,
+          "rawFields": false,
+          "hash": false,
+          "candidates": true
+        },
+        "layer2": {
+          "path": true,
+          "rawFields": true,
+          "hash": true,
+          "candidates": true
+        }
+      },
+      "editorOpen": {
+        "choices": 7
+      },
+      "tagEdit": {
+        "possible": true,
+        "steps": 6,
+        "saved": true
+      },
+      "cancel": {
+        "steps": 1,
+        "undoOffered": true
+      },
+      "conflict": {
+        "steps": 2,
+        "draftKept": true
+      },
+      "rowTop_base": 158,
+      "rowTop_a": 210,
+      "rowTop_eight": 210
+    }
+  }
+}
