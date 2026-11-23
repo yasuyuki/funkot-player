@@ -1,0 +1,236 @@
+{
+ "passed": 46,
+ "total": 46,
+ "results": [
+  {
+   "name": "S1 opening screen: no condition line, the list starts under one search field",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A0 / focuses the search field",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A1 typing 2015 offers the year with its count",
+   "ok": true,
+   "detail": "年 2015 制作年 ライブラリ全体で1,170曲 加えると 1,170曲"
+  },
+  {
+   "name": "A2 several candidates for 日本人",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A3 romaji finds アニソンremix and lists spelling variants",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A4 three AND conditions",
+   "ok": true,
+   "detail": "2015 + 日本人トラックメーカー + アニソンremix"
+  },
+  {
+   "name": "A5 the editor is a separate surface with its own exit",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A6 back to results: count shown, one condition line with three terms",
+   "ok": true,
+   "detail": "53曲"
+  },
+  {
+   "name": "A7 the condition line is one line (≤ 48px)",
+   "ok": true,
+   "detail": "{\"sum\":40,\"first\":218}"
+  },
+  {
+   "name": "B0 a term opens the editor",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "B1 pausing widens the result",
+   "ok": true,
+   "detail": "53 → 143"
+  },
+  {
+   "name": "B2 resuming restores it",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "B3 removing offers undo",
+   "ok": true,
+   "detail": "条件「アニソンremix」を外しました"
+  },
+  {
+   "name": "B4 undo puts it back in place",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "B5 どれかに一致 widens and the joiners read または",
+   "ok": true,
+   "detail": "53 → 10525"
+  },
+  {
+   "name": "B6 Escape closes the editor and returns focus to the field",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "B7 × clears all conditions and offers undo",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "B8 undo restores all three",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "B9 the recent list restores the cleared conditions",
+   "ok": true,
+   "detail": "2015年 ＋ 日本人トラックメーカー ＋ アニソンremix 53曲"
+  },
+  {
+   "name": "C0 the add control names its destination",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C1 one click adds to the shown destination",
+   "ok": true,
+   "detail": "「鋼鉄商店街ダンスホール」を再生待ちの5番目に追加しました"
+  },
+  {
+   "name": "C2 the row says where it landed",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C3 the dock tail shows it before the automatic picks",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C4 the destination list is folded until asked",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C5 after switching, the row action names the new destination",
+   "ok": true,
+   "detail": "「鋼鉄商店街ダンスホール」を金曜の夜に追加"
+  },
+  {
+   "name": "C6 adds to 金曜の夜",
+   "ok": true,
+   "detail": "fri=24"
+  },
+  {
+   "name": "C7 a missing file cannot be added and says why",
+   "ok": true,
+   "detail": "ファイルが見つからないため追加できません"
+  },
+  {
+   "name": "C8 keyboard: arrow to a row and press A",
+   "ok": true,
+   "detail": "fri=25"
+  },
+  {
+   "name": "C9 add: ≥ 28px mouse target, glyph far smaller than the title",
+   "ok": true,
+   "detail": "{\"titlePx\":19,\"titleArea\":17874,\"glyphArea\":324,\"hit\":[40,40]}"
+  },
+  {
+   "name": "E1 nine conditions: still one line, the rest folds into ほかN, list does not move",
+   "ok": true,
+   "detail": "{\"sum\":40,\"first\":218,\"more\":\"ほか7つ\"}"
+  },
+  {
+   "name": "E2 ほかN opens the editor with all nine",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "desktop has no page errors",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D1 tapping search opens the full-screen condition sheet",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D2 three conditions built by tapping",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D3 the sheet closes on its count button",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D4 no horizontal overflow at 412px",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D5 one tap adds to 再生待ち",
+   "ok": true,
+   "detail": "「鋼鉄商店街ダンスホール」を再生待ちの5番目に追加しました"
+  },
+  {
+   "name": "D6 the destination chip opens the sheet with every destination",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D7 destination switched",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D8 a condition removed in the sheet",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D9 sheet controls are at least 44px tall",
+   "ok": true,
+   "detail": "0 smaller"
+  },
+  {
+   "name": "D10 every visible control on the results screen is ≥ 44px",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "narrow has no page errors",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "Z1 200%: no horizontal overflow, first row and its add control on screen",
+   "ok": true,
+   "detail": "{\"first\":198,\"add\":626,\"w\":640}"
+  },
+  {
+   "name": "N1 every visible control has an accessible name",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "N2 a row reads as title and artist",
+   "ok": true,
+   "detail": "微熱パレード (Bootleg)、鉄塔ガールズ。詳細"
+  }
+ ]
+}
