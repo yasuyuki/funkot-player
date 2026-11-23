@@ -11,12 +11,9 @@ Before changing API, CLI, configuration, or persistent-data contracts, follow
 
 ## Registered branch work
 
-While `agent-branches/state.json` is in the Git common directory, register work
-with the public agent-rules command `branch begin`. `workspace-lifecycle begin`
-refuses this registry. After GitHub merges the topic into the registered remote
-destination, record that merge with `branch accept-remote-merge`, then remove
-the worktree with `branch retire`. Those commands and their refusals are in
-that source's README, under "Registered work and branch enforcement".
+Start each task with `wl begin` and end it with `wl finish --retire`.
+`.lifecycle.toml` declares the slot cache and the checks `wl` runs before it
+integrates into `main`.
 
 This interactive working-set boundary is separate from isolated
 `wsl-agent-lifecycle` clone management. Do not access `.secrets/`, copy

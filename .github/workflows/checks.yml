@@ -22,16 +22,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: funkot-player
-      - uses: actions/checkout@v7
-        with:
-          repository: yasuyuki/workspace-lifecycle
-          ref: 0765d3bb33ddab16e93daa6f942e5bd781c3c5cd
-          path: workspace-lifecycle
-      - name: Install the tested public reclamation API
-        run: python -m pip install ./workspace-lifecycle
-      - name: Test native generation, deployment and completion
+      - name: Test native build and deployment
         working-directory: funkot-player
-        run: ./scripts/win-build.test.ps1 -OwnerPython (Get-Command python).Source
+        run: ./scripts/win-build.test.ps1
       - name: Test repeatable music transfer
         working-directory: funkot-player
         run: python -B -m unittest discover -s scripts -p test_adb_push_music_list.py

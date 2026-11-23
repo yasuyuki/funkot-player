@@ -417,11 +417,19 @@ output location. Do not move a live release or manual data into an owned root.
 
 ### Windows host smoke (native checkout)
 
-Use the Windows-native `funkot-player` checkout in the selected managed working
-set, with its declared `funkot-autodj-for-ui` sibling at the required core
-revision. Verify that working set before building. If those checkouts are not
-available, provision them through the workspace's registered work/branch entry;
-this product does not create or synchronize a Windows source mirror.
+Use the Windows-native `funkot-player` checkout of the task (a `wl` slot), with
+the `funkot-autodj-for-ui` sibling at the revision in `funkot-core.commit`.
+Every slot shares one sibling in the slots directory. Create it once as a
+plain clone, not a worktree, so the engine's checkouts are unaffected:
+
+```powershell
+git clone --no-checkout https://github.com/yasuyuki/funkot-autodj.git ..\funkot-autodj-for-ui
+git -C ..\funkot-autodj-for-ui checkout --detach (Get-Content funkot-core.commit)
+```
+
+After a task changes `funkot-core.commit`, fetch in the sibling and check out
+the new SHA the same way. This product does not create or synchronize a
+Windows source mirror.
 
 Open PowerShell in that player checkout and build/deploy to
 `C:\funkot-player-test`:
@@ -429,6 +437,11 @@ Open PowerShell in that player checkout and build/deploy to
 ```powershell
 .\scripts\win-build.ps1
 ```
+
+The build stays in this checkout's `src-tauri\target`. `-BuildOnly` stops
+there, and `-DeployOnly` deploys the last successful build only while its
+inputs and files are unchanged. The deploy refuses a destination whose
+executables it did not write, or that changed since it wrote them.
 
 The former `win-run.sh` synchronization entry has been removed: its fixed
 `C:\src` copies were outside the managed working set and could overwrite native

@@ -1,24 +1,21 @@
 [CmdletBinding()]
 param(
     [switch]$Launch, [switch]$BuildOnly, [switch]$DeployOnly,
-    [string]$Receipt, [string]$Destination = 'C:\funkot-player-test',
-    [string]$OwnerPython = $env:FUNKOT_OWNER_PYTHON,
-    [switch]$Complete, [switch]$UsersReleased, [string]$ResultRef
+    [string]$Destination = 'C:\funkot-player-test'
 )
 $ErrorActionPreference = 'Stop'
+
+# The build stays in this checkout's src-tauri\target (the wl slot cache).
+# A stamp written after a successful build records its inputs and final files;
+# a deploy refuses outputs whose stamp, inputs or files no longer agree.
+$script:StampName = '.funkot-windows-build.json'
+$script:DeploymentManifest = '.funkot-native-generation.json'
 
 function Invoke-CheckedOutput {
     param([string]$Command, [string[]]$Arguments)
     $result = & $Command @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Command failed with exit code $LASTEXITCODE" }
     return ($result -join [Environment]::NewLine).Trim()
-}
-
-function Invoke-Owner {
-    param([string]$Python, [string]$Repo, [string[]]$Arguments)
-    $result = & $Python (Join-Path $Repo 'scripts\win-build-owner.py') @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) { throw ($result -join [Environment]::NewLine) }
-    return ($result -join [Environment]::NewLine) | ConvertFrom-Json
 }
 
 function Initialize-BuildEnvironment {
@@ -54,18 +51,10 @@ function Get-BuildInputs {
     $bash = Join-Path (Split-Path (Split-Path $gitPath)) 'bin\bash.exe'
     if (-not (Test-Path -LiteralPath $bash)) { throw 'Git Bash is required for the existing core adoption check' }
     $oldCore = $env:FUNKOT_CORE_REPO
-    $oldTarget = $env:CARGO_TARGET_DIR
     try {
         $env:FUNKOT_CORE_REPO = $core
         Invoke-CheckedOutput $bash @((Join-Path $Repo 'scripts\check-funkot-core-commit.sh')) | Out-Null
-        $env:CARGO_TARGET_DIR = Join-Path $Repo 'src-tauri\target'
-        $metadata = (Invoke-CheckedOutput cargo @('metadata', '--no-deps', '--format-version', '1',
-            '--manifest-path', (Join-Path $Repo 'src-tauri\Cargo.toml'))) | ConvertFrom-Json
-    } finally {
-        $env:FUNKOT_CORE_REPO = $oldCore
-        $env:CARGO_TARGET_DIR = $oldTarget
-    }
-    if (-not $metadata.build_directory) { throw 'Cargo metadata must expose the effective shared build_directory' }
+    } finally { $env:FUNKOT_CORE_REPO = $oldCore }
     $sources = [ordered]@{}
     $names = & git -C $Repo ls-files --cached --others --exclude-standard
     if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate player inputs' }
@@ -75,32 +64,16 @@ function Get-BuildInputs {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Player input missing: $name" }
         $sources[$name] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
     }
-    $configurations = [ordered]@{}
-    foreach ($file in @((Join-Path $env:CARGO_HOME 'config'), (Join-Path $env:CARGO_HOME 'config.toml'),
-        (Join-Path $Repo '.cargo\config.toml'), (Join-Path $Repo 'src-tauri\.cargo\config.toml'))) {
-        if (Test-Path -LiteralPath $file -PathType Leaf) {
-            $configurations[$file] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-        }
-    }
     $flags = [ordered]@{}
     Get-ChildItem Env: | Where-Object {
-        $_.Name -match '^(CARGO_(BUILD|PROFILE|TARGET|ENCODED_RUSTFLAGS)|RUSTFLAGS|RUSTUP_TOOLCHAIN|TAURI_CONFIG$|CC$|CXX$|LIBCLANG_PATH$|INCLUDE$|LIB$|LIBPATH$|VCToolsVersion$|WindowsSDKVersion$)'
+        $_.Name -match '^(CARGO_(BUILD|PROFILE|ENCODED_RUSTFLAGS)|RUSTFLAGS|RUSTUP_TOOLCHAIN|TAURI_CONFIG$)'
     } | Sort-Object Name | ForEach-Object { $flags[$_.Name] = $_.Value }
-    $flags.Remove('CARGO_TARGET_DIR')
     return [ordered]@{
         source_revision = Invoke-CheckedOutput git @('-C', $Repo, 'rev-parse', 'HEAD')
-        sources = $sources; core = $core
+        sources = $sources
         core_revision = Invoke-CheckedOutput git @('-C', $core, 'rev-parse', 'HEAD')
-        core_pin = (Get-Content -LiteralPath (Join-Path $Repo 'funkot-core.commit') -Raw).Trim()
         candidate = $env:FUNKOT_CORE_CANDIDATE_SHA
-        cargo = Invoke-CheckedOutput cargo @('--version')
-        rustc = Invoke-CheckedOutput rustc @('-vV')
-        npm = Invoke-CheckedOutput npm.cmd @('--version')
-        tauri = Invoke-CheckedOutput npm.cmd @('run', 'tauri', '--', '--version')
-        build_directory = [IO.Path]::GetFullPath($metadata.build_directory)
-        target_directory = [IO.Path]::GetFullPath($metadata.target_directory)
-        configurations = $configurations; flags = $flags
-        recipe = @('npm', 'run', 'tauri', '--', 'build', '--no-bundle'); profile = 'release'
+        flags = $flags
     }
 }
 
@@ -109,36 +82,33 @@ function Invoke-NativeCompile {
     if ($LASTEXITCODE -ne 0) { throw "tauri build failed with exit code $LASTEXITCODE" }
 }
 
-function ConvertTo-PrivateFinalFiles {
-    param([string]$OutputRoot)
-    Assert-PlainPath $OutputRoot
-    $directories = @(Get-ChildItem -LiteralPath $OutputRoot -Directory -Recurse -Force)
-    foreach ($directory in $directories) {
-        Assert-PlainPath $directory.FullName
-        if ($directory.Name -in @('deps', 'build', 'incremental', '.fingerprint')) {
-            throw 'Cargo intermediate output entered the dedicated final root'
-        }
+function Get-ReleaseFiles {
+    param([string]$Release)
+    $executable = Join-Path $Release 'funkot-player.exe'
+    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Build produced no $executable" }
+    $files = @(Get-Item -LiteralPath $executable) + @(Get-ChildItem -LiteralPath $Release -Filter '*.dll' -File)
+    return @($files | ForEach-Object {
+        [ordered]@{ name = $_.Name; path = $_.FullName; sha256 = (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant() }
+    })
+}
+
+function ConvertTo-Json30 { param($Value) return ($Value | ConvertTo-Json -Depth 30 -Compress) }
+
+function Read-BuildStamp {
+    param([string]$Release, $Inputs)
+    $stamp = Join-Path $Release $script:StampName
+    if (-not (Test-Path -LiteralPath $stamp -PathType Leaf)) {
+        throw 'There is no successful build in this checkout; build without -DeployOnly first'
     }
-    # Cargo hardlinks final binaries to the shared build cache; copy only finals.
-    foreach ($file in @(Get-ChildItem -LiteralPath $OutputRoot -File -Recurse -Force)) {
-        Assert-PlainPath $file.FullName
-        $temporary = Join-Path $file.DirectoryName ('.native-copy-' + [Guid]::NewGuid().ToString('N'))
-        $inputStream = $null
-        $outputStream = $null
-        try {
-            $inputStream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-            $outputStream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            $inputStream.CopyTo($outputStream)
-            $outputStream.Flush($true)
-            $outputStream.Dispose(); $outputStream = $null
-            $inputStream.Dispose(); $inputStream = $null
-            Move-Item -LiteralPath $temporary -Destination $file.FullName -Force
-        } finally {
-            if ($outputStream) { $outputStream.Dispose() }
-            if ($inputStream) { $inputStream.Dispose() }
-            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
-        }
+    $recorded = Get-Content -LiteralPath $stamp -Raw | ConvertFrom-Json
+    if ((ConvertTo-Json30 $recorded.inputs) -ne (ConvertTo-Json30 ($Inputs | ConvertTo-Json -Depth 30 | ConvertFrom-Json))) {
+        throw 'Build inputs changed since the last successful build; rebuild before deploying'
     }
+    $current = @(Get-ReleaseFiles $Release)
+    $expected = @($recorded.files | ForEach-Object { $_.name + ':' + $_.sha256 }) -join '|'
+    $actual = @($current | ForEach-Object { $_.name + ':' + $_.sha256 }) -join '|'
+    if ($expected -ne $actual) { throw 'Built files changed since the last successful build; rebuild before deploying' }
+    return [ordered]@{ source_revision = $recorded.inputs.source_revision; files = $current }
 }
 
 function Stop-DeployTarget {
@@ -160,154 +130,95 @@ function Assert-PlainPath {
     while ($current) {
         $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            throw 'Native output and deployment paths cannot traverse reparse points'
+            throw 'Deployment paths cannot traverse reparse points'
         }
         $current = Split-Path $current -Parent
     }
 }
 
-function Assert-Deployment {
-    param($Generation, [string]$Destination)
-    Assert-PlainPath $Destination
-    $deploymentReceipt = Join-Path $Destination '.funkot-native-generation.json'
+# Returns the file names the previous deploy wrote. Refuses a destination whose
+# executables this entry did not write or that changed since.
+function Get-PreviousDeployment {
+    param([string]$Destination)
+    $manifest = Join-Path $Destination $script:DeploymentManifest
     $existing = @(Get-ChildItem -LiteralPath $Destination -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -eq 'funkot-player.exe' -or $_.Extension -eq '.dll' })
-    if (-not $existing.Count) { return }
-    if (-not (Test-Path -LiteralPath $deploymentReceipt -PathType Leaf)) {
-        throw 'Existing deployment has no native owner receipt; preserve it until the product owner migrates it'
+    if (-not $existing.Count) { return @() }
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "Existing deployment in $Destination was not written by this entry; move it aside first"
     }
-    $previous = Get-Content -LiteralPath $deploymentReceipt -Raw | ConvertFrom-Json
-    if (-not $previous.generation -or -not $previous.receipt -or -not $previous.files) {
-        throw 'Existing deployment receipt is incomplete'
-    }
+    $previous = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+    if (-not $previous.files) { throw 'Existing deployment manifest is incomplete' }
     $expectedNames = @($previous.files | ForEach-Object { $_.name } | Sort-Object)
     $actualNames = @($existing | ForEach-Object { $_.Name } | Sort-Object)
-    if (($expectedNames -join '|') -ne ($actualNames -join '|')) { throw 'Deployment file set changed' }
+    if (($expectedNames -join '|') -ne ($actualNames -join '|')) { throw 'Existing deployment file set changed' }
     foreach ($file in $previous.files) {
-        if ([IO.Path]::GetFileName($file.name) -ne $file.name) { throw 'Unsafe deployment receipt filename' }
-        Assert-PlainPath (Join-Path $Destination $file.name)
+        if ([IO.Path]::GetFileName($file.name) -ne $file.name) { throw 'Unsafe deployment manifest filename' }
         if ((Get-FileHash -LiteralPath (Join-Path $Destination $file.name)).Hash -ine $file.sha256) {
-            throw 'Existing deployment identity changed'
+            throw 'Existing deployment changed since it was deployed'
         }
     }
-    $newNames = @($Generation.files | ForEach-Object { $_.name } | Sort-Object)
-    if (($newNames -join '|') -ne ($actualNames -join '|')) {
-        throw 'Deployment file set differs; release the previous deployment through its owner first'
-    }
+    return $expectedNames
 }
 
-function Invoke-ExactDeploy {
-    param($Generation, [string]$Destination, [switch]$Launch)
-    $handles = @()
-    $destinationHandles = @()
-    $deployLock = $null
-    try {
-        # Read-sharing pins each exact source object against writers and deletion.
-        foreach ($file in $Generation.files) {
-            Assert-PlainPath $file.path
-            $stream = [IO.File]::Open($file.path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-            $handles += $stream
-            $sha = [Security.Cryptography.SHA256]::Create()
-            try { $digest = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
-            finally { $sha.Dispose() }
-            if ($digest -ne $file.sha256.ToLowerInvariant()) { throw 'Deploy source changed before its read handle was acquired' }
-            $stream.Position = 0
-        }
-        $deployed = Join-Path $Destination 'funkot-player.exe'
-        $deploymentReceipt = Join-Path $Destination '.funkot-native-generation.json'
-        Assert-Deployment $Generation $Destination
-        New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-        $lockPath = Join-Path $Destination '.funkot-native-deploy.lock'
-        Assert-PlainPath $lockPath
-        $deployLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        Assert-Deployment $Generation $Destination
-        Stop-DeployTarget $deployed
-        for ($index = 0; $index -lt $handles.Count; $index++) {
-            $target = Join-Path $Destination $Generation.files[$index].name
-            $output = [IO.File]::Open($target, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-            $destinationHandles += $output
-            $handles[$index].CopyTo($output)
-            $output.Flush($true)
-            $output.Position = 0
-            $sha = [Security.Cryptography.SHA256]::Create()
-            try { $digest = [BitConverter]::ToString($sha.ComputeHash($output)).Replace('-', '').ToLowerInvariant() }
-            finally { $sha.Dispose() }
-            if ($digest -ne $Generation.files[$index].sha256.ToLowerInvariant()) { throw 'Deployed artifact readback mismatch' }
-        }
-        $deployment = @{ generation = $Generation.generation; receipt = $Generation.receipt; files = $Generation.files }
-        [IO.File]::WriteAllText($deploymentReceipt, ($deployment | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
-        foreach ($stream in $destinationHandles) { $stream.Dispose() }
-        $destinationHandles = @()
-        if ($Launch) { Start-DeployTarget $deployed }
-    } finally {
-        foreach ($stream in $destinationHandles) { $stream.Dispose() }
-        foreach ($stream in $handles) { $stream.Dispose() }
-        if ($deployLock) { $deployLock.Dispose() }
+function Invoke-Deploy {
+    param($Build, [string]$Destination, [switch]$Launch)
+    Assert-PlainPath $Destination
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $previousNames = Get-PreviousDeployment $Destination
+    $deployed = Join-Path $Destination 'funkot-player.exe'
+    Stop-DeployTarget $deployed
+    foreach ($file in $Build.files) {
+        $target = Join-Path $Destination $file.name
+        Copy-Item -LiteralPath $file.path -Destination $target -Force
+        if ((Get-FileHash -LiteralPath $target).Hash -ine $file.sha256) { throw "Deployed $($file.name) readback mismatch" }
     }
-    Write-Host "OK: deployed generation $($Generation.generation) to $deployed"
+    $newNames = @($Build.files | ForEach-Object { $_.name })
+    foreach ($name in $previousNames) {
+        if ($name -notin $newNames) { Remove-Item -LiteralPath (Join-Path $Destination $name) }
+    }
+    $manifest = [ordered]@{
+        source_revision = $Build.source_revision
+        files = @($Build.files | ForEach-Object { [ordered]@{ name = $_.name; sha256 = $_.sha256 } })
+    }
+    [IO.File]::WriteAllText((Join-Path $Destination $script:DeploymentManifest),
+        ($manifest | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+    if ($Launch) { Start-DeployTarget $deployed }
+    Write-Host "OK: deployed $($Build.source_revision) to $deployed"
 }
 
 function Invoke-WindowsBuild {
-    param([string]$Repo, [string]$Python, [string]$Destination, [string]$Receipt,
-        [switch]$BuildOnly, [switch]$DeployOnly, [switch]$Launch,
-        [switch]$Complete, [switch]$UsersReleased, [string]$ResultRef)
-    if (($BuildOnly -and $DeployOnly) -or ($BuildOnly -and $Launch) -or
-        ($Complete -and ($BuildOnly -or $DeployOnly -or $Launch))) { throw 'Conflicting build/deploy/completion options' }
-    if (-not $Python) {
-        if ($env:WORKSPACE_LIFECYCLE_CONTEXT) {
-            $context = $env:WORKSPACE_LIFECYCLE_CONTEXT | ConvertFrom-Json
-            $Python = $context.owner_receipt_argv[0]
-        } else { $Python = (Get-Command python.exe -ErrorAction Stop).Source }
-    }
+    param([string]$Repo, [string]$Destination, [switch]$BuildOnly, [switch]$DeployOnly, [switch]$Launch)
+    if (($BuildOnly -and $DeployOnly) -or ($BuildOnly -and $Launch)) { throw 'Conflicting build/deploy options' }
     $oldLocation = Get-Location
     $oldTarget = $env:CARGO_TARGET_DIR
-    $operationLock = $null
-    $inputsFile = $null
     try {
         Set-Location -LiteralPath $Repo
-        Invoke-Owner $Python $Repo @('resume', '--repo', $Repo) | Out-Null
-        if ($Complete) {
-            if (-not $Receipt -or -not $UsersReleased -or -not $ResultRef) {
-                throw 'Completion requires an exact receipt, result reference and explicit final-user release'
-            }
-            return Invoke-Owner $Python $Repo @('complete', '--receipt', $Receipt,
-                '--result-ref', $ResultRef, '--users-released')
-        }
-        $paths = Invoke-Owner $Python $Repo @('paths', '--repo', $Repo)
-        $operationLock = [IO.File]::Open($paths.lock, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        if (-not $DeployOnly) { Invoke-Owner $Python $Repo @('invalidate', '--repo', $Repo) | Out-Null }
-        Initialize-BuildEnvironment
-        if (-not $DeployOnly -and -not (Test-Path -LiteralPath (Join-Path $Repo 'node_modules'))) {
-            npm.cmd ci | Out-Host
-            if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
-        }
-        $inputsFile = Join-Path (Split-Path $paths.lock) ('inputs-' + [Guid]::NewGuid().ToString('N') + '.json')
-        $inputs = Get-BuildInputs $Repo
-        [IO.File]::WriteAllText($inputsFile, ($inputs | ConvertTo-Json -Depth 30 -Compress), [Text.UTF8Encoding]::new($false))
+        $target = Join-Path $Repo 'src-tauri\target'
+        $release = Join-Path $target 'release'
+        $env:CARGO_TARGET_DIR = $target
         if (-not $DeployOnly) {
-            $generation = Invoke-Owner $Python $Repo @('begin', '--repo', $Repo, '--inputs', $inputsFile)
-            $Receipt = $generation.receipt
-            $env:CARGO_TARGET_DIR = $generation.output
-            try {
-                Invoke-NativeCompile
-                ConvertTo-PrivateFinalFiles $generation.output
-                $inputs = Get-BuildInputs $Repo
-                [IO.File]::WriteAllText($inputsFile, ($inputs | ConvertTo-Json -Depth 30 -Compress), [Text.UTF8Encoding]::new($false))
-                Invoke-Owner $Python $Repo @('seal', '--receipt', $Receipt, '--inputs', $inputsFile) | Out-Null
-            } catch {
-                $buildError = $_
-                try { ConvertTo-PrivateFinalFiles $generation.output }
-                catch { Write-Warning 'Failed build output could not be separated from cache links; preserve it for owner recovery' }
-                Invoke-Owner $Python $Repo @('fail', '--receipt', $Receipt) | Out-Null
-                throw $buildError
+            Initialize-BuildEnvironment
+            if (-not (Test-Path -LiteralPath (Join-Path $Repo 'node_modules'))) {
+                npm.cmd ci | Out-Host
+                if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
             }
-        } elseif (-not $Receipt) { $Receipt = (Invoke-Owner $Python $Repo @('latest', '--repo', $Repo)).receipt }
-        $generation = Invoke-Owner $Python $Repo @('verify', '--receipt', $Receipt, '--repo', $Repo, '--inputs', $inputsFile)
-        if (-not $BuildOnly) { Invoke-ExactDeploy $generation $Destination -Launch:$Launch }
-        return $generation
+        }
+        $inputs = Get-BuildInputs $Repo
+        if (-not $DeployOnly) {
+            $stamp = Join-Path $release $script:StampName
+            if (Test-Path -LiteralPath $stamp) { Remove-Item -LiteralPath $stamp }
+            Invoke-NativeCompile
+            $after = Get-BuildInputs $Repo
+            if ((ConvertTo-Json30 $after) -ne (ConvertTo-Json30 $inputs)) { throw 'Build inputs changed during the build' }
+            $files = @(Get-ReleaseFiles $release | ForEach-Object { [ordered]@{ name = $_.name; sha256 = $_.sha256 } })
+            [IO.File]::WriteAllText($stamp, (ConvertTo-Json30 ([ordered]@{ inputs = $inputs; files = $files })),
+                [Text.UTF8Encoding]::new($false))
+        }
+        $build = Read-BuildStamp $release $inputs
+        if (-not $BuildOnly) { Invoke-Deploy $build $Destination -Launch:$Launch }
+        return $build
     } finally {
-        if ($inputsFile -and (Test-Path -LiteralPath $inputsFile)) { Remove-Item -LiteralPath $inputsFile }
-        if ($operationLock) { $operationLock.Dispose() }
         $env:CARGO_TARGET_DIR = $oldTarget
         Set-Location -LiteralPath $oldLocation
     }
@@ -316,9 +227,7 @@ function Invoke-WindowsBuild {
 if ($MyInvocation.InvocationName -ne '.') {
     $arguments = @{
         Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-        Python = $OwnerPython; Destination = $Destination; Receipt = $Receipt
-        BuildOnly = $BuildOnly; DeployOnly = $DeployOnly; Launch = $Launch
-        Complete = $Complete; UsersReleased = $UsersReleased; ResultRef = $ResultRef
+        Destination = $Destination; BuildOnly = $BuildOnly; DeployOnly = $DeployOnly; Launch = $Launch
     }
     Invoke-WindowsBuild @arguments | ConvertTo-Json -Depth 30
 }

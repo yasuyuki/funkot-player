@@ -77,7 +77,6 @@ def main():
 
         def run(path, player=1, core_value=1, build=1, label='', candidate=None, expect_reject=False, core_repo=None):
             env = os.environ.copy()
-            env.pop('WORKSPACE_LIFECYCLE_CONTEXT', None)
             env.pop('FUNKOT_CORE_CANDIDATE_SHA', None)
             core_repo = core_repo or core
             env['FUNKOT_CORE_REPO'] = str(core_repo)
@@ -128,7 +127,6 @@ def main():
         src = a / 'src-tauri/src/lib.rs'
         original = src.read_bytes()
         env = os.environ.copy()
-        env.pop('WORKSPACE_LIFECYCLE_CONTEXT', None)
         env.pop('FUNKOT_CORE_CANDIDATE_SHA', None)
         env['FUNKOT_CORE_REPO'] = str(core)
         env['FUNKOT_CARGO_TARGET'] = volume
