@@ -1,0 +1,49 @@
+/* The identification panel uses the ink and paper of the surrounding sleeve. */
+.record-card {
+  padding:0; width:min(38rem,calc(100% - 2rem)); max-height: min(85dvh,52rem);
+  color:var(--ink); background:var(--card); border:1px solid var(--ink); border-radius:14px;
+  box-shadow:0 20px 64px #15133345; overflow:hidden;
+}
+.record-card[open] {display:flex; flex-direction:column}
+.record-card::backdrop {background:#17163264}
+.record-bar {display:flex; justify-content:space-between; align-items:center; flex:none; gap:.75rem; padding:.45rem 1.25rem; font-weight:700; border-bottom:1px solid var(--rule)}
+.record-card button,.record-fold summary {min-height:var(--ctl); min-width:var(--ctl)}
+.record-bar button {font-weight:700; color:var(--blue)}
+.record-scroll {overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable}
+.record-face {position:relative; padding:clamp(1.15rem,4vw,2.4rem); background:var(--paper); border-inline-start:8px solid var(--pink)}
+.record-credit {font-weight:700; color:var(--ink-2); font-size:1rem}
+.record-card h2 {font-family:var(--display); line-height:1.25; letter-spacing:-.045em; font-size:clamp(1.65rem,3.1vw,2.65rem); margin:.4rem 0 1.5rem; overflow-wrap:anywhere}
+.record-card h2 span {display:block; margin-top:.3em; font-family:var(--text); font-weight:500; font-size:.68em; letter-spacing:-.025em}
+.record-spec {display:flex; flex-wrap:wrap; gap:.65rem 2rem; font-variant-numeric:tabular-nums}
+.record-spec small,.record-spec b {display:block}
+.record-spec small,.record-fold small,.record-tag-head small {color:var(--ink-3); font-weight:500}
+.record-spec b {font-size:1.15rem}
+.record-state {font-size:.85rem; margin:.9rem 0 0; color:var(--ink-2)}
+.record-notes {padding:1rem clamp(1rem,4vw,2.4rem) 1.25rem}
+.record-tag-head,.record-version {display:flex; align-items:center; gap:.75rem; justify-content:space-between}
+.record-tag-head h3 {margin:0;font-size:1.2rem}
+.record-tag-head button {font-weight:700; padding:.35rem 1rem; border-radius:8px; background:var(--ink); color:var(--card)}
+.record-tags {margin:.65rem 0; overflow-wrap:anywhere}
+.record-fold {border-top:1px solid var(--rule)}
+.record-fold summary {cursor:pointer; display:flex; align-items:center; gap:.5rem; font-weight:700; padding:.4rem 0}
+.record-fold summary::after {content:"＋"; margin-inline-start:auto; color:var(--ink-3)}
+.record-fold[open] summary::after {content:"−"}
+.record-fold dl {display:grid; grid-template-columns:minmax(5em,auto) minmax(0,1fr); gap:.5rem .9rem; margin:.35rem 0 1rem; overflow-wrap:anywhere}
+.record-fold dt {color:var(--ink-3)}
+.record-fold dd {margin:0}
+.record-actions {display:flex; flex-wrap:wrap; gap:.5rem}
+.record-actions button,.record-version {border:1px solid var(--rule); padding:.35rem .65rem; border-radius:.4rem}
+.record-version {width:100%; flex-wrap:wrap;text-align:start; margin-bottom:.4rem}
+.record-version span {overflow-wrap:anywhere; flex:1; min-width:6rem}
+.record-version:disabled {opacity:1; background:var(--paper)}
+@media(max-width:650px){
+.record-card {width:100%; max-width:100%; margin:auto 0 0; max-height:92dvh; border-radius:16px 16px 0 0}
+.record-scroll {scrollbar-gutter:auto}
+.record-card h2 {font-size:1.9rem}
+#resultsBar:has(.index-bulk) {flex-wrap:wrap;height:auto}
+}
+@media(max-height:520px){.record-card{max-height:98dvh}}
+
+.record-key {padding:.2rem .5rem; text-align:start; text-decoration:underline; text-decoration-color:var(--rule); text-underline-offset:.25em; overflow-wrap:anywhere}
+.record-receipt {color:var(--teal); font-weight:700; margin:.5rem 0}
+.demo select {background:var(--card);color:var(--ink);border-radius:4px;max-width:9.5rem}

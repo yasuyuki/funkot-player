@@ -1,0 +1,229 @@
+{
+  "browser": "157.0.4341.46",
+  "viewports": [
+    {
+      "width": 412,
+      "height": 915,
+      "checks": [
+        "選択した3条件と全結果の実データが一致",
+        "9条件・グループ内OR・否定・一時停止",
+        "同名ファイル切替後も元の曲行へフォーカス復帰・検索条件保持",
+        "取消でドラフト破棄、競合で無変更、再読込後に同じ曲へ手動タグ保存",
+        "大量タグを名前で探して削除を取り消し、埋め込みジャンルの除外と再追加",
+        "一括操作中の検索・選択変更と再スキャン後も当初の対象へ保存",
+        "保存失敗・識別変更後は再読込でも別の曲に下書きを書かない",
+        "412×510のキーボード領域代替、文字拡大、保存フッター到達",
+        "識別未確定を含む一括保存を拒否、年確認中を未設定から除外、長い題名と欠落情報を表示",
+        "同一内容2パスの共有、年の手動指定・未設定・自動、no-opはrevision不変、3種の自動年診断"
+      ],
+      "screens": [
+        "search",
+        "advanced",
+        "detail",
+        "single",
+        "conflict",
+        "many-tags",
+        "bulk",
+        "failed",
+        "keyboard-space",
+        "large-type"
+      ],
+      "choices": {
+        "first": 5
+      },
+      "layout": {
+        "search": {
+          "horizontalOverflow": false,
+          "visibleControls": 7,
+          "below44px": [],
+          "focus": "ライブラリを検索"
+        },
+        "advanced": {
+          "horizontalOverflow": false,
+          "visibleControls": 22,
+          "below44px": [],
+          "focus": "BUTTON"
+        },
+        "detail": {
+          "horizontalOverflow": false,
+          "visibleControls": 6,
+          "below44px": [],
+          "focus": "BUTTON"
+        },
+        "single": {
+          "horizontalOverflow": false,
+          "visibleControls": 8,
+          "below44px": [],
+          "focus": "INPUT"
+        },
+        "conflict": {
+          "horizontalOverflow": false,
+          "visibleControls": 11,
+          "below44px": [],
+          "focus": "P"
+        },
+        "many-tags": {
+          "horizontalOverflow": false,
+          "visibleControls": 9,
+          "below44px": [],
+          "focus": "INPUT"
+        },
+        "bulk": {
+          "horizontalOverflow": false,
+          "visibleControls": 8,
+          "below44px": [],
+          "focus": "INPUT"
+        },
+        "failed": {
+          "horizontalOverflow": false,
+          "visibleControls": 10,
+          "below44px": [],
+          "focus": "P"
+        },
+        "keyboard-space": {
+          "horizontalOverflow": false,
+          "visibleControls": 8,
+          "below44px": [],
+          "focus": "BUTTON"
+        },
+        "large-type": {
+          "horizontalOverflow": false,
+          "visibleControls": 7,
+          "below44px": [],
+          "focus": "BUTTON"
+        }
+      },
+      "keys": 2779,
+      "manyTags": 114
+    },
+    {
+      "width": 1280,
+      "height": 900,
+      "checks": [
+        "選択した3条件と全結果の実データが一致",
+        "9条件・グループ内OR・否定・一時停止",
+        "同名ファイル切替後も元の曲行へフォーカス復帰・検索条件保持",
+        "取消でドラフト破棄、競合で無変更、再読込後に同じ曲へ手動タグ保存",
+        "大量タグを名前で探して削除を取り消し、埋め込みジャンルの除外と再追加",
+        "一括操作中の検索・選択変更と再スキャン後も当初の対象へ保存",
+        "保存失敗・識別変更後は再読込でも別の曲に下書きを書かない",
+        "識別未確定を含む一括保存を拒否、年確認中を未設定から除外、長い題名と欠落情報を表示",
+        "同一内容2パスの共有、年の手動指定・未設定・自動、no-opはrevision不変、3種の自動年診断"
+      ],
+      "screens": [
+        "search",
+        "advanced",
+        "detail",
+        "single",
+        "conflict",
+        "many-tags",
+        "bulk",
+        "failed"
+      ],
+      "choices": {
+        "first": 5
+      },
+      "layout": {
+        "search": {
+          "horizontalOverflow": false,
+          "visibleControls": 7,
+          "below44px": [
+            "INPUT",
+            "close"
+          ],
+          "focus": "ライブラリを検索"
+        },
+        "advanced": {
+          "horizontalOverflow": false,
+          "visibleControls": 31,
+          "below44px": [
+            "INPUT",
+            "edit",
+            "remove",
+            "close",
+            "join",
+            "remove-value",
+            "mode",
+            "negate",
+            "pause",
+            "separate-year",
+            "add"
+          ],
+          "focus": "BUTTON"
+        },
+        "detail": {
+          "horizontalOverflow": false,
+          "visibleControls": 6,
+          "below44px": [
+            "BUTTON",
+            "SUMMARY"
+          ],
+          "focus": "BUTTON"
+        },
+        "single": {
+          "horizontalOverflow": false,
+          "visibleControls": 8,
+          "below44px": [
+            "cancel",
+            "INPUT",
+            "SUMMARY",
+            "save"
+          ],
+          "focus": "INPUT"
+        },
+        "conflict": {
+          "horizontalOverflow": false,
+          "visibleControls": 12,
+          "below44px": [
+            "cancel",
+            "INPUT",
+            "add",
+            "SUMMARY",
+            "undo",
+            "save",
+            "reload"
+          ],
+          "focus": "P"
+        },
+        "many-tags": {
+          "horizontalOverflow": false,
+          "visibleControls": 9,
+          "below44px": [
+            "cancel",
+            "INPUT",
+            "SUMMARY",
+            "show-more",
+            "save"
+          ],
+          "focus": "INPUT"
+        },
+        "bulk": {
+          "horizontalOverflow": false,
+          "visibleControls": 8,
+          "below44px": [
+            "cancel",
+            "INPUT",
+            "SUMMARY",
+            "save"
+          ],
+          "focus": "INPUT"
+        },
+        "failed": {
+          "horizontalOverflow": false,
+          "visibleControls": 11,
+          "below44px": [
+            "cancel",
+            "INPUT",
+            "add",
+            "SUMMARY",
+            "undo",
+            "save"
+          ],
+          "focus": "P"
+        }
+      },
+      "keys": 2779,
+      "manyTags": 114
+    }
+  ]
+}

@@ -1,0 +1,516 @@
+{
+  "source": "../../library-general-claude/index.html",
+  "browser": "157.0.4341.46",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 900,
+      "touch": false,
+      "trial": {
+        "searchFocus": "finderInput",
+        "candidateChoices": {
+          "year2015": 4,
+          "japaneseTag": 7,
+          "romanizedGenre": 2
+        },
+        "threeConditions": {
+          "clauses": 3,
+          "mode": "all",
+          "metrics": {
+            "visibleChoices": 82,
+            "visibleCandidateChoices": 0,
+            "firstRowTop": 622,
+            "resultScrollHeight": 3832,
+            "resultClientHeight": 266,
+            "pageHorizontalOverflow": false,
+            "conditionSummaryHeight": 0,
+            "editorOpen": true,
+            "editorIsFullViewport": false,
+            "focusedId": null,
+            "focusedAction": null
+          }
+        },
+        "afterReturningToResults": {
+          "visibleChoices": 35,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 218,
+          "resultScrollHeight": 3832,
+          "resultClientHeight": 670,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 40,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "conditionEditEscape": {
+          "editorOpen": false,
+          "focusedId": null
+        },
+        "detail": {
+          "active": "capture",
+          "metrics": {
+            "visibleChoices": 31,
+            "visibleCandidateChoices": 0,
+            "firstRowTop": 218,
+            "resultScrollHeight": 4093,
+            "resultClientHeight": 670,
+            "pageHorizontalOverflow": false,
+            "conditionSummaryHeight": 40,
+            "editorOpen": false,
+            "editorIsFullViewport": false,
+            "focusedId": null,
+            "focusedAction": null
+          }
+        },
+        "tagDraft": {
+          "active": "tagEdit",
+          "metrics": {
+            "visibleChoices": 31,
+            "visibleCandidateChoices": 0,
+            "firstRowTop": 218,
+            "resultScrollHeight": 4139,
+            "resultClientHeight": 670,
+            "pageHorizontalOverflow": false,
+            "conditionSummaryHeight": 40,
+            "editorOpen": false,
+            "editorIsFullViewport": false,
+            "focusedId": "tagEdit",
+            "focusedAction": null
+          }
+        },
+        "tagMutationToast": "タグを加えました（試作のため保存しません）"
+      },
+      "errors": [],
+      "staticStates": {
+        "base": {
+          "visibleChoices": 32,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 170,
+          "resultScrollHeight": 4329,
+          "resultClientHeight": 718,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 0,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "a": {
+          "visibleChoices": 35,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 218,
+          "resultScrollHeight": 3832,
+          "resultClientHeight": 670,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 40,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "a-edit": {
+          "visibleChoices": 39,
+          "visibleCandidateChoices": 2,
+          "firstRowTop": 508,
+          "resultScrollHeight": 3832,
+          "resultClientHeight": 380,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 0,
+          "editorOpen": true,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "a-detail": {
+          "visibleChoices": 36,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 218,
+          "resultScrollHeight": 4111,
+          "resultClientHeight": 670,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 40,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "a-select": {
+          "visibleChoices": 46,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 218,
+          "resultScrollHeight": 3832,
+          "resultClientHeight": 670,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 40,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "eight": {
+          "visibleChoices": 31,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 218,
+          "resultScrollHeight": 670,
+          "resultClientHeight": 670,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 40,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "eight-edit": {
+          "visibleChoices": 94,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 622,
+          "resultScrollHeight": 640,
+          "resultClientHeight": 266,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 0,
+          "editorOpen": true,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "error": {
+          "visibleChoices": 35,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 278,
+          "resultScrollHeight": 3832,
+          "resultClientHeight": 610,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 40,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "tagDraft": {
+          "visibleChoices": 36,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 218,
+          "resultScrollHeight": 4139,
+          "resultClientHeight": 670,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 40,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": "tagEdit",
+          "focusedAction": null
+        }
+      }
+    },
+    "narrow": {
+      "width": 412,
+      "height": 915,
+      "touch": true,
+      "trial": {
+        "searchFocus": "lensInput",
+        "candidateChoices": {
+          "year2015": 4,
+          "japaneseTag": 7,
+          "romanizedGenre": 2
+        },
+        "threeConditions": {
+          "clauses": 3,
+          "mode": "all",
+          "metrics": {
+            "visibleChoices": 85,
+            "visibleCandidateChoices": 0,
+            "firstRowTop": 158,
+            "resultScrollHeight": 3933,
+            "resultClientHeight": 749,
+            "pageHorizontalOverflow": false,
+            "conditionSummaryHeight": 0,
+            "editorOpen": true,
+            "editorIsFullViewport": true,
+            "focusedId": null,
+            "focusedAction": null
+          }
+        },
+        "afterReturningToResults": {
+          "visibleChoices": 32,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 210,
+          "resultScrollHeight": 3933,
+          "resultClientHeight": 697,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 48,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "conditionEditEscape": {
+          "editorOpen": false,
+          "focusedId": null
+        },
+        "detail": {
+          "active": "capture",
+          "metrics": {
+            "visibleChoices": 24,
+            "visibleCandidateChoices": 0,
+            "firstRowTop": 210,
+            "resultScrollHeight": 4386,
+            "resultClientHeight": 697,
+            "pageHorizontalOverflow": false,
+            "conditionSummaryHeight": 48,
+            "editorOpen": false,
+            "editorIsFullViewport": false,
+            "focusedId": null,
+            "focusedAction": null
+          }
+        },
+        "tagDraft": {
+          "active": "tagEdit",
+          "metrics": {
+            "visibleChoices": 24,
+            "visibleCandidateChoices": 0,
+            "firstRowTop": 210,
+            "resultScrollHeight": 4382,
+            "resultClientHeight": 697,
+            "pageHorizontalOverflow": false,
+            "conditionSummaryHeight": 48,
+            "editorOpen": false,
+            "editorIsFullViewport": false,
+            "focusedId": "tagEdit",
+            "focusedAction": null
+          }
+        },
+        "tagMutationToast": "タグを加えました（試作のため保存しません）"
+      },
+      "errors": [],
+      "staticStates": {
+        "base": {
+          "visibleChoices": 30,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 158,
+          "resultScrollHeight": 4444,
+          "resultClientHeight": 749,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 0,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "a": {
+          "visibleChoices": 32,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 210,
+          "resultScrollHeight": 3933,
+          "resultClientHeight": 697,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 48,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "a-edit": {
+          "visibleChoices": 49,
+          "visibleCandidateChoices": 2,
+          "firstRowTop": 158,
+          "resultScrollHeight": 3933,
+          "resultClientHeight": 749,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 0,
+          "editorOpen": true,
+          "editorIsFullViewport": true,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "a-detail": {
+          "visibleChoices": 28,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 210,
+          "resultScrollHeight": 4579,
+          "resultClientHeight": 697,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 48,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "a-select": {
+          "visibleChoices": 43,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 210,
+          "resultScrollHeight": 3933,
+          "resultClientHeight": 697,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 48,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "eight": {
+          "visibleChoices": 27,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 210,
+          "resultScrollHeight": 697,
+          "resultClientHeight": 697,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 48,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "eight-edit": {
+          "visibleChoices": 89,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 158,
+          "resultScrollHeight": 749,
+          "resultClientHeight": 749,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 0,
+          "editorOpen": true,
+          "editorIsFullViewport": true,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "error": {
+          "visibleChoices": 31,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 274,
+          "resultScrollHeight": 3933,
+          "resultClientHeight": 633,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 48,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": null,
+          "focusedAction": null
+        },
+        "tagDraft": {
+          "visibleChoices": 28,
+          "visibleCandidateChoices": 0,
+          "firstRowTop": 210,
+          "resultScrollHeight": 4575,
+          "resultClientHeight": 697,
+          "pageHorizontalOverflow": false,
+          "conditionSummaryHeight": 48,
+          "editorOpen": false,
+          "editorIsFullViewport": false,
+          "focusedId": "tagEdit",
+          "focusedAction": null
+        }
+      }
+    }
+  },
+  "captures": [
+    {
+      "file": "desktop-base.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 301964
+    },
+    {
+      "file": "desktop-a.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 308384
+    },
+    {
+      "file": "desktop-a-edit.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 273778
+    },
+    {
+      "file": "desktop-a-detail.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 298940
+    },
+    {
+      "file": "desktop-a-select.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 311976
+    },
+    {
+      "file": "desktop-eight.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 282572
+    },
+    {
+      "file": "desktop-eight-edit.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 267722
+    },
+    {
+      "file": "desktop-error.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 306634
+    },
+    {
+      "file": "desktop-tag-draft.png",
+      "width": 1280,
+      "height": 900,
+      "bytes": 295405
+    },
+    {
+      "file": "narrow-base.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 207017
+    },
+    {
+      "file": "narrow-a.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 206682
+    },
+    {
+      "file": "narrow-a-edit.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 54216
+    },
+    {
+      "file": "narrow-a-detail.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 171157
+    },
+    {
+      "file": "narrow-a-select.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 211395
+    },
+    {
+      "file": "narrow-eight.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 189924
+    },
+    {
+      "file": "narrow-eight-edit.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 68603
+    },
+    {
+      "file": "narrow-error.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 200309
+    },
+    {
+      "file": "narrow-tag-draft.png",
+      "width": 412,
+      "height": 915,
+      "bytes": 172715
+    }
+  ]
+}

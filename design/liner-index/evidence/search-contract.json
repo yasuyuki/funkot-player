@@ -1,0 +1,712 @@
+{
+  "source": "../index.html",
+  "browser": "157.0.4341.46",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 900,
+      "touch": false,
+      "measurements": {
+        "2015": {
+          "suggestions": [
+            {
+              "kind": "文字",
+              "value": "「2015」を文字検索",
+              "count": "1曲"
+            },
+            {
+              "kind": "制作年",
+              "value": "2015",
+              "count": "1,173曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "2015",
+              "count": "1曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "2015夏頒布",
+              "count": "213曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "2015冬頒布",
+              "count": "190曲"
+            }
+          ],
+          "suggestionCount": 5,
+          "visibleChoices": 38
+        },
+        "日本人": {
+          "suggestions": [
+            {
+              "kind": "文字",
+              "value": "「日本人」を文字検索",
+              "count": "0曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人トラックメーカー",
+              "count": "359曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人ボーカル",
+              "count": "2曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人トラックメーカー（旧名義）",
+              "count": "1曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人リミキサー",
+              "count": "1曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人 trackmaker",
+              "count": "0曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人MC",
+              "count": "0曲"
+            }
+          ],
+          "suggestionCount": 7,
+          "visibleChoices": 43
+        },
+        "anison": {
+          "suggestions": [
+            {
+              "kind": "文字",
+              "value": "「anison」を文字検索",
+              "count": "0曲"
+            },
+            {
+              "kind": "ジャンル",
+              "value": "アニソンremix類似表記 4",
+              "count": "52曲"
+            },
+            {
+              "kind": "ジャンル",
+              "value": "anison remix類似表記 4",
+              "count": "4曲"
+            },
+            {
+              "kind": "ジャンル",
+              "value": "アニソンRemix類似表記 4",
+              "count": "3曲"
+            },
+            {
+              "kind": "ジャンル",
+              "value": "アニソンリミックス類似表記 4",
+              "count": "5曲"
+            }
+          ],
+          "suggestionCount": 5,
+          "visibleChoices": 44
+        }
+      },
+      "pageErrors": [],
+      "finalVisibleChoices": 40
+    },
+    "narrow": {
+      "width": 412,
+      "height": 915,
+      "touch": true,
+      "measurements": {
+        "2015": {
+          "suggestions": [
+            {
+              "kind": "文字",
+              "value": "「2015」を文字検索",
+              "count": "1曲"
+            },
+            {
+              "kind": "制作年",
+              "value": "2015",
+              "count": "1,173曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "2015",
+              "count": "1曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "2015夏頒布",
+              "count": "213曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "2015冬頒布",
+              "count": "190曲"
+            }
+          ],
+          "suggestionCount": 5,
+          "visibleChoices": 36
+        },
+        "日本人": {
+          "suggestions": [
+            {
+              "kind": "文字",
+              "value": "「日本人」を文字検索",
+              "count": "0曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人トラックメーカー",
+              "count": "359曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人ボーカル",
+              "count": "2曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人トラックメーカー（旧名義）",
+              "count": "1曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人リミキサー",
+              "count": "1曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人 trackmaker",
+              "count": "0曲"
+            },
+            {
+              "kind": "タグ",
+              "value": "日本人MC",
+              "count": "0曲"
+            }
+          ],
+          "suggestionCount": 7,
+          "visibleChoices": 41
+        },
+        "anison": {
+          "suggestions": [
+            {
+              "kind": "文字",
+              "value": "「anison」を文字検索",
+              "count": "0曲"
+            },
+            {
+              "kind": "ジャンル",
+              "value": "アニソンremix類似表記 4",
+              "count": "52曲"
+            },
+            {
+              "kind": "ジャンル",
+              "value": "anison remix類似表記 4",
+              "count": "4曲"
+            },
+            {
+              "kind": "ジャンル",
+              "value": "アニソンRemix類似表記 4",
+              "count": "3曲"
+            },
+            {
+              "kind": "ジャンル",
+              "value": "アニソンリミックス類似表記 4",
+              "count": "5曲"
+            }
+          ],
+          "suggestionCount": 5,
+          "visibleChoices": 42
+        }
+      },
+      "pageErrors": [],
+      "finalVisibleChoices": 38
+    }
+  },
+  "checks": [
+    {
+      "name": "same-name-2015-namespaces",
+      "ok": true,
+      "detail": {
+        "suggestions": [
+          {
+            "kind": "文字",
+            "value": "「2015」を文字検索",
+            "count": "1曲"
+          },
+          {
+            "kind": "制作年",
+            "value": "2015",
+            "count": "1,173曲"
+          },
+          {
+            "kind": "タグ",
+            "value": "2015",
+            "count": "1曲"
+          },
+          {
+            "kind": "タグ",
+            "value": "2015夏頒布",
+            "count": "213曲"
+          },
+          {
+            "kind": "タグ",
+            "value": "2015冬頒布",
+            "count": "190曲"
+          }
+        ],
+        "suggestionCount": 5,
+        "visibleChoices": 38
+      }
+    },
+    {
+      "name": "same-name-funkot-namespaces",
+      "ok": true,
+      "detail": {
+        "suggestions": [
+          {
+            "kind": "文字",
+            "value": "「Funkot」を文字検索",
+            "count": "5,371曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "Funkot",
+            "count": "20,410曲"
+          },
+          {
+            "kind": "タグ",
+            "value": "Funkot",
+            "count": "1曲"
+          }
+        ]
+      }
+    },
+    {
+      "name": "spelling-variants-visible",
+      "ok": true,
+      "detail": {
+        "suggestions": [
+          {
+            "kind": "文字",
+            "value": "「anison」を文字検索",
+            "count": "0曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "アニソンremix類似表記 4",
+            "count": "52曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "anison remix類似表記 4",
+            "count": "4曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "アニソンRemix類似表記 4",
+            "count": "3曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "アニソンリミックス類似表記 4",
+            "count": "5曲"
+          }
+        ],
+        "suggestionCount": 5,
+        "visibleChoices": 44
+      }
+    },
+    {
+      "name": "or-prediction-broadens-results",
+      "ok": true,
+      "detail": {
+        "andCount": 52,
+        "orCount": 10525,
+        "joiner": "または"
+      }
+    },
+    {
+      "name": "pause-is-visible-and-changes-result",
+      "ok": true,
+      "detail": {
+        "orCount": 10525,
+        "pausedCount": 9802,
+        "pausedText": "条件 · 制作年\n2015年\n一時停止"
+      }
+    },
+    {
+      "name": "negation-is-visible",
+      "ok": true,
+      "detail": {
+        "negatedText": "または · タグ\n日本人トラックメーカー\n除外",
+        "resultCount": 18349
+      }
+    },
+    {
+      "name": "undo-restores-removed-condition",
+      "ok": true,
+      "detail": {
+        "afterRemoval": 1,
+        "afterUndo": 2
+      }
+    },
+    {
+      "name": "history-restores-a-search",
+      "ok": true,
+      "detail": {
+        "historyCount": 2,
+        "restoredTerms": 2
+      }
+    },
+    {
+      "name": "zero-result-relaxation",
+      "ok": true,
+      "detail": {
+        "beforeRelax": 0,
+        "afterRelax": 52,
+        "relaxVisible": true,
+        "relaxText": "2009冬頒布 と サイレン を外す 52曲"
+      }
+    },
+    {
+      "name": "unset-year-remains-mandatory-in-or",
+      "ok": true,
+      "detail": {
+        "unsetOnly": 1785,
+        "unsetAndAny": 1488,
+        "visibleYears": [
+          "—4:20",
+          "—5:43",
+          "—6:41",
+          "—3:35",
+          "—3:23",
+          "—5:38",
+          "—5:36",
+          "—3:39",
+          "—4:47",
+          "—5:45",
+          "—5:36",
+          "—5:20",
+          "—4:11",
+          "—4:26",
+          "—6:40",
+          "—4:11",
+          "—5:57",
+          "—4:45",
+          "—4:33",
+          "—4:36",
+          "—3:46",
+          "—6:17",
+          "—3:22",
+          "—3:11",
+          "—5:13",
+          "—2:30",
+          "—4:24",
+          "—4:38",
+          "—4:35",
+          "—6:46",
+          "—5:14",
+          "—3:43",
+          "—4:11",
+          "—5:52",
+          "—6:01",
+          "—2:31",
+          "—3:03",
+          "—4:23",
+          "—4:39",
+          "—3:49",
+          "—2:57",
+          "—4:06",
+          "—5:15",
+          "—2:53",
+          "—6:17",
+          "—5:47",
+          "—6:19",
+          "—4:07",
+          "—6:26",
+          "—3:56",
+          "—5:06",
+          "—6:14",
+          "—3:21",
+          "—6:23",
+          "—4:26",
+          "—6:13",
+          "—2:32",
+          "—4:46",
+          "—4:23",
+          "—3:30"
+        ]
+      }
+    },
+    {
+      "name": "ime-composition-keeps-focus-and-defers-render",
+      "ok": true,
+      "detail": {
+        "before": 0,
+        "during": {
+          "active": "indexSearchInput",
+          "value": "日本人",
+          "suggestions": 0
+        },
+        "after": {
+          "active": "indexSearchInput",
+          "suggestions": 7
+        },
+        "boundary": "synthetic DOM composition events only; no OS IME"
+      }
+    },
+    {
+      "name": "page-errors-desktop",
+      "ok": true,
+      "detail": {
+        "errors": []
+      }
+    },
+    {
+      "name": "same-name-2015-namespaces",
+      "ok": true,
+      "detail": {
+        "suggestions": [
+          {
+            "kind": "文字",
+            "value": "「2015」を文字検索",
+            "count": "1曲"
+          },
+          {
+            "kind": "制作年",
+            "value": "2015",
+            "count": "1,173曲"
+          },
+          {
+            "kind": "タグ",
+            "value": "2015",
+            "count": "1曲"
+          },
+          {
+            "kind": "タグ",
+            "value": "2015夏頒布",
+            "count": "213曲"
+          },
+          {
+            "kind": "タグ",
+            "value": "2015冬頒布",
+            "count": "190曲"
+          }
+        ],
+        "suggestionCount": 5,
+        "visibleChoices": 36
+      }
+    },
+    {
+      "name": "same-name-funkot-namespaces",
+      "ok": true,
+      "detail": {
+        "suggestions": [
+          {
+            "kind": "文字",
+            "value": "「Funkot」を文字検索",
+            "count": "5,371曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "Funkot",
+            "count": "20,410曲"
+          },
+          {
+            "kind": "タグ",
+            "value": "Funkot",
+            "count": "1曲"
+          }
+        ]
+      }
+    },
+    {
+      "name": "spelling-variants-visible",
+      "ok": true,
+      "detail": {
+        "suggestions": [
+          {
+            "kind": "文字",
+            "value": "「anison」を文字検索",
+            "count": "0曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "アニソンremix類似表記 4",
+            "count": "52曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "anison remix類似表記 4",
+            "count": "4曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "アニソンRemix類似表記 4",
+            "count": "3曲"
+          },
+          {
+            "kind": "ジャンル",
+            "value": "アニソンリミックス類似表記 4",
+            "count": "5曲"
+          }
+        ],
+        "suggestionCount": 5,
+        "visibleChoices": 42
+      }
+    },
+    {
+      "name": "or-prediction-broadens-results",
+      "ok": true,
+      "detail": {
+        "andCount": 52,
+        "orCount": 10525,
+        "joiner": "または"
+      }
+    },
+    {
+      "name": "pause-is-visible-and-changes-result",
+      "ok": true,
+      "detail": {
+        "orCount": 10525,
+        "pausedCount": 9802,
+        "pausedText": "条件 · 制作年\n2015年\n一時停止"
+      }
+    },
+    {
+      "name": "negation-is-visible",
+      "ok": true,
+      "detail": {
+        "negatedText": "または · タグ\n日本人トラックメーカー\n除外",
+        "resultCount": 18349
+      }
+    },
+    {
+      "name": "undo-restores-removed-condition",
+      "ok": true,
+      "detail": {
+        "afterRemoval": 1,
+        "afterUndo": 2
+      }
+    },
+    {
+      "name": "history-restores-a-search",
+      "ok": true,
+      "detail": {
+        "historyCount": 2,
+        "restoredTerms": 2
+      }
+    },
+    {
+      "name": "zero-result-relaxation",
+      "ok": true,
+      "detail": {
+        "beforeRelax": 0,
+        "afterRelax": 52,
+        "relaxVisible": true,
+        "relaxText": "2009冬頒布 と サイレン を外す 52曲"
+      }
+    },
+    {
+      "name": "unset-year-remains-mandatory-in-or",
+      "ok": true,
+      "detail": {
+        "unsetOnly": 1785,
+        "unsetAndAny": 1488,
+        "visibleYears": [
+          "—4:20",
+          "—5:43",
+          "—6:41",
+          "—3:35",
+          "—3:23",
+          "—5:38",
+          "—5:36",
+          "—3:39",
+          "—4:47",
+          "—5:45",
+          "—5:36",
+          "—5:20",
+          "—4:11",
+          "—4:26",
+          "—6:40",
+          "—4:11",
+          "—5:57",
+          "—4:45",
+          "—4:33",
+          "—4:36",
+          "—3:46",
+          "—6:17",
+          "—3:22",
+          "—3:11",
+          "—5:13",
+          "—2:30",
+          "—4:24",
+          "—4:38",
+          "—4:35",
+          "—6:46",
+          "—5:14",
+          "—3:43",
+          "—4:11",
+          "—5:52",
+          "—6:01",
+          "—2:31",
+          "—3:03",
+          "—4:23",
+          "—4:39",
+          "—3:49",
+          "—2:57",
+          "—4:06",
+          "—5:15",
+          "—2:53",
+          "—6:17",
+          "—5:47",
+          "—6:19",
+          "—4:07",
+          "—6:26",
+          "—3:56",
+          "—5:06",
+          "—6:14",
+          "—3:21",
+          "—6:23",
+          "—4:26",
+          "—6:13",
+          "—2:32",
+          "—4:46",
+          "—4:23",
+          "—3:30"
+        ]
+      }
+    },
+    {
+      "name": "ime-composition-keeps-focus-and-defers-render",
+      "ok": true,
+      "detail": {
+        "before": 0,
+        "during": {
+          "active": "indexSearchInput",
+          "value": "日本人",
+          "suggestions": 0
+        },
+        "after": {
+          "active": "indexSearchInput",
+          "suggestions": 7
+        },
+        "boundary": "synthetic DOM composition events only; no OS IME"
+      }
+    },
+    {
+      "name": "page-errors-narrow",
+      "ok": true,
+      "detail": {
+        "errors": []
+      }
+    }
+  ],
+  "passed": 24,
+  "total": 24
+}

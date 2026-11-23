@@ -1,0 +1,88 @@
+/* A quiet paper sheet: tag work is deliberate without turning normal browsing
+   into a diagnostic console. */
+.index-editor { width: min(760px, calc(100vw - 32px)); max-height: min(820px, calc(100dvh - 32px)); margin: auto; padding: 0; border: 0; color: var(--ink); background: transparent; overflow: visible; }
+.index-editor::backdrop { background: color-mix(in oklab, var(--ink) 42%, transparent); backdrop-filter: blur(2px); }
+.index-editor-paper { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; max-height: inherit; overflow: hidden; background: var(--card); border: 1.5px solid var(--ink); border-radius: 14px; box-shadow: 7px 7px 0 var(--pink); }
+.index-editor-heading { display: flex; align-items: start; gap: 16px; padding: 22px 24px 18px; border-bottom: 1px solid var(--rule); }
+.index-editor-heading > div { min-width: 0; flex: 1; }
+.index-editor-kicker { margin: 0 0 2px; color: var(--pink-text); font-weight: 800; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.index-editor-heading h2 { margin: 0; font-family: var(--display); font-size: 24px; letter-spacing: -.03em; }
+.index-editor-target { margin: 6px 0 0; color: var(--ink-2); overflow-wrap: anywhere; }
+.index-editor-x { width: var(--ctl); height: var(--ctl); border-radius: 50%; font-size: 27px; line-height: 1; color: var(--ink-2); }
+.index-editor-x:hover, .index-editor-cancel:hover { background: var(--paper-2); color: var(--ink); }
+.index-editor-body { min-height: 0; overflow: auto; padding: 18px 24px 24px; }
+.index-editor-safety, .index-editor-notice, .index-editor-error { margin: 0 0 16px; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
+.index-editor-safety { color: var(--ink-2); background: var(--paper-2); }
+.index-editor-notice { color: var(--teal); background: color-mix(in oklab, var(--teal) 10%, var(--paper)); box-shadow: inset 3px 0 0 var(--teal); }
+.index-editor-error { color: var(--danger); background: color-mix(in oklab, var(--danger) 9%, var(--paper)); box-shadow: inset 3px 0 0 var(--danger); font-weight: 700; }
+.index-editor-section + .index-editor-section, .index-editor-metadata, .index-editor-simulation { margin-top: 22px; }
+.index-editor-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.index-editor-section-head h3 { margin: 0; font-size: 16px; }
+.index-editor-section-head span { color: var(--ink-3); font-size: 12px; text-align: right; }
+.index-editor-year { display: flex; gap: 10px; align-items: end; }
+.index-editor-year label { display: grid; gap: 4px; color: var(--ink-2); font-size: 12px; font-weight: 700; }
+.index-editor-year select, .index-editor-year input, .index-editor-find input { width: 100%; min-height: var(--ctl); padding: 0 10px; border: 1.5px solid var(--rule); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; }
+.index-editor-year > label:first-child { flex: 1; }
+.index-editor-year-value { width: 132px; }
+.index-editor-year-value.is-hidden { display: none; }
+.index-editor-year-drawer { margin-top: 14px; padding: 10px 12px; border-radius: 8px; background: var(--paper-2); }
+.index-editor-year-drawer summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; font-weight: 800; }
+.index-editor-year-drawer summary span { color: var(--ink-3); font-size: 13px; font-weight: 500; }
+.index-editor-year-drawer[open] .index-editor-year { margin-top: 12px; }
+.index-editor-find { display: block; }
+.index-editor-suggestions, .index-editor-tags, .index-editor-draft ul, .index-editor-metadata ul { list-style: none; padding: 0; margin: 8px 0 0; }
+.index-editor-suggestions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+.index-editor-suggestions button { width: 100%; min-height: var(--ctl); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; text-align: left; padding: 5px 8px; border-radius: 7px; background: var(--paper-2); }
+.index-editor-suggestions button:hover { background: var(--paper-3); }
+.index-editor-suggestions b, .index-editor-tag b { color: var(--pink-text); font-size: 11px; text-transform: uppercase; }
+.index-editor-suggestions span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.index-editor-suggestions i { color: var(--ink-3); font-size: 12px; font-style: normal; }
+.index-editor-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.index-editor-tag { display: inline-flex; align-items: center; gap: 0; min-height: 28px; max-width: 100%; padding: 3px 8px; border-radius: 999px; background: var(--paper-2); font-size: 13px; }
+.index-editor-tag span { min-width: 0; overflow-wrap: anywhere; }
+.index-editor-tag b { display: inline-block; margin-right: 6px; }
+.index-editor-tag i { display: inline-block; margin-left: 5px; color: var(--ink-3); font-size: 11px; font-style: normal; }
+.index-editor-tag em { display: inline-block; margin-left: 6px; color: var(--ink-3); font-size: 11px; font-style: normal; }
+.index-editor-tag button, .index-editor-draft button, .index-editor-simulation button { min-height: calc(var(--ctl) - 6px); padding: 0 10px; border-radius: 999px; background: var(--card); color: var(--ink-2); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.index-editor-tag button:hover, .index-editor-simulation button:hover { background: var(--ink); color: var(--paper); }
+.index-editor-tag.is-pending-remove { opacity: .63; text-decoration: line-through; }
+.index-editor-origin { margin: -3px 0 8px; color: var(--ink-3); font-size: 12px; }
+.index-editor-show-more { min-height: var(--ctl); margin-top: 8px; padding: 0 10px; border-radius: 999px; color: var(--ink-2); font-weight: 700; }
+.index-editor-show-more:hover { background: var(--paper-2); color: var(--ink); }
+.index-editor-selected-action { display: flex; gap: 8px; align-items: end; margin-top: 10px; }
+.index-editor-selected-action label { min-width: 0; flex: 1; display: grid; gap: 4px; color: var(--ink-3); font-size: 12px; font-weight: 700; }
+.index-editor-selected-action select { min-width: 0; width: 100%; min-height: var(--ctl); padding: 0 8px; border: 1.5px solid var(--rule); border-radius: 8px; background: var(--paper); color: var(--ink); }
+.index-editor-selected-action button { min-height: var(--ctl); padding: 0 12px; border-radius: 999px; background: var(--paper-2); color: var(--ink); font-weight: 800; white-space: nowrap; }
+.index-editor-selected-action button:hover { background: var(--ink); color: var(--paper); }
+.index-editor-empty { padding: 10px; color: var(--ink-3); background: var(--paper-2); border-radius: 7px; font-size: 13px; }
+.index-editor-draft ul { display: flex; flex-wrap: wrap; gap: 6px; }
+.index-editor-draft li { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 4px 6px 4px 9px; border-radius: 999px; font-size: 13px; overflow-wrap: anywhere; }
+.index-editor-draft li.pending-add { background: color-mix(in oklab, var(--teal) 16%, var(--paper)); }
+.index-editor-draft li.pending-remove { background: color-mix(in oklab, var(--danger) 12%, var(--paper)); }
+.index-editor-draft button { min-height: 24px; width: 24px; padding: 0; background: transparent; font-size: 18px; }
+.index-editor-metadata, .index-editor-simulation { border-top: 1px dashed var(--rule); padding-top: 12px; color: var(--ink-2); font-size: 13px; }
+.index-editor-metadata summary, .index-editor-simulation summary { cursor: pointer; color: var(--ink); font-weight: 700; }
+.index-editor-metadata p, .index-editor-simulation p { margin: 8px 0; }
+.index-editor-metadata li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid var(--rule); }
+.index-editor-metadata li span { color: var(--ink-3); text-align: right; }
+.index-editor-simulation > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.index-editor-actions { display: flex; align-items: center; gap: 8px; padding: 14px 24px; border-top: 1px solid var(--rule); background: color-mix(in oklab, var(--paper-2) 58%, var(--card)); }
+.index-editor-pending { color: var(--ink-2); font-size: 13px; font-weight: 700; }
+.index-editor-actions-grow { flex: 1; }
+.index-editor-cancel, .index-editor-save, .index-editor-discard { min-height: var(--ctl); padding: 0 15px; border-radius: 999px; font-weight: 800; }
+.index-editor-discard { background: var(--danger); color: #fff; }
+.index-editor-save { background: var(--ink); color: var(--paper); box-shadow: 2px 2px 0 var(--pink); }
+.index-editor-save:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--pink); }
+.index-editor-save:disabled { box-shadow: none; }
+.index-editor-reload { min-height: var(--ctl); padding: 0 12px; border-radius: 999px; background: var(--paper-3); color: var(--ink); font-weight: 800; }
+@media (pointer: coarse) { .index-editor-metadata summary, .index-editor-simulation summary, .index-editor-year-drawer summary { min-height: 44px; display: flex; align-items: center; } .index-editor-draft button { min-width: 44px; min-height: 44px; } }
+@media (max-width: 620px) { .index-editor { width: min(100vw - 16px, 760px); max-height: calc(100dvh - 16px); } .index-editor-heading, .index-editor-body, .index-editor-actions { padding-left: 16px; padding-right: 16px; } .index-editor-suggestions { grid-template-columns: 1fr; } .index-editor-year { align-items: stretch; flex-direction: column; } .index-editor-year-value { width: 100%; } .index-editor-selected-action { align-items: stretch; flex-direction: column; } .index-editor-metadata li { display: grid; } .index-editor-metadata li span { text-align: left; } .index-editor-actions { flex-wrap: wrap; } .index-editor-pending { width: 100%; } .index-editor-actions-grow { display: none; } .index-editor-cancel, .index-editor-save { flex: 1; } }
+
+.index-editor-organize {margin-top:.6rem; color:var(--ink-2)}
+.index-editor-organize summary {min-height:var(--ctl); cursor:pointer; align-content:center; font-weight:700}
+.index-editor-metadata li button {padding:.25rem .65rem; min-height:var(--ctl); color:var(--blue); font-weight:700}
+.index-editor-suggestions:empty {display:none}
+.index-editor-year-drawer {margin:.8rem 0 1.15rem}
+@media(max-width:620px) {
+  dialog.index-editor {width:calc(100% - 16px);max-width:calc(100% - 16px)}
+}

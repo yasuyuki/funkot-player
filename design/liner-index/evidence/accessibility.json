@@ -1,0 +1,32 @@
+[
+  {
+    "width": 412,
+    "stage": "search",
+    "result": []
+  },
+  {
+    "width": 412,
+    "stage": "detail",
+    "result": []
+  },
+  {
+    "width": 412,
+    "stage": "editor",
+    "result": []
+  },
+  {
+    "width": 1280,
+    "stage": "search",
+    "result": []
+  },
+  {
+    "width": 1280,
+    "stage": "detail",
+    "result": []
+  },
+  {
+    "width": 1280,
+    "stage": "editor",
+    "result": []
+  }
+]
