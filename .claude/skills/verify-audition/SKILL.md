@@ -34,13 +34,13 @@ Use this skill when a change touches any of these in `src-tauri/src/lib.rs`:
 `install_audition`, `resume_autodj`, `audition_again`, `toggle_pause`,
 `flip_paused`, `set_paused`, `ensure_pause_allowed`, the `0 | 4 | 5` arm of
 `onNativeControl`, or any store to `AUDITIONING`, `AUDITION_PREPARING`,
-`Playback::paused` or `RenderState::audition`. Also use it when `src/App.svelte`
+`Playback::paused` or `RenderState::audition`. Also use it when `src/components/PlaybackBar.svelte`
 changes when the banner shows, when `src/lib/transportMode.ts` changes
 `primaryMode`, or when `verification/audition` or `verification/check_audition.py`
 changes.
 
 Sync commit: `a3d5bf276870006dfa0809f337a997283fe1dfce`. The model was last confirmed against the code at that
-commit. Run `git diff a3d5bf276870006dfa0809f337a997283fe1dfce -- src-tauri/src/lib.rs src/App.svelte
+commit. Run `git diff a3d5bf276870006dfa0809f337a997283fe1dfce -- src-tauri/src/lib.rs src/components/PlaybackBar.svelte
 src/lib/transportMode.ts` and read every hunk that touches the names above. Move
 the sync commit forward only after you confirm that every model action and line
 comment still describes the code at the new commit.
