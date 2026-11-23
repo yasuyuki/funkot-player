@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ラインナップ — Funkotのライブラリ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="stage" id="app">
+  <header class="top">
+    <h1 class="sr">ライブラリ</h1>
+    <div class="find">
+      <label class="sr" for="q">曲名、アーティスト、年、タグで探す</label>
+      <input id="q" type="search" autocomplete="off" spellcheck="false" role="combobox"
+        aria-autocomplete="list" aria-expanded="false" aria-controls="cands"
+        placeholder="曲名、アーティスト、年、タグで探す">
+    </div>
+    <div class="summary" id="summary"></div>
+  </header>
+  <main class="list" id="list">
+    <p class="banner" id="banner" hidden></p>
+    <ol class="tracks" id="tracks"></ol>
+    <div class="empty" id="empty" hidden></div>
+    <div class="sentinel" id="sentinel"></div>
+  </main>
+  <footer class="now" id="now"></footer>
+  <button class="ticket" id="destBtn" type="button" aria-haspopup="dialog" aria-expanded="false"></button>
+  <button class="scrim" id="scrim" type="button" hidden>閉じる</button>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="false" hidden></div>
+  <div class="toast" id="toast" role="status" hidden></div>
+</div>
+<div class="demo" id="demo">
+  <button type="button" data-scn="base">通常</button>
+  <button type="button" data-scn="a">3条件</button>
+  <button type="button" data-scn="a-edit">編集</button>
+  <button type="button" data-scn="added">追加後</button>
+  <button type="button" data-scn="eight">8条件+</button>
+  <button type="button" data-scn="detail">詳細</button>
+  <button type="button" data-scn="zero">0件</button>
+  <button type="button" data-scn="loading">照合中</button>
+  <button type="button" data-scn="error">失敗</button>
+  <button type="button" data-scn="zoom">文字200%</button>
+</div>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

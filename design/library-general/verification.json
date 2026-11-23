@@ -1,0 +1,574 @@
+{
+  "results": [
+    {
+      "name": "A1 2015は制作年の候補が先",
+      "ok": true,
+      "detail": "制作年 2015年 加えると 1,170曲"
+    },
+    {
+      "name": "A2 ローマ字でアニソンremixと表記ゆれ",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "A3 3条件のAND",
+      "ok": true,
+      "detail": "2015 / 日本人トラックメーカー / アニソンremix"
+    },
+    {
+      "name": "A4 件数と曲名が見える",
+      "ok": true,
+      "detail": "53曲"
+    },
+    {
+      "name": "B1 一時停止で結果が広がる",
+      "ok": true,
+      "detail": "53 → 143"
+    },
+    {
+      "name": "B2 再開で戻る",
+      "ok": true,
+      "detail": "53"
+    },
+    {
+      "name": "B3 外すと取り消しが出る",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "B4 元に戻す",
+      "ok": true,
+      "detail": "2015 / 日本人トラックメーカー / アニソンremix"
+    },
+    {
+      "name": "B5 またはは同じ条件に入る",
+      "ok": true,
+      "detail": "アニソンremix|電波remix"
+    },
+    {
+      "name": "C1 1操作で追加先が見える",
+      "ok": true,
+      "detail": "「鋼鉄商店街ダンスホール」を再生待ちの5番目に追加しました 元に戻す"
+    },
+    {
+      "name": "C2 追加先を変えられる",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "C3 キーボードで追加",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "C4 当たりは44px以上、印は曲名より小さい",
+      "ok": true,
+      "detail": "hit 44 glyph 16"
+    },
+    {
+      "name": "E1 9条件は1行の要約",
+      "ok": true,
+      "detail": "9条件すべてに一致、3つは停止 h=29"
+    },
+    {
+      "name": "E2 9条件でも最初の曲が見える",
+      "ok": true,
+      "detail": "{\"firstRowTop\":102,\"titleWidth\":1190,\"titleFont\":\"21.12px\",\"visibleTracks\":8,\"chromeControls\":5,\"chromeNames\":[\"\",\"2015年 または 2016年 かつ 日本人トラックメーカー かつ アニソンre\",\"一時停止\",\"次の曲\",\"追加先は再生待ち、7曲。変更する\"],\"summaryHeight\":29,\"addHit\":44,\"addGlyph\":16,\"overflow\":0}"
+    },
+    {
+      "name": "Z1 0件は外すと何曲かを示す",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Z2 失敗は条件を残して再試行",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Z3 文字200%で横にはみ出さない",
+      "ok": true,
+      "detail": "overflow 0 tracks 5"
+    },
+    {
+      "name": "ページ例外なし",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "D1 狭幅でも3条件",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "D2 狭幅で1タップ追加",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "D3 狭幅で横にはみ出さない",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "D4 狭幅の追加先が読める",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "比較 狭幅の初期画面で曲名が上に来る",
+      "ok": true,
+      "detail": "{\"firstRowTop\":[222,98],\"titleWidth\":[332,341],\"visibleTracks\":[6,12],\"chromeControls\":[10,4],\"summaryHeight\":[168,29]}"
+    },
+    {
+      "name": "比較 狭幅の検索後も曲一覧が広い",
+      "ok": true,
+      "detail": "{\"firstRowTop\":[273,98],\"titleWidth\":[332,341],\"visibleTracks\":[6,12],\"chromeControls\":[15,5],\"summaryHeight\":[219,29]}"
+    },
+    {
+      "name": "比較 常設操作が少ない",
+      "ok": true,
+      "detail": "{\"firstRowTop\":[257,102],\"titleWidth\":[532,1190],\"visibleTracks\":[8,12],\"chromeControls\":[14,4],\"summaryHeight\":[203,29]}"
+    }
+  ],
+  "metrics": {
+    "lineup": {
+      "desktopBase": {
+        "firstRowTop": 102,
+        "titleWidth": 1190,
+        "titleFont": "21.12px",
+        "visibleTracks": 12,
+        "chromeControls": 4,
+        "chromeNames": [
+          "",
+          "一時停止",
+          "次の曲",
+          "追加先は再生待ち、7曲。変更する"
+        ],
+        "summaryHeight": 29,
+        "addHit": 44,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "desktopA": {
+        "firstRowTop": 102,
+        "titleWidth": 1190,
+        "titleFont": "21.12px",
+        "visibleTracks": 12,
+        "chromeControls": 5,
+        "chromeNames": [
+          "",
+          "2015年 かつ 日本人トラックメーカー かつ アニソンremix。条件を編集",
+          "一時停止",
+          "次の曲",
+          "追加先は再生待ち、7曲。変更する"
+        ],
+        "summaryHeight": 29,
+        "addHit": 44,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "desktopAdded": {
+        "firstRowTop": 102,
+        "titleWidth": 1190,
+        "titleFont": "21.12px",
+        "visibleTracks": 12,
+        "chromeControls": 6,
+        "chromeNames": [
+          "",
+          "2015年 かつ 日本人トラックメーカー かつ アニソンremix。条件を編集",
+          "一時停止",
+          "次の曲",
+          "追加先は再生待ち、5番目に追加。変更する",
+          "元に戻す"
+        ],
+        "summaryHeight": 29,
+        "addHit": 44,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "desktopEight": {
+        "firstRowTop": 102,
+        "titleWidth": 1190,
+        "titleFont": "21.12px",
+        "visibleTracks": 8,
+        "chromeControls": 5,
+        "chromeNames": [
+          "",
+          "2015年 または 2016年 かつ 日本人トラックメーカー かつ アニソンre",
+          "一時停止",
+          "次の曲",
+          "追加先は再生待ち、7曲。変更する"
+        ],
+        "summaryHeight": 29,
+        "addHit": 44,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "narrowBase": {
+        "firstRowTop": 98,
+        "titleWidth": 341,
+        "titleFont": "18.56px",
+        "visibleTracks": 12,
+        "chromeControls": 4,
+        "chromeNames": [
+          "",
+          "一時停止",
+          "次の曲",
+          "追加先は再生待ち、7曲。変更する"
+        ],
+        "summaryHeight": 29,
+        "addHit": 44,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "narrowA": {
+        "firstRowTop": 98,
+        "titleWidth": 341,
+        "titleFont": "18.56px",
+        "visibleTracks": 12,
+        "chromeControls": 5,
+        "chromeNames": [
+          "",
+          "2015年 かつ 日本人トラックメーカー かつ アニソンremix。条件を編集",
+          "一時停止",
+          "次の曲",
+          "追加先は再生待ち、7曲。変更する"
+        ],
+        "summaryHeight": 29,
+        "addHit": 44,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "narrowEight": {
+        "firstRowTop": 98,
+        "titleWidth": 341,
+        "titleFont": "18.56px",
+        "visibleTracks": 8,
+        "chromeControls": 5,
+        "chromeNames": [
+          "",
+          "2015年 または 2016年 かつ 日本人トラックメーカー かつ アニソンre",
+          "一時停止",
+          "次の曲",
+          "追加先は再生待ち、7曲。変更する"
+        ],
+        "summaryHeight": 29,
+        "addHit": 44,
+        "addGlyph": 16,
+        "overflow": 0
+      }
+    },
+    "claude": {
+      "desktopBase": {
+        "firstRowTop": 257,
+        "titleWidth": 532,
+        "titleFont": "18px",
+        "visibleTracks": 8,
+        "chromeControls": 14,
+        "chromeNames": [
+          "ライブラリ",
+          "再生待ち",
+          "プレイリスト",
+          "履歴",
+          "表示テーマを切り替える",
+          "曲名、アーティスト、タグ、年で探す",
+          "まとめて選ぶ",
+          "再生待ち再生中7",
+          "金曜の夜23",
+          "作業用 18061",
+          "アニソン縛り 201511",
+          "お気に入り140",
+          "一時停止",
+          "次の曲へ"
+        ],
+        "summaryHeight": 203,
+        "addHit": 52,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "desktopA": {
+        "firstRowTop": 298,
+        "titleWidth": 532,
+        "titleFont": "18px",
+        "visibleTracks": 7,
+        "chromeControls": 22,
+        "chromeNames": [
+          "ライブラリ",
+          "再生待ち",
+          "プレイリスト",
+          "履歴",
+          "表示テーマを切り替える",
+          "一致のしかた: すべての条件に一致。押すと切り替え",
+          "制作年 2015年 を編集",
+          "条件「2015年」を外す",
+          "タグ 日本人トラックメーカー を編集",
+          "条件「日本人トラックメーカー」を外す",
+          "ジャンル アニソンremix を編集",
+          "条件「アニソンremix」を外す",
+          "条件を追加",
+          "曲名、アーティスト、タグ、年で探す",
+          "まとめて選ぶ",
+          "再生待ち再生中7",
+          "金曜の夜23",
+          "作業用 18061",
+          "アニソン縛り 201511",
+          "お気に入り140",
+          "一時停止",
+          "次の曲へ"
+        ],
+        "summaryHeight": 244,
+        "addHit": 52,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "desktopEight": {
+        "firstRowTop": 298,
+        "titleWidth": 617,
+        "titleFont": "18px",
+        "visibleTracks": 7,
+        "chromeControls": 21,
+        "chromeNames": [
+          "ライブラリ",
+          "再生待ち",
+          "プレイリスト",
+          "履歴",
+          "表示テーマを切り替える",
+          "一致のしかた: すべての条件に一致。押すと切り替え",
+          "制作年 2015年 または 2016年 を編集",
+          "条件「2015年 または 2016年」を外す",
+          "タグ 日本人トラックメーカー を編集",
+          "条件「日本人トラックメーカー」を外す",
+          "ほか7つの条件を表示して編集",
+          "条件を追加",
+          "曲名、アーティスト、タグ、年で探す",
+          "まとめて選ぶ",
+          "再生待ち再生中7",
+          "金曜の夜23",
+          "作業用 18061",
+          "アニソン縛り 201511",
+          "お気に入り140",
+          "一時停止",
+          "次の曲へ"
+        ],
+        "summaryHeight": 244,
+        "addHit": 52,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "narrowBase": {
+        "firstRowTop": 222,
+        "titleWidth": 332,
+        "titleFont": "17px",
+        "visibleTracks": 6,
+        "chromeControls": 10,
+        "chromeNames": [
+          "曲名、アーティスト、タグ、年で探す",
+          "まとめて選ぶ",
+          "追加先を閉じる",
+          "再生待ち再生中7",
+          "金曜の夜23",
+          "作業用 18061",
+          "アニソン縛り 201511",
+          "お気に入り140",
+          "次の曲へ",
+          "追加先を変える"
+        ],
+        "summaryHeight": 168,
+        "addHit": 48,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "narrowA": {
+        "firstRowTop": 273,
+        "titleWidth": 332,
+        "titleFont": "17px",
+        "visibleTracks": 6,
+        "chromeControls": 15,
+        "chromeNames": [
+          "一致のしかた: すべての条件に一致。押すと切り替え",
+          "制作年 2015年 を編集",
+          "タグ 日本人トラックメーカー を編集",
+          "ジャンル アニソンremix を編集",
+          "条件を追加",
+          "曲名、アーティスト、タグ、年で探す",
+          "まとめて選ぶ",
+          "追加先を閉じる",
+          "再生待ち再生中7",
+          "金曜の夜23",
+          "作業用 18061",
+          "アニソン縛り 201511",
+          "お気に入り140",
+          "次の曲へ",
+          "追加先を変える"
+        ],
+        "summaryHeight": 219,
+        "addHit": 48,
+        "addGlyph": 16,
+        "overflow": 0
+      },
+      "narrowEight": {
+        "firstRowTop": 313,
+        "titleWidth": 332,
+        "titleFont": "17px",
+        "visibleTracks": 5,
+        "chromeControls": 15,
+        "chromeNames": [
+          "一致のしかた: すべての条件に一致。押すと切り替え",
+          "制作年 2015年 または 2016年 を編集",
+          "タグ 日本人トラックメーカー を編集",
+          "ほか7つの条件を表示して編集",
+          "条件を追加",
+          "曲名、アーティスト、タグ、年で探す",
+          "まとめて選ぶ",
+          "追加先を閉じる",
+          "再生待ち再生中7",
+          "金曜の夜23",
+          "作業用 18061",
+          "アニソン縛り 201511",
+          "お気に入り140",
+          "次の曲へ",
+          "追加先を変える"
+        ],
+        "summaryHeight": 259,
+        "addHit": 48,
+        "addGlyph": 16,
+        "overflow": 0
+      }
+    }
+  },
+  "compare": {
+    "desktopBase": {
+      "firstRowTop": [
+        257,
+        102
+      ],
+      "titleWidth": [
+        532,
+        1190
+      ],
+      "visibleTracks": [
+        8,
+        12
+      ],
+      "chromeControls": [
+        14,
+        4
+      ],
+      "summaryHeight": [
+        203,
+        29
+      ]
+    },
+    "desktopA": {
+      "firstRowTop": [
+        298,
+        102
+      ],
+      "titleWidth": [
+        532,
+        1190
+      ],
+      "visibleTracks": [
+        7,
+        12
+      ],
+      "chromeControls": [
+        22,
+        5
+      ],
+      "summaryHeight": [
+        244,
+        29
+      ]
+    },
+    "desktopEight": {
+      "firstRowTop": [
+        298,
+        102
+      ],
+      "titleWidth": [
+        617,
+        1190
+      ],
+      "visibleTracks": [
+        7,
+        8
+      ],
+      "chromeControls": [
+        21,
+        5
+      ],
+      "summaryHeight": [
+        244,
+        29
+      ]
+    },
+    "narrowBase": {
+      "firstRowTop": [
+        222,
+        98
+      ],
+      "titleWidth": [
+        332,
+        341
+      ],
+      "visibleTracks": [
+        6,
+        12
+      ],
+      "chromeControls": [
+        10,
+        4
+      ],
+      "summaryHeight": [
+        168,
+        29
+      ]
+    },
+    "narrowA": {
+      "firstRowTop": [
+        273,
+        98
+      ],
+      "titleWidth": [
+        332,
+        341
+      ],
+      "visibleTracks": [
+        6,
+        12
+      ],
+      "chromeControls": [
+        15,
+        5
+      ],
+      "summaryHeight": [
+        219,
+        29
+      ]
+    },
+    "narrowEight": {
+      "firstRowTop": [
+        313,
+        98
+      ],
+      "titleWidth": [
+        332,
+        341
+      ],
+      "visibleTracks": [
+        5,
+        8
+      ],
+      "chromeControls": [
+        15,
+        5
+      ],
+      "summaryHeight": [
+        259,
+        29
+      ]
+    }
+  }
+}
