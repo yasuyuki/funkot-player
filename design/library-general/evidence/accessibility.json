@@ -1,0 +1,42 @@
+[
+  {
+    "width": 1280,
+    "s": "base",
+    "findings": []
+  },
+  {
+    "width": 1280,
+    "s": "a-edit",
+    "findings": []
+  },
+  {
+    "width": 1280,
+    "s": "a-detail",
+    "findings": []
+  },
+  {
+    "width": 1280,
+    "s": "eight",
+    "findings": []
+  },
+  {
+    "width": 412,
+    "s": "base",
+    "findings": []
+  },
+  {
+    "width": 412,
+    "s": "a-edit",
+    "findings": []
+  },
+  {
+    "width": 412,
+    "s": "a-detail",
+    "findings": []
+  },
+  {
+    "width": 412,
+    "s": "eight",
+    "findings": []
+  }
+]

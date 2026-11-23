@@ -1,0 +1,496 @@
+{
+  "browser": "Chromium 153.0.8010.12 via Playwright",
+  "scenarios": [
+    "base",
+    "a",
+    "a-edit",
+    "a-detail",
+    "eight",
+    "zero",
+    "loading",
+    "error"
+  ],
+  "metrics": {
+    "claude": {
+      "desktop": {
+        "base": {
+          "firstRowY": 257,
+          "titleColumnWidth": 561,
+          "fullyVisibleRows": 7,
+          "visibleFixedControls": 16,
+          "visibleRowControls": 16,
+          "songColumnBottom": 828,
+          "firstRowToScreenBottomOcclusion": 72,
+          "visibleSongListAreaPx2": 454914,
+          "firstRowActionSize": 52
+        },
+        "a": {
+          "firstRowY": 298,
+          "titleColumnWidth": 561,
+          "fullyVisibleRows": 6,
+          "visibleFixedControls": 23,
+          "visibleRowControls": 14,
+          "songColumnBottom": 828,
+          "firstRowToScreenBottomOcclusion": 72,
+          "visibleSongListAreaPx2": 421681,
+          "firstRowActionSize": 52
+        },
+        "a-edit": {
+          "firstRowY": 454,
+          "titleColumnWidth": 561,
+          "fullyVisibleRows": 4,
+          "visibleFixedControls": 27,
+          "visibleRowControls": 10,
+          "songColumnBottom": 828,
+          "firstRowToScreenBottomOcclusion": 72,
+          "visibleSongListAreaPx2": 297505,
+          "firstRowActionSize": 52
+        },
+        "a-detail": {
+          "firstRowY": 305,
+          "titleColumnWidth": 611,
+          "fullyVisibleRows": 2,
+          "visibleFixedControls": 23,
+          "visibleRowControls": 13,
+          "songColumnBottom": 828,
+          "firstRowToScreenBottomOcclusion": 72,
+          "visibleSongListAreaPx2": 416109,
+          "firstRowActionSize": 52
+        },
+        "eight": {
+          "firstRowY": 298,
+          "titleColumnWidth": 611,
+          "fullyVisibleRows": 6,
+          "visibleFixedControls": 22,
+          "visibleRowControls": 14,
+          "songColumnBottom": 828,
+          "firstRowToScreenBottomOcclusion": 72,
+          "visibleSongListAreaPx2": 421681,
+          "firstRowActionSize": 52
+        },
+        "zero": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 31,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "loading": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 23,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "error": {
+          "firstRowY": 365,
+          "titleColumnWidth": 561,
+          "fullyVisibleRows": 6,
+          "visibleFixedControls": 26,
+          "visibleRowControls": 12,
+          "songColumnBottom": 828,
+          "firstRowToScreenBottomOcclusion": 72,
+          "visibleSongListAreaPx2": 368946,
+          "firstRowActionSize": 52
+        }
+      },
+      "narrow": {
+        "base": {
+          "firstRowY": 222,
+          "titleColumnWidth": 332,
+          "fullyVisibleRows": 6,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 12,
+          "songColumnBottom": 810,
+          "firstRowToScreenBottomOcclusion": 105,
+          "visibleSongListAreaPx2": 232700,
+          "firstRowActionSize": 48
+        },
+        "a": {
+          "firstRowY": 273,
+          "titleColumnWidth": 332,
+          "fullyVisibleRows": 5,
+          "visibleFixedControls": 10,
+          "visibleRowControls": 12,
+          "songColumnBottom": 810,
+          "firstRowToScreenBottomOcclusion": 105,
+          "visibleSongListAreaPx2": 212652,
+          "firstRowActionSize": 48
+        },
+        "a-edit": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 15,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "a-detail": {
+          "firstRowY": 275,
+          "titleColumnWidth": 332,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 10,
+          "visibleRowControls": 9,
+          "songColumnBottom": 810,
+          "firstRowToScreenBottomOcclusion": 105,
+          "visibleSongListAreaPx2": 211773,
+          "firstRowActionSize": 48
+        },
+        "eight": {
+          "firstRowY": 273,
+          "titleColumnWidth": 332,
+          "fullyVisibleRows": 5,
+          "visibleFixedControls": 10,
+          "visibleRowControls": 12,
+          "songColumnBottom": 810,
+          "firstRowToScreenBottomOcclusion": 105,
+          "visibleSongListAreaPx2": 212652,
+          "firstRowActionSize": 48
+        },
+        "zero": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 16,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "loading": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 10,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "error": {
+          "firstRowY": 360,
+          "titleColumnWidth": 332,
+          "fullyVisibleRows": 4,
+          "visibleFixedControls": 12,
+          "visibleRowControls": 10,
+          "songColumnBottom": 810,
+          "firstRowToScreenBottomOcclusion": 105,
+          "visibleSongListAreaPx2": 178398,
+          "firstRowActionSize": 48
+        }
+      }
+    },
+    "integrated": {
+      "desktop": {
+        "base": {
+          "firstRowY": 182,
+          "titleColumnWidth": 765,
+          "fullyVisibleRows": 10,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 22,
+          "songColumnBottom": 892,
+          "firstRowToScreenBottomOcclusion": 8,
+          "visibleSongListAreaPx2": 602546,
+          "firstRowActionSize": 32
+        },
+        "a": {
+          "firstRowY": 211,
+          "titleColumnWidth": 765,
+          "fullyVisibleRows": 10,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 20,
+          "songColumnBottom": 892,
+          "firstRowToScreenBottomOcclusion": 8,
+          "visibleSongListAreaPx2": 577935,
+          "firstRowActionSize": 32
+        },
+        "a-edit": {
+          "firstRowY": 631,
+          "titleColumnWidth": 765,
+          "fullyVisibleRows": 3,
+          "visibleFixedControls": 23,
+          "visibleRowControls": 8,
+          "songColumnBottom": 892,
+          "firstRowToScreenBottomOcclusion": 8,
+          "visibleSongListAreaPx2": 221579,
+          "firstRowActionSize": 32
+        },
+        "a-detail": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 2,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "eight": {
+          "firstRowY": 211,
+          "titleColumnWidth": 765,
+          "fullyVisibleRows": 8,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 16,
+          "songColumnBottom": 731,
+          "firstRowToScreenBottomOcclusion": 169,
+          "visibleSongListAreaPx2": 441301,
+          "firstRowActionSize": 32
+        },
+        "zero": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "loading": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "error": {
+          "firstRowY": 301,
+          "titleColumnWidth": 765,
+          "fullyVisibleRows": 9,
+          "visibleFixedControls": 7,
+          "visibleRowControls": 18,
+          "songColumnBottom": 892,
+          "firstRowToScreenBottomOcclusion": 8,
+          "visibleSongListAreaPx2": 501556,
+          "firstRowActionSize": 32
+        }
+      },
+      "narrow": {
+        "base": {
+          "firstRowY": 170,
+          "titleColumnWidth": 340,
+          "fullyVisibleRows": 11,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 24,
+          "songColumnBottom": 815,
+          "firstRowToScreenBottomOcclusion": 100,
+          "visibleSongListAreaPx2": 250260,
+          "firstRowActionSize": 44
+        },
+        "a": {
+          "firstRowY": 191,
+          "titleColumnWidth": 340,
+          "fullyVisibleRows": 11,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 22,
+          "songColumnBottom": 815,
+          "firstRowToScreenBottomOcclusion": 100,
+          "visibleSongListAreaPx2": 242112,
+          "firstRowActionSize": 44
+        },
+        "a-edit": {
+          "firstRowY": 191,
+          "titleColumnWidth": 340,
+          "fullyVisibleRows": 1,
+          "visibleFixedControls": 22,
+          "visibleRowControls": 2,
+          "songColumnBottom": 267,
+          "firstRowToScreenBottomOcclusion": 648,
+          "visibleSongListAreaPx2": 29488,
+          "firstRowActionSize": 44
+        },
+        "a-detail": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 2,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "eight": {
+          "firstRowY": 191,
+          "titleColumnWidth": 340,
+          "fullyVisibleRows": 8,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 16,
+          "songColumnBottom": 639,
+          "firstRowToScreenBottomOcclusion": 276,
+          "visibleSongListAreaPx2": 173824,
+          "firstRowActionSize": 44
+        },
+        "zero": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "loading": {
+          "firstRowY": -1,
+          "titleColumnWidth": -1,
+          "fullyVisibleRows": 0,
+          "visibleFixedControls": 6,
+          "visibleRowControls": 0,
+          "songColumnBottom": 0,
+          "firstRowToScreenBottomOcclusion": null,
+          "visibleSongListAreaPx2": 0,
+          "firstRowActionSize": -1
+        },
+        "error": {
+          "firstRowY": 314,
+          "titleColumnWidth": 340,
+          "fullyVisibleRows": 8,
+          "visibleFixedControls": 7,
+          "visibleRowControls": 18,
+          "songColumnBottom": 815,
+          "firstRowToScreenBottomOcclusion": 100,
+          "visibleSongListAreaPx2": 194388,
+          "firstRowActionSize": 44
+        }
+      }
+    }
+  },
+  "checks": [
+    {
+      "name": "slash focuses the global finder",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "year candidate is discoverable",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "thousands-tag candidate narrows by text",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "spelling variant is discoverable",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "three active AND conditions yield the exact 53 results",
+      "passed": true,
+      "detail": "{\"clauses\":3,\"rows\":53,\"count\":\"53 曲\"}"
+    },
+    {
+      "name": "a condition can be paused without removal",
+      "passed": true,
+      "detail": "992 results"
+    },
+    {
+      "name": "resuming restores the three-condition result",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "a condition can be negated",
+      "passed": true,
+      "detail": "939 results"
+    },
+    {
+      "name": "condition history restores the pre-negation search",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "OR interpretation remains available for the same conditions",
+      "passed": true,
+      "detail": "10525 results"
+    },
+    {
+      "name": "editing closes before result actions",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "mouse add target is named and reaches 28px",
+      "passed": true,
+      "detail": "鋼鉄商店街ダンスホール を 再生待ち に追加, 32px"
+    },
+    {
+      "name": "one action adds to displayed destination",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard row add remains available",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "8+ conditions have a bounded summary and editor",
+      "passed": true,
+      "detail": "{\"clauses\":9,\"summary\":\"9条件（3件休止）・すべてに一致　2015年 または 2016年 / 日本人トラックメーカー / アニソンremix または アニソンRemix または anison remix\",\"editor\":true}"
+    },
+    {
+      "name": "error scenario is explicitly rendered",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no JavaScript errors in desktop flow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "200% equivalent keeps search reachable without horizontal overflow",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "root text enlargement doubles title at 412px",
+      "passed": true,
+      "detail": "16 to 32px"
+    },
+    {
+      "name": "enlarged-text user can edit conditions and return",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "touch builds the same three structured AND conditions",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "touch add target reaches 44px",
+      "passed": true,
+      "detail": "44×44px"
+    },
+    {
+      "name": "touch adds in one operation",
+      "passed": true,
+      "detail": ""
+    }
+  ]
+}

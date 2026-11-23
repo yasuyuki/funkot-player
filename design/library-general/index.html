@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Funkot Library — Sleeve</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="sleeve.css">
+</head>
+<body>
+  <main class="shell" id="app">
+    <header class="masthead">
+      <div class="brand" aria-label="Funkot ライブラリ"><i>F</i><span>FUNKOT<br>LIBRARY</span></div>
+      <nav aria-label="主な画面"><a href="#lists">再生待ち・リスト</a></nav>
+    </header>
+
+    <section class="search-region" aria-label="曲を探す">
+      <div class="searchline">
+        <label class="searchbox"><span aria-hidden="true">⌕</span><input id="finderInput" type="search" autocomplete="off" placeholder="曲名、アーティスト、タグ、年で探す" aria-label="曲名、アーティスト、タグ、年で探す" aria-controls="lens" aria-expanded="false" role="combobox"><kbd>/</kbd></label>
+        <button id="filterBtn" class="filter-button" type="button" aria-controls="lens" aria-expanded="false">条件を編集 <span id="activeNumber">0</span></button>
+      </div>
+      <div class="summary" id="summary" aria-live="polite"></div>
+      <section class="lens" id="lens" hidden aria-label="検索条件を編集">
+        <div class="lens-top"><strong>条件を組み立てる</strong><button type="button" class="close-panel" id="closeLens">閉じる</button></div>
+        <p>候補から選ぶと、結果の見込み数を確認できます。条件は <b id="joiner">AND</b> でつながります。</p>
+        <div id="editorConditions" class="editor-conditions" aria-label="有効な検索条件"></div>
+        <div class="condition-builder">
+          <label>条件を探す <input id="conditionInput" type="search" placeholder="例：2015年、アニソンremix"></label>
+          <button type="button" id="groupBack" hidden>別候補の追加をやめる</button><div id="candidates" class="candidates" role="listbox" aria-label="条件候補"></div>
+        </div>
+        <div class="lens-actions"><button id="toggleJoiner" type="button">AND / OR を切り替える</button><button id="undoCondition" type="button">ひとつ戻す</button><button id="clearConditions" type="button">すべて解除</button></div>
+        <div class="condition-history" id="conditionHistory" aria-live="polite"></div>
+      </section>
+    </section>
+
+    <section class="library" aria-label="ライブラリの曲">
+      <header class="list-header"><div><span id="eyebrow">すべての曲</span><h1 id="listTitle">あなたのライブラリ</h1></div><div class="result-count" id="count"></div></header>
+      <div id="status" class="notice" hidden></div>
+      <ol class="rows" id="rows" aria-label="曲"></ol>
+      <button id="moreRows" class="more-rows" type="button" hidden>さらに曲を表示</button>
+      <div id="rowsEmpty" class="empty" hidden></div>
+    </section>
+
+    <aside class="destination" id="dock" aria-label="追加先">
+      <div class="destination-mark" aria-hidden="true">↳</div>
+      <div><span>追加先</span><strong id="destinationName">再生待ち</strong><small id="queueCount">0 曲</small></div>
+      <button type="button" id="destinationBtn" aria-expanded="false" aria-controls="destinationMenu">変更</button>
+      <div id="destinationMenu" class="destination-menu" hidden></div>
+    </aside>
+
+    <footer class="now-playing" id="now" aria-label="再生中"><i class="sleeve-art" aria-hidden="true"></i><div class="playing-copy"><span>再生中</span><strong id="nowTitle">放課後シグナル (Funkot Remix)</strong><small id="nowArtist">ねこまたドライブ</small></div><button type="button" id="nowPause" aria-label="再生を一時停止">Ⅱ</button></footer>
+
+    <dialog class="detail-sheet" id="detailSheet" hidden aria-labelledby="detailTitle"></dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </main>
+  <dialog id="collectionView" aria-labelledby="collectionTitle">
+    <form method="dialog"><button aria-label="一覧を閉じる">閉じる</button></form>
+    <h2 id="collectionTitle"></h2>
+    <select id="collectionSelect" aria-label="表示するリスト"></select>
+    <p id="collectionCount"></p><ol id="collectionRows"></ol>
+  </dialog>
+  <script src="../library-ideal-claude/data.js"></script>
+  <script src="detail.js"></script>
+  <script src="app.js"></script>
+  <script src="library-tools.js"></script>
+</body>
+</html>
