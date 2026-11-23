@@ -1,0 +1,201 @@
+{
+ "passed": 39,
+ "total": 39,
+ "results": [
+  {
+   "name": "S1 opening state: 24,823 songs, 2,600+ tags, no condition bar",
+   "ok": true,
+   "detail": "{\"songs\":24823,\"tags\":2678,\"sumHidden\":true,\"rows\":60,\"firstTop\":170}"
+  },
+  {
+   "name": "A1 / focuses search field and opens palette",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A2 beginner search hides advanced concepts on first open",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A3 typing 2015 disambiguates year vs custom tag vs text",
+   "ok": true,
+   "detail": "{\"hasYear\":true,\"hasCustom\":true,\"hasText\":true,\"banner\":true}"
+  },
+  {
+   "name": "A4 after 1st condition, add mode stays calm with optional link to adjust",
+   "ok": true,
+   "detail": "{\"clauses\":1,\"advInAdd\":false,\"hasAdjustLink\":true}"
+  },
+  {
+   "name": "A5 3-condition AND + romaji + variants + live prediction exact match + 1-line summary",
+   "ok": true,
+   "detail": "predicted=57, actual=57, sumH=40"
+  },
+  {
+   "name": "A6 desktop 1-click condition removal and Undo restore",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A7 9 conditions stay 1-line with paused indicator in ほかN",
+   "ok": true,
+   "detail": "{\"sumH\":40,\"firstTop\":218,\"more\":\"ほか7つ（停止3・除外1）\"}"
+  },
+  {
+   "name": "A8 Condition Ledger shows 9 clauses cleanly (≥7 visible without scroll)",
+   "ok": true,
+   "detail": "{\"total\":9,\"visibleWithoutScroll\":9,\"hasPreview\":true}"
+  },
+  {
+   "name": "A9 yearUnset applies as AND even in OR mode, excludes pending, includes manual unset",
+   "ok": true,
+   "detail": "{\"allHaveNullYear\":true,\"pendingExcluded\":true,\"manualUnsetIncluded\":true}"
+  },
+  {
+   "name": "A10 Escape closes palette and returns focus to #finderInput cleanly",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "A11 0-result relaxation can pause a clause while preserving it",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "B1 Inspector opens beside list & dock, tech details collapsed, twins clear, no fake media",
+   "ok": true,
+   "detail": "{\"visible\":true,\"dockVisible\":true,\"fullTitle\":true,\"techCollapsed\":true,\"noFakeBpmOrCover\":true,\"twinsShown\":true}"
+  },
+  {
+   "name": "B2 Tech details reveal full untruncated path and content_hash",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "B3 32-tag track folds initially, expands, and filters tags inline",
+   "ok": true,
+   "detail": "init=14, filteredCustom=1"
+  },
+  {
+   "name": "B4 Tag click in Detail filters library; Esc closes Detail and restores row focus",
+   "ok": true,
+   "detail": "{\"hidden\":true,\"focusedRowId\":\"24818\"}"
+  },
+  {
+   "name": "C1 Tag Editor modal opens with role=dialog and sticky Save/Cancel",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C2 No-op save keeps revision unchanged and notifies clearly",
+   "ok": true,
+   "detail": "{\"revAfter\":\"agy-mock-1/1/2026/0\",\"sameRev\":true,\"toast\":\"変更はありませんでした\"}"
+  },
+  {
+   "name": "C3 Single-track edit updates effective tags, suppresses auto genre, leaves audio files untouched",
+   "ok": true,
+   "detail": "{\"year\":2016,\"hasAdded\":true,\"funkotSuppressed\":true,\"audioUntouched\":{\"ok\":true,\"checked\":24823}}"
+  },
+  {
+   "name": "C4 Suppressed auto tag survives rescan and restores in 1 click",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C5 32-tag editor filters inline, isolates diff in 変更 tab, keeps footer visible",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C6 Year conflict surfaces valid adoptable candidates and sets manual year",
+   "ok": true,
+   "detail": "btns=4, year=2014"
+  },
+  {
+   "name": "C7 Bulk edit defaults year to 不変更, explains shared-hash & filter scope, shows common/mixed",
+   "ok": true,
+   "detail": "{\"yearUnchanged\":true,\"hasUniqueBanner\":true,\"hasScopeBanner\":true,\"hasCommonAndMixed\":true}"
+  },
+  {
+   "name": "C8 stale_revision keeps draft -> Reload preserves draft -> retry Save succeeds",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C9 identity_changed blocks Save and never applies draft to replacement track",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C10 store_read_only disables edits while allowing inspection",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "C11 Unresolved identity disables tag edit; non-Funkot allows tag edit while keeping queue gated",
+   "ok": true,
+   "detail": "{\"editEnabled\":true,\"addDisabled\":true}"
+  },
+  {
+   "name": "C12 Modal keeps Tab focus inside and Cancel discards draft cleanly",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "N1 every visible control has an accessible name",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "N2 desktop run had zero page or console errors",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D1 Narrow touch 3-condition search has no overflow and all lens targets ≥ 44px",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D2 Narrow 9-condition ledger has zero horizontal overflow and targets ≥ 44px",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "D3 Narrow Detail & 32-tag Editor: zero overflow, sticky footer visible, targets ≥ 44px",
+   "ok": true,
+   "detail": "{\"overflow\":false,\"footVisible\":true,\"small\":[]}"
+  },
+  {
+   "name": "D4 Narrow run had zero page errors",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "Z-a 200% zoom: zero overflow & primary controls reachable",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "Z-search-basic 200% zoom: zero overflow & primary controls reachable",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "Z-detail 200% zoom: zero overflow & primary controls reachable",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "Z-edit-single 200% zoom: zero overflow & primary controls reachable",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "name": "Z-edit-conflict 200% zoom: zero overflow & primary controls reachable",
+   "ok": true,
+   "detail": ""
+  }
+ ]
+}
